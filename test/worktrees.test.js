@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPatch, diffTrees, isGitRepository, snapshotTree } from "../src/git.js";
-import { createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
+import { commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
 
 test("isolated sibling worktrees produce patches that integrate into the zero-state run", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-"));
@@ -13,6 +13,7 @@ test("isolated sibling worktrees produce patches that integrate into the zero-st
   try {
     const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
     assert.equal(workspace.cwd, cwd);
+    assert.match(await readFile(join(workspace.cwd, ".gitignore"), "utf8"), /node_modules/);
     await writeFile(join(workspace.cwd, "package.json"), "{}\n");
     const base = await snapshotTree(workspace.cwd);
     const pairs = await createParallelWorktrees({
@@ -35,6 +36,19 @@ test("isolated sibling worktrees produce patches that integrate into the zero-st
   }
 });
 
+test("commits accepted workspace changes and skips an empty follow-up commit", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-commit-"));
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-test" }, runId: "run-1" });
+    assert.equal(await commitWorkspace(cwd, "Baseline should already be clean"), null);
+    await writeFile(join(cwd, "feature.txt"), "accepted\n");
+    assert.match(await commitWorkspace(cwd, "Implement: feature"), /^[a-f0-9]{40}$/);
+    assert.equal(await commitWorkspace(cwd, "Implement: feature again"), null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("repairs a missing local Git workspace without losing surviving files", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-repair-"));
   const previousCwd = join(dataDir, "old-run");
@@ -49,6 +63,18 @@ test("repairs a missing local Git workspace without losing surviving files", asy
     assert.equal(await snapshotTree(workspace.cwd) !== null, true);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("initializes a missing selected run directory as unrecovered", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-missing-"));
+  const cwd = join(root, "working-directory");
+  try {
+    const { workspace, recovered } = await repairZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-test" }, runId: "run-1", previousCwd: cwd });
+    assert.equal(recovered, false);
+    assert.equal(await isGitRepository(workspace.cwd), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

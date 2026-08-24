@@ -33,7 +33,8 @@
           "acceptanceCriteria": [
             "npm start launches a page without runtime errors",
             "npm test succeeds",
-            "The initial page has an accessible application heading and empty state"
+            "The initial page has an accessible application heading and empty state",
+            "A repository-appropriate .gitignore excludes dependencies, coverage, logs, environment secrets, and OS metadata"
           ],
           "dependsOn": ["architecture"]
         }
@@ -78,18 +79,53 @@
     },
     {
       "id": "manage-tasks",
-      "type": "ticket",
-      "title": "Complete, restore, and remove tasks",
-      "description": "Extend the accepted task workflow with lifecycle controls while preserving task creation.",
-      "permission": "write",
-      "writeScope": "src,public,test",
-      "acceptanceCriteria": [
-        "Tasks can be completed and restored",
-        "Tasks can be removed",
-        "Task creation remains working",
-        "npm test covers the lifecycle behavior and succeeds"
-      ],
-      "dependsOn": ["parallel-build"]
+      "type": "group",
+      "title": "Task lifecycle",
+      "children": [
+        {
+          "id": "complete-tasks",
+          "type": "ticket",
+          "title": "Complete tasks",
+          "description": "Add the active-to-completed transition while preserving task creation.",
+          "permission": "write",
+          "writeScope": "src,public,test",
+          "acceptanceCriteria": [
+            "Active tasks can be completed",
+            "Completed state is visible and accessible",
+            "Task creation remains working",
+            "npm test covers completion and succeeds"
+          ],
+          "dependsOn": ["parallel-build"]
+        },
+        {
+          "id": "restore-tasks",
+          "type": "ticket",
+          "title": "Restore completed tasks",
+          "description": "Add the completed-to-active transition without changing completion semantics.",
+          "permission": "write",
+          "writeScope": "src,public,test",
+          "acceptanceCriteria": [
+            "Completed tasks can be restored to active",
+            "Completion and task creation remain working",
+            "npm test covers restoration and succeeds"
+          ],
+          "dependsOn": ["complete-tasks"]
+        },
+        {
+          "id": "remove-tasks",
+          "type": "ticket",
+          "title": "Remove tasks",
+          "description": "Add explicit task removal after completion and restoration are established.",
+          "permission": "write",
+          "writeScope": "src,public,test",
+          "acceptanceCriteria": [
+            "Active and completed tasks can be removed",
+            "Creation, completion, and restoration remain working",
+            "npm test covers removal and succeeds"
+          ],
+          "dependsOn": ["restore-tasks"]
+        }
+      ]
     },
     {
       "id": "persist-tasks",

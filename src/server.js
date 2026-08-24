@@ -12,8 +12,8 @@ import { loadLocalFixture } from "./local.js";
 import { PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
-import { createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
-import { blockingFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch } from "./execution.js";
+import { commitWorkspace, createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -361,8 +361,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
       });
       let nextFeedback = feedback;
       if (!nextFeedback && step.status === "interrupted") {
-        const findings = blockingFindings([step.attempts?.at(-1)?.verification || {}]);
-        if (findings.length) nextFeedback = `Resume the interrupted correction for these verified blocking issues:\n\n${JSON.stringify(findings, null, 2)}`;
+        const findings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
+        if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
       }
       for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
         signal?.throwIfAborted();
@@ -444,7 +444,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           runId: latest.runId, stageId: "verify", stepId, attemptId, name: "verification.json",
           content: JSON.stringify(verification, null, 2), kind: "step-verification"
         });
-        const findings = blockingFindings([verification]);
+        const findings = actionableFindings([verification]);
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
@@ -471,13 +471,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
-            target.lastError = `${findings.length} blocking verification finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`;
+            target.lastError = `${findings.length} actionable verification finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`;
             current.status = "needs_attention";
             setStage(current, "implement", "blocked", target.lastError);
           });
           return;
         }
-        nextFeedback = `Fresh verification found these blocking issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
+        nextFeedback = `Fresh verification found these actionable issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
       }
     } catch (error) {
       if (signal?.aborted) return;
@@ -534,13 +534,14 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
-    const findings = blockingFindings(reviews);
+    const findings = actionableFindings(reviews);
     await update((state) => {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
-      run.reviews.push({ round, reviews, blockingFindings: findings, diff, createdAt: new Date().toISOString() });
+      run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
     });
     if (!findings.length) {
+      await commitWorkspace(current.workspace.cwd, "Apply final review fixes");
       if (current.ticket.source === "local") {
         const handoff = await persistArtifact(dataDir, current.ticket, {
           runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
@@ -585,7 +586,7 @@ async function finalReviewLoop(ticketId, signal) {
     if (round === MAX_REVIEW_ROUNDS) {
       await update((state) => {
         const run = ticketRun(state, ticketId);
-        setStage(run, "verify", "blocked", `${findings.length} blocking finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`);
+        setStage(run, "verify", "blocked", `${findings.length} actionable finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`);
         run.status = "needs_attention";
         run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Final review needs attention", findings, createdAt: new Date().toISOString() };
       });
@@ -594,7 +595,7 @@ async function finalReviewLoop(ticketId, signal) {
     const fixStep = {
       id: `review-fix-${round}`,
       title: `Fix final review findings — round ${round}`,
-      prompt: `Correct these independently verified blocking findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.`,
+      prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.`,
       contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
       permission: "write", writeScope: "**", skills: [], references: [],
       expectedArtifacts: [`review-fixes-round-${round}.md`],
@@ -654,12 +655,31 @@ async function finishHandoff(ticketId) {
   });
 }
 
+async function ensureLocalWorkspace(ticketId) {
+  const before = store.read();
+  const previous = ticketRun(before, ticketId);
+  if (previous.ticket.source !== "local" || (previous.workspace?.cwd === before.workspace.cwd && await isGitRepository(previous.workspace.cwd))) return previous;
+  const { workspace, recovered } = await repairZeroStateWorkspace({ cwd: before.workspace.cwd, ticket: previous.ticket, runId: previous.runId, previousCwd: previous.workspace?.cwd });
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.workspace = workspace;
+    run.baselineTree = workspace.baselineTree;
+    run.lastError = null;
+    for (const step of flattenSteps(run.plan)) {
+      if (!recovered && step.status === "accepted") step.status = "ready";
+      if (step.status !== "accepted") {
+        if (!["ready", "interrupted"].includes(step.status)) step.status = "interrupted";
+        delete step.workspace;
+        delete step.baseTree;
+      }
+    }
+  });
+  return ticketRun(store.read(), ticketId);
+}
+
 async function advanceTicket(ticketId, signal) {
   signal?.throwIfAborted();
-  const run = ticketRun(store.read(), ticketId);
-  if (run.ticket.source === "local" && !(await isGitRepository(run.workspace.cwd))) {
-    throw new Error("Local run directory is not an isolated Git repository. Resume the run to repair it before implementation.");
-  }
+  const run = await ensureLocalWorkspace(ticketId);
   if (flattenSteps(run.plan).some((step) => step.status === "review_ready")) return;
   const batch = nextRunnableBatch(run.plan);
   if (batch.length) {
@@ -689,25 +709,7 @@ async function runTicket(ticketId) {
   return startTicketWork(ticketId, async (signal) => {
     try {
       signal.throwIfAborted();
-      const before = store.read();
-      const previous = ticketRun(before, ticketId);
-      if (previous.ticket.source === "local" && (previous.workspace?.cwd !== before.workspace.cwd || !(await isGitRepository(previous.workspace?.cwd)))) {
-        const { workspace, recovered } = await repairZeroStateWorkspace({ cwd: before.workspace.cwd, ticket: previous.ticket, runId: previous.runId, previousCwd: previous.workspace?.cwd });
-        await update((state) => {
-          const run = ticketRun(state, ticketId);
-          run.workspace = workspace;
-          run.baselineTree = workspace.baselineTree;
-          run.lastError = null;
-          for (const step of flattenSteps(run.plan)) {
-            if (!recovered && step.status === "accepted") step.status = "ready";
-            if (step.status !== "accepted") {
-              if (!["ready", "interrupted"].includes(step.status)) step.status = "interrupted";
-              delete step.workspace;
-              delete step.baseTree;
-            }
-          }
-        });
-      }
+      await ensureLocalWorkspace(ticketId);
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.status = "running";
@@ -890,11 +892,13 @@ async function api(request, response, url) {
       return json(response, 202, { accepted: true, ticketId, stepId });
     }
     if (step.workspace?.isolated) await applyPatch(current.workspace.cwd, step.diff?.patch);
+    const commit = await commitWorkspace(current.workspace.cwd, `Implement: ${step.title}`);
     await update((state) => {
       const run = ticketRun(state, ticketId);
       const accepted = findNode(run.plan, stepId);
       accepted.status = "accepted";
       accepted.acceptedAt = new Date().toISOString();
+      if (commit) accepted.commit = commit;
       run.status = "running";
       run.checkpoint = null;
     });

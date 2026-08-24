@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadLocalFixture } from "../src/local.js";
 
 test("loads prompt-free local tickets and preserves their dependency graph", async () => {
@@ -39,4 +40,15 @@ test("rejects runtime prompts in local plans", async () => {
   } finally {
     await rm(root, { recursive: true });
   }
+});
+
+test("zero-state fixture keeps task lifecycle verbs as separate dependent tickets", async () => {
+  const fixture = await loadLocalFixture(fileURLToPath(new URL("../fixtures/zero-state-task-board", import.meta.url)), ".");
+  const lifecycle = fixture.plan.nodes.find((node) => node.id === "manage-tasks");
+  assert.deepEqual(lifecycle.children.map((step) => [step.id, step.dependsOn]), [
+    ["complete-tasks", ["parallel-build"]],
+    ["restore-tasks", ["complete-tasks"]],
+    ["remove-tasks", ["restore-tasks"]]
+  ]);
+  assert.deepEqual(fixture.plan.nodes.find((node) => node.id === "persist-tasks").dependsOn, ["manage-tasks"]);
 });

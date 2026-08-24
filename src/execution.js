@@ -39,10 +39,9 @@ export function nextRunnableBatch(plan) {
   ) : [first];
 }
 
-export function blockingFindings(reviews) {
+export function actionableFindings(reviews) {
   const seen = new Set();
   return reviews.flatMap((review) => review.findings || [])
-    .filter((finding) => finding.severity === "blocking")
     .filter((finding) => {
       const evidence = finding.evidence?.[0] || {};
       const key = `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();

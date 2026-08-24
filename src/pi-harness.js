@@ -621,7 +621,7 @@ Return ONLY JSON:
   }]
 }
 
-Only report findings supported by repository, test, or diff evidence. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. Do not modify files.`));
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
       const parsed = jsonReply(rawOutput);
@@ -710,7 +710,7 @@ Return ONLY JSON:
   }]
 }
 
-Only report a finding when you can cite repository or diff evidence. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository or diff evidence. Do not modify files.`));
       signal?.throwIfAborted();
       const parsed = jsonReply(lastAssistantText(session));
       return {

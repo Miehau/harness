@@ -14,7 +14,7 @@ A local-first visual workspace for shaping development tasks with Pi, generating
 - Explicit dependency artifact handoffs.
 - Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
 - Live run events and output.
-- Per-run Git tree diffs without modifying the real Git index or creating commits.
+- Per-run Git tree diffs without modifying the user's index, plus one commit for each accepted step.
 - Screenshot references passed into the selected step's Pi session.
 - Local JSON persistence under `~/.agent-plan-workspace`.
 - Prompt-free local fixtures loaded from `feature.md` and `plan.json` into a fresh zero-state repository.
@@ -34,7 +34,7 @@ The app uses Pi's existing authentication and model settings from `~/.pi/agent`.
 
 ## Local zero-state fixture
 
-The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes that directory as the zero-state Git repository, renders its own Pi prompts, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
+The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes or repairs that directory as the zero-state Git repository, seeds a baseline `.gitignore`, renders its own Pi prompts, commits each accepted step, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
 
 Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptance criteria, and dependencies. Runtime fields such as prompts, skills, harnesses, and agent IDs are rejected so framework versions can be compared against the same authored input.
 

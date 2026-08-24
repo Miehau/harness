@@ -10,7 +10,7 @@
     "camera": "node src/camera-control.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.0",

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, readdir } from "node:fs/promises";
+import { access, cp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
@@ -28,8 +28,10 @@ export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles 
   const entries = await readdir(cwd);
   if (!allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
   if (!(await isGitRepository(cwd))) await git(cwd, ["init", "-q", "-b", "main"]);
+  if (!entries.includes(".gitignore")) await writeFile(join(cwd, ".gitignore"), "node_modules/\ncoverage/\n.env*\n!.env.example\n*.log\n.DS_Store\n", "utf8");
   try { await git(cwd, ["rev-parse", "HEAD"]); }
   catch {
+    await git(cwd, ["add", "-A"]);
     await git(cwd, ["commit", "--allow-empty", "-qm", "Zero-state baseline"], { env: identity });
   }
   if (await git(cwd, ["branch", "--show-current"]) !== branch) {
@@ -40,8 +42,11 @@ export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles 
 }
 
 export async function repairZeroStateWorkspace({ cwd, ticket, runId, previousCwd }) {
+  let recovered = false;
+  if (previousCwd === cwd) {
+    try { await access(cwd); recovered = true; } catch {}
+  }
   const workspace = await createZeroStateWorkspace({ cwd, ticket, runId, allowFiles: previousCwd === cwd });
-  let recovered = previousCwd === cwd;
   if (previousCwd && previousCwd !== cwd) {
     try {
       await cp(previousCwd, cwd, { recursive: true, force: true, filter: (path) => basename(path) !== ".git" });
@@ -51,6 +56,13 @@ export async function repairZeroStateWorkspace({ cwd, ticket, runId, previousCwd
     }
   }
   return { workspace, recovered };
+}
+
+export async function commitWorkspace(cwd, message) {
+  await git(cwd, ["add", "-A"]);
+  if (!(await git(cwd, ["status", "--porcelain"]))) return null;
+  await git(cwd, ["commit", "-qm", message], { env: identity });
+  return git(cwd, ["rev-parse", "HEAD"]);
 }
 
 export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {

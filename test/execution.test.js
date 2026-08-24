@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { blockingFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch, nextRunnableStep } from "../src/execution.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch, nextRunnableStep } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -28,13 +28,13 @@ test("dependency-ready siblings in one group form a parallel batch", () => {
   assert.deepEqual(nextRunnableBatch(plan), []);
 });
 
-test("final review keeps unique blocking findings and has a bounded loop", () => {
+test("final review keeps unique actionable findings and has a bounded loop", () => {
   const duplicate = { severity: "blocking", claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] };
-  const findings = blockingFindings([
-    { findings: [duplicate, { severity: "warning", claim: "Naming", evidence: [{ file: "src/a.ts", line: 2 }] }] },
+  const findings = actionableFindings([
+    { findings: [duplicate, { severity: "warning", claim: "Missing browser coverage", evidence: [{ file: "test/app.test.ts", line: 2 }] }] },
     { findings: [duplicate, { severity: "blocking", claim: "No regression test", evidence: [{ file: "test/a.test.ts", line: 1 }] }] }
   ]);
-  assert.equal(findings.length, 2);
+  assert.equal(findings.length, 3);
   assert.equal(MAX_REVIEW_ROUNDS, 3);
 });
 
