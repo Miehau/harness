@@ -35,6 +35,16 @@ export function executionGraph(plan) {
   };
 }
 
+export function artifactsForStage(artifacts = [], stageId) {
+  return artifacts.filter((artifact) => artifact.stageId === stageId || (stageId === "verify" && artifact.stageId?.startsWith("review-round-")));
+}
+
+export function preferredStepId(plan, currentId) {
+  const steps = (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
+  if (steps.some((step) => step.id === currentId)) return currentId;
+  return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
+}
+
 function toolTitle(tool, args) {
   let values = {};
   try { values = JSON.parse(args || "{}"); } catch {}

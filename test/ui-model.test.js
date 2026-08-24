@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { eventTimeline, executionGraph, formatOutput, parseDiff, runHeartbeat } from "../public/ui-model.js";
+import { artifactsForStage, eventTimeline, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [
@@ -43,4 +43,16 @@ test("tool activity preserves event order and pairs details", () => {
 
 test("formats JSON output including nested serialized JSON", () => {
   assert.equal(formatOutput('{"summary":"ok","rawOutput":"{\\"findings\\":[]}"}'), '{\n  "summary": "ok",\n  "rawOutput": {\n    "findings": []\n  }\n}');
+});
+
+test("filters artifacts for a workflow stage and includes review rounds in verification", () => {
+  const artifacts = [{ stageId: "design" }, { stageId: "verify" }, { stageId: "review-round-1" }, { stageId: "implement" }];
+  assert.equal(artifactsForStage(artifacts, "design").length, 1);
+  assert.equal(artifactsForStage(artifacts, "verify").length, 2);
+});
+
+test("keeps an explicit step selection when another step awaits review", () => {
+  const plan = { nodes: [{ id: "review", status: "review_ready" }, { id: "other", status: "ready" }] };
+  assert.equal(preferredStepId(plan, "other"), "other");
+  assert.equal(preferredStepId(plan, null), "review");
 });

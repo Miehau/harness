@@ -2,7 +2,7 @@
 <link rel="stylesheet" href="/styles.css">
 <div class="app-shell">
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span></div>
+    <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span><button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide work queue" title="Hide work queue">‹</button></div>
     <div class="topbar-actions">
       <form id="workspace-form" class="workspace-form">
         <label for="workspace-path">Repository</label>
@@ -14,7 +14,7 @@
   </header>
 
   <div class="layout ticket-layout">
-    <aside class="ticket-pane">
+    <aside id="ticket-pane" class="ticket-pane">
       <header class="pane-header ticket-header">
         <div><span class="eyebrow">Local or Linear</span><h1>Work queue</h1></div>
         <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh Linear" title="Refresh Linear">↻</button></div>

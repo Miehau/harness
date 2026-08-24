@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { eventTimeline, executionGraph, formatOutput, parseDiff, runHeartbeat } from "/ui-model.js";
+import { artifactsForStage, eventTimeline, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -9,6 +9,7 @@ const escapeHtml = (value = "") => String(value)
 let state = null;
 let linear = { configured: false, viewer: null, tickets: [] };
 let selectedStepId = null;
+let selectedStageId = null;
 let activeTab = "run";
 let toastTimer;
 const liveRuns = new Map();
@@ -112,7 +113,7 @@ function renderTickets() {
 
 function stagesHtml(run) {
   if (!run) return "";
-  return `<section class="workflow-stages"><header><span class="eyebrow">Ticket workflow</span><span class="stage-count">${run.stages.filter((stage) => stage.status === "completed").length}/${run.stages.length} complete</span></header><ol>${run.stages.map((stage, index) => `<li class="stage-${escapeHtml(stage.status)}"><span class="stage-marker">${stage.status === "completed" ? "✓" : index + 1}</span><span class="stage-copy"><strong>${escapeHtml(stage.title)}</strong><small>${escapeHtml(stage.summary || "Waiting")}</small></span><span class="stage-status">${escapeHtml(stage.status)}</span></li>`).join("")}</ol></section>`;
+  return `<section class="workflow-stages"><header><span class="eyebrow">Ticket workflow</span><span class="stage-count">${run.stages.filter((stage) => stage.status === "completed").length}/${run.stages.length} complete</span></header><ol>${run.stages.map((stage, index) => `<li class="stage-${escapeHtml(stage.status)} ${stage.id === selectedStageId ? "selected" : ""}"><button class="workflow-stage" type="button" data-stage="${escapeHtml(stage.id)}" aria-pressed="${stage.id === selectedStageId}"><span class="stage-marker">${stage.status === "completed" ? "✓" : index + 1}</span><span class="stage-copy"><strong>${escapeHtml(stage.title)}</strong><small>${escapeHtml(stage.summary || "Waiting")}</small></span><span class="stage-status">${escapeHtml(stage.status)}</span></button></li>`).join("")}</ol></section>`;
 }
 
 function checkpointHtml(run) {
@@ -229,8 +230,7 @@ function diffPanel(step) {
   return `<div class="diff-overview"><div><strong>${step.diff.files.length} changed files</strong><span>${escapeHtml(step.diff.stat || "Exact tree diff")}</span></div><div class="diff-total"><b>+${diff.additions}</b><i>−${diff.deletions}</i></div></div><div class="diff-files">${diff.files.map((file, index) => `<details class="diff-file" ${index === 0 ? "open" : ""}><summary><span class="diff-file-name">${escapeHtml(file.name)}</span><span class="diff-numbers"><b>+${file.additions}</b><i>−${file.deletions}</i></span></summary><div class="diff-code">${file.rows.map((row) => `<div class="diff-line ${row.kind}"><span>${row.old}</span><span>${row.new}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div></details>`).join("")}</div>`;
 }
 
-function artifactsPanel(step) {
-  const artifacts = step ? step.artifacts || [] : runFor()?.artifacts || [];
+function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
   return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(artifact.name)}</span><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
@@ -238,8 +238,16 @@ function renderInspector() {
   const target = $("#inspector");
   const openEvents = new Set([...target.querySelectorAll("details.run-event[open]")].map((item) => item.dataset.eventKey));
   const run = runFor();
+  const stage = run?.stages?.find((item) => item.id === selectedStageId);
   const step = nodeById(selectedStepId);
   if (!run) { target.innerHTML = `<div class="empty"><div><strong>Ticket details</strong>Select a Linear ticket, then start its workflow.</div></div>`; return; }
+  if (stage) {
+    const profileId = ({ explore: "exploration", design: "architecture", implement: "implementation", verify: "verification" })[stage.id] || stage.id;
+    const profile = run.stageProfiles?.[profileId];
+    const artifacts = artifactsForStage(run.artifacts, stage.id);
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}<div class="tab-panel">${artifactsPanel(null, artifacts)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    return;
+  }
   if (!step) {
     target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
     return;
@@ -267,9 +275,8 @@ function render() {
   if (!state) return;
   $("#workspace-path").value = state.workspace.cwd;
   const run = runFor();
-  const reviewStep = flattenSteps(run?.plan).find((step) => step.status === "review_ready");
-  if (reviewStep) selectedStepId = reviewStep.id;
-  else if (!selectedStepId || !nodeById(selectedStepId)) selectedStepId = flattenSteps(run?.plan)[0]?.id || null;
+  if (selectedStageId && !run?.stages?.some((stage) => stage.id === selectedStageId)) selectedStageId = null;
+  if (!selectedStageId) selectedStepId = preferredStepId(run?.plan, selectedStepId);
   renderTickets();
   renderHeader();
   renderPlanTree();
@@ -288,14 +295,14 @@ document.addEventListener("click", async (event) => {
     if (!confirm("Remove all non-running items from the queue? On-disk artifacts will be preserved.")) return;
     try {
       const result = await api("/api/queue/clear", { method: "POST", body: "{}" });
-      state = result.state; selectedStepId = null; render(); notify(`${result.cleared} queue item${result.cleared === 1 ? "" : "s"} removed`);
+      state = result.state; selectedStepId = null; selectedStageId = null; render(); notify(`${result.cleared} queue item${result.cleared === 1 ? "" : "s"} removed`);
     } catch (error) { notify(error.message); }
     return;
   }
   const ticketButton = event.target.closest("[data-ticket]");
   if (ticketButton) {
     state = await api(`/api/tickets/${encodeURIComponent(ticketButton.dataset.ticket)}/select`, { method: "POST", body: "{}" });
-    selectedStepId = null; activeTab = "run"; render(); return;
+    selectedStepId = null; selectedStageId = null; activeTab = "run"; render(); return;
   }
   const start = event.target.closest("[data-start-ticket]");
   if (start) {
@@ -329,19 +336,30 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const selectStep = event.target.closest("[data-select-step]");
-  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; activeTab = "diff"; render(); return; }
+  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; render(); return; }
   const acceptStep = event.target.closest("[data-accept-step]");
   if (acceptStep) {
     try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(acceptStep.dataset.acceptStep)}/accept`, { method: "POST", body: "{}" }); notify("Step accepted; continuing to the next slice"); }
     catch (error) { notify(error.message); }
     return;
   }
+  const stage = event.target.closest("[data-stage]");
+  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; render(); return; }
   const step = event.target.closest("[data-step]");
-  if (step) { selectedStepId = step.dataset.step; activeTab = "run"; render(); return; }
+  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; activeTab = "run"; render(); return; }
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; renderInspector(); }
   if (event.target.closest("#profile-settings")) { renderProfiles(); $("#profiles-dialog").showModal(); }
   if (event.target.closest("#close-profiles")) $("#profiles-dialog").close();
+  const queueToggle = event.target.closest("#toggle-ticket-pane");
+  if (queueToggle) {
+    const collapsed = $(".ticket-layout").classList.toggle("sidebar-collapsed");
+    queueToggle.setAttribute("aria-expanded", String(!collapsed));
+    queueToggle.setAttribute("aria-label", collapsed ? "Show work queue" : "Hide work queue");
+    queueToggle.title = collapsed ? "Show work queue" : "Hide work queue";
+    queueToggle.textContent = collapsed ? "›" : "‹";
+    requestAnimationFrame(() => runFor()?.plan && renderPlanTree());
+  }
 });
 
 document.addEventListener("submit", async (event) => {
@@ -375,7 +393,7 @@ document.addEventListener("submit", async (event) => {
     const path = new FormData(event.target).get("path");
     try {
       const result = await api("/api/local/load", { method: "POST", body: JSON.stringify({ path }) });
-      state = result.state; selectedStepId = null; activeTab = "run"; render(); notify("Local zero-state fixture loaded");
+      state = result.state; selectedStepId = null; selectedStageId = null; activeTab = "run"; render(); notify("Local zero-state fixture loaded");
     } catch (error) { notify(error.message); }
     return;
   }
