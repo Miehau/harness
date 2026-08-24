@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { eventTimeline, executionGraph, parseDiff, runHeartbeat } from "/ui-model.js";
+import { eventTimeline, executionGraph, formatOutput, parseDiff, runHeartbeat } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -147,7 +147,7 @@ function renderHeader() {
   }
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled"].includes(run.status) && run.plan ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && run.plan ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
@@ -214,11 +214,11 @@ function runPanel(step) {
   const timeline = eventTimeline(events).map((item) => {
     const heading = `<span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.status)}</small></span><time>${escapeHtml((item.at || "").slice(11, 19))}</time>`;
     if (!item.hasDetails) return `<div class="run-event unavailable ${item.isError ? "warning" : ""}">${heading}<em>Legacy run — input and output were not recorded</em></div>`;
-    const detail = [["Input", item.args], ["Live output", item.output], ["Result", item.result]].filter(([, value]) => value).map(([label, value]) => `<div class="event-block"><label>${label}</label><pre>${escapeHtml(value)}</pre></div>`).join("");
-    return `<details class="run-event ${item.isError ? "warning" : ""}"><summary>${heading}</summary>${detail}</details>`;
+    const detail = [["Input", item.args], ["Live output", item.output], ["Result", item.result]].filter(([, value]) => value).map(([label, value]) => `<div class="event-block"><label>${label}</label><pre>${escapeHtml(formatOutput(value))}</pre></div>`).join("");
+    return `<details class="run-event ${item.isError ? "warning" : ""}" data-event-key="${escapeHtml(item.key)}"><summary>${heading}</summary>${detail}</details>`;
   }).join("") || `<div class="run-empty">The worker has not called a tool yet.</div>`;
   const rawOutput = currentLive?.output || trace?.rawOutput || [attempt?.rawOutput, attempt?.verification?.rawOutput].filter(Boolean).join("\n\n") || "";
-  const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre>${escapeHtml(rawOutput || "No assistant text yet. Open event details below to inspect tool calls and their output.")}</pre></section>`;
+  const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre>${escapeHtml(formatOutput(rawOutput || "No assistant text yet. Open event details below to inspect tool calls and their output."))}</pre></section>`;
   const criteria = `<section class="review-criteria"><span class="eyebrow">Acceptance criteria</span>${step.acceptanceCriteria.map((criterion) => `<div><span>○</span>${escapeHtml(criterion)}</div>`).join("")}</section>`;
   return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${criteria}${raw}<section class="run-events"><span class="eyebrow">Activity · chronological</span>${timeline}</section>`;
 }
@@ -231,11 +231,12 @@ function diffPanel(step) {
 
 function artifactsPanel(step) {
   const artifacts = step ? step.artifacts || [] : runFor()?.artifacts || [];
-  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(artifact.name)}</span><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
+  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(artifact.name)}</span><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
 function renderInspector() {
   const target = $("#inspector");
+  const openEvents = new Set([...target.querySelectorAll("details.run-event[open]")].map((item) => item.dataset.eventKey));
   const run = runFor();
   const step = nodeById(selectedStepId);
   if (!run) { target.innerHTML = `<div class="empty"><div><strong>Ticket details</strong>Select a Linear ticket, then start its workflow.</div></div>`; return; }
@@ -247,7 +248,8 @@ function renderInspector() {
   const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || sessionTraces.get(`${run.id}:${step.id}`)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
   const panels = { run: runPanel(step), diff: diffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
   const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="2" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Request changes</button></form><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept & continue</button></section>` : "";
-  target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission</span><span>${escapeHtml(step.status.replaceAll("_", " "))}</span></footer></div>`;
+  target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>Output · ${escapeHtml(run.workspace?.cwd || state.workspace.cwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission · ${escapeHtml(step.status.replaceAll("_", " "))}</span></footer></div>`;
+  for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
 }
 
 async function loadSessionTrace(run, step) {

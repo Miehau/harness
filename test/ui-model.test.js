@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { eventTimeline, executionGraph, parseDiff, runHeartbeat } from "../public/ui-model.js";
+import { eventTimeline, executionGraph, formatOutput, parseDiff, runHeartbeat } from "../public/ui-model.js";
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [
@@ -36,6 +36,11 @@ test("tool activity preserves event order and pairs details", () => {
   ]);
   assert.deepEqual(timeline.map((item) => item.tool), ["bash", "read"]);
   assert.match(timeline[0].title, /npm test/);
+  assert.equal(timeline[0].key, "1");
   assert.equal(timeline[0].result, "32 tests pass");
   assert.equal(eventTimeline([{ type: "tool_start", tool: "edit", at: "1" }, { type: "tool_end", tool: "edit", at: "2" }])[0].hasDetails, false);
+});
+
+test("formats JSON output including nested serialized JSON", () => {
+  assert.equal(formatOutput('{"summary":"ok","rawOutput":"{\\"findings\\":[]}"}'), '{\n  "summary": "ok",\n  "rawOutput": {\n    "findings": []\n  }\n}');
 });

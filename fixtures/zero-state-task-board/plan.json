@@ -11,12 +11,15 @@
           "id": "architecture",
           "type": "ticket",
           "role": "architecture",
-          "title": "Choose the application architecture",
-          "description": "Define the structure, state model, persistence approach, accessibility basics, and verification strategy for the supplied feature brief.",
+          "title": "Derive the domain architecture",
+          "description": "Model the product domain before proposing repository structure. Identify important nouns, verbs, state transitions, invariants, cohesive units that change together, external boundaries, and dependency direction. Then map every downstream ticket, including automation, onto the smallest sound architecture.",
           "permission": "none",
           "acceptanceCriteria": [
-            "The artifact gives downstream tickets concrete implementation boundaries",
-            "The approach satisfies every runtime constraint in feature.md"
+            "The artifact defines a consistent domain language, behaviors, states, and invariants",
+            "Boundaries are justified by responsibilities that change together rather than technical file types",
+            "Domain logic is independent from UI, persistence, server, and automation adapters",
+            "Every downstream ticket and runtime constraint has an explicit architectural owner",
+            "The resulting repository structure contains no speculative abstractions"
           ],
           "dependsOn": []
         },

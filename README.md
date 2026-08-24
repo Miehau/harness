@@ -34,7 +34,7 @@ The app uses Pi's existing authentication and model settings from `~/.pi/agent`.
 
 ## Local zero-state fixture
 
-The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Open this repository, keep the default fixture path in the left pane, and choose **Load**. The framework creates an empty Git repository, renders its own Pi prompts, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
+The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes that directory as the zero-state Git repository, renders its own Pi prompts, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
 
 Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptance criteria, and dependencies. Runtime fields such as prompts, skills, harnesses, and agent IDs are rejected so framework versions can be compared against the same authored input.
 

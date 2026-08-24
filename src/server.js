@@ -6,13 +6,13 @@ import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
-import { applyPatch, diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
+import { applyPatch, diffTrees, isGitRepository, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
-import { createParallelWorktrees, createZeroStateWorkspace, ensureTicketWorktree } from "./worktrees.js";
+import { createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
 import { blockingFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
@@ -156,8 +156,6 @@ async function loadLocalRun(inputPath) {
     state: { name: "Local fixture", type: "local", color: "#8b7cf6" },
     team: { name: "Local" }
   };
-  const workspace = await createZeroStateWorkspace({ dataDir, ticket, runId });
-  const baselineTree = await snapshotTree(workspace.cwd);
   const artifacts = await Promise.all([
     persistArtifact(dataDir, ticket, { runId, name: "feature.md", content: fixture.feature, stageId: "requirements", kind: "feature-brief" }),
     persistArtifact(dataDir, ticket, { runId, name: "plan.json", content: fixture.planSource, stageId: "design", kind: "plan-source" }),
@@ -168,7 +166,7 @@ async function loadLocalRun(inputPath) {
         piDependency: packageMetadata.dependencies["@earendil-works/pi-coding-agent"],
         nodeVersion: process.version,
         stageProfiles,
-        baselineTree,
+        baselineTree: null,
         featureSha256: createHash("sha256").update(fixture.feature).digest("hex"),
         planSha256: createHash("sha256").update(fixture.planSource).digest("hex")
       }, null, 2)
@@ -177,7 +175,7 @@ async function loadLocalRun(inputPath) {
   const state = await update((draft) => {
     draft.selectedTicketId = id;
     draft.ticketRuns[id] = {
-      id, runId, ticket, workspace, baselineTree, status: "awaiting_approval",
+      id, runId, ticket, workspace: null, baselineTree: null, status: "awaiting_approval",
       stages: localStages(), checkpoint: {
         id: randomUUID(), kind: "awaiting_approval", title: "Approve local execution plan",
         prompt: fixture.feature, createdAt: new Date().toISOString()
@@ -688,6 +686,25 @@ async function runTicket(ticketId) {
   return startTicketWork(ticketId, async (signal) => {
     try {
       signal.throwIfAborted();
+      const before = store.read();
+      const previous = ticketRun(before, ticketId);
+      if (previous.ticket.source === "local" && (previous.workspace?.cwd !== before.workspace.cwd || !(await isGitRepository(previous.workspace?.cwd)))) {
+        const { workspace, recovered } = await repairZeroStateWorkspace({ cwd: before.workspace.cwd, ticket: previous.ticket, runId: previous.runId, previousCwd: previous.workspace?.cwd });
+        await update((state) => {
+          const run = ticketRun(state, ticketId);
+          run.workspace = workspace;
+          run.baselineTree = workspace.baselineTree;
+          run.lastError = null;
+          for (const step of flattenSteps(run.plan)) {
+            if (!recovered && step.status === "accepted") step.status = "ready";
+            if (step.status !== "accepted") {
+              if (!["ready", "interrupted"].includes(step.status)) step.status = "interrupted";
+              delete step.workspace;
+              delete step.baseTree;
+            }
+          }
+        });
+      }
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.status = "running";
@@ -802,7 +819,7 @@ async function api(request, response, url) {
   if (request.method === "POST" && resume) {
     const id = decodeURIComponent(resume[1]);
     const run = ticketRun(store.read(), id);
-    if (!["interrupted", "cancelled"].includes(run.status) || !run.plan) throw new Error("This run cannot be resumed from its current stage");
+    if (!["interrupted", "cancelled", "needs_attention"].includes(run.status) || !run.plan) throw new Error("This run cannot be resumed from its current stage");
     if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already active; wait for one to reach a checkpoint");
     if (run.status === "cancelled") await update((state) => {
       const current = ticketRun(state, id);

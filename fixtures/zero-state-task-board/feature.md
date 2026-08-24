@@ -2,12 +2,15 @@
 
 Build a complete local task-board web application from an empty Git repository.
 
-## Product behavior
+## Domain behavior
 
-- Users can create non-empty tasks and see them immediately.
-- Users can complete, restore, and remove tasks.
-- Tasks and completion state survive a browser reload.
-- Invalid persisted data does not prevent the app from starting.
+- A task board owns a collection of tasks.
+- A task is created with a non-empty title and appears immediately.
+- A task moves between active and completed states.
+- Restoring a task returns it to active.
+- Removing a task ends its lifecycle on the board.
+- The board and task states survive a browser reload.
+- Invalid persisted state does not prevent the board from starting.
 
 ## Runtime contract
 

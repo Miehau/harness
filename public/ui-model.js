@@ -42,13 +42,26 @@ function toolTitle(tool, args) {
   return subject ? `${tool} · ${String(subject).split("\n")[0]}` : tool;
 }
 
+function expandJson(value) {
+  if (Array.isArray(value)) return value.map(expandJson);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandJson(item)]));
+  if (typeof value !== "string" || !/^[{[]/.test(value.trim())) return value;
+  try { return expandJson(JSON.parse(value)); } catch { return value; }
+}
+
+export function formatOutput(value = "") {
+  const text = String(value);
+  if (!/^[{[]/.test(text.trim())) return text;
+  try { return JSON.stringify(expandJson(JSON.parse(text)), null, 2); } catch { return text; }
+}
+
 export function eventTimeline(events = []) {
   const items = [];
   const byCallId = new Map();
   const pendingByTool = new Map();
   for (const event of events) {
     if (event.type === "tool_start") {
-      const item = { tool: event.tool, title: toolTitle(event.tool, event.args), at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
+      const item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: toolTitle(event.tool, event.args), at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
       items.push(item);
       if (event.callId) byCallId.set(event.callId, item);
       else pendingByTool.set(event.tool, [...(pendingByTool.get(event.tool) || []), item]);
@@ -57,15 +70,15 @@ export function eventTimeline(events = []) {
     if (["tool_update", "tool_end"].includes(event.type)) {
       let item = event.callId ? byCallId.get(event.callId) : pendingByTool.get(event.tool)?.find((candidate) => candidate.status === "running");
       if (!item) {
-        item = { tool: event.tool, title: event.tool, at: event.at, args: "", output: "", result: "", status: "running", isError: false };
+        item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: event.tool, at: event.at, args: "", output: "", result: "", status: "running", isError: false };
         items.push(item);
       }
       if (event.type === "tool_update") item.output += event.detail || "";
       else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : "finished", isError: Boolean(event.isError) });
       continue;
     }
-    if (event.type === "agent_error") items.push({ title: "Model request failed", at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
-    if (event.type === "reasoning_summary") items.push({ title: "Reasoning summary", at: event.at, result: event.detail || "", status: "summary", isError: false });
+    if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: "Model request failed", at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
+    if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: "Reasoning summary", at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
 }

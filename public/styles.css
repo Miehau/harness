@@ -274,7 +274,7 @@ h3 { font-size: 14px; }
 .artifact-name { font-weight: 600; }
 .artifact-source { color: #9098a0; font-size: 11px; }
 .artifact-body { max-height: 620px; overflow: auto; color: #d6dbe0; font-size: 13px; line-height: 1.6; }
-.artifact-path { display: block; overflow: hidden; margin-bottom: 9px; color: #7f8993; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-path { display: block; margin-bottom: 9px; color: #7f8993; font-size: 9px; overflow-wrap: anywhere; white-space: normal; }
 .artifact-body h2, .artifact-body h3, .artifact-body h4 { margin: 18px 0 7px; color: #f0f2f4; font-size: 15px; }
 .artifact-body h2:first-child, .artifact-body h3:first-child { margin-top: 5px; }
 .artifact-body p { margin: 0 0 10px; }
@@ -315,6 +315,7 @@ h3 { font-size: 14px; }
 .attachment img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .attachment figcaption { padding: 7px; color: #a7aeb6; font-size: 11px; }
 .inspector-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #2d3135; padding: 10px 14px; color: #9299a1; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.inspector-footer span { min-width: 0; overflow-wrap: anywhere; }
 
 dialog { width: min(860px, calc(100vw - 32px)); border: 1px solid #3a4047; border-radius: 12px; padding: 0; background: #14171a; color: #edf0f2; }
 dialog::backdrop { background: rgb(0 0 0 / .68); }

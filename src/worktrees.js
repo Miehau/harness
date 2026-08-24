@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { cp, mkdir, readdir } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
 
@@ -19,19 +19,38 @@ const identity = {
   GIT_COMMITTER_EMAIL: "agent-plan@local"
 };
 
-export async function createZeroStateWorkspace({ dataDir, ticket, runId }) {
+export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles = false }) {
   const slug = safeName(ticket.identifier || ticket.id);
   const runSlug = safeName(runId);
-  const cwd = join(dataDir, "ticket-runs", slug, "runs", runSlug, "worktree");
   const branch = `codex/${slug}-${runSlug.slice(0, 8)}`;
   await mkdir(cwd, { recursive: true });
+  const entries = await readdir(cwd);
+  if (!allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
   try { await git(cwd, ["rev-parse", "--is-inside-work-tree"]); }
+  catch { await git(cwd, ["init", "-q", "-b", "main"]); }
+  try { await git(cwd, ["rev-parse", "HEAD"]); }
   catch {
-    await git(cwd, ["init", "-q", "-b", "main"]);
     await git(cwd, ["commit", "--allow-empty", "-qm", "Zero-state baseline"], { env: identity });
-    await git(cwd, ["checkout", "-qb", branch]);
   }
-  return { sourceCwd: cwd, cwd, branch, zeroState: true };
+  if (await git(cwd, ["branch", "--show-current"]) !== branch) {
+    try { await git(cwd, ["checkout", "-qb", branch]); }
+    catch { await git(cwd, ["checkout", "-q", branch]); }
+  }
+  return { sourceCwd: cwd, cwd, branch, zeroState: true, baselineTree: await git(cwd, ["rev-parse", "HEAD^{tree}"]) };
+}
+
+export async function repairZeroStateWorkspace({ cwd, ticket, runId, previousCwd }) {
+  const workspace = await createZeroStateWorkspace({ cwd, ticket, runId, allowFiles: previousCwd === cwd });
+  let recovered = previousCwd === cwd;
+  if (previousCwd && previousCwd !== cwd) {
+    try {
+      await cp(previousCwd, cwd, { recursive: true, force: true, filter: (path) => basename(path) !== ".git" });
+      recovered = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return { workspace, recovered };
 }
 
 export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {

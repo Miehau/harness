@@ -10,6 +10,7 @@ test("stage profiles accept editable model, reasoning, and prompt values", () =>
   assert.equal(profiles.implementation.thinking, "low");
   assert.match(stagePrompt(profiles.implementation, "Locked contract."), /Locked contract[\s\S]*Keep it tiny/);
   assert.equal(profiles.architecture.model, defaultStageProfiles().architecture.model);
+  assert.match(profiles.architecture.prompt, /ubiquitous language[\s\S]*downstream ticket/);
 });
 
 test("stage profiles reject invalid reasoning levels", () => {
