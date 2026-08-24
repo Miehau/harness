@@ -35,21 +35,39 @@ export function executionGraph(plan) {
   };
 }
 
-export function summarizeRun(events = []) {
-  const groups = {
-    inspect: { title: "Explored the repository", detail: "reads and searches", tools: new Set(["read", "grep", "find", "ls"]) },
-    change: { title: "Changed the implementation", detail: "file edits", tools: new Set(["write", "edit"]) },
-    check: { title: "Ran commands and checks", detail: "commands", tools: new Set(["bash"]) },
-    report: { title: "Prepared the handoff", detail: "reports", tools: new Set(["worker_report"]) }
-  };
-  const activities = [];
-  for (const group of Object.values(groups)) {
-    const matching = events.filter((event) => event.type === "tool_start" && group.tools.has(event.tool));
-    if (matching.length) activities.push({ title: group.title, detail: `${matching.length} ${matching.length === 1 && group.detail === "reports" ? "report" : group.detail}`, at: matching[0].at, kind: "success" });
+function toolTitle(tool, args) {
+  let values = {};
+  try { values = JSON.parse(args || "{}"); } catch {}
+  const subject = values.command || values.cmd || values.path || values.pattern || values.query;
+  return subject ? `${tool} · ${String(subject).split("\n")[0]}` : tool;
+}
+
+export function eventTimeline(events = []) {
+  const items = [];
+  const byCallId = new Map();
+  const pendingByTool = new Map();
+  for (const event of events) {
+    if (event.type === "tool_start") {
+      const item = { tool: event.tool, title: toolTitle(event.tool, event.args), at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
+      items.push(item);
+      if (event.callId) byCallId.set(event.callId, item);
+      else pendingByTool.set(event.tool, [...(pendingByTool.get(event.tool) || []), item]);
+      continue;
+    }
+    if (["tool_update", "tool_end"].includes(event.type)) {
+      let item = event.callId ? byCallId.get(event.callId) : pendingByTool.get(event.tool)?.find((candidate) => candidate.status === "running");
+      if (!item) {
+        item = { tool: event.tool, title: event.tool, at: event.at, args: "", output: "", result: "", status: "running", isError: false };
+        items.push(item);
+      }
+      if (event.type === "tool_update") item.output += event.detail || "";
+      else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : "finished", isError: Boolean(event.isError) });
+      continue;
+    }
+    if (event.type === "agent_error") items.push({ title: "Model request failed", at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
+    if (event.type === "reasoning_summary") items.push({ title: "Reasoning summary", at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
-  const errors = events.filter((event) => event.type === "tool_end" && event.isError);
-  if (errors.length) activities.push({ title: "Some commands needed correction", detail: `${errors.length} failed ${errors.length === 1 ? "operation" : "operations"}`, at: errors[0].at, kind: "warning" });
-  return activities.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
 }
 
 export function runHeartbeat(active, live = {}, now = Date.now()) {

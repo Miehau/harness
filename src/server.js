@@ -47,10 +47,11 @@ function publishState(state = store.read()) { publish({ type: "state", state });
 
 function publishStepEvent(ticketId, stepId, runId, event) {
   publish({ channel: "run", ticketId, stepId, runId, ...event });
-  if (!["tool_start", "tool_end", "agent_error"].includes(event.type)) return;
+  if (!["prompt", "tool_start", "tool_end", "agent_error"].includes(event.type)) return;
   update((state) => {
     const active = state.ticketRuns[ticketId]?.activeRuns?.[stepId];
     if (!active || active.runId !== runId) return;
+    if (event.type === "prompt") active.prompt = event.content;
     active.lastEvent = event.label;
     active.lastEventAt = new Date().toISOString();
     active.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
@@ -415,7 +416,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, violations, feedback: nextFeedback || null });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
@@ -452,7 +453,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.diff = diff;
           target.sessionFile = result.sessionFile;
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, violations, feedback: nextFeedback || null, verification });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, verification });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });
@@ -715,6 +716,13 @@ async function api(request, response, url) {
     let cleared = 0;
     const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set(activeTickets.keys())); });
     return json(response, 200, { cleared, state });
+  }
+  const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
+  if (request.method === "GET" && sessionTrace) {
+    const run = ticketRun(store.read(), decodeURIComponent(sessionTrace[1]));
+    const step = findNode(run.plan, decodeURIComponent(sessionTrace[2]));
+    if (!step) throw new Error("Step not found");
+    return json(response, 200, await harness.sessionTrace(step.sessionFile));
   }
   if (request.method === "POST" && url.pathname === "/api/stage-profiles") {
     const profiles = normalizeStageProfiles((await body(request)).profiles);

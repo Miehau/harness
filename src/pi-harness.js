@@ -1,5 +1,5 @@
 import { mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { normalizePlan } from "./plan.js";
@@ -124,6 +124,15 @@ function lastAssistantText(session) {
   return textFromContent(message?.content);
 }
 
+function eventText(value) {
+  let text;
+  try { text = typeof value === "string" ? value : JSON.stringify(value, null, 2); }
+  catch { text = String(value); }
+  text ??= String(value ?? "");
+  // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
+  return text.length > 50000 ? `${text.slice(0, 50000)}\n\n[truncated after 50,000 characters]` : text;
+}
+
 function safeEvent(event) {
   if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     return { type: "text_delta", delta: event.assistantMessageEvent.delta, label: "Writing the response" };
@@ -134,8 +143,10 @@ function safeEvent(event) {
   if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "error") {
     return { type: "agent_error", label: event.message.errorMessage || "Model request failed" };
   }
-  if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, label: `Using ${event.toolName}` };
-  if (event.type === "tool_execution_end") return { type: "tool_end", tool: event.toolName, isError: event.isError, label: event.isError ? `${event.toolName} failed` : "Model is reasoning" };
+  if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, callId: event.toolCallId, args: eventText(event.args), label: `Using ${event.toolName}` };
+  if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), label: `${event.toolName} is running` };
+  if (event.type === "bash_execution_update") return { type: "tool_update", tool: "bash", callId: event.id, detail: eventText(event.delta), label: "Command is running" };
+  if (event.type === "tool_execution_end") return { type: "tool_end", tool: event.toolName, callId: event.toolCallId, result: eventText(event.result), isError: event.isError, label: event.isError ? `${event.toolName} failed` : "Model is reasoning" };
   if (event.type === "agent_start" || event.type === "turn_start") return { type: event.type, label: "Model is reasoning" };
   if (event.type === "agent_settled" || event.type === "turn_end") return { type: event.type, label: "Finishing this phase" };
   return null;
@@ -289,6 +300,33 @@ export class PiHarness {
     this.supervisorSignals = [];
     this.supervisorStages = [];
     this.supervisorQueues = new Map();
+  }
+
+  async sessionTrace(sessionFile) {
+    if (!sessionFile) return { prompt: "", rawOutput: "", events: [] };
+    const file = resolve(sessionFile);
+    const root = `${resolve(this.dataDir, "pi-sessions")}${sep}`;
+    if (!file.startsWith(root)) throw new Error("Session file is outside Pi session storage");
+    const trace = { prompt: "", rawOutput: "", events: [] };
+    for (const line of (await readFile(file, "utf8")).split("\n").filter(Boolean)) {
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const message = entry.type === "message" ? entry.message : null;
+      if (!message) continue;
+      const at = new Date(message.timestamp || entry.timestamp || Date.now()).toISOString();
+      if (message.role === "user") trace.prompt = textFromContent(message.content);
+      if (message.role === "assistant") for (const part of message.content || []) {
+        if (part.type === "text") trace.rawOutput += part.text || "";
+        if (part.type === "thinking" && part.thinkingSignature) {
+          try {
+            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) trace.events.push({ type: "reasoning_summary", detail: summary.text, at });
+          } catch {}
+        }
+        if (part.type === "toolCall") trace.events.push({ type: "tool_start", tool: part.name, callId: part.id, args: eventText(part.arguments), at });
+      }
+      if (message.role === "toolResult") trace.events.push({ type: "tool_end", tool: message.toolName, callId: message.toolCallId, result: eventText(textFromContent(message.content)), isError: Boolean(message.isError), at });
+    }
+    return trace;
   }
 
   sdk() {
@@ -585,8 +623,9 @@ Return ONLY JSON:
 
 Only report findings supported by repository, test, or diff evidence. Do not modify files.`));
       signal?.throwIfAborted();
-      const parsed = jsonReply(lastAssistantText(session));
-      return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], sessionFile: session.sessionFile };
+      const rawOutput = lastAssistantText(session);
+      const parsed = jsonReply(rawOutput);
+      return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
     } finally {
       unsubscribe();
       await unbindAbort();
@@ -736,20 +775,22 @@ ${stripFrontmatter(content).trim()}
       if (safe.type === "thinking") lastThinkingAt = Date.now();
       if (safe.type === "text_delta") output += safe.delta;
       else events.push({ ...safe, at: new Date().toISOString() });
-      onEvent(safe);
+      onEvent?.(safe);
     });
     try {
       signal?.throwIfAborted();
       const correction = feedback ? `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.` : "";
       const guidance = profile?.prompt ? `# Configured stage guidance\n${profile.prompt}` : "";
       const prompt = [skillBlocks.join("\n\n"), guidance, stepContext({ plan, step, artifacts }), correction].filter(Boolean).join("\n\n");
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();
-      const fallbackOutput = output || lastAssistantText(session);
+      const rawOutput = output || lastAssistantText(session);
       return {
         prompt,
-        output: report?.artifact || fallbackOutput,
-        report: report || { status: "completed", summary: fallbackOutput, artifact: fallbackOutput },
+        rawOutput,
+        output: report?.artifact || rawOutput,
+        report: report || { status: "completed", summary: rawOutput, artifact: rawOutput },
         sessionFile: session.sessionFile,
         events: events.slice(-100)
       };

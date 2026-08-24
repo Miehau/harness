@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { executionGraph, parseDiff, runHeartbeat, summarizeRun } from "/ui-model.js";
+import { eventTimeline, executionGraph, parseDiff, runHeartbeat } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -12,6 +12,8 @@ let selectedStepId = null;
 let activeTab = "run";
 let toastTimer;
 const liveRuns = new Map();
+const sessionTraces = new Map();
+const pendingSessionTraces = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -202,14 +204,23 @@ function renderPlanTree() {
 function runPanel(step) {
   const run = runFor();
   const attempt = step.attempts?.at(-1);
+  const trace = sessionTraces.get(`${run.id}:${step.id}`);
   const live = liveRuns.get(`${run.id}:${step.id}`);
+  const currentLive = live?.runId === attempt?.runId ? null : live;
   const active = run.activeRuns?.[step.id];
   const pulse = runHeartbeat(active, live);
   const heartbeat = pulse ? `<section class="run-heartbeat ${pulse.state}"><span class="heartbeat-dot"></span><div><strong>${escapeHtml(pulse.label)}</strong><small>${pulse.elapsed}s elapsed · last activity ${pulse.idle ? `${pulse.idle}s ago` : "now"}${pulse.note ? ` · ${escapeHtml(pulse.note)}` : ""}</small></div></section>` : "";
-  const activities = summarizeRun([...(attempt?.events || []), ...(live?.events || [])]);
-  const timeline = activities.length ? activities.map((activity) => `<div class="run-activity ${activity.kind}"><span class="activity-marker">${activity.kind === "warning" ? "!" : "✓"}</span><span><strong>${escapeHtml(activity.title)}</strong><small>${escapeHtml(activity.detail)}</small></span><time>${escapeHtml((activity.at || "").slice(11, 19))}</time></div>`).join("") : `<div class="run-empty">The worker has not reported meaningful activity yet.</div>`;
+  const events = [...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])];
+  const timeline = eventTimeline(events).map((item) => {
+    const heading = `<span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.status)}</small></span><time>${escapeHtml((item.at || "").slice(11, 19))}</time>`;
+    if (!item.hasDetails) return `<div class="run-event unavailable ${item.isError ? "warning" : ""}">${heading}<em>Legacy run — input and output were not recorded</em></div>`;
+    const detail = [["Input", item.args], ["Live output", item.output], ["Result", item.result]].filter(([, value]) => value).map(([label, value]) => `<div class="event-block"><label>${label}</label><pre>${escapeHtml(value)}</pre></div>`).join("");
+    return `<details class="run-event ${item.isError ? "warning" : ""}"><summary>${heading}</summary>${detail}</details>`;
+  }).join("") || `<div class="run-empty">The worker has not called a tool yet.</div>`;
+  const rawOutput = currentLive?.output || trace?.rawOutput || [attempt?.rawOutput, attempt?.verification?.rawOutput].filter(Boolean).join("\n\n") || "";
+  const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre>${escapeHtml(rawOutput || "No assistant text yet. Open event details below to inspect tool calls and their output.")}</pre></section>`;
   const criteria = `<section class="review-criteria"><span class="eyebrow">Acceptance criteria</span>${step.acceptanceCriteria.map((criterion) => `<div><span>○</span>${escapeHtml(criterion)}</div>`).join("")}</section>`;
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${criteria}<div class="run-timeline">${timeline}</div>${live?.output ? `<div class="live-report">${renderMarkdown(live.output)}</div>` : ""}`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${criteria}${raw}<section class="run-events"><span class="eyebrow">Activity · chronological</span>${timeline}</section>`;
 }
 
 function diffPanel(step) {
@@ -232,10 +243,22 @@ function renderInspector() {
     target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
-  const renderedPrompt = [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt is rendered when the worker starts.";
+  loadSessionTrace(run, step);
+  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || sessionTraces.get(`${run.id}:${step.id}`)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
   const panels = { run: runPanel(step), diff: diffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
   const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="2" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Request changes</button></form><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept & continue</button></section>` : "";
   target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission</span><span>${escapeHtml(step.status.replaceAll("_", " "))}</span></footer></div>`;
+}
+
+async function loadSessionTrace(run, step) {
+  const key = `${run.id}:${step.id}`;
+  if (!step.sessionFile || sessionTraces.has(key) || pendingSessionTraces.has(key)) return;
+  pendingSessionTraces.add(key);
+  try {
+    sessionTraces.set(key, await api(`/api/tickets/${encodeURIComponent(run.id)}/steps/${encodeURIComponent(step.id)}/session-trace`));
+    if (run.id === runFor()?.id && step.id === selectedStepId) renderInspector();
+  } catch (error) { sessionTraces.set(key, { prompt: "", rawOutput: "", events: [] }); notify(error.message); }
+  finally { pendingSessionTraces.delete(key); }
 }
 
 function render() {
@@ -379,10 +402,13 @@ events.onmessage = ({ data }) => {
   if (event.type === "state") { state = event.state; render(); return; }
   if (event.channel === "run" && event.ticketId && event.stepId) {
     const key = `${event.ticketId}:${event.stepId}`;
-    const live = liveRuns.get(key) || { events: [], output: "" };
-    if (event.type === "phase") live.output = "";
-    if (event.type === "text_delta") live.output += event.delta;
+    let live = liveRuns.get(key) || { events: [], output: "" };
+    if (live.runId && live.runId !== event.runId) live = { events: [], output: "" };
+    live.runId = event.runId;
+    if (event.type === "prompt") live.prompt = event.content;
+    else if (event.type === "text_delta") live.output += event.delta;
     else live.events.push({ ...event, at: new Date().toISOString() });
+    live.events = live.events.slice(-200);
     live.label = event.label || live.label;
     live.lastAt = new Date().toISOString();
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
