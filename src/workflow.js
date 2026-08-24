@@ -1,0 +1,65 @@
+import { randomUUID } from "node:crypto";
+
+export function initialWorkflow(current = {}) {
+  return {
+    skillName: current.skillName || null,
+    status: current.status || "idle",
+    stages: Array.isArray(current.stages) ? current.stages : [],
+    checkpoints: Array.isArray(current.checkpoints) ? current.checkpoints : [],
+    lastReview: current.lastReview || null
+  };
+}
+
+export function upsertWorkflowStage(workflow, input) {
+  const id = String(input.id || "stage").trim();
+  const existing = workflow.stages.find((stage) => stage.id === id);
+  const stage = existing || { id, createdAt: new Date().toISOString() };
+  stage.title = String(input.title || existing?.title || id);
+  stage.status = ["pending", "active", "completed", "blocked"].includes(input.status) ? input.status : "pending";
+  if (stage.status === "active") {
+    for (const other of workflow.stages) if (other.id !== id && other.status === "active") other.status = "completed";
+  }
+  stage.summary = String(input.summary || "");
+  stage.updatedAt = new Date().toISOString();
+  if (!existing) workflow.stages.push(stage);
+  return stage;
+}
+
+export function pendingCheckpoints(workflow) {
+  return (workflow?.checkpoints || []).filter((checkpoint) => checkpoint.status === "pending");
+}
+
+export function workflowBlockers(workflow) {
+  return pendingCheckpoints(workflow)
+    .filter((checkpoint) => checkpoint.blocking !== false)
+    .map((checkpoint) => checkpoint.title || checkpoint.prompt);
+}
+
+export function addCheckpoint(workflow, input) {
+  const checkpoint = {
+    id: randomUUID(),
+    kind: input.kind === "needs_input" ? "needs_input" : "awaiting_approval",
+    title: String(input.title || "Supervisor checkpoint"),
+    prompt: String(input.prompt || "Review before continuing"),
+    stepId: input.stepId || null,
+    source: input.source || "supervisor",
+    blocking: input.blocking !== false,
+    status: "pending",
+    createdAt: new Date().toISOString()
+  };
+  workflow.checkpoints.push(checkpoint);
+  workflow.status = checkpoint.kind;
+  return checkpoint;
+}
+
+export function resolveCheckpoint(workflow, id, response) {
+  const checkpoint = workflow.checkpoints.find((item) => item.id === id);
+  if (!checkpoint) throw new Error("Checkpoint not found");
+  if (checkpoint.status !== "pending") throw new Error("Checkpoint is already resolved");
+  checkpoint.status = "resolved";
+  checkpoint.response = String(response || "Approved");
+  checkpoint.resolvedAt = new Date().toISOString();
+  const pending = pendingCheckpoints(workflow);
+  workflow.status = pending.length ? pending[0].kind : (workflow.skillName ? "active" : "idle");
+  return checkpoint;
+}

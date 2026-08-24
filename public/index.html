@@ -1,0 +1,63 @@
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/styles.css">
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span></div>
+    <div class="topbar-actions">
+      <form id="workspace-form" class="workspace-form">
+        <label for="workspace-path">Repository</label>
+        <input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false">
+        <button class="button" type="submit">Open</button>
+      </form>
+      <button id="profile-settings" class="button" type="button">Agent setup</button>
+    </div>
+  </header>
+
+  <div class="layout ticket-layout">
+    <aside class="ticket-pane">
+      <header class="pane-header ticket-header">
+        <div><span class="eyebrow">Local or Linear</span><h1>Work queue</h1></div>
+        <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh Linear" title="Refresh Linear">↻</button></div>
+      </header>
+      <form id="local-load" class="linear-connect local-load">
+        <strong>Load local fixture</strong>
+        <p>Read feature.md and plan.json from the open repository.</p>
+        <input name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required>
+        <button class="button primary" type="submit">Load</button>
+      </form>
+      <div id="linear-status" class="linear-status"></div>
+      <div class="ticket-filter"><input id="ticket-search" type="search" placeholder="Filter tickets…" aria-label="Filter tickets"></div>
+      <div id="ticket-list" class="ticket-list" aria-live="polite"></div>
+      <footer class="ticket-pane-footer"><span id="run-capacity">0 / 2 active</span><span>one worktree per ticket</span></footer>
+    </aside>
+
+    <main class="plan-pane">
+      <section id="ticket-header" class="plan-header"></section>
+      <section class="workspace-content">
+        <div id="plan-tree" class="plan-tree"></div>
+        <section id="inspector" class="inspector"></section>
+      </section>
+    </main>
+  </div>
+</div>
+
+<dialog id="plan-dialog">
+  <form method="dialog" class="dialog-shell">
+    <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></header>
+    <textarea id="plan-json" spellcheck="false"></textarea>
+    <footer><span id="plan-json-error" class="error-text"></span><button class="button" value="cancel">Close</button></footer>
+  </form>
+</dialog>
+
+<dialog id="profiles-dialog">
+  <form id="profiles-form" class="dialog-shell">
+    <header><div><span class="eyebrow">Framework configuration</span><h2>Stage profiles</h2></div><button id="close-profiles" class="icon-button" type="button" aria-label="Close">×</button></header>
+    <p class="profiles-note">Model IDs, reasoning, and additional stage guidance. Changes apply to new runs.</p>
+    <div id="profile-fields" class="profile-fields"></div>
+    <datalist id="model-options"><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.6-luna"></option></datalist>
+    <footer><span class="profiles-provider">Provider: openai-codex</span><button class="button primary" type="submit">Save profiles</button></footer>
+  </form>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="/app.js"></script>

@@ -1,0 +1,19 @@
+{
+  "name": "agent-plan-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "camera": "node src/camera-control.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.0",
+    "typebox": "1.3.7"
+  }
+}
