@@ -3,6 +3,7 @@ import { cp, mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
+import { isGitRepository } from "./git.js";
 
 const exec = promisify(execFile);
 
@@ -26,8 +27,7 @@ export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles 
   await mkdir(cwd, { recursive: true });
   const entries = await readdir(cwd);
   if (!allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
-  try { await git(cwd, ["rev-parse", "--is-inside-work-tree"]); }
-  catch { await git(cwd, ["init", "-q", "-b", "main"]); }
+  if (!(await isGitRepository(cwd))) await git(cwd, ["init", "-q", "-b", "main"]);
   try { await git(cwd, ["rev-parse", "HEAD"]); }
   catch {
     await git(cwd, ["commit", "--allow-empty", "-qm", "Zero-state baseline"], { env: identity });

@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyPatch, diffTrees, snapshotTree } from "../src/git.js";
+import { applyPatch, diffTrees, isGitRepository, snapshotTree } from "../src/git.js";
 import { createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
 
 test("isolated sibling worktrees produce patches that integrate into the zero-state run", async () => {
@@ -49,6 +49,21 @@ test("repairs a missing local Git workspace without losing surviving files", asy
     assert.equal(await snapshotTree(workspace.cwd) !== null, true);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("initializes an isolated repository when the run directory is nested in another repository", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "agent-plan-parent-"));
+  const cwd = join(parent, "working-directory");
+  try {
+    await createZeroStateWorkspace({ cwd: parent, ticket: { identifier: "LOCAL-parent" }, runId: "parent-run" });
+    const parentHead = await readFile(join(parent, ".git", "HEAD"), "utf8");
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-child" }, runId: "child-run" });
+    assert.equal((await readdir(cwd)).includes(".git"), true);
+    assert.equal(await isGitRepository(cwd), true);
+    assert.equal(await readFile(join(parent, ".git", "HEAD"), "utf8"), parentHead);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
   }
 });
 

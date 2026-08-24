@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -13,7 +13,7 @@ async function git(cwd, args, options = {}) {
 
 export async function isGitRepository(cwd) {
   try {
-    return (await git(cwd, ["rev-parse", "--is-inside-work-tree"])) === "true";
+    return await realpath(await git(cwd, ["rev-parse", "--show-toplevel"])) === await realpath(cwd);
   } catch {
     return false;
   }

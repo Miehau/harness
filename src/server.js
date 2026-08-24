@@ -657,6 +657,9 @@ async function finishHandoff(ticketId) {
 async function advanceTicket(ticketId, signal) {
   signal?.throwIfAborted();
   const run = ticketRun(store.read(), ticketId);
+  if (run.ticket.source === "local" && !(await isGitRepository(run.workspace.cwd))) {
+    throw new Error("Local run directory is not an isolated Git repository. Resume the run to repair it before implementation.");
+  }
   if (flattenSteps(run.plan).some((step) => step.status === "review_ready")) return;
   const batch = nextRunnableBatch(run.plan);
   if (batch.length) {
