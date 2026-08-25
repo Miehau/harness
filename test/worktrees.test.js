@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isGitRepository, snapshotTree } from "../src/git.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
 
 test("isolated sibling worktrees produce commits that integrate into the zero-state run", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-"));
@@ -43,6 +43,80 @@ test("commits accepted workspace changes and skips an empty follow-up commit", a
     assert.equal(await commitWorkspace(cwd, "Implement: feature again"), null);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("integrates a completed ticket branch into the opened working directory", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-integrate-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-change" }, runId: "run-1" });
+    await writeFile(join(workspace.cwd, "integrated.txt"), "ready\n");
+    await commitWorkspace(workspace.cwd, "feat: integrate ticket\n\nWhy: The result belongs in the opened repository.\nRequirement: REQ-integrate");
+    let verified = false;
+    const result = await integrateBranch({
+      sourceCwd: cwd, branch: workspace.branch, integrationCwd: join(dataDir, "integration"),
+      verify: async ({ cwd: integrationCwd }) => { verified = (await readFile(join(integrationCwd, "integrated.txt"), "utf8")) === "ready\n"; }
+    });
+    assert.match(result.commit, /^[a-f0-9]{40}$/);
+    assert.equal(verified, true);
+    assert.equal(await readFile(join(cwd, "integrated.txt"), "utf8"), "ready\n");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("uses a resolver only when an isolated merge has conflicts", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-conflict-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    await writeFile(join(cwd, "shared.txt"), "base\n");
+    await commitWorkspace(cwd, "feat: shared base");
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-change" }, runId: "run-1" });
+    await writeFile(join(workspace.cwd, "shared.txt"), "ticket\n");
+    await commitWorkspace(workspace.cwd, "feat: ticket change");
+    await writeFile(join(cwd, "shared.txt"), "target\n");
+    await commitWorkspace(cwd, "feat: target change");
+    let resolverCalls = 0;
+    const result = await integrateBranch({
+      sourceCwd: cwd, branch: workspace.branch, integrationCwd: join(dataDir, "integration"),
+      resolveConflicts: async ({ cwd: integrationCwd, conflicts }) => {
+        resolverCalls++;
+        assert.deepEqual(conflicts, ["shared.txt"]);
+        await writeFile(join(integrationCwd, "shared.txt"), "target + ticket\n");
+      },
+      verify: async ({ cwd: integrationCwd }) => assert.equal(await readFile(join(integrationCwd, "shared.txt"), "utf8"), "target + ticket\n")
+    });
+    assert.equal(resolverCalls, 1);
+    assert.deepEqual(result.conflicts, ["shared.txt"]);
+    assert.equal(await readFile(join(cwd, "shared.txt"), "utf8"), "target + ticket\n");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("does not touch the opened repository when merged verification fails", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-rejected-merge-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    const sourceTree = await snapshotTree(cwd);
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-change" }, runId: "run-1" });
+    await writeFile(join(workspace.cwd, "unverified.txt"), "not ready\n");
+    await commitWorkspace(workspace.cwd, "feat: unverified change");
+    await assert.rejects(
+      integrateBranch({
+        sourceCwd: cwd, branch: workspace.branch, integrationCwd: join(dataDir, "integration"),
+        verify: async () => { throw new Error("checks failed"); }
+      }),
+      /checks failed/
+    );
+    assert.equal(await snapshotTree(cwd), sourceTree);
+    await assert.rejects(readFile(join(cwd, "unverified.txt"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

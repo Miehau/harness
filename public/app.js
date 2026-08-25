@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, stageMilestones } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -8,6 +8,7 @@ const escapeHtml = (value = "") => String(value)
 
 let state = null;
 let linear = { configured: false, viewer: null, tickets: [] };
+let codexModels = [];
 let selectedStepId = null;
 let selectedStageId = null;
 let activeTab = "run";
@@ -37,12 +38,13 @@ function notify(message) {
 }
 
 function renderProfiles() {
-  const rows = profileIds.map((id) => {
+  const cards = profileIds.map((id) => {
     const profile = state.stageProfiles[id];
     const label = escapeHtml(profile.label);
-    return `<tr data-profile="${id}"><th scope="row">${label}</th><td><label class="sr-only" for="${id}-model">${label} model</label><input id="${id}-model" name="${id}-model" list="model-options" value="${escapeHtml(profile.model)}" required></td><td><label class="sr-only" for="${id}-thinking">${label} reasoning</label><select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></td><td><details class="profile-instructions"><summary>Instructions</summary><label class="sr-only" for="${id}-prompt">${label} additional instructions</label><textarea id="${id}-prompt" name="${id}-prompt" rows="3">${escapeHtml(profile.prompt)}</textarea></details></td></tr>`;
+    const models = codexModels.some((model) => model.id === profile.model) ? codexModels : [{ id: profile.model, name: profile.model }, ...codexModels];
+    return `<fieldset class="profile-card" data-profile="${id}"><legend>${label}</legend><label for="${id}-model">Model<select id="${id}-model" name="${id}-model" required>${models.map((model) => `<option value="${escapeHtml(model.id)}" ${profile.model === model.id ? "selected" : ""}>${escapeHtml(model.name || model.id)}</option>`).join("")}</select></label><label for="${id}-thinking">Reasoning<select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></label><label class="profile-prompt" for="${id}-prompt">Agent instructions<textarea id="${id}-prompt" name="${id}-prompt" rows="5">${escapeHtml(profile.prompt)}</textarea></label></fieldset>`;
   }).join("");
-  $("#profile-fields").innerHTML = `<table class="profile-table"><thead><tr><th>Stage</th><th>Model</th><th>Reasoning</th><th>Guidance</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $("#profile-fields").innerHTML = cards;
 }
 
 function runFor(id = state?.selectedTicketId) { return id ? state?.ticketRuns?.[id] || null : null; }
@@ -249,14 +251,21 @@ function timelineHtml(events, active = false) {
   }).join("") || `<div class="run-empty">The agent has not started a focused activity yet.</div>`;
 }
 
+function milestoneTimelineHtml(items) {
+  return `<ol class="stage-timeline">${items.map((item) => {
+    const heading = `<span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.status)}</small></span><time>${escapeHtml((item.at || "").slice(11, 19))}</time>`;
+    return `<li><span class="timeline-marker"></span>${item.detail ? `<details><summary>${heading}</summary><div class="timeline-detail">${renderMarkdown(item.detail)}</div></details>` : `<div class="timeline-row">${heading}</div>`}</li>`;
+  }).join("")}</ol>`;
+}
+
 function stageActivityPanel(run, stage) {
   const live = liveStages.get(`${run.id}:${stage.id}`);
-  const activity = live || stage.activity;
-  if (!activity) return `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
+  const activity = live || stage.activity || {};
+  const milestones = stageMilestones(run, stage);
+  if (!live && !stage.activity && !milestones.length) return `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
   const active = stage.status === "active";
   const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: stage.updatedAt, lastEvent: stage.summary }, live)) : "";
-  const output = live?.output || activity.rawOutput || (active ? "Waiting for model output…" : "No assistant output was recorded.");
-  return `<div class="stage-activity">${pulse}<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre data-stage-raw-output>${escapeHtml(formatOutput(output))}</pre></section><section class="run-events"><span class="eyebrow">Activity · grouped by focus</span><div>${timelineHtml(activity.events || [], active)}</div></section></div>`;
+  return `<div class="stage-activity">${pulse}<section class="run-events"><span class="eyebrow">Timeline</span><div>${milestones.length ? milestoneTimelineHtml(milestones) : timelineHtml(activity.events || [], active)}</div></section></div>`;
 }
 
 function rawOutputFor(run, step) {
@@ -328,7 +337,7 @@ function renderInspector() {
     const profileId = ({ explore: "exploration", design: "architecture", implement: "implementation", verify: "verification" })[stage.id] || stage.id;
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<div class="tab-panel">${artifactsPanel(null, artifacts)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<details class="stage-artifacts"><summary>Artifacts <span>${artifacts.length}</span></summary><div class="tab-panel">${artifactsPanel(null, artifacts)}</div></details><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     return;
   }
   if (!step) {
@@ -452,7 +461,7 @@ document.addEventListener("click", async (event) => {
   }
   const approveContext = event.target.closest("[data-approve-context]");
   if (approveContext) {
-    try { await api(`/api/tickets/${encodeURIComponent(approveContext.dataset.approveContext)}/context/approve`, { method: "POST", body: "{}" }); notify("Living product context approved; handoff complete"); }
+    try { await api(`/api/tickets/${encodeURIComponent(approveContext.dataset.approveContext)}/context/approve`, { method: "POST", body: "{}" }); notify("Context approved; added to the merge queue"); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -471,6 +480,10 @@ document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; renderInspector(); }
   if (event.target.closest("#workspace-settings")) $("#workspace-dialog").showModal();
+  if (event.target.closest("#pick-workspace")) {
+    try { $("#workspace-path").value = (await api("/api/workspace/pick", { method: "POST", body: "{}" })).cwd; }
+    catch (error) { if (!/cancelled/i.test(error.message)) notify(error.message); }
+  }
   if (event.target.closest("#free-text-open")) $("#free-text-dialog").showModal();
   if (event.target.closest("#linear-connect-open")) $("#linear-dialog").showModal();
   if (event.target.closest("#profile-settings")) { renderProfiles(); $("#profiles-dialog").showModal(); }
@@ -584,15 +597,14 @@ events.onmessage = ({ data }) => {
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveStages.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId) {
-      const raw = $("#inspector [data-stage-raw-output]");
-      if (event.type === "text_delta" && raw) raw.textContent = formatOutput(live.output);
-      else renderInspector();
+      if (event.type !== "text_delta") renderInspector();
     }
   }
 };
 events.onerror = () => notify("Live connection lost; reconnecting…");
 
 state = await api("/api/state");
+try { codexModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }
 await refreshTickets();
 render();
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, cp, mkdir, readdir, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
@@ -78,6 +78,53 @@ export async function cherryPickCommit(cwd, commit) {
     throw error;
   }
   return git(cwd, ["rev-parse", "HEAD"]);
+}
+
+export async function integrateBranch({ sourceCwd, branch, integrationCwd, dependencyCwd, resolveConflicts, verify }) {
+  if (await git(sourceCwd, ["status", "--porcelain"])) throw new Error(`Cannot integrate ${branch}: the working directory has uncommitted changes`);
+  const sourceHead = await git(sourceCwd, ["rev-parse", "HEAD"]);
+  const listed = await git(sourceCwd, ["worktree", "list", "--porcelain"]);
+  if (listed.split("\n\n").some((block) => block.includes(`worktree ${integrationCwd}`))) await git(sourceCwd, ["worktree", "remove", "--force", integrationCwd]);
+  await rm(integrationCwd, { recursive: true, force: true });
+  await mkdir(dirname(integrationCwd), { recursive: true });
+  await git(sourceCwd, ["worktree", "add", "-q", "--detach", integrationCwd, sourceHead]);
+  if (dependencyCwd) {
+    try {
+      await access(join(dependencyCwd, "node_modules"));
+      await git(integrationCwd, ["check-ignore", "-q", "node_modules"]);
+      await symlink(join(dependencyCwd, "node_modules"), join(integrationCwd, "node_modules"), "dir");
+    } catch {}
+  }
+  let conflicts = [];
+  try {
+    try {
+      await git(integrationCwd, ["merge", "--no-edit", branch], { env: identity });
+    } catch (error) {
+      conflicts = (await git(integrationCwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+      if (!conflicts.length || !resolveConflicts) throw error;
+      await resolveConflicts({ cwd: integrationCwd, conflicts });
+      await git(integrationCwd, ["add", "-A"]);
+      const unresolved = (await git(integrationCwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+      if (unresolved.length) throw new Error(`Conflict resolver left unresolved files: ${unresolved.join(", ")}`);
+      await git(integrationCwd, ["diff", "--cached", "--check"]);
+      let mergePending = false;
+      try { await git(integrationCwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]); mergePending = true; } catch {}
+      if (mergePending) {
+        await git(integrationCwd, ["commit", "--allow-empty", "-m", `Merge ${branch}\n\nWhy: Resolve merge-queue conflicts after independent verification.`], { env: identity });
+      }
+    }
+    await verify?.({ cwd: integrationCwd, conflicts });
+    if (await git(integrationCwd, ["status", "--porcelain"])) throw new Error("Post-merge verification left uncommitted changes in the integration worktree");
+    await git(integrationCwd, ["merge-base", "--is-ancestor", branch, "HEAD"]);
+    if (await git(sourceCwd, ["status", "--porcelain"])) throw new Error("The working directory changed while its merge was being verified");
+    if ((await git(sourceCwd, ["rev-parse", "HEAD"])) !== sourceHead) throw new Error("The working directory advanced while its merge was being verified; retry the queue item");
+    const commit = await git(integrationCwd, ["rev-parse", "HEAD"]);
+    await git(sourceCwd, ["merge", "--ff-only", commit], { env: identity });
+    return { commit, conflicts };
+  } finally {
+    await git(sourceCwd, ["worktree", "remove", "--force", integrationCwd]).catch(() => {});
+    await rm(integrationCwd, { recursive: true, force: true });
+  }
 }
 
 export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {

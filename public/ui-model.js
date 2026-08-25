@@ -147,6 +147,50 @@ export function eventGroups(events = []) {
   return groups;
 }
 
+function findingDetails(findings) {
+  return findings.map((finding, index) => `### Finding ${index + 1} · ${finding.severity || "issue"}\n\n${finding.claim || "Unspecified finding"}${finding.suggestedFix ? `\n\n**Suggested fix:** ${finding.suggestedFix}` : ""}`).join("\n\n");
+}
+
+export function stageMilestones(run, stage) {
+  const activity = stage?.activity;
+  if (stage?.id === "verify") {
+    const items = activity?.startedAt ? [{ title: "Agent review started.", status: "started", at: activity.startedAt, detail: "Independent requirements, integration, verification, and deterministic-check reviews started." }] : [];
+    for (const [index, review] of (run?.reviews || []).entries()) {
+      const findings = review.actionableFindings || [];
+      items.push({
+        title: `Review round ${index + 1} ${findings.length ? "found issues." : "passed."}`,
+        status: findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"}` : "clean",
+        at: review.createdAt,
+        detail: findings.length ? findingDetails(findings) : (review.reviews || []).map((item) => `**${item.role}:** ${item.summary}`).join("\n\n")
+      });
+      if (review.fix) items.push({
+        title: "Focused fixes completed.",
+        status: "fixed",
+        at: review.fix.artifact?.createdAt || review.createdAt,
+        detail: [review.fix.report?.summary, review.fix.diff?.stat].filter(Boolean).join("\n\n")
+      });
+    }
+    if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
+    if (stage.status === "completed") items.push({ title: "Agent review completed.", status: "complete", at: stage.updatedAt, detail: stage.summary });
+    return items;
+  }
+  if (stage?.id === "handoff") {
+    const items = activity?.startedAt ? [{ title: "Handoff started.", status: "started", at: activity.startedAt, detail: "Preparing the final product-context update and repository integration." }] : [];
+    const proposal = (run?.artifacts || []).find((artifact) => artifact.kind === "product-context-update");
+    if (proposal) items.push({ title: "Product context update prepared.", status: run.checkpoint?.kind === "product_context_review" ? "awaiting approval" : "approved", at: proposal.createdAt, detail: proposal.content });
+    const merge = run?.merge;
+    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository: \`${merge.sourceCwd}\`\n\nTicket branch: \`${merge.branch}\`` });
+    if (merge?.startedAt) items.push({ title: "Automated merge started.", status: "merging", at: merge.startedAt, detail: "Git is merging in an isolated integration worktree; the opened repository remains untouched until verification passes." });
+    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${file}\``).join("\n") });
+    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: merge.resolutionArtifact?.content || "Conflicts resolved in the isolated integration worktree." });
+    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: merge.checks?.summary || "Repository checks passed." });
+    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: merge.error });
+    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Repository: \`${run.integration.sourceCwd}\`\n\nCommit: \`${run.integration.commit}\`` });
+    return items;
+  }
+  return [];
+}
+
 export function runHeartbeat(active, live = {}, now = Date.now()) {
   if (!active) return null;
   const elapsed = Math.max(0, Math.floor((now - Date.parse(active.startedAt)) / 1000));

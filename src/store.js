@@ -40,7 +40,10 @@ export class JsonStore {
             if (["running", "fixing"].includes(step.status)) step.status = "interrupted";
           }
         }
-        if (["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status)) run.status = "interrupted";
+        if (["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge"].includes(run.status)) {
+          run.status = "interrupted";
+          if (["queued", "merging", "resolving_conflicts", "verifying"].includes(run.merge?.status)) run.merge.status = "interrupted";
+        }
       }
     } catch (error) {
       if (error.code !== "ENOENT") throw error;

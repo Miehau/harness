@@ -3,11 +3,26 @@ import test from "node:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatCommitMessage, PiHarness, stepContext } from "../src/pi-harness.js";
+import { formatCommitMessage, formatTicketHorizon, PiHarness, stepContext } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
+import { defaultStageProfiles } from "../src/profiles.js";
 
 test("commit messages always explain why and name the requirement", () => {
   assert.equal(formatCommitMessage({ subject: "feat: add task board", why: "Users need a visible queue.", requirement: "REQ-board — tasks are displayed" }, {}), "feat: add task board\n\nWhy: Users need a visible queue.\nRequirement: REQ-board — tasks are displayed");
+});
+
+test("ticket horizon excludes the current ticket and puts same-team work first", () => {
+  const horizon = formatTicketHorizon(
+    { id: "current", team: { id: "team-a" } },
+    [
+      { id: "other", identifier: "B-1", title: "Other team", team: { id: "team-b" } },
+      { id: "current", identifier: "A-1", title: "Current", team: { id: "team-a" } },
+      { id: "next", identifier: "A-2", title: "Shared foundation", description: "Reuse the task model", team: { id: "team-a" }, state: { name: "Backlog" } }
+    ]
+  );
+  assert.doesNotMatch(horizon, /Current/);
+  assert.ok(horizon.indexOf("A-2") < horizon.indexOf("B-1"));
+  assert.match(horizon, /A-2 \[Backlog\] Shared foundation — Reuse the task model/);
 });
 
 test("architecture workers see completed and future plan outcomes", () => {
@@ -40,6 +55,11 @@ test("runs the repository's root npm test script as a deterministic gate", async
   } finally {
     await rm(root, { recursive: true });
   }
+});
+
+test("lists every configured Codex model used by stage profiles", async () => {
+  const ids = new Set((await new PiHarness({ dataDir: tmpdir() }).models()).map((model) => model.id));
+  for (const profile of Object.values(defaultStageProfiles())) assert.equal(ids.has(profile.model), true);
 });
 
 test("recovers a chronological, detailed trace from a persisted Pi session", async () => {

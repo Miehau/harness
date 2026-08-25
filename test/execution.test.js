@@ -51,9 +51,9 @@ test("cancelling a run stops every active step and preserves it for resume", () 
 });
 
 test("clearing the queue preserves active runs", () => {
-  const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" } } };
-  assert.equal(clearInactiveRuns(state, new Set(["stale", "active"])), 2);
-  assert.deepEqual(Object.keys(state.ticketRuns), ["active"]);
+  const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" }, merge: { status: "merging" } } };
+  assert.equal(clearInactiveRuns(state, new Set(["stale", "active", "merge"])), 2);
+  assert.deepEqual(Object.keys(state.ticketRuns), ["active", "merge"]);
   assert.equal(state.selectedTicketId, null);
 });
 

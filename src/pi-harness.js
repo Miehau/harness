@@ -100,9 +100,19 @@ Return ONLY valid JSON:
 }
 Questions should normally be empty.`;
 
+const ticketLookAheadInstruction = `You are the ticket look-ahead agent. Analyze the current ticket alongside the supplied nearby-ticket horizon without repository access.
+1. Identify credible shared foundations, domain concepts, architectural conflicts, and sequencing implications.
+2. Separate evidence from inference and ignore superficial title similarity.
+3. Do not expand the current ticket's approved scope; produce concise constraints and opportunities for the design agent.
+
+Return ONLY valid JSON:
+{
+  "artifact": "a concise markdown ticket look-ahead with relevant tickets, shared concerns, sequencing, and design implications"
+}`;
+
 const ticketDesignInstruction = `${planSchemaInstruction}
 
-Also include a top-level "designArtifact" string containing a concise markdown design: chosen approach, alternatives rejected, important files, risks, and verification strategy. The execution plan must start after exploration and clarification; do not add redundant discovery steps.`;
+Use the supplied ticket look-ahead to preserve likely shared foundations and avoid near-term architectural dead ends, without adding unrelated ticket scope. Also include a top-level "designArtifact" string containing a concise markdown design: chosen approach, alternatives rejected, important files, risks, and verification strategy. The execution plan must start after exploration and clarification; do not add redundant discovery steps.`;
 
 const productContextUpdateInstruction = `Update the living product context after a completed, independently verified ticket. Preserve existing unrelated product intent. Merge the approved PRD addendum, verified implementation delta, accepted outcomes, and final diff into one concise markdown document with:
 - stable REQ-* product requirements,
@@ -183,6 +193,24 @@ function jsonReply(reply) {
 
 function commitField(value, fallback) {
   return String(value || fallback).replace(/\s+/g, " ").trim();
+}
+
+export function formatTicketHorizon(currentTicket, tickets, limit = 12) {
+  const seen = new Set([String(currentTicket?.id || "")]);
+  const currentTeam = currentTicket?.team?.id || currentTicket?.team?.name;
+  const candidates = (tickets || []).filter((ticket) => {
+    const id = String(ticket?.id || "");
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).map((ticket, order) => ({ ticket, order, sameTeam: Boolean(currentTeam && currentTeam === (ticket.team?.id || ticket.team?.name)) }))
+    .sort((a, b) => Number(b.sameTeam) - Number(a.sameTeam) || a.order - b.order);
+  const rows = candidates.slice(0, limit).map(({ ticket }) => {
+    const description = String(ticket.description || "").replace(/\s+/g, " ").trim().slice(0, 240);
+    const labels = (ticket.labels || []).map((label) => label.name).filter(Boolean).join(", ");
+    return `- ${ticket.identifier || ticket.id} [${ticket.state?.name || "queued"}] ${ticket.title || "Untitled"}${labels ? ` · ${labels}` : ""}${description ? ` — ${description}` : ""}`;
+  });
+  return `# Nearby ticket horizon\n\n${rows.length ? rows.join("\n") : "No other queued tickets are available."}${candidates.length > limit ? `\n\n${candidates.length - limit} additional queued ticket(s) omitted.` : ""}`;
 }
 
 export function formatCommitMessage(value, step) {
@@ -388,6 +416,14 @@ export class PiHarness {
     await Promise.all(Object.values(profiles).map((profile) => this.sessionOptions(profile)));
   }
 
+  async models(provider = "openai-codex") {
+    const { ModelRuntime } = await this.sdk();
+    this.modelRuntimePromise ||= ModelRuntime.create();
+    return (await this.modelRuntimePromise).getModels(provider)
+      .map(({ id, name, reasoning, contextWindow }) => ({ id, name, reasoning, contextWindow }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
   async runRepositoryChecks({ cwd, signal }) {
     let packageJson;
     try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
@@ -470,7 +506,7 @@ export class PiHarness {
   async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
       return {
         artifact: String(parsed.artifact || ""),
@@ -480,10 +516,18 @@ export class PiHarness {
     }, ticket.id);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, answers, profile, onEvent, signal }) {
+  async lookAheadTickets({ cwd, ticket, runId, productContext, requirements, ticketHorizon, profile, onEvent, signal }) {
+    return this.supervisorTurn(async () => {
+      const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-ticket-lookahead`, { repositoryAccess: false, profile });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketLookAheadInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n${ticketHorizon}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      return { artifact: String(jsonReply(reply).artifact || ""), sessionFile: session.sessionFile };
+    }, `${ticket.id}:ticket-lookahead`);
+  }
+
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
       const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
       return { plan: normalizePlan(parsed), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);

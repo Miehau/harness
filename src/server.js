@@ -1,22 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
+import { promisify } from "node:util";
 import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
-import { PiHarness } from "./pi-harness.js";
+import { enqueueSerial } from "./merge-queue.js";
+import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
 import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, planApprovalPending } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
+const runFile = promisify(execFile);
 const publicDir = join(here, "public");
 const packageMetadata = JSON.parse(await readFile(join(here, "package.json"), "utf8"));
 const args = process.argv.slice(2);
@@ -36,6 +40,8 @@ const harness = new PiHarness({ dataDir, publish });
 const clients = new Set();
 const activeSteps = new Map();
 const activeTickets = new Map();
+const activeMerges = new Set();
+const mergeQueues = new Map();
 let ticketCache = new Map();
 
 function publish(event) {
@@ -62,12 +68,13 @@ function captureStageActivity(ticketId, stageId, runId) {
   const startedAt = new Date().toISOString();
   const events = [];
   let rawOutput = "";
-  let lastThinkingAt = 0;
+  const lastThinkingAt = new Map();
   return {
     onEvent(event, actor) {
       const now = Date.now();
-      if (event.type === "thinking" && now - lastThinkingAt < 2000) return;
-      if (event.type === "thinking") lastThinkingAt = now;
+      const activityKey = actor || "stage";
+      if (event.type === "thinking" && now - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
+      if (event.type === "thinking") lastThinkingAt.set(activityKey, now);
       const item = { ...event, ...(actor ? { actor } : {}), at: new Date(now).toISOString() };
       if (item.type === "text_delta") rawOutput += item.delta || "";
       else events.push(item);
@@ -143,7 +150,7 @@ function setStage(run, id, status, summary = "") {
 function initialStages() {
   return [
     ["requirements", "Clarify requirements"],
-    ["explore", "Explore code"],
+    ["explore", "Explore code & ticket horizon"],
     ["design", "Design & plan"],
     ["implement", "Implement"],
     ["verify", "Review & verify"],
@@ -171,6 +178,17 @@ async function body(request) {
     chunks.push(chunk);
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+}
+
+async function pickDirectory() {
+  if (process.platform !== "darwin") throw new Error("Native repository selection currently requires macOS");
+  try {
+    const { stdout } = await runFile("osascript", ["-e", 'POSIX path of (choose folder with prompt "Open repository")']);
+    return normalize(stdout.trim());
+  } catch (error) {
+    if (error.code === 1) throw new Error("Repository selection cancelled");
+    throw error;
+  }
 }
 
 function findForkSession(plan, step) {
@@ -287,6 +305,10 @@ async function continueAfterRequirements(ticketId, answers) {
     const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
     if (!draft || !productContext) throw new Error("Requirements draft or product context snapshot not found");
     const requirements = `${draft.content}\n\n## User clarification\n${answers || "Approved without changes."}`;
+    const ticketHorizon = formatTicketHorizon(run.ticket, [
+      ...ticketCache.values(),
+      ...Object.values(before.ticketRuns).map((ticketRun) => ticketRun.ticket)
+    ]);
     const requirementArtifact = await persistArtifact(dataDir, run.ticket, {
       runId: run.runId, name: "requirements.md", content: requirements,
       stageId: "requirements", kind: "requirements"
@@ -308,22 +330,39 @@ async function continueAfterRequirements(ticketId, answers) {
       current.workspace = workspace;
       current.baselineTree = baselineTree;
       current.status = "exploring";
-      setStage(current, "explore", "active", "Pi is mapping relevant code and tests");
+      setStage(current, "explore", "active", "Pi is mapping code, tests, and nearby tickets");
     });
-    const explored = await harness.exploreTicket({
-      cwd: workspace.cwd, ticket: run.ticket, sessionFile: null, runId: run.runId,
-      productContext: productContext.content, requirements, profile: run.stageProfiles.exploration, onEvent: activity.onEvent, signal
-    });
+    const explorationResults = await Promise.allSettled([
+      harness.exploreTicket({
+        cwd: workspace.cwd, ticket: run.ticket, sessionFile: null, runId: run.runId,
+        productContext: productContext.content, requirements, profile: run.stageProfiles.exploration,
+        onEvent: (event) => activity.onEvent(event, "code explorer"), signal
+      }),
+      harness.lookAheadTickets({
+        cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
+        productContext: productContext.content, requirements, ticketHorizon, profile: run.stageProfiles.exploration,
+        onEvent: (event) => activity.onEvent(event, "ticket look-ahead"), signal
+      })
+    ]);
+    const failedExploration = explorationResults.find((result) => result.status === "rejected");
+    if (failedExploration) throw failedExploration.reason;
+    const [explored, lookedAhead] = explorationResults.map((result) => result.value);
     signal.throwIfAborted();
-    const explorationArtifact = await persistArtifact(dataDir, run.ticket, {
-      runId: run.runId, name: "implementation-delta.md", content: explored.artifact,
-      stageId: "explore", kind: "implementation-delta"
-    });
+    const [explorationArtifact, lookAheadArtifact] = await Promise.all([
+      persistArtifact(dataDir, run.ticket, {
+        runId: run.runId, name: "implementation-delta.md", content: explored.artifact,
+        stageId: "explore", kind: "implementation-delta"
+      }),
+      persistArtifact(dataDir, run.ticket, {
+        runId: run.runId, name: "ticket-lookahead.md", content: lookedAhead.artifact,
+        stageId: "explore", kind: "ticket-lookahead"
+      })
+    ]);
     await update((state) => {
       const current = ticketRun(state, ticketId);
       current.sessionFile = explored.sessionFile;
-      current.artifacts.push(explorationArtifact);
-      setStage(current, "explore", explored.questions.length ? "blocked" : "completed", explored.questions.length ? "Technical decision required" : "Repository map persisted").activity = activity.snapshot();
+      current.artifacts.push(explorationArtifact, lookAheadArtifact);
+      setStage(current, "explore", explored.questions.length ? "blocked" : "completed", explored.questions.length ? "Technical decision required" : "Code map and ticket look-ahead persisted").activity = activity.snapshot();
       if (explored.questions.length) {
         current.status = "awaiting_input";
         current.checkpoint = {
@@ -355,6 +394,7 @@ async function designTicket(ticketId, answers, signal) {
   const requirements = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements");
   const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
   const exploration = [...run.artifacts].reverse().find((artifact) => artifact.kind === "implementation-delta");
+  const ticketLookAhead = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead")?.content || "No nearby ticket implications were found.";
   if (!requirements || !productContext || !exploration) throw new Error("Approved requirements, product context, and implementation delta are required before design");
   await update((draft) => {
     const current = ticketRun(draft, ticketId);
@@ -366,7 +406,7 @@ async function designTicket(ticketId, answers, signal) {
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
-      productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, answers,
+      productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent, signal
     });
     signal?.throwIfAborted();
@@ -562,6 +602,125 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
   return work;
 }
 
+async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signal, attempt }) {
+  signal?.throwIfAborted();
+  const current = ticketRun(store.read(), ticketId);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    Object.assign(run.merge, { status: "resolving_conflicts", conflicts, resolverStartedAt: new Date().toISOString() });
+    run.status = "resolving_conflicts";
+    setStage(run, "handoff", "active", `Resolving ${conflicts.length} merge conflict${conflicts.length === 1 ? "" : "s"}`);
+  });
+  activity.onEvent({ type: "phase", label: `Merge conflicts detected · ${conflicts.join(", ")}` }, "merge queue");
+  const requirementIds = flattenSteps(current.plan).flatMap((step) => step.requirementIds || []).filter((id, index, all) => all.indexOf(id) === index);
+  const step = {
+    id: `merge-conflict-${attempt}`, type: "step", role: "implementation",
+    title: "Resolve merge-queue conflicts", description: `Reconcile ${current.ticket.identifier} with the latest opened repository state.`,
+    prompt: `A Git merge is already in progress in this isolated integration worktree. Resolve only these conflicted files: ${conflicts.join(", ")}. Preserve the verified ticket behavior and compatible changes already integrated into the target branch. Do not abort, restart, or commit the merge. Run focused checks, leave every conflict resolved, and report exactly what was reconciled.`,
+    contextPolicy: "seeded", harness: "pi", agentId: `merge-conflict-resolver:${current.ticket.identifier}`,
+    permission: "write", writeScope: conflicts.join(", "), skills: [], references: conflicts,
+    requirementIds, capabilityIds: [], deltaIds: [], productContext: "Resolve only the concrete merge conflict without expanding ticket scope.",
+    expectedArtifacts: [`merge-conflict-resolution-${attempt}.md`], acceptanceCriteria: ["Every Git conflict is resolved", "Verified behavior from both branches is preserved"],
+    dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
+  };
+  const result = await harness.runStep({
+    cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
+    onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
+  });
+  signal?.throwIfAborted();
+  if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Merge conflict resolver needs attention");
+  const artifact = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: step.expectedArtifacts[0], content: result.output, stageId: "handoff", kind: "merge-conflict-resolution"
+  });
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.artifacts.push(artifact);
+    Object.assign(run.merge, { resolverCompletedAt: new Date().toISOString(), resolutionArtifact: artifact });
+  });
+}
+
+async function scheduleTicketIntegration(ticketId, { diff, contextContent = null, signal } = {}) {
+  const queuedRun = ticketRun(store.read(), ticketId);
+  if (["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) throw new Error("This ticket is already in the merge queue");
+  const sourceCwd = queuedRun.workspace.sourceCwd;
+  const attempt = (queuedRun.merge?.attempt || 0) + 1;
+  const queuedAt = new Date().toISOString();
+  let queuedState;
+  const queued = enqueueSerial(mergeQueues, sourceCwd, (position) => {
+    activeMerges.add(ticketId);
+    queuedState = update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.merge = { status: "queued", position, attempt, queuedAt, sourceCwd, branch: run.workspace.branch, conflicts: [] };
+      run.status = "queued_for_merge";
+      run.checkpoint = null;
+      setStage(run, "handoff", "active", `Merge queue position ${position}`);
+    });
+    return queuedState;
+  }, async () => {
+    signal?.throwIfAborted();
+    const current = ticketRun(store.read(), ticketId);
+    const activity = captureStageActivity(ticketId, "handoff", current.runId);
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      Object.assign(run.merge, { status: "merging", position: 1, startedAt: new Date().toISOString() });
+      run.status = "merging";
+      run.lastError = null;
+      setStage(run, "handoff", "active", `Merging ${run.workspace.branch}`);
+    });
+    activity.onEvent({ type: "phase", label: "Automated merge started" }, "merge queue");
+    const integrationCwd = join(dataDir, "ticket-runs", safeName(current.ticket.identifier || current.ticket.id), "runs", safeName(current.runId), "integration");
+    const integration = await integrateBranch({
+      sourceCwd, branch: current.workspace.branch, integrationCwd, dependencyCwd: current.workspace.cwd,
+      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt }),
+      verify: async ({ cwd, conflicts }) => {
+        signal?.throwIfAborted();
+        await update((state) => {
+          const run = ticketRun(state, ticketId);
+          Object.assign(run.merge, { status: "verifying", conflicts, verificationStartedAt: new Date().toISOString() });
+          run.status = "verifying_merge";
+          setStage(run, "handoff", "active", "Verifying merged result");
+        });
+        activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
+        const checks = await harness.runRepositoryChecks({ cwd, signal });
+        if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+        await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
+      }
+    });
+    const integratedAt = new Date().toISOString();
+    const productContext = contextContent === null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
+    const handoff = await persistArtifact(dataDir, current.ticket, {
+      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+      content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nIntegrated into: \`${sourceCwd}\`\n\nSource branch: \`${current.workspace.branch}\`\n\nCommit: \`${integration.commit}\`${productContext ? `\n\nLiving product context: \`${productContext.path}\`.` : ""}\n\n${diff?.stat || "No changed files."}`
+    });
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.integration = { sourceCwd, branch: current.workspace.branch, commit: integration.commit, integratedAt };
+      Object.assign(run.merge, { status: "integrated", commit: integration.commit, conflicts: integration.conflicts, integratedAt });
+      if (productContext) run.productContextPath = productContext.path;
+      run.artifacts.push(handoff);
+      run.checkpoint = null;
+      setStage(run, "handoff", "completed", `Merged into ${sourceCwd}`).activity = activity.snapshot();
+      run.status = "completed";
+      run.lastError = null;
+      run.completedAt = integratedAt;
+    });
+    return integration;
+  });
+  await queuedState;
+  const tracked = queued.promise.catch(async (error) => {
+    if (!signal?.aborted) await update((state) => {
+      const run = ticketRun(state, ticketId);
+      Object.assign(run.merge, { status: "failed", error: error.message, failedAt: new Date().toISOString() });
+      run.status = "needs_attention";
+      run.lastError = error.message;
+      setStage(run, "handoff", "blocked", error.message);
+    });
+    throw error;
+  }).finally(() => activeMerges.delete(ticketId));
+  return { position: queued.position, promise: tracked };
+}
+
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
@@ -574,7 +733,8 @@ async function finalReviewLoop(ticketId, signal) {
     run.checkpoint = null;
     run.reviews ||= [];
   });
-  for (let round = 1; ; round++) {
+  const firstRound = Math.max(0, ...(started.reviews || []).map((review) => Number(review.round) || 0)) + 1;
+  for (let round = firstRound; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
     activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
@@ -616,19 +776,13 @@ async function finalReviewLoop(ticketId, signal) {
     if (!findings.length) {
       await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
       if (current.ticket.source === "local") {
-        const handoff = await persistArtifact(dataDir, current.ticket, {
-          runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-          content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted tickets from a zero-state repository.\n\nRepository: \`${current.workspace.cwd}\`\n\nBranch: \`${current.workspace.branch}\`.\n\n${diff.stat || "No changed files."}`
-        });
         await update((state) => {
           const run = ticketRun(state, ticketId);
-          run.artifacts.push(handoff);
           setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-          setStage(run, "handoff", "completed", `Zero-state app ready on ${run.workspace.branch}`);
-          run.status = "completed";
-          run.checkpoint = null;
-          run.completedAt = new Date().toISOString();
+          setStage(run, "handoff", "active", "Waiting for merge queue");
         });
+        const queued = await scheduleTicketIntegration(ticketId, { diff, signal });
+        await queued.promise;
         return;
       }
       const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
@@ -704,20 +858,8 @@ async function finishHandoff(ticketId) {
   if (current.checkpoint?.kind !== "product_context_review") throw new Error("No product-context update is awaiting approval");
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
   if (!proposal) throw new Error("Product-context proposal not found");
-  const productContext = await persistProductContext(dataDir, current.workspace.sourceCwd, proposal.content);
-  const handoff = await persistArtifact(dataDir, current.ticket, {
-    runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-    content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nBranch: \`${current.workspace.branch}\`\n\nLiving product context: \`${productContext.path}\`.`
-  });
-  await update((state) => {
-    const run = ticketRun(state, ticketId);
-    run.productContextPath = productContext.path;
-    run.artifacts.push(handoff);
-    run.checkpoint = null;
-    setStage(run, "handoff", "completed", `Changes ready on ${run.workspace.branch}`);
-    run.status = "completed";
-    run.completedAt = new Date().toISOString();
-  });
+  const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent: proposal.content });
+  queued.promise.catch(() => {});
 }
 
 async function ensureLocalWorkspace(ticketId) {
@@ -832,9 +974,10 @@ async function runTicket(ticketId) {
 
 async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
+  if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
   if (request.method === "POST" && url.pathname === "/api/queue/clear") {
     let cleared = 0;
-    const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set(activeTickets.keys())); });
+    const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set([...activeTickets.keys(), ...activeMerges])); });
     return json(response, 200, { cleared, state });
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
@@ -869,6 +1012,7 @@ async function api(request, response, url) {
     request.on("close", () => clients.delete(response));
     return;
   }
+  if (request.method === "POST" && url.pathname === "/api/workspace/pick") return json(response, 200, { cwd: await pickDirectory() });
   if (request.method === "POST" && url.pathname === "/api/workspace") {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));

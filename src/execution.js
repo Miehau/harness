@@ -11,7 +11,7 @@ export function markRunCancelled(run, at = new Date().toISOString()) {
 }
 
 export function clearInactiveRuns(state, activeTicketIds) {
-  const running = new Set(["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"]);
+  const running = new Set(["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge"]);
   let cleared = 0;
   for (const id of Object.keys(state.ticketRuns)) {
     if (activeTicketIds.has(id) && running.has(state.ticketRuns[id].status)) continue;

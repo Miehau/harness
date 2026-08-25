@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, stageMilestones } from "../public/ui-model.js";
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [
@@ -77,6 +77,33 @@ test("stage activity identifies concurrent reviewers", () => {
     { type: "tool_start", actor: "verification", callId: "read", tool: "read", args: '{"path":"test/app.test.js"}', at: "2" }
   ]);
   assert.deepEqual(timeline.map((item) => item.title), ["Reasoning · requirements · Model is reasoning", "verification · Read · test/app.test.js"]);
+});
+
+test("review stage becomes a findings-and-fixes timeline", () => {
+  const milestones = stageMilestones({ reviews: [{
+    round: 1, createdAt: "2026-08-25T10:01:00.000Z",
+    actionableFindings: [{ severity: "blocking", claim: "Completion is not persisted", suggestedFix: "Save the state" }],
+    fix: { report: { summary: "Persisted completion" }, diff: { stat: "1 file changed" }, artifact: { createdAt: "2026-08-25T10:02:00.000Z" } }
+  }] }, { id: "verify", status: "active", updatedAt: "2026-08-25T10:03:00.000Z", activity: { startedAt: "2026-08-25T10:00:00.000Z" } });
+  assert.deepEqual(milestones.map((item) => item.title), ["Agent review started.", "Review round 1 found issues.", "Focused fixes completed.", "Review round 2 started."]);
+  assert.match(milestones[1].detail, /Completion is not persisted/);
+  assert.match(milestones[2].detail, /Persisted completion/);
+});
+
+test("handoff timeline exposes merge queue, conflict resolution, verification, and integration", () => {
+  const milestones = stageMilestones({
+    merge: {
+      status: "integrated", queuedAt: "2026-08-25T10:00:00.000Z", startedAt: "2026-08-25T10:01:00.000Z",
+      sourceCwd: "/repo", branch: "codex/ticket", conflicts: ["src/app.js"], resolverStartedAt: "2026-08-25T10:02:00.000Z",
+      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined both state transitions." },
+      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed." }
+    },
+    integration: { sourceCwd: "/repo", commit: "abc123", integratedAt: "2026-08-25T10:05:00.000Z" }, artifacts: []
+  }, { id: "handoff", status: "completed" });
+  assert.deepEqual(milestones.map((item) => item.title), [
+    "Added to merge queue.", "Automated merge started.", "Merge conflicts found.",
+    "Conflict-resolution agent completed.", "Merged result verified.", "Changes integrated into the working directory."
+  ]);
 });
 
 test("free text becomes a local ticket without losing the original request", () => {
