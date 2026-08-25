@@ -20,14 +20,19 @@ const identity = {
   GIT_COMMITTER_EMAIL: "agent-plan@local"
 };
 
+export async function needsLocalWorkspaceRepair(ticket, workspace) {
+  return ticket?.source === "local" && !(workspace?.cwd && await isGitRepository(workspace.cwd));
+}
+
 export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles = false }) {
   const slug = safeName(ticket.identifier || ticket.id);
   const runSlug = safeName(runId);
   const branch = `codex/${slug}-${runSlug.slice(0, 8)}`;
   await mkdir(cwd, { recursive: true });
   const entries = await readdir(cwd);
-  if (!allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
-  if (!(await isGitRepository(cwd))) await git(cwd, ["init", "-q", "-b", "main"]);
+  const initialized = await isGitRepository(cwd);
+  if (!initialized && !allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
+  if (!initialized) await git(cwd, ["init", "-q", "-b", "main"]);
   if (!entries.includes(".gitignore")) await writeFile(join(cwd, ".gitignore"), "node_modules/\ncoverage/\n.env*\n!.env.example\n*.log\n.DS_Store\n", "utf8");
   try { await git(cwd, ["rev-parse", "HEAD"]); }
   catch {

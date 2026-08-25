@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep } from "../src/execution.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -55,4 +55,9 @@ test("clearing the queue preserves active runs", () => {
   assert.equal(clearInactiveRuns(state, new Set(["stale", "active"])), 2);
   assert.deepEqual(Object.keys(state.ticketRuns), ["active"]);
   assert.equal(state.selectedTicketId, null);
+});
+
+test("a preserved plan checkpoint remains approvable after setup fails", () => {
+  assert.equal(planApprovalPending({ status: "needs_attention", plan: { nodes: [] }, checkpoint: { kind: "awaiting_approval" } }), true);
+  assert.equal(planApprovalPending({ status: "needs_attention", plan: { nodes: [] }, checkpoint: null }), false);
 });

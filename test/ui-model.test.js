@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [
@@ -69,6 +69,21 @@ test("activity groups tool calls under the latest reasoning focus", () => {
     ["Verify the focused redesign", ["test"]]
   ]);
   assert.equal(groups[1].items[0].status, "running");
+});
+
+test("stage activity identifies concurrent reviewers", () => {
+  const timeline = eventTimeline([
+    { type: "thinking", actor: "requirements", label: "Model is reasoning", at: "1" },
+    { type: "tool_start", actor: "verification", callId: "read", tool: "read", args: '{"path":"test/app.test.js"}', at: "2" }
+  ]);
+  assert.deepEqual(timeline.map((item) => item.title), ["Reasoning · requirements · Model is reasoning", "verification · Read · test/app.test.js"]);
+});
+
+test("free text becomes a local ticket without losing the original request", () => {
+  const ticket = freeTextTicket("# Improve search\n\nAdd keyboard navigation.", "A1B2-C3D4");
+  assert.deepEqual([ticket.id, ticket.identifier, ticket.title, ticket.source], ["local-text-a1b2-c3d4", "TEXT-A1B2C3D4", "Improve search", "local"]);
+  assert.match(ticket.description, /keyboard navigation/);
+  assert.throws(() => freeTextTicket("", "id"), /Describe the task/);
 });
 
 test("formats JSON output including nested serialized JSON", () => {

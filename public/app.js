@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -15,6 +15,7 @@ let toastTimer;
 let clearTimer;
 let clearArmed = false;
 const liveRuns = new Map();
+const liveStages = new Map();
 const sessionTraces = new Map();
 const pendingSessionTraces = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
@@ -68,7 +69,7 @@ function statusLabel(run) {
 function renderLinearStatus() {
   const target = $("#linear-status");
   if (!linear.configured) {
-    target.innerHTML = `<button id="linear-connect-open" class="linear-connect-button" type="button"><span><strong>Linear</strong><small>Not connected</small></span><b>Connect</b></button>`;
+    target.innerHTML = `<button id="linear-connect-open" class="source-button" type="button"><span><strong>Linear</strong><small>Not connected</small></span><b>Connect</b></button>`;
     return;
   }
   target.innerHTML = `<div class="connected"><span class="connection-dot"></span><span>${escapeHtml(linear.viewer?.name || "Linear connected")}</span><small>${linear.tickets.length} active ticket${linear.tickets.length === 1 ? "" : "s"}</small></div>`;
@@ -152,7 +153,7 @@ function renderHeader() {
   }
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && run.plan ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && run.plan && !run.checkpoint ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
@@ -245,7 +246,17 @@ function timelineHtml(events, active = false) {
     const meta = [`${group.items.length} action${group.items.length === 1 ? "" : "s"}`, duration, current ? "active" : group.isError ? "failed" : "complete"].filter(Boolean).join(" · ");
     const note = group.note ? `<div class="activity-group-note">${renderMarkdown(group.note)}</div>` : "";
     return `<details class="activity-group ${current ? "current" : ""} ${group.isError ? "warning" : ""}" data-group-key="${escapeHtml(group.key)}" ${current ? "open" : ""}><summary><span><b>${escapeHtml(group.title)}</b><small>${meta}</small></span><time>${escapeHtml((group.at || "").slice(11, 19))}</time></summary><div class="activity-group-body">${note}${group.items.map(eventHtml).join("")}</div></details>`;
-  }).join("") || `<div class="run-empty">The worker has not started a focused activity yet.</div>`;
+  }).join("") || `<div class="run-empty">The agent has not started a focused activity yet.</div>`;
+}
+
+function stageActivityPanel(run, stage) {
+  const live = liveStages.get(`${run.id}:${stage.id}`);
+  const activity = live || stage.activity;
+  if (!activity) return `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
+  const active = stage.status === "active";
+  const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: stage.updatedAt, lastEvent: stage.summary }, live)) : "";
+  const output = live?.output || activity.rawOutput || (active ? "Waiting for model output…" : "No assistant output was recorded.");
+  return `<div class="stage-activity">${pulse}<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre data-stage-raw-output>${escapeHtml(formatOutput(output))}</pre></section><section class="run-events"><span class="eyebrow">Activity · grouped by focus</span><div>${timelineHtml(activity.events || [], active)}</div></section></div>`;
 }
 
 function rawOutputFor(run, step) {
@@ -317,7 +328,7 @@ function renderInspector() {
     const profileId = ({ explore: "exploration", design: "architecture", implement: "implementation", verify: "verification" })[stage.id] || stage.id;
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}<div class="tab-panel">${artifactsPanel(null, artifacts)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<div class="tab-panel">${artifactsPanel(null, artifacts)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     return;
   }
   if (!step) {
@@ -460,6 +471,7 @@ document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; renderInspector(); }
   if (event.target.closest("#workspace-settings")) $("#workspace-dialog").showModal();
+  if (event.target.closest("#free-text-open")) $("#free-text-dialog").showModal();
   if (event.target.closest("#linear-connect-open")) $("#linear-dialog").showModal();
   if (event.target.closest("#profile-settings")) { renderProfiles(); $("#profiles-dialog").showModal(); }
   if (event.target.closest("#close-profiles")) $("#profiles-dialog").close();
@@ -479,6 +491,15 @@ document.addEventListener("submit", async (event) => {
     event.preventDefault();
     try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); render(); }
     catch (error) { notify(error.message); }
+    return;
+  }
+  if (event.target.id === "free-text-form") {
+    event.preventDefault();
+    try {
+      const ticket = freeTextTicket(new FormData(event.target).get("description"), crypto.randomUUID());
+      await api(`/api/tickets/${encodeURIComponent(ticket.id)}/start`, { method: "POST", body: JSON.stringify({ ticket }) });
+      $("#free-text-dialog").close(); event.target.reset(); notify(`${ticket.identifier} requirements clarification started`);
+    } catch (error) { notify(error.message); }
     return;
   }
   if (event.target.id === "profiles-form") {
@@ -548,6 +569,24 @@ events.onmessage = ({ data }) => {
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
       if (event.type === "prompt" && activeTab === "prompt") renderInspector();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
+    }
+  }
+  if (event.channel === "stage" && event.ticketId && event.stageId) {
+    const key = `${event.ticketId}:${event.stageId}`;
+    let live = liveStages.get(key) || { events: [], output: "", startedAt: new Date().toISOString() };
+    if (live.runId && live.runId !== event.runId) live = { events: [], output: "", startedAt: new Date().toISOString() };
+    live.runId = event.runId;
+    if (event.type === "text_delta") live.output += event.delta || "";
+    else live.events.push(event);
+    live.events = live.events.slice(-200);
+    live.lastAt = new Date().toISOString();
+    live.label = event.label || live.label;
+    live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
+    liveStages.set(key, live);
+    if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId) {
+      const raw = $("#inspector [data-stage-raw-output]");
+      if (event.type === "text_delta" && raw) raw.textContent = formatOutput(live.output);
+      else renderInspector();
     }
   }
 };

@@ -23,6 +23,11 @@ test("architecture workers see completed and future plan outcomes", () => {
   assert.match(prompt, /Planned after this ticket[\s\S]*Persist tasks: Survive browser reloads\./);
 });
 
+test("synthetic review steps can omit optional planning arrays", () => {
+  const step = { id: "review-fix", title: "Fix review findings", role: "implementation", harness: "pi", contextPolicy: "seeded", permission: "write" };
+  assert.match(stepContext({ plan: { title: "Review", nodes: [step] }, step, artifacts: [] }), /Skills requested: none/);
+});
+
 test("runs the repository's root npm test script as a deterministic gate", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-checks-"));
   try {

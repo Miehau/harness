@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isGitRepository, snapshotTree } from "../src/git.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
 
 test("isolated sibling worktrees produce commits that integrate into the zero-state run", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-"));
@@ -41,6 +41,30 @@ test("commits accepted workspace changes and skips an empty follow-up commit", a
     await writeFile(join(cwd, "feature.txt"), "accepted\n");
     assert.match(await commitWorkspace(cwd, "Implement: feature"), /^[a-f0-9]{40}$/);
     assert.equal(await commitWorkspace(cwd, "Implement: feature again"), null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("reuses an initialized non-empty zero-state repository", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-existing-"));
+  try {
+    const input = { cwd, ticket: { identifier: "LOCAL-test" }, runId: "run-1" };
+    await createZeroStateWorkspace(input);
+    await writeFile(join(cwd, "existing.txt"), "keep\n");
+    assert.equal((await createZeroStateWorkspace(input)).cwd, cwd);
+    assert.equal(await readFile(join(cwd, "existing.txt"), "utf8"), "keep\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("does not repair a local run that already owns an initialized worktree", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-owned-"));
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-test" }, runId: "run-1" });
+    assert.equal(await needsLocalWorkspaceRepair({ source: "local" }, { cwd }), false);
+    assert.equal(await needsLocalWorkspaceRepair({ source: "local" }, null), true);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

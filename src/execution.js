@@ -22,6 +22,10 @@ export function clearInactiveRuns(state, activeTicketIds) {
   return cleared;
 }
 
+export function planApprovalPending(run) {
+  return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval");
+}
+
 export function nextRunnableStep(plan) {
   return flattenSteps(plan).find((step) =>
     ["ready", "interrupted"].includes(step.status) && blockingReasons(plan, step).length === 0

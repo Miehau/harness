@@ -6,14 +6,14 @@ import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
-import { diffTrees, isGitRepository, outsideWriteScope, snapshotTree } from "./git.js";
+import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch } from "./execution.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, planApprovalPending } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -56,6 +56,27 @@ function publishStepEvent(ticketId, stepId, runId, event) {
     active.lastEventAt = new Date().toISOString();
     active.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
   }, { publish: false }).catch(() => {});
+}
+
+function captureStageActivity(ticketId, stageId, runId) {
+  const startedAt = new Date().toISOString();
+  const events = [];
+  let rawOutput = "";
+  let lastThinkingAt = 0;
+  return {
+    onEvent(event, actor) {
+      const now = Date.now();
+      if (event.type === "thinking" && now - lastThinkingAt < 2000) return;
+      if (event.type === "thinking") lastThinkingAt = now;
+      const item = { ...event, ...(actor ? { actor } : {}), at: new Date(now).toISOString() };
+      if (item.type === "text_delta") rawOutput += item.delta || "";
+      else events.push(item);
+      publish({ channel: "stage", ticketId, stageId, runId, ...item });
+    },
+    snapshot() {
+      return { startedAt, completedAt: new Date().toISOString(), rawOutput: rawOutput.slice(-100000), events: events.slice(-200) };
+    }
+  };
 }
 
 function repositoryCheckReview(checks) {
@@ -116,6 +137,7 @@ function setStage(run, id, status, summary = "") {
     for (const other of run.stages) if (other.status === "active") other.status = "completed";
   }
   Object.assign(stage, { status, summary, updatedAt: new Date().toISOString() });
+  return stage;
 }
 
 function initialStages() {
@@ -206,17 +228,19 @@ async function loadLocalRun(inputPath) {
 
 async function prepareTicket(ticketId) {
   return startTicketWork(ticketId, async (signal) => {
+   let activity;
    try {
     signal.throwIfAborted();
     const before = store.read();
     const run = ticketRun(before, ticketId);
+    activity = captureStageActivity(ticketId, "requirements", run.runId);
     const productContext = await readProductContext(dataDir, before.workspace.cwd);
     await update((state) => {
       const current = ticketRun(state, ticketId);
       current.status = "clarifying";
       setStage(current, "requirements", "active", "Pi is shaping requirements without repository access");
     });
-    const clarified = await harness.clarifyRequirements({ cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId, productContext: productContext.content, profile: run.stageProfiles.requirements, signal });
+    const clarified = await harness.clarifyRequirements({ cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId, productContext: productContext.content, profile: run.stageProfiles.requirements, onEvent: activity.onEvent, signal });
     signal.throwIfAborted();
     const contextSnapshot = await persistArtifact(dataDir, run.ticket, {
       runId: run.runId, name: "product-context-snapshot.md", content: productContext.content,
@@ -231,7 +255,7 @@ async function prepareTicket(ticketId) {
       current.requirementsSessionFile = clarified.sessionFile;
       current.artifacts.push(contextSnapshot, artifact);
       current.status = "awaiting_requirements";
-      setStage(current, "requirements", "blocked", "Requirement approval needed before repository access");
+      setStage(current, "requirements", "blocked", "Requirement approval needed before repository access").activity = activity.snapshot();
       current.checkpoint = {
         id: randomUUID(), kind: "requirements_review", title: "Approve ticket requirements",
         prompt: clarified.artifact, questions: clarified.questions, createdAt: new Date().toISOString()
@@ -241,7 +265,11 @@ async function prepareTicket(ticketId) {
     if (signal.aborted) return;
     await update((state) => {
       const current = state.ticketRuns[ticketId];
-      if (current) { current.status = "failed"; current.lastError = error.message; }
+      if (current) {
+        current.status = "failed";
+        current.lastError = error.message;
+        if (activity) current.stages.find((stage) => stage.id === "requirements").activity = activity.snapshot();
+      }
     });
    }
   });
@@ -249,10 +277,12 @@ async function prepareTicket(ticketId) {
 
 async function continueAfterRequirements(ticketId, answers) {
   return startTicketWork(ticketId, async (signal) => {
+   let activity;
    try {
     signal.throwIfAborted();
     const before = store.read();
     const run = ticketRun(before, ticketId);
+    activity = captureStageActivity(ticketId, "explore", run.runId);
     const draft = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements-draft");
     const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
     if (!draft || !productContext) throw new Error("Requirements draft or product context snapshot not found");
@@ -282,7 +312,7 @@ async function continueAfterRequirements(ticketId, answers) {
     });
     const explored = await harness.exploreTicket({
       cwd: workspace.cwd, ticket: run.ticket, sessionFile: null, runId: run.runId,
-      productContext: productContext.content, requirements, profile: run.stageProfiles.exploration, signal
+      productContext: productContext.content, requirements, profile: run.stageProfiles.exploration, onEvent: activity.onEvent, signal
     });
     signal.throwIfAborted();
     const explorationArtifact = await persistArtifact(dataDir, run.ticket, {
@@ -293,7 +323,7 @@ async function continueAfterRequirements(ticketId, answers) {
       const current = ticketRun(state, ticketId);
       current.sessionFile = explored.sessionFile;
       current.artifacts.push(explorationArtifact);
-      setStage(current, "explore", explored.questions.length ? "blocked" : "completed", explored.questions.length ? "Technical decision required" : "Repository map persisted");
+      setStage(current, "explore", explored.questions.length ? "blocked" : "completed", explored.questions.length ? "Technical decision required" : "Repository map persisted").activity = activity.snapshot();
       if (explored.questions.length) {
         current.status = "awaiting_input";
         current.checkpoint = {
@@ -307,7 +337,11 @@ async function continueAfterRequirements(ticketId, answers) {
     if (signal.aborted) return;
     await update((state) => {
       const current = state.ticketRuns[ticketId];
-      if (current) { current.status = "failed"; current.lastError = error.message; }
+      if (current) {
+        current.status = "failed";
+        current.lastError = error.message;
+        if (activity) current.stages.find((stage) => stage.id === "explore").activity = activity.snapshot();
+      }
     });
    }
   });
@@ -317,6 +351,7 @@ async function designTicket(ticketId, answers, signal) {
   signal?.throwIfAborted();
   const state = store.read();
   const run = ticketRun(state, ticketId);
+  const activity = captureStageActivity(ticketId, "design", run.runId);
   const requirements = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements");
   const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
   const exploration = [...run.artifacts].reverse().find((artifact) => artifact.kind === "implementation-delta");
@@ -332,7 +367,7 @@ async function designTicket(ticketId, answers, signal) {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
       productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, answers,
-      profile: run.stageProfiles.architecture, signal
+      profile: run.stageProfiles.architecture, onEvent: activity.onEvent, signal
     });
     signal?.throwIfAborted();
     const artifact = await persistArtifact(dataDir, run.ticket, {
@@ -344,7 +379,7 @@ async function designTicket(ticketId, answers, signal) {
       current.plan = result.plan;
       current.artifacts.push(artifact);
       current.status = "awaiting_approval";
-      setStage(current, "design", "blocked", "Plan ready for approval");
+      setStage(current, "design", "blocked", "Plan ready for approval").activity = activity.snapshot();
       current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: result.artifact, createdAt: new Date().toISOString() };
     });
   } catch (error) {
@@ -353,7 +388,7 @@ async function designTicket(ticketId, answers, signal) {
       const current = ticketRun(draft, ticketId);
       current.status = "failed";
       current.lastError = error.message;
-      setStage(current, "design", "blocked", error.message);
+      setStage(current, "design", "blocked", error.message).activity = activity.snapshot();
     });
   }
 }
@@ -529,6 +564,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
 
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
+  const started = ticketRun(store.read(), ticketId);
+  const activity = captureStageActivity(ticketId, "verify", started.runId);
   await update((state) => {
     const run = ticketRun(state, ticketId);
     setStage(run, "implement", "completed", `${flattenSteps(run.plan).length} implementation slices accepted`);
@@ -540,6 +577,7 @@ async function finalReviewLoop(ticketId, signal) {
   for (let round = 1; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
+    activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
     const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal });
     signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);
@@ -554,6 +592,7 @@ async function finalReviewLoop(ticketId, signal) {
       round,
       runId: current.runId,
       profile: current.stageProfiles.verification,
+      onEvent: (event) => activity.onEvent(event, role),
       signal
     })))];
     signal?.throwIfAborted();
@@ -572,6 +611,7 @@ async function finalReviewLoop(ticketId, signal) {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
+      run.stages.find((stage) => stage.id === "verify").activity = activity.snapshot();
     });
     if (!findings.length) {
       await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
@@ -583,7 +623,7 @@ async function finalReviewLoop(ticketId, signal) {
         await update((state) => {
           const run = ticketRun(state, ticketId);
           run.artifacts.push(handoff);
-          setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`);
+          setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
           setStage(run, "handoff", "completed", `Zero-state app ready on ${run.workspace.branch}`);
           run.status = "completed";
           run.checkpoint = null;
@@ -592,10 +632,11 @@ async function finalReviewLoop(ticketId, signal) {
         return;
       }
       const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
+      const handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
       const contextContent = await harness.updateProductContext({
         cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
         artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
-        diff, runId: current.runId, profile: current.stageProfiles.handoff, signal
+        diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
       });
       signal?.throwIfAborted();
       if (!contextContent.trim()) throw new Error("Product context update was empty");
@@ -606,8 +647,8 @@ async function finalReviewLoop(ticketId, signal) {
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.artifacts.push(contextArtifact);
-        setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`);
-        setStage(run, "handoff", "blocked", "Approve the living product-context update");
+        setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
+        setStage(run, "handoff", "blocked", "Approve the living product-context update").activity = handoffActivity.snapshot();
         run.status = "awaiting_product_context";
         run.checkpoint = {
           id: randomUUID(), kind: "product_context_review", title: "Approve living product context",
@@ -631,7 +672,7 @@ async function finalReviewLoop(ticketId, signal) {
       cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
       images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
       profile: current.stageProfiles.implementation,
-      onEvent: (event) => publish({ channel: "review", ticketId, round, ...event }),
+      onEvent: (event) => activity.onEvent(event, "review fixer"),
       signal
     });
     signal?.throwIfAborted();
@@ -653,7 +694,7 @@ async function finalReviewLoop(ticketId, signal) {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(fixArtifact);
       run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, artifact: fixArtifact };
-      setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`);
+      setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`).activity = activity.snapshot();
     });
   }
 }
@@ -682,7 +723,7 @@ async function finishHandoff(ticketId) {
 async function ensureLocalWorkspace(ticketId) {
   const before = store.read();
   const previous = ticketRun(before, ticketId);
-  if (previous.ticket.source !== "local" || (previous.workspace?.cwd === before.workspace.cwd && await isGitRepository(previous.workspace.cwd))) return previous;
+  if (!(await needsLocalWorkspaceRepair(previous.ticket, previous.workspace))) return previous;
   const { workspace, recovered } = await repairZeroStateWorkspace({ cwd: before.workspace.cwd, ticket: previous.ticket, runId: previous.runId, previousCwd: previous.workspace?.cwd });
   await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -916,9 +957,14 @@ async function api(request, response, url) {
     const id = decodeURIComponent(approve[1]);
     if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already running");
     const run = ticketRun(store.read(), id);
-    if (run.status !== "awaiting_approval" || !run.plan) throw new Error("This ticket has no plan awaiting approval");
+    if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
     const input = await body(request);
-    await update((state) => { ticketRun(state, id).auto = Boolean(input.auto); });
+    await update((state) => {
+      const current = ticketRun(state, id);
+      current.auto = Boolean(input.auto);
+      current.status = "awaiting_approval";
+      current.lastError = null;
+    });
     runTicket(id).catch(() => {});
     return json(response, 202, { accepted: true, ticketId: id });
   }

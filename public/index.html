@@ -29,6 +29,7 @@
         <input name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required>
         <button class="button primary" type="submit">Load</button>
       </form>
+      <button id="free-text-open" class="source-button" type="button"><span><strong>Free text</strong><small>Describe a new task</small></span><b>New task</b></button>
       <div id="linear-status" class="linear-status"></div>
       <div class="ticket-filter"><input id="ticket-search" type="search" placeholder="Filter tickets…" aria-label="Filter tickets"></div>
       <div id="ticket-list" class="ticket-list" aria-live="polite"></div>
@@ -50,6 +51,15 @@
     <header><div><span class="eyebrow">Workspace</span><h2>Open repository</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
     <label class="dialog-field" for="workspace-path">Repository path<input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" required></label>
     <footer><span></span><button class="button primary" type="submit">Open repository</button></footer>
+  </form>
+</dialog>
+
+<dialog id="free-text-dialog">
+  <form id="free-text-form" class="dialog-shell">
+    <header><div><span class="eyebrow">Local task</span><h2>Start from free text</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <p class="profiles-note">The first line becomes the ticket title. The full text goes through the normal requirements and planning workflow.</p>
+    <label class="dialog-field">Task description<textarea name="description" rows="8" placeholder="Describe what you want built or changed…" required></textarea></label>
+    <footer><span></span><button class="button primary" type="submit">Start workflow</button></footer>
   </form>
 </dialog>
 

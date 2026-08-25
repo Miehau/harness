@@ -49,6 +49,23 @@ function firstLine(value, fallback = "") {
   return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim().replace(/[*`]/g, "").slice(0, 120) || fallback;
 }
 
+export function freeTextTicket(value, id) {
+  const description = String(value || "").trim();
+  const suffix = String(id || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (!description) throw new Error("Describe the task first");
+  if (!suffix) throw new Error("Task ID is required");
+  const title = firstLine(description).replace(/^#+\s*/, "") || "Untitled task";
+  return {
+    id: `local-text-${suffix}`,
+    identifier: `TEXT-${suffix.replaceAll("-", "").slice(0, 8).toUpperCase()}`,
+    title,
+    description,
+    source: "local",
+    state: { name: "Free text", type: "local", color: "#8b7cf6" },
+    team: { name: "Local" }
+  };
+}
+
 function toolTitle(tool, args) {
   let values = {};
   try { values = JSON.parse(args || "{}"); } catch {}
@@ -81,7 +98,7 @@ export function eventTimeline(events = []) {
   const pendingByTool = new Map();
   for (const event of events) {
     if (event.type === "tool_start") {
-      const item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: toolTitle(event.tool, event.args), at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
+      const item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: `${event.actor ? `${event.actor} · ` : ""}${toolTitle(event.tool, event.args)}`, at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
       items.push(item);
       if (event.callId) byCallId.set(event.callId, item);
       else pendingByTool.set(event.tool, [...(pendingByTool.get(event.tool) || []), item]);
@@ -97,8 +114,9 @@ export function eventTimeline(events = []) {
       else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : "finished", isError: Boolean(event.isError) });
       continue;
     }
-    if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: "Model request failed", at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
-    if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${firstLine(event.detail, "summary")}`, at: event.at, result: event.detail || "", status: "summary", isError: false });
+    if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: `${event.actor ? `${event.actor} · ` : ""}Model request failed`, at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
+    if (["thinking", "phase"].includes(event.type)) items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${event.actor ? `${event.actor} · ` : ""}${event.label || "working"}`, at: event.at, result: "", status: "summary", isError: false });
+    if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${event.actor ? `${event.actor} · ` : ""}${firstLine(event.detail, "summary")}`, at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
 }

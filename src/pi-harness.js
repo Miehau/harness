@@ -221,11 +221,11 @@ Harness: ${step.harness}
 Context policy: ${step.contextPolicy}
 Permission: ${step.permission}
 Write scope: ${step.writeScope || "none"}
-Skills requested: ${step.skills.join(", ") || "none"}
-References: ${step.references.join(", ") || "none"}
-Requirement IDs: ${step.requirementIds.join(", ") || "none"}
-Capability IDs: ${step.capabilityIds.join(", ") || "none"}
-Implementation delta IDs: ${step.deltaIds.join(", ") || "none"}
+Skills requested: ${step.skills?.join(", ") || "none"}
+References: ${step.references?.join(", ") || "none"}
+Requirement IDs: ${step.requirementIds?.join(", ") || "none"}
+Capability IDs: ${step.capabilityIds?.join(", ") || "none"}
+Implementation delta IDs: ${step.deltaIds?.join(", ") || "none"}
 ${architectureHorizon}
 
 ## Relevant product context
@@ -240,10 +240,10 @@ ${step.description || step.title}
 ${step.prompt ? `## Planner guidance\n${step.prompt}\n` : ""}
 
 ## Expected artifacts
-${step.expectedArtifacts.map((item) => `- ${item}`).join("\n") || "- Concise run result"}
+${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise run result"}
 
 ## Acceptance criteria
-${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
+${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 
 Work only within the stated permission and write scope. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
 }
@@ -454,10 +454,10 @@ export class PiHarness {
     return session;
   }
 
-  async clarifyRequirements({ cwd, ticket, runId, productContext, profile, signal }) {
+  async clarifyRequirements({ cwd, ticket, runId, productContext, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = jsonReply(reply);
       return {
         artifact: String(parsed.artifact || ""),
@@ -467,10 +467,10 @@ export class PiHarness {
     }, `${ticket.id}:${runId}:requirements`);
   }
 
-  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, signal }) {
+  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
       return {
         artifact: String(parsed.artifact || ""),
@@ -480,10 +480,10 @@ export class PiHarness {
     }, ticket.id);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, answers, profile, signal }) {
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, answers, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
       const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
       return { plan: normalizePlan(parsed), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);
@@ -497,12 +497,13 @@ export class PiHarness {
     return this.supervisorStages.splice(0);
   }
 
-  async visibleSupervisorPrompt(session, prompt, { images = [], publishText = true, signal } = {}) {
+  async visibleSupervisorPrompt(session, prompt, { images = [], publishText = true, onEvent, signal } = {}) {
     let reply = "";
     const unsubscribe = session.subscribe((event) => {
       const safe = safeEvent(event);
       if (!safe) return;
       if (safe.type === "text_delta") reply += safe.delta;
+      onEvent?.(safe);
       if (publishText || safe.type !== "text_delta") this.publish({ channel: "chat", ...safe });
     });
     const unbindAbort = bindAbort(session, signal);
@@ -727,13 +728,14 @@ Return ONLY JSON:
     }
   }
 
-  async updateProductContext({ cwd, ticket, currentContext, artifacts, diff, runId, profile, signal }) {
+  async updateProductContext({ cwd, ticket, currentContext, artifacts, diff, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "product-context");
     await mkdir(sessionDir, { recursive: true });
     const { session } = await createAgentSession({ ...(await this.sessionOptions(profile)), cwd, tools: [], sessionManager: SessionManager.create(cwd, sessionDir) });
     session.setSessionName("product-context-update");
     const unbindAbort = bindAbort(session, signal);
+    const unsubscribe = session.subscribe((event) => { const safe = safeEvent(event); if (safe) onEvent?.(safe); });
     try {
       signal?.throwIfAborted();
       await session.prompt(`${stagePrompt(profile, productContextUpdateInstruction)}
@@ -755,12 +757,13 @@ ${diff.patch || "No textual diff"}`);
       signal?.throwIfAborted();
       return String(jsonReply(lastAssistantText(session)).content || "");
     } finally {
+      unsubscribe();
       await unbindAbort();
       session.dispose();
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, role, round, runId, profile, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -772,6 +775,13 @@ ${diff.patch || "No textual diff"}`);
     });
     session.setSessionName(`review:${role}:round-${round}`);
     const unbindAbort = bindAbort(session, signal);
+    let lastThinkingAt = 0;
+    const unsubscribe = session.subscribe((event) => {
+      const safe = safeEvent(event);
+      if (!safe || (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000)) return;
+      if (safe.type === "thinking") lastThinkingAt = Date.now();
+      onEvent?.(safe);
+    });
     try {
       signal?.throwIfAborted();
       await session.prompt(stagePrompt(profile, `# Independent ${role} review
@@ -814,6 +824,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
         sessionFile: session.sessionFile
       };
     } finally {
+      unsubscribe();
       await unbindAbort();
       session.dispose();
     }
