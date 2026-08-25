@@ -55,12 +55,12 @@ function publishStepEvent(ticketId, stepId, runId, event) {
     active.lastEvent = event.label;
     active.lastEventAt = new Date().toISOString();
     active.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
-  }).catch(() => {});
+  }, { publish: false }).catch(() => {});
 }
 
-async function update(change) {
+async function update(change, { publish: shouldPublish = true } = {}) {
   const state = await store.update(change);
-  publishState(state);
+  if (shouldPublish) publishState(state);
   return state;
 }
 

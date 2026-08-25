@@ -598,6 +598,9 @@ Approved design:
 ${design}
 
 Slice: ${step.title}
+Step permission: ${step.permission}
+Write scope: ${step.writeScope || "none"}
+Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
 
@@ -621,7 +624,7 @@ Return ONLY JSON:
   }]
 }
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`));
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
       const parsed = jsonReply(rawOutput);

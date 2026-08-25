@@ -202,26 +202,76 @@ function renderPlanTree() {
   requestAnimationFrame(() => drawEdges(graph.edges));
 }
 
-function runPanel(step) {
-  const run = runFor();
-  const attempt = step.attempts?.at(-1);
-  const trace = sessionTraces.get(`${run.id}:${step.id}`);
+function cachedTrace(run, step) {
+  const cached = sessionTraces.get(`${run.id}:${step.id}`);
+  return cached?.sessionFile === step.sessionFile ? cached.trace : null;
+}
+
+function currentLiveRun(run, step) {
   const live = liveRuns.get(`${run.id}:${step.id}`);
-  const currentLive = live?.runId === attempt?.runId ? null : live;
-  const active = run.activeRuns?.[step.id];
-  const pulse = runHeartbeat(active, live);
-  const heartbeat = pulse ? `<section class="run-heartbeat ${pulse.state}"><span class="heartbeat-dot"></span><div><strong>${escapeHtml(pulse.label)}</strong><small>${pulse.elapsed}s elapsed · last activity ${pulse.idle ? `${pulse.idle}s ago` : "now"}${pulse.note ? ` · ${escapeHtml(pulse.note)}` : ""}</small></div></section>` : "";
-  const events = [...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])];
-  const timeline = eventTimeline(events).map((item) => {
+  return live?.runId === step.attempts?.at(-1)?.runId ? null : live;
+}
+
+function heartbeatContent(pulse) {
+  return `<span class="heartbeat-dot"></span><div><strong data-heartbeat-label>${escapeHtml(pulse.label)}</strong><small data-heartbeat-note>${pulse.elapsed}s elapsed · last activity ${pulse.idle ? `${pulse.idle}s ago` : "now"}${pulse.note ? ` · ${escapeHtml(pulse.note)}` : ""}</small></div>`;
+}
+
+function heartbeatHtml(pulse) {
+  return pulse ? `<section class="run-heartbeat ${pulse.state}" data-run-heartbeat>${heartbeatContent(pulse)}</section>` : "";
+}
+
+function timelineHtml(events) {
+  return eventTimeline(events).map((item) => {
     const heading = `<span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.status)}</small></span><time>${escapeHtml((item.at || "").slice(11, 19))}</time>`;
     if (!item.hasDetails) return `<div class="run-event unavailable ${item.isError ? "warning" : ""}">${heading}<em>Legacy run — input and output were not recorded</em></div>`;
     const detail = [["Input", item.args], ["Live output", item.output], ["Result", item.result]].filter(([, value]) => value).map(([label, value]) => `<div class="event-block"><label>${label}</label><pre>${escapeHtml(formatOutput(value))}</pre></div>`).join("");
     return `<details class="run-event ${item.isError ? "warning" : ""}" data-event-key="${escapeHtml(item.key)}"><summary>${heading}</summary>${detail}</details>`;
   }).join("") || `<div class="run-empty">The worker has not called a tool yet.</div>`;
-  const rawOutput = currentLive?.output || trace?.rawOutput || [attempt?.rawOutput, attempt?.verification?.rawOutput].filter(Boolean).join("\n\n") || "";
-  const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre>${escapeHtml(formatOutput(rawOutput || "No assistant text yet. Open event details below to inspect tool calls and their output."))}</pre></section>`;
+}
+
+function rawOutputFor(run, step) {
+  const attempt = step.attempts?.at(-1);
+  const live = currentLiveRun(run, step);
+  return live?.output || cachedTrace(run, step)?.rawOutput || [attempt?.rawOutput, attempt?.verification?.rawOutput].filter(Boolean).join("\n\n") || "";
+}
+
+function runPanel(step) {
+  const run = runFor();
+  const attempt = step.attempts?.at(-1);
+  const trace = cachedTrace(run, step);
+  const currentLive = currentLiveRun(run, step);
+  const active = run.activeRuns?.[step.id];
+  const heartbeat = heartbeatHtml(runHeartbeat(active, liveRuns.get(`${run.id}:${step.id}`)));
+  const events = [...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])];
+  const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutputFor(run, step) || "No assistant text yet. Open event details below to inspect tool calls and their output."))}</pre></section>`;
   const criteria = `<section class="review-criteria"><span class="eyebrow">Acceptance criteria</span>${step.acceptanceCriteria.map((criterion) => `<div><span>○</span>${escapeHtml(criterion)}</div>`).join("")}</section>`;
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${criteria}${raw}<section class="run-events"><span class="eyebrow">Activity · chronological</span>${timeline}</section>`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${criteria}${raw}<section class="run-events"><span class="eyebrow">Activity · chronological</span><div data-run-events>${timelineHtml(events)}</div></section>`;
+}
+
+function refreshLiveRun({ events = false } = {}) {
+  if (activeTab !== "run") return;
+  const run = runFor();
+  const step = nodeById(selectedStepId);
+  const panel = $("#inspector .tab-panel");
+  if (!run || !step || !panel) return;
+  const live = liveRuns.get(`${run.id}:${step.id}`);
+  const pulse = runHeartbeat(run.activeRuns?.[step.id], live);
+  const heartbeat = panel.querySelector("[data-run-heartbeat]");
+  if (heartbeat && pulse) {
+    heartbeat.className = `run-heartbeat ${pulse.state}`;
+    heartbeat.innerHTML = heartbeatContent(pulse);
+  }
+  const raw = panel.querySelector("[data-run-raw-output]");
+  if (raw) raw.textContent = formatOutput(rawOutputFor(run, step) || "No assistant text yet. Open event details below to inspect tool calls and their output.");
+  if (!events) return;
+  const target = panel.querySelector("[data-run-events]");
+  if (!target) return;
+  const open = new Set([...target.querySelectorAll("details.run-event[open]")].map((item) => item.dataset.eventKey));
+  const attempt = step.attempts?.at(-1);
+  const trace = cachedTrace(run, step);
+  const currentLive = currentLiveRun(run, step);
+  target.innerHTML = timelineHtml([...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])]);
+  for (const item of target.querySelectorAll("details.run-event")) item.open = open.has(item.dataset.eventKey);
 }
 
 function diffPanel(step) {
@@ -253,7 +303,7 @@ function renderInspector() {
     return;
   }
   loadSessionTrace(run, step);
-  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || sessionTraces.get(`${run.id}:${step.id}`)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
+  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
   const panels = { run: runPanel(step), diff: diffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
   const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="2" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Request changes</button></form><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept & continue</button></section>` : "";
   target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>Output · ${escapeHtml(run.workspace?.cwd || state.workspace.cwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission · ${escapeHtml(step.status.replaceAll("_", " "))}</span></footer></div>`;
@@ -262,13 +312,23 @@ function renderInspector() {
 
 async function loadSessionTrace(run, step) {
   const key = `${run.id}:${step.id}`;
-  if (!step.sessionFile || sessionTraces.has(key) || pendingSessionTraces.has(key)) return;
-  pendingSessionTraces.add(key);
+  const sessionFile = step.sessionFile;
+  const requestKey = `${key}:${sessionFile}`;
+  if (!sessionFile || cachedTrace(run, step) || pendingSessionTraces.has(requestKey)) return;
+  pendingSessionTraces.add(requestKey);
   try {
-    sessionTraces.set(key, await api(`/api/tickets/${encodeURIComponent(run.id)}/steps/${encodeURIComponent(step.id)}/session-trace`));
-    if (run.id === runFor()?.id && step.id === selectedStepId) renderInspector();
-  } catch (error) { sessionTraces.set(key, { prompt: "", rawOutput: "", events: [] }); notify(error.message); }
-  finally { pendingSessionTraces.delete(key); }
+    const trace = await api(`/api/tickets/${encodeURIComponent(run.id)}/steps/${encodeURIComponent(step.id)}/session-trace`);
+    if (nodeById(step.id, runFor()?.plan)?.sessionFile !== sessionFile) return;
+    sessionTraces.set(key, { sessionFile, trace });
+    if (run.id === runFor()?.id && step.id === selectedStepId) {
+      if (activeTab === "run") refreshLiveRun({ events: true });
+      else if (activeTab === "prompt") renderInspector();
+    }
+  } catch (error) {
+    sessionTraces.set(key, { sessionFile, trace: { prompt: "", rawOutput: "", events: [] } });
+    notify(error.message);
+  }
+  finally { pendingSessionTraces.delete(requestKey); }
 }
 
 function render() {
@@ -433,7 +493,10 @@ events.onmessage = ({ data }) => {
     live.lastAt = new Date().toISOString();
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveRuns.set(key, live);
-    if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) renderInspector();
+    if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
+      if (event.type === "prompt" && activeTab === "prompt") renderInspector();
+      else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
+    }
   }
 };
 events.onerror = () => notify("Live connection lost; reconnecting…");
@@ -442,4 +505,4 @@ state = await api("/api/state");
 await refreshTickets();
 render();
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());
-setInterval(() => activeTab === "run" && runFor()?.activeRuns?.[selectedStepId] && renderInspector(), 1000);
+setInterval(refreshLiveRun, 1000);

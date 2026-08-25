@@ -41,6 +41,21 @@ test("tool activity preserves event order and pairs details", () => {
   assert.equal(eventTimeline([{ type: "tool_start", tool: "edit", at: "1" }, { type: "tool_end", tool: "edit", at: "2" }])[0].hasDetails, false);
 });
 
+test("activity gives persisted reasoning and worker reports meaningful titles and details", () => {
+  const timeline = eventTimeline([
+    { type: "reasoning_summary", detail: "Mapped task lifecycle invariants", at: "1" },
+    { type: "reasoning_summary", detail: "Checked automation ownership", at: "2" },
+    { type: "tool_start", callId: "report", tool: "worker_report", args: '{"status":"completed","summary":"Derived domain architecture","artifact":"# Architecture"}', at: "3" },
+    { type: "tool_end", callId: "report", tool: "worker_report", result: "Reported completed", at: "4" }
+  ]);
+  assert.deepEqual(timeline.map((item) => item.title), [
+    "Reasoning · Mapped task lifecycle invariants",
+    "Reasoning · Checked automation ownership",
+    "Worker report · completed — Derived domain architecture"
+  ]);
+  assert.equal(timeline[2].hasDetails, true);
+});
+
 test("formats JSON output including nested serialized JSON", () => {
   assert.equal(formatOutput('{"summary":"ok","rawOutput":"{\\"findings\\":[]}"}'), '{\n  "summary": "ok",\n  "rawOutput": {\n    "findings": []\n  }\n}');
 });

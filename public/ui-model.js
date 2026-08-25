@@ -45,9 +45,18 @@ export function preferredStepId(plan, currentId) {
   return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
+function firstLine(value, fallback = "") {
+  return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 120) || fallback;
+}
+
 function toolTitle(tool, args) {
   let values = {};
   try { values = JSON.parse(args || "{}"); } catch {}
+  if (tool === "worker_report") {
+    const status = values.status ? ` · ${values.status}` : "";
+    const summary = firstLine(values.summary);
+    return `Worker report${status}${summary ? ` — ${summary}` : ""}`;
+  }
   const subject = values.command || values.cmd || values.path || values.pattern || values.query;
   return subject ? `${tool} · ${String(subject).split("\n")[0]}` : tool;
 }
@@ -88,7 +97,7 @@ export function eventTimeline(events = []) {
       continue;
     }
     if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: "Model request failed", at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
-    if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: "Reasoning summary", at: event.at, result: event.detail || "", status: "summary", isError: false });
+    if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${firstLine(event.detail, "summary")}`, at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
 }

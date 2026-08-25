@@ -258,6 +258,8 @@ h3 { font-size: 14px; }
 .run-events { display: grid; gap: 6px; }
 .run-event { border: 1px solid #30363d; border-radius: 8px; background: #11151b; }
 .run-event summary { display: flex; justify-content: space-between; gap: 10px; padding: 9px 10px; cursor: pointer; color: #cbd3dd; font-size: 11px; }
+.run-event summary::before { content: "›"; color: #8da4c3; font-size: 16px; line-height: 1; transition: transform 120ms ease; }
+.run-event[open] summary::before { transform: rotate(90deg); }
 .run-event summary span { min-width: 0; }
 .run-event b, .run-event small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-event small { margin-top: 2px; color: #7f8993; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }

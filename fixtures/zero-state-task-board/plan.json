@@ -12,13 +12,15 @@
           "type": "ticket",
           "role": "architecture",
           "title": "Derive the domain architecture",
-          "description": "Model the product domain before proposing repository structure. Identify important nouns, verbs, state transitions, invariants, cohesive units that change together, external boundaries, and dependency direction. Then map every downstream ticket, including automation, onto the smallest sound architecture.",
-          "permission": "none",
+          "description": "Model the product domain before proposing repository structure. Identify important nouns, verbs, state transitions, invariants, cohesive units that change together, external boundaries, and dependency direction. Then map every downstream ticket, including automation, onto the smallest sound architecture. Record the approved architecture in docs/domain-architecture.md so later workers can inspect the same durable design.",
+          "permission": "write",
+          "writeScope": "docs",
           "acceptanceCriteria": [
             "The artifact defines a consistent domain language, behaviors, states, and invariants",
             "Boundaries are justified by responsibilities that change together rather than technical file types",
             "Domain logic is independent from UI, persistence, server, and automation adapters",
             "Every downstream ticket and runtime constraint has an explicit architectural owner",
+            "docs/domain-architecture.md records the architecture for later workers",
             "The resulting repository structure contains no speculative abstractions"
           ],
           "dependsOn": []

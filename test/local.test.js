@@ -44,6 +44,9 @@ test("rejects runtime prompts in local plans", async () => {
 
 test("zero-state fixture keeps task lifecycle verbs as separate dependent tickets", async () => {
   const fixture = await loadLocalFixture(fileURLToPath(new URL("../fixtures/zero-state-task-board", import.meta.url)), ".");
+  const architecture = fixture.plan.nodes.find((node) => node.id === "foundation").children.find((step) => step.id === "architecture");
+  assert.deepEqual([architecture.permission, architecture.writeScope], ["write", "docs"]);
+  assert.ok(architecture.acceptanceCriteria.includes("docs/domain-architecture.md records the architecture for later workers"));
   const lifecycle = fixture.plan.nodes.find((node) => node.id === "manage-tasks");
   assert.deepEqual(lifecycle.children.map((step) => [step.id, step.dependsOn]), [
     ["complete-tasks", ["parallel-build"]],
