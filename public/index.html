@@ -1,19 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket Agent Workspace</title>
 <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
 <div class="app-shell">
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span><button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide work queue" title="Hide work queue">‹</button></div>
+    <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span></div>
     <div class="topbar-actions">
-      <form id="workspace-form" class="workspace-form">
-        <label for="workspace-path">Repository</label>
-        <input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false">
-        <button class="button" type="submit">Open</button>
-      </form>
-      <button id="profile-settings" class="button" type="button">Agent setup</button>
+      <button id="workspace-settings" class="workspace-picker" type="button" aria-haspopup="dialog"><span>Repository</span><code id="workspace-path-display"></code></button>
+      <button id="profile-settings" class="icon-button" type="button" aria-label="Agent setup" title="Agent setup">⚙</button>
     </div>
   </header>
 
   <div class="layout ticket-layout">
+    <button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide work queue" title="Hide work queue">‹</button>
     <aside id="ticket-pane" class="ticket-pane">
       <header class="pane-header ticket-header">
         <div><span class="eyebrow">Local or Linear</span><h1>Work queue</h1></div>
@@ -41,6 +45,23 @@
   </div>
 </div>
 
+<dialog id="workspace-dialog">
+  <form id="workspace-form" class="dialog-shell">
+    <header><div><span class="eyebrow">Workspace</span><h2>Open repository</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <label class="dialog-field" for="workspace-path">Repository path<input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" required></label>
+    <footer><span></span><button class="button primary" type="submit">Open repository</button></footer>
+  </form>
+</dialog>
+
+<dialog id="linear-dialog">
+  <form id="linear-connect" class="dialog-shell">
+    <header><div><span class="eyebrow">Integration</span><h2>Connect Linear</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <p class="profiles-note">The personal API key stays in this server process and is never written to disk.</p>
+    <label class="dialog-field">Personal API key<input name="apiKey" type="password" placeholder="lin_api_…" autocomplete="off" required></label>
+    <footer><span></span><button class="button primary" type="submit">Connect Linear</button></footer>
+  </form>
+</dialog>
+
 <dialog id="plan-dialog">
   <form method="dialog" class="dialog-shell">
     <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></header>
@@ -61,3 +82,5 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="/app.js"></script>
+</body>
+</html>

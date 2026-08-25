@@ -65,6 +65,16 @@ export async function commitWorkspace(cwd, message) {
   return git(cwd, ["rev-parse", "HEAD"]);
 }
 
+export async function cherryPickCommit(cwd, commit) {
+  try {
+    await git(cwd, ["cherry-pick", commit], { env: identity });
+  } catch (error) {
+    await git(cwd, ["cherry-pick", "--abort"]).catch(() => {});
+    throw error;
+  }
+  return git(cwd, ["rev-parse", "HEAD"]);
+}
+
 export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {
   const parent = await git(sourceCwd, ["rev-parse", "HEAD"]);
   const commit = await git(sourceCwd, ["commit-tree", tree, "-p", parent, "-m", "Parallel ticket baseline"], { env: identity });

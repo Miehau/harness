@@ -51,13 +51,14 @@
           "id": "create-tasks",
           "type": "ticket",
           "title": "Create and display tasks",
-          "description": "Implement the first vertical product slice: creating valid tasks and displaying the current list.",
+          "description": "Implement the first vertical product slice: creating valid tasks and displaying the current list. Establish the board's intentionally designed visual baseline now: use a coherent layout, hierarchy, control states, and feedback rather than browser-default presentation.",
           "permission": "write",
           "writeScope": "src,public,test",
           "acceptanceCriteria": [
             "Users can create non-empty tasks",
             "Empty submissions are rejected",
             "Created tasks appear immediately",
+            "The task-creation interface has intentional, responsive visual hierarchy and states rather than browser-default styling",
             "npm test covers the new behavior and succeeds"
           ],
           "dependsOn": ["foundation"]

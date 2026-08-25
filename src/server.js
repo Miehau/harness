@@ -6,14 +6,14 @@ import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
-import { applyPatch, diffTrees, isGitRepository, outsideWriteScope, snapshotTree } from "./git.js";
+import { diffTrees, isGitRepository, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
-import { commitWorkspace, createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch } from "./execution.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, repairZeroStateWorkspace } from "./worktrees.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -47,7 +47,7 @@ function publishState(state = store.read()) { publish({ type: "state", state });
 
 function publishStepEvent(ticketId, stepId, runId, event) {
   publish({ channel: "run", ticketId, stepId, runId, ...event });
-  if (!["prompt", "tool_start", "tool_end", "agent_error"].includes(event.type)) return;
+  if (!["prompt", "phase", "tool_start", "tool_end", "agent_error"].includes(event.type)) return;
   update((state) => {
     const active = state.ticketRuns[ticketId]?.activeRuns?.[stepId];
     if (!active || active.runId !== runId) return;
@@ -56,6 +56,22 @@ function publishStepEvent(ticketId, stepId, runId, event) {
     active.lastEventAt = new Date().toISOString();
     active.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
   }, { publish: false }).catch(() => {});
+}
+
+function repositoryCheckReview(checks) {
+  return {
+    role: "deterministic",
+    summary: checks.summary,
+    findings: checks.status === "failed" ? [{
+      severity: "blocking",
+      category: "tests",
+      claim: `Repository check failed: ${checks.command}`,
+      evidence: [],
+      suggestedFix: `Make ${checks.command} pass.\n\n${checks.output}`,
+      confidence: "high"
+    }] : [],
+    checks
+  };
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
@@ -80,6 +96,7 @@ async function cancelTicket(ticketId) {
   const active = activeTickets.get(ticketId);
   if (!active) throw new Error("This run is not active");
   active.controller.abort(new Error("Run cancelled"));
+  await active.promise.catch(() => {});
   await update((state) => {
     const run = ticketRun(state, ticketId);
     markRunCancelled(run);
@@ -180,7 +197,7 @@ async function loadLocalRun(inputPath) {
         id: randomUUID(), kind: "awaiting_approval", title: "Approve local execution plan",
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
-      plan: fixture.plan, stageProfiles, artifacts, activeRuns: {}, sessionFile: null, lastError: null,
+      plan: fixture.plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
       createdAt: new Date().toISOString()
     };
   });
@@ -364,7 +381,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const findings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
         if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
       }
-      for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+      for (let round = 1; ; round++) {
         signal?.throwIfAborted();
         const latest = ticketRun(store.read(), ticketId);
         const currentStep = findNode(latest.plan, stepId);
@@ -393,6 +410,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
           signal
         });
+        signal?.throwIfAborted();
+        let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
+        if (currentStep.permission === "write" && result.report.status === "completed") {
+          publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Running repository checks" });
+          checks = await harness.runRepositoryChecks({ cwd, signal });
+        }
         signal?.throwIfAborted();
         const afterTree = await snapshotTree(cwd);
         const diff = await diffTrees(cwd, stepBaseTree, afterTree);
@@ -432,19 +455,37 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         });
         const design = [...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture")?.content || "";
         publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: `Verifying ${currentStep.title}` });
-        const verification = await harness.verifyStep({
-          cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
-          design, diff, output: result.output, runId: latest.runId, round,
-          profile: latest.stageProfiles.verification,
-          onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
-          signal
-        });
+        const deterministicReview = repositoryCheckReview(checks);
+        const verification = deterministicReview.findings.length ? {
+          summary: deterministicReview.summary,
+          findings: deterministicReview.findings,
+          rawOutput: checks.output,
+          sessionFile: null,
+          checks
+        } : {
+          ...(await harness.verifyStep({
+            cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
+            design, diff, output: result.output, runId: latest.runId, round,
+            profile: latest.stageProfiles.verification,
+            onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
+            signal
+          })),
+          checks
+        };
         signal?.throwIfAborted();
         const verificationArtifact = await persistArtifact(dataDir, latest.ticket, {
           runId: latest.runId, stageId: "verify", stepId, attemptId, name: "verification.json",
           content: JSON.stringify(verification, null, 2), kind: "step-verification"
         });
         const findings = actionableFindings([verification]);
+        let commitMessage = null;
+        if (!findings.length) {
+          publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Drafting the requirement-linked commit" });
+          commitMessage = await harness.generateCommitMessage({
+            cwd, ticket: latest.ticket, step: currentStep, diff, runId: latest.runId,
+            profile: latest.stageProfiles.commit, signal
+          });
+        }
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
@@ -460,20 +501,10 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "review_ready";
+            target.commitMessage = commitMessage;
             current.status = "awaiting_step_review";
             current.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `Review: ${target.title}`, createdAt: new Date().toISOString() };
             setStage(current, "implement", "blocked", `${target.title} is verified and awaiting your review`);
-          });
-          return;
-        }
-        if (round === MAX_REVIEW_ROUNDS) {
-          await update((state) => {
-            const current = ticketRun(state, ticketId);
-            const target = findNode(current.plan, stepId);
-            target.status = "needs_attention";
-            target.lastError = `${findings.length} actionable verification finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`;
-            current.status = "needs_attention";
-            setStage(current, "implement", "blocked", target.lastError);
           });
           return;
         }
@@ -506,12 +537,14 @@ async function finalReviewLoop(ticketId, signal) {
     run.checkpoint = null;
     run.reviews ||= [];
   });
-  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+  for (let round = 1; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
+    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal });
+    signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);
     const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
-    const reviews = await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
+    const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
       plan: current.plan,
@@ -522,7 +555,7 @@ async function finalReviewLoop(ticketId, signal) {
       runId: current.runId,
       profile: current.stageProfiles.verification,
       signal
-    })));
+    })))];
     signal?.throwIfAborted();
     const persisted = [];
     for (const review of reviews) {
@@ -541,7 +574,7 @@ async function finalReviewLoop(ticketId, signal) {
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
     });
     if (!findings.length) {
-      await commitWorkspace(current.workspace.cwd, "Apply final review fixes");
+      await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
       if (current.ticket.source === "local") {
         const handoff = await persistArtifact(dataDir, current.ticket, {
           runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
@@ -580,15 +613,6 @@ async function finalReviewLoop(ticketId, signal) {
           id: randomUUID(), kind: "product_context_review", title: "Approve living product context",
           prompt: contextContent, createdAt: new Date().toISOString()
         };
-      });
-      return;
-    }
-    if (round === MAX_REVIEW_ROUNDS) {
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        setStage(run, "verify", "blocked", `${findings.length} actionable finding${findings.length === 1 ? "" : "s"} remain after ${round} rounds`);
-        run.status = "needs_attention";
-        run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Final review needs attention", findings, createdAt: new Date().toISOString() };
       });
       return;
     }
@@ -677,10 +701,42 @@ async function ensureLocalWorkspace(ticketId) {
   return ticketRun(store.read(), ticketId);
 }
 
+async function acceptStep(ticketId, stepId) {
+  const current = ticketRun(store.read(), ticketId);
+  const step = findNode(current.plan, stepId);
+  if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
+  const message = step.commitMessage || `feat: ${step.title}\n\nWhy: ${step.description || step.title}\nRequirement: ${step.requirementIds.join(", ") || step.acceptanceCriteria.join("; ") || "Complete the approved execution-plan slice"}`;
+  let commit;
+  if (step.workspace?.isolated) {
+    let workspaceCommit = step.workspaceCommit;
+    if (!workspaceCommit) {
+      workspaceCommit = await commitWorkspace(step.workspace.cwd, message);
+      await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).workspaceCommit = workspaceCommit; });
+    }
+    if (workspaceCommit) commit = await cherryPickCommit(current.workspace.cwd, workspaceCommit);
+  } else {
+    commit = await commitWorkspace(current.workspace.cwd, message);
+  }
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    const accepted = findNode(run.plan, stepId);
+    accepted.status = "accepted";
+    accepted.acceptedAt = new Date().toISOString();
+    if (commit) accepted.commit = commit;
+    run.status = "running";
+    run.checkpoint = null;
+  });
+}
+
 async function advanceTicket(ticketId, signal) {
   signal?.throwIfAborted();
   const run = await ensureLocalWorkspace(ticketId);
-  if (flattenSteps(run.plan).some((step) => step.status === "review_ready")) return;
+  const reviews = flattenSteps(run.plan).filter((step) => step.status === "review_ready");
+  if (reviews.length) {
+    if (!run.auto) return;
+    for (const step of reviews) await acceptStep(ticketId, step.id);
+    return advanceTicket(ticketId, signal);
+  }
   const batch = nextRunnableBatch(run.plan);
   if (batch.length) {
     if (batch.length > 1) {
@@ -700,6 +756,7 @@ async function advanceTicket(ticketId, signal) {
       setStage(current, "implement", "active", batch.length > 1 ? `Running ${batch.length} tickets in parallel` : `Running ${batch[0].title}`);
     });
     await Promise.all(batch.map((step) => executeStep(ticketId, step.id, { signal })));
+    if (ticketRun(store.read(), ticketId).auto) return advanceTicket(ticketId, signal);
     return;
   }
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) await finalReviewLoop(ticketId, signal);
@@ -805,6 +862,7 @@ async function api(request, response, url) {
         artifacts: [],
         activeRuns: {},
         sessionFile: null,
+        auto: false,
         lastError: null,
         createdAt: new Date().toISOString()
       };
@@ -859,6 +917,8 @@ async function api(request, response, url) {
     if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already running");
     const run = ticketRun(store.read(), id);
     if (run.status !== "awaiting_approval" || !run.plan) throw new Error("This ticket has no plan awaiting approval");
+    const input = await body(request);
+    await update((state) => { ticketRun(state, id).auto = Boolean(input.auto); });
     runTicket(id).catch(() => {});
     return json(response, 202, { accepted: true, ticketId: id });
   }
@@ -884,6 +944,7 @@ async function api(request, response, url) {
       if (!feedback) throw new Error("Describe the changes you want");
       await update((state) => {
         const run = ticketRun(state, ticketId);
+        delete findNode(run.plan, stepId).workspaceCommit;
         run.status = "running";
         run.checkpoint = null;
         setStage(run, "implement", "active", `Revising ${step.title}`);
@@ -891,17 +952,7 @@ async function api(request, response, url) {
       startTicketWork(ticketId, (signal) => executeStep(ticketId, stepId, { feedback, signal })).catch(() => {});
       return json(response, 202, { accepted: true, ticketId, stepId });
     }
-    if (step.workspace?.isolated) await applyPatch(current.workspace.cwd, step.diff?.patch);
-    const commit = await commitWorkspace(current.workspace.cwd, `Implement: ${step.title}`);
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      const accepted = findNode(run.plan, stepId);
-      accepted.status = "accepted";
-      accepted.acceptedAt = new Date().toISOString();
-      if (commit) accepted.commit = commit;
-      run.status = "running";
-      run.checkpoint = null;
-    });
+    await acceptStep(ticketId, stepId);
     startTicketWork(ticketId, async (signal) => {
       try { await advanceTicket(ticketId, signal); }
       catch (error) {

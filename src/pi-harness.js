@@ -1,9 +1,13 @@
+import { execFile } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { normalizePlan } from "./plan.js";
+import { flattenSteps, normalizePlan } from "./plan.js";
 import { stagePrompt } from "./profiles.js";
+
+const exec = promisify(execFile);
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -67,6 +71,8 @@ Rules:
 - Code-writing steps should be serial by default. Deliberately parallel writes must be siblings with disjoint write scopes; they run in isolated worktrees and block if their patches conflict during integration.
 - Decompose implementation into a ticket-specific sequence of coherent, human-reviewable behavior slices. Each write step must leave the worktree valid, have a focused diff, and be independently understandable and verifiable.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
+- For frontend/backend work, establish one shared contract first, run independently testable conformance implementations as parallel siblings, then add a serial integration step depending on that group. Put cross-branch integration tests in the integration step and continue depth-first with the next vertical outcome.
+- Treat the repository's root npm test script as the deterministic gate when present. Every isolated step must keep its own applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
 - Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
 - Every step must have a useful prompt, expected artifact, and acceptance criterion.`;
@@ -146,7 +152,7 @@ function safeEvent(event) {
   if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, callId: event.toolCallId, args: eventText(event.args), label: `Using ${event.toolName}` };
   if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), label: `${event.toolName} is running` };
   if (event.type === "bash_execution_update") return { type: "tool_update", tool: "bash", callId: event.id, detail: eventText(event.delta), label: "Command is running" };
-  if (event.type === "tool_execution_end") return { type: "tool_end", tool: event.toolName, callId: event.toolCallId, result: eventText(event.result), isError: event.isError, label: event.isError ? `${event.toolName} failed` : "Model is reasoning" };
+  if (event.type === "tool_execution_end") return { type: "tool_end", tool: event.toolName, callId: event.toolCallId, result: eventText(event.result), isError: event.isError, label: event.isError ? `${event.toolName} failed` : `Reviewing ${event.toolName} result` };
   if (event.type === "agent_start" || event.type === "turn_start") return { type: event.type, label: "Model is reasoning" };
   if (event.type === "agent_settled" || event.type === "turn_end") return { type: event.type, label: "Finishing this phase" };
   return null;
@@ -175,10 +181,36 @@ function jsonReply(reply) {
   return JSON.parse(fenced || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
 }
 
-function stepContext({ plan, step, artifacts }) {
+function commitField(value, fallback) {
+  return String(value || fallback).replace(/\s+/g, " ").trim();
+}
+
+export function formatCommitMessage(value, step) {
+  const fallbackRequirement = [step.requirementIds?.join(", "), step.acceptanceCriteria?.join("; ")].filter(Boolean).join(" — ") || "Complete the approved execution-plan slice";
+  return `${commitField(value?.subject, `feat: ${step.title}`)}\n\nWhy: ${commitField(value?.why, step.description || step.title)}\nRequirement: ${commitField(value?.requirement, fallbackRequirement)}`;
+}
+
+export function stepContext({ plan, step, artifacts }) {
   const artifactText = artifacts.length
     ? artifacts.map((artifact) => `### ${artifact.name}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.content || artifact.summary || ""}`).join("\n\n")
     : "No dependency artifacts.";
+  const steps = flattenSteps(plan);
+  const summarize = (items) => items.length
+    ? items.map((item) => `- ${item.title}: ${item.description || "No outcome summary."}`).join("\n")
+    : "- None";
+  const architectureHorizon = step.role === "architecture" ? `
+## Architecture horizon
+Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
+
+### Already completed
+${summarize(steps.filter((item) => item.status === "accepted"))}
+
+### Current architecture outcome
+- ${step.title}: ${step.description || "No outcome summary."}
+
+### Planned after this ticket
+${summarize(steps.filter((item) => item.id !== step.id && item.status !== "accepted"))}
+` : "";
   return `# Step run
 
 Plan: ${plan.title}
@@ -194,6 +226,7 @@ References: ${step.references.join(", ") || "none"}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
 Capability IDs: ${step.capabilityIds.join(", ") || "none"}
 Implementation delta IDs: ${step.deltaIds.join(", ") || "none"}
+${architectureHorizon}
 
 ## Relevant product context
 ${step.productContext || "No step-specific product context was assigned."}
@@ -353,6 +386,24 @@ export class PiHarness {
 
   async validateProfiles(profiles) {
     await Promise.all(Object.values(profiles).map((profile) => this.sessionOptions(profile)));
+  }
+
+  async runRepositoryChecks({ cwd, signal }) {
+    let packageJson;
+    try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
+    catch (error) {
+      if (error.code === "ENOENT") return { status: "skipped", command: null, summary: "No root package.json; no deterministic check was discovered.", output: "" };
+      return { status: "failed", command: "npm test", summary: "Root package.json could not be read.", output: error.message };
+    }
+    if (!packageJson.scripts?.test) return { status: "skipped", command: null, summary: "No root npm test script; no deterministic check was discovered.", output: "" };
+    const startedAt = Date.now();
+    try {
+      const { stdout, stderr } = await exec("npm", ["test"], { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CI: "1" } });
+      return { status: "passed", command: "npm test", summary: "npm test passed.", output: eventText([stdout, stderr].filter(Boolean).join("\n")), durationMs: Date.now() - startedAt };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { status: "failed", command: "npm test", summary: "npm test failed.", output: eventText([error.stdout, error.stderr, error.message].filter(Boolean).join("\n")), durationMs: Date.now() - startedAt };
+    }
   }
 
   supervisorTurn(work, key = "shared") {
@@ -624,7 +675,7 @@ Return ONLY JSON:
   }]
 }
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. For an explicit visual acceptance criterion, inspect the markup and CSS for concrete implementation; browser-default presentation does not satisfy a requirement for an intentional interface. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`));
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
       const parsed = jsonReply(rawOutput);
@@ -633,6 +684,46 @@ Every reported finding triggers an automatic correction round. Report concrete d
       unsubscribe();
       await unbindAbort();
       session.dispose();
+    }
+  }
+
+  async generateCommitMessage({ cwd, ticket, step, diff, runId, profile, signal }) {
+    const fallback = formatCommitMessage(null, step);
+    try {
+      const { createAgentSession, SessionManager } = await this.sdk();
+      const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "commits", step.id);
+      await mkdir(sessionDir, { recursive: true });
+      const { session } = await createAgentSession({ ...(await this.sessionOptions(profile)), cwd, tools: [], sessionManager: SessionManager.create(cwd, sessionDir) });
+      session.setSessionName(`commit:${step.id}`);
+      const unbindAbort = bindAbort(session, signal);
+      try {
+        signal?.throwIfAborted();
+        await session.prompt(stagePrompt(profile, `Write one Git commit message for this verified execution-plan step.
+
+Ticket: ${ticket.identifier} — ${ticket.title}
+Step: ${step.title}
+Outcome: ${step.description || step.title}
+Requirement IDs: ${step.requirementIds.join(", ") || "none"}
+Acceptance criteria:
+${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- Complete the approved step"}
+Changed files: ${diff.files.join(", ") || "none"}
+Diff summary: ${diff.stat || "No repository changes"}
+
+Return ONLY JSON:
+{
+  "subject": "conventional-commit subject under 72 characters",
+  "why": "one sentence explaining why this change exists",
+  "requirement": "requirement IDs and the observable requirement satisfied"
+}`));
+        signal?.throwIfAborted();
+        return formatCommitMessage(jsonReply(lastAssistantText(session)), step);
+      } finally {
+        await unbindAbort();
+        session.dispose();
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return fallback;
     }
   }
 

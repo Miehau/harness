@@ -14,7 +14,8 @@ A local-first visual workspace for shaping development tasks with Pi, generating
 - Explicit dependency artifact handoffs.
 - Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
 - Live run events and output.
-- Per-run Git tree diffs without modifying the user's index, plus one commit for each accepted step.
+- Per-run Git tree diffs without modifying the user's index, plus one requirement-linked commit for each accepted step.
+- Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
 - Screenshot references passed into the selected step's Pi session.
 - Local JSON persistence under `~/.agent-plan-workspace`.
 - Prompt-free local fixtures loaded from `feature.md` and `plan.json` into a fresh zero-state repository.
@@ -45,13 +46,13 @@ Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptanc
 3. Inspect or edit the plan JSON and every individual worker prompt.
 4. Run a single step or an entire parallel group. Parallel writers use isolated worktrees.
 5. Review the supervisor response, live output, exact diff, and produced artifact.
-6. Accept the step. Downstream dependencies unlock only after every required predecessor is accepted.
+6. Accept the step, or choose Auto when approving the graph. Manual runs pause for every verified batch; Auto accepts its commits and continues. Downstream dependencies unlock only after every required predecessor is accepted.
 
 ## Deliberate MVP limits
 
 - Pi is the only implemented harness.
 - Groups can contain steps, not nested groups.
-- Dependency-ready siblings run in isolated worktrees. Accepted patches are applied to the run worktree in review order; conflicts stop for human attention.
+- Dependency-ready siblings run in isolated worktrees. Accepted worktree commits are cherry-picked into the run worktree in review order; conflicts stop for human attention.
 - Built-in Pi tools respect the selected permission. Any third-party Pi extension still runs with the authority it defines, so review installed extensions before use.
 - Write scopes are verified against the resulting diff. They are not a filesystem sandbox.
 

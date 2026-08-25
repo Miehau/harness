@@ -47,6 +47,8 @@ test("zero-state fixture keeps task lifecycle verbs as separate dependent ticket
   const architecture = fixture.plan.nodes.find((node) => node.id === "foundation").children.find((step) => step.id === "architecture");
   assert.deepEqual([architecture.permission, architecture.writeScope], ["write", "docs"]);
   assert.ok(architecture.acceptanceCriteria.includes("docs/domain-architecture.md records the architecture for later workers"));
+  const createTasks = fixture.plan.nodes.find((node) => node.id === "parallel-build").children.find((step) => step.id === "create-tasks");
+  assert.ok(createTasks.acceptanceCriteria.some((criterion) => /intentional, responsive visual hierarchy/.test(criterion)));
   const lifecycle = fixture.plan.nodes.find((node) => node.id === "manage-tasks");
   assert.deepEqual(lifecycle.children.map((step) => [step.id, step.dependsOn]), [
     ["complete-tasks", ["parallel-build"]],

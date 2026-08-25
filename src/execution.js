@@ -1,7 +1,5 @@
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 
-export const MAX_REVIEW_ROUNDS = 3;
-
 export function markRunCancelled(run, at = new Date().toISOString()) {
   run.status = "cancelled";
   run.cancelledAt = at;
@@ -13,9 +11,10 @@ export function markRunCancelled(run, at = new Date().toISOString()) {
 }
 
 export function clearInactiveRuns(state, activeTicketIds) {
+  const running = new Set(["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"]);
   let cleared = 0;
   for (const id of Object.keys(state.ticketRuns)) {
-    if (activeTicketIds.has(id)) continue;
+    if (activeTicketIds.has(id) && running.has(state.ticketRuns[id].status)) continue;
     delete state.ticketRuns[id];
     cleared++;
   }

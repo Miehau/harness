@@ -32,7 +32,8 @@ export class JsonStore {
       this.state.stageProfiles = normalizeStageProfiles(this.state.stageProfiles);
       this.state.ticketRuns ||= {};
       for (const run of Object.values(this.state.ticketRuns)) {
-        run.stageProfiles ||= structuredClone(this.state.stageProfiles);
+        run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
+        run.auto ||= false;
         run.activeRuns = {};
         for (const node of run.plan?.nodes || []) {
           for (const step of node.type === "group" ? node.children : [node]) {

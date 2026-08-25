@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventTimeline, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, parseDiff, preferredStepId, runHeartbeat } from "../public/ui-model.js";
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [
@@ -35,7 +35,7 @@ test("tool activity preserves event order and pairs details", () => {
     { type: "tool_end", callId: "2", tool: "read", result: "source", at: "4" }
   ]);
   assert.deepEqual(timeline.map((item) => item.tool), ["bash", "read"]);
-  assert.match(timeline[0].title, /npm test/);
+  assert.equal(timeline[0].title, "Command · npm test");
   assert.equal(timeline[0].key, "1");
   assert.equal(timeline[0].result, "32 tests pass");
   assert.equal(eventTimeline([{ type: "tool_start", tool: "edit", at: "1" }, { type: "tool_end", tool: "edit", at: "2" }])[0].hasDetails, false);
@@ -43,7 +43,7 @@ test("tool activity preserves event order and pairs details", () => {
 
 test("activity gives persisted reasoning and worker reports meaningful titles and details", () => {
   const timeline = eventTimeline([
-    { type: "reasoning_summary", detail: "Mapped task lifecycle invariants", at: "1" },
+    { type: "reasoning_summary", detail: "**Mapped** task lifecycle invariants", at: "1" },
     { type: "reasoning_summary", detail: "Checked automation ownership", at: "2" },
     { type: "tool_start", callId: "report", tool: "worker_report", args: '{"status":"completed","summary":"Derived domain architecture","artifact":"# Architecture"}', at: "3" },
     { type: "tool_end", callId: "report", tool: "worker_report", result: "Reported completed", at: "4" }
@@ -54,6 +54,21 @@ test("activity gives persisted reasoning and worker reports meaningful titles an
     "Worker report · completed — Derived domain architecture"
   ]);
   assert.equal(timeline[2].hasDetails, true);
+});
+
+test("activity groups tool calls under the latest reasoning focus", () => {
+  const groups = eventGroups([
+    { type: "reasoning_summary", detail: "Inspect the current UI", at: "2026-08-25T10:00:00.000Z" },
+    { type: "tool_start", callId: "read", tool: "read", args: '{"path":"public/app.js"}', at: "2026-08-25T10:00:01.000Z" },
+    { type: "tool_end", callId: "read", tool: "read", result: "source", at: "2026-08-25T10:00:03.000Z" },
+    { type: "reasoning_summary", detail: "Verify the focused redesign", at: "2026-08-25T10:00:04.000Z" },
+    { type: "tool_start", callId: "test", tool: "bash", args: '{"command":"npm test"}', at: "2026-08-25T10:00:05.000Z" }
+  ]);
+  assert.deepEqual(groups.map((group) => [group.title, group.items.map((item) => item.key)]), [
+    ["Inspect the current UI", ["read"]],
+    ["Verify the focused redesign", ["test"]]
+  ]);
+  assert.equal(groups[1].items[0].status, "running");
 });
 
 test("formats JSON output including nested serialized JSON", () => {

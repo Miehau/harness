@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, MAX_REVIEW_ROUNDS, nextRunnableBatch, nextRunnableStep } from "../src/execution.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -28,14 +28,13 @@ test("dependency-ready siblings in one group form a parallel batch", () => {
   assert.deepEqual(nextRunnableBatch(plan), []);
 });
 
-test("final review keeps unique actionable findings and has a bounded loop", () => {
+test("final review keeps every unique actionable finding", () => {
   const duplicate = { severity: "blocking", claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] };
   const findings = actionableFindings([
     { findings: [duplicate, { severity: "warning", claim: "Missing browser coverage", evidence: [{ file: "test/app.test.ts", line: 2 }] }] },
     { findings: [duplicate, { severity: "blocking", claim: "No regression test", evidence: [{ file: "test/a.test.ts", line: 1 }] }] }
   ]);
   assert.equal(findings.length, 3);
-  assert.equal(MAX_REVIEW_ROUNDS, 3);
 });
 
 test("cancelling a run stops every active step and preserves it for resume", () => {
@@ -52,8 +51,8 @@ test("cancelling a run stops every active step and preserves it for resume", () 
 });
 
 test("clearing the queue preserves active runs", () => {
-  const state = { selectedTicketId: "old", ticketRuns: { old: {}, active: {} } };
-  assert.equal(clearInactiveRuns(state, new Set(["active"])), 1);
+  const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" } } };
+  assert.equal(clearInactiveRuns(state, new Set(["stale", "active"])), 2);
   assert.deepEqual(Object.keys(state.ticketRuns), ["active"]);
   assert.equal(state.selectedTicketId, null);
 });

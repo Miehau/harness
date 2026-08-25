@@ -46,7 +46,7 @@ export function preferredStepId(plan, currentId) {
 }
 
 function firstLine(value, fallback = "") {
-  return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 120) || fallback;
+  return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim().replace(/[*`]/g, "").slice(0, 120) || fallback;
 }
 
 function toolTitle(tool, args) {
@@ -57,8 +57,9 @@ function toolTitle(tool, args) {
     const summary = firstLine(values.summary);
     return `Worker report${status}${summary ? ` — ${summary}` : ""}`;
   }
-  const subject = values.command || values.cmd || values.path || values.pattern || values.query;
-  return subject ? `${tool} · ${String(subject).split("\n")[0]}` : tool;
+  const label = ({ bash: "Command", read: "Read", grep: "Search", find: "Find", ls: "List", edit: "Edit", write: "Write" })[tool] || tool.replaceAll("_", " ");
+  const subject = firstLine(values.command || values.cmd || values.path || values.pattern || values.query);
+  return subject ? `${label} · ${subject}` : label;
 }
 
 function expandJson(value) {
@@ -100,6 +101,32 @@ export function eventTimeline(events = []) {
     if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${firstLine(event.detail, "summary")}`, at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
+}
+
+export function eventGroups(events = []) {
+  const groups = [];
+  let current;
+  for (const item of eventTimeline(events)) {
+    if (item.key.startsWith("reasoning:")) {
+      const title = item.title.replace(/^Reasoning · /, "");
+      if (current && current.items.length === 0) {
+        current.title = title;
+        current.note = [current.note, item.result].filter(Boolean).join("\n\n");
+      } else {
+        current = { key: item.key, title, note: item.result || "", at: item.at, endedAt: item.at, items: [], isError: false };
+        groups.push(current);
+      }
+      continue;
+    }
+    if (!current) {
+      current = { key: `activity:${groups.length}`, title: item.title, note: "", at: item.at, endedAt: item.at, items: [], isError: false };
+      groups.push(current);
+    }
+    current.items.push(item);
+    current.endedAt = item.at || current.endedAt;
+    current.isError ||= item.isError;
+  }
+  return groups;
 }
 
 export function runHeartbeat(active, live = {}, now = Date.now()) {

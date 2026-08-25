@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyPatch, diffTrees, isGitRepository, snapshotTree } from "../src/git.js";
-import { commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
+import { isGitRepository, snapshotTree } from "../src/git.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, repairZeroStateWorkspace } from "../src/worktrees.js";
 
-test("isolated sibling worktrees produce patches that integrate into the zero-state run", async () => {
+test("isolated sibling worktrees produce commits that integrate into the zero-state run", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-"));
   const cwd = join(dataDir, "working-directory");
   const ticket = { id: "local-test", identifier: "LOCAL-test" };
@@ -25,10 +25,7 @@ test("isolated sibling worktrees produce patches that integrate into the zero-st
     await writeFile(join(worktrees.feature.cwd, "src", "app.js"), "export const ready = true;\n");
     await mkdir(join(worktrees.ci.cwd, ".github", "workflows"), { recursive: true });
     await writeFile(join(worktrees.ci.cwd, ".github", "workflows", "ci.yml"), "name: CI\n");
-    for (const cwd of [worktrees.feature.cwd, worktrees.ci.cwd]) {
-      const after = await snapshotTree(cwd);
-      await applyPatch(workspace.cwd, (await diffTrees(cwd, base, after)).patch);
-    }
+    for (const cwd of [worktrees.feature.cwd, worktrees.ci.cwd]) await cherryPickCommit(workspace.cwd, await commitWorkspace(cwd, "feat: verified slice\n\nWhy: The ticket needs it.\nRequirement: REQ-test"));
     assert.equal(await readFile(join(workspace.cwd, "src", "app.js"), "utf8"), "export const ready = true;\n");
     assert.equal(await readFile(join(workspace.cwd, ".github", "workflows", "ci.yml"), "utf8"), "name: CI\n");
   } finally {

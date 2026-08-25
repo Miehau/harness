@@ -24,5 +24,7 @@ Build a complete local task-board web application from an empty Git repository.
 ## Quality bar
 
 - The primary workflow is usable with a keyboard and has visible labels.
+- The interface is deliberately designed rather than browser-default: use a coherent visual hierarchy, spacing, controls, feedback, and task-list states that make the board feel like a small finished product.
+- The layout remains usable on narrow screens, and focus, hover, validation, empty, active, and completed states are visibly distinct where applicable.
 - Empty task submission is rejected without losing the current task list.
 - Later tickets preserve every previously accepted behavior.
