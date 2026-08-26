@@ -4,7 +4,7 @@ import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 
 function initialState(cwd) {
   return {
-    version: 4,
+    version: 5,
     revision: 0,
     workspace: { cwd },
     settings: normalizeSettings(),
@@ -17,10 +17,15 @@ function initialState(cwd) {
 
 export function normalizeSettings(value = {}) {
   const maxConcurrentTickets = Number(value.maxConcurrentTickets);
+  const pollIntervalSeconds = Number(value.pollIntervalSeconds);
   return {
     maxConcurrentTickets: Number.isInteger(maxConcurrentTickets) && maxConcurrentTickets >= 1 && maxConcurrentTickets <= 32
       ? maxConcurrentTickets
-      : 2
+      : 2,
+    projectMode: value.projectMode === "automatic" ? "automatic" : "manual",
+    pollIntervalSeconds: Number.isInteger(pollIntervalSeconds) && pollIntervalSeconds >= 15 && pollIntervalSeconds <= 3600
+      ? pollIntervalSeconds
+      : 60
   };
 }
 
@@ -36,8 +41,8 @@ export class JsonStore {
     await mkdir(dirname(this.file), { recursive: true });
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
-      if ([3, 4].includes(saved.version)) this.state = saved;
-      this.state.version = 4;
+      if ([3, 4, 5].includes(saved.version)) this.state = saved;
+      this.state.version = 5;
       this.state.workspace ||= { cwd: this.cwd };
       this.state.workspace.cwd ||= this.cwd;
       this.state.settings = normalizeSettings(this.state.settings);

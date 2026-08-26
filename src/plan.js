@@ -93,6 +93,45 @@ export function normalizePlan(raw) {
   };
 }
 
+function rawNodes(raw) {
+  return (Array.isArray(raw?.nodes) ? raw.nodes : []).flatMap((node) =>
+    node?.type === "group" || Array.isArray(node?.children) ? [node, ...(node.children || [])] : [node]
+  );
+}
+
+export function normalizeEditedPlan(raw) {
+  if (!raw || typeof raw !== "object") throw new Error("Plan must be an object");
+  const ids = rawNodes(raw).map((node) => String(node?.id || "").trim()).filter(Boolean);
+  const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (duplicate) throw new Error(`Plan contains duplicate id “${duplicate}”`);
+
+  const known = new Set(ids);
+  for (const node of rawNodes(raw)) {
+    if (node?.type === "group" || Array.isArray(node?.children)) continue;
+    const id = String(node?.id || "").trim();
+    for (const dependency of strings(node?.dependsOn)) {
+      if (dependency === id) throw new Error(`Step “${id}” cannot depend on itself`);
+      if (!known.has(dependency)) throw new Error(`Step “${id || node?.title || "untitled"}” has unknown dependency “${dependency}”`);
+    }
+  }
+
+  const plan = normalizePlan(raw);
+  const groups = new Map(plan.nodes.filter((node) => node.type === "group").map((group) => [group.id, group.children.map((step) => step.id)]));
+  const edges = new Map(flattenSteps(plan).map((step) => [step.id, step.dependsOn.flatMap((id) => groups.get(id) || [id])]));
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (id) => {
+    if (visiting.has(id)) throw new Error(`Plan dependency cycle includes “${id}”`);
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of edges.get(id) || []) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of edges.keys()) visit(id);
+  return plan;
+}
+
 export function flattenSteps(plan) {
   return (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
 }

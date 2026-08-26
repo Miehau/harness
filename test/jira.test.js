@@ -57,3 +57,22 @@ test("extracts readable text from Atlassian document format", () => {
     { type: "paragraph", content: [{ type: "text", text: "Two" }] }
   ] }).trim(), "One\nTwo");
 });
+
+test("uses Jira comment documents and workflow transitions", async () => {
+  const requests = [];
+  const client = new JiraClient({
+    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", projectKey: "APP",
+    fetchImpl: async (url, input = {}) => {
+      requests.push({ url, input });
+      if (url.includes("/comment") && input.method === "POST") return { ok: true, json: async () => ({ id: "c1", created: "now", body: JSON.parse(input.body).body }) };
+      if (url.includes("/comment")) return { ok: true, json: async () => ({ comments: [{ id: "c2", created: "later", body: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Answer: yes" }] }] } }] }) };
+      if (input.method === "POST") return { ok: true, text: async () => "" };
+      return { ok: true, json: async () => ({ transitions: [{ id: "21", to: { name: "In Progress", statusCategory: { key: "indeterminate" } } }] }) };
+    }
+  });
+  const ticket = { identifier: "APP-1", provider: "jira" };
+  assert.equal((await client.comment(ticket, "Question")).id, "c1");
+  assert.match((await client.comments(ticket))[0].body, /Answer: yes/);
+  assert.equal((await client.transition(ticket, "in_progress")).name, "In Progress");
+  assert.deepEqual(JSON.parse(requests.at(-1).input.body), { transition: { id: "21" } });
+});

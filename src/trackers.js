@@ -5,6 +5,16 @@ export class TrackerHub {
 
   get configured() { return this.clients.some((client) => client.configured); }
 
+  clientFor(ticket) {
+    const client = this.clients.find((candidate) => candidate.provider === ticket?.provider);
+    if (!client?.configured) throw new Error(`${ticket?.provider || "Ticket"} tracker is not configured`);
+    return client;
+  }
+
+  comment(ticket, body) { return this.clientFor(ticket).comment(ticket, body); }
+  comments(ticket) { return this.clientFor(ticket).comments(ticket); }
+  transition(ticket, state) { return this.clientFor(ticket).transition(ticket, state); }
+
   async tickets() {
     const results = await Promise.allSettled(this.clients.map((client) => client.tickets()));
     const sources = results.map((result, index) => {

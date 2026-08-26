@@ -35,6 +35,17 @@ function jiraError(payload, status) {
   return details.join("; ") || `Jira returned ${status}`;
 }
 
+function adfDocument(body) {
+  return {
+    type: "doc",
+    version: 1,
+    content: String(body).split(/\n{2,}/).map((paragraph) => ({
+      type: "paragraph",
+      content: [{ type: "text", text: paragraph.trim() || " " }]
+    }))
+  };
+}
+
 export class JiraClient {
   constructor({
     baseUrl = process.env.JIRA_BASE_URL,
@@ -63,7 +74,9 @@ export class JiraClient {
         ...options.headers
       }
     });
-    const payload = await response.json();
+    const payload = response.text
+      ? await response.text().then((text) => text ? JSON.parse(text) : null)
+      : await response.json();
     if (!response.ok) throw new Error(jiraError(payload, response.status));
     return payload;
   }
@@ -117,6 +130,31 @@ export class JiraClient {
           labels: (issue.fields?.labels || []).map((name) => ({ id: name, name }))
         }))
     };
+  }
+
+  async comment(ticket, body) {
+    const result = await this.request(`/rest/api/3/issue/${encodeURIComponent(ticket.identifier)}/comment`, {
+      method: "POST",
+      body: JSON.stringify({ body: adfDocument(body) })
+    });
+    return { id: result.id, body: adfText(result.body), createdAt: result.created };
+  }
+
+  async comments(ticket) {
+    const result = await this.request(`/rest/api/3/issue/${encodeURIComponent(ticket.identifier)}/comment?maxResults=100&orderBy=created`);
+    return (result.comments || []).map((comment) => ({ id: comment.id, body: adfText(comment.body), createdAt: comment.created }));
+  }
+
+  async transition(ticket, target) {
+    const result = await this.request(`/rest/api/3/issue/${encodeURIComponent(ticket.identifier)}/transitions`);
+    const category = target === "done" ? "done" : target === "in_progress" ? "indeterminate" : "new";
+    const transition = (result.transitions || []).find((candidate) => candidate.to?.statusCategory?.key === category);
+    if (!transition) throw new Error(`Jira workflow has no ${target} transition`);
+    await this.request(`/rest/api/3/issue/${encodeURIComponent(ticket.identifier)}/transitions`, {
+      method: "POST",
+      body: JSON.stringify({ transition: { id: transition.id } })
+    });
+    return transition.to;
   }
 }
 

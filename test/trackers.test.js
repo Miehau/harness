@@ -13,3 +13,18 @@ test("combines configured tracker tickets without hiding a healthy source failur
   assert.equal(result.viewer.name, "linear: Lin");
   assert.equal(result.sources[1].error, "Jira unavailable");
 });
+
+test("routes lifecycle writes to the ticket provider", async () => {
+  const calls = [];
+  const hub = new TrackerHub([{ provider: "jira", configured: true,
+    tickets: async () => ({ configured: true, tickets: [] }),
+    comment: async (_ticket, body) => calls.push(["comment", body]),
+    comments: async () => [{ body: "Answer: yes" }],
+    transition: async (_ticket, state) => calls.push(["transition", state])
+  }]);
+  const ticket = { provider: "jira" };
+  await hub.comment(ticket, "hello");
+  assert.equal((await hub.comments(ticket))[0].body, "Answer: yes");
+  await hub.transition(ticket, "done");
+  assert.deepEqual(calls, [["comment", "hello"], ["transition", "done"]]);
+});

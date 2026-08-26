@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { blockingReasons, dependencyArtifacts, findNode, groupStatus, normalizePlan } from "../src/plan.js";
+import { blockingReasons, dependencyArtifacts, findNode, groupStatus, normalizeEditedPlan, normalizePlan } from "../src/plan.js";
 
 function planFixture() {
   return normalizePlan({
@@ -76,4 +76,13 @@ test("steps retain selective product context references", () => {
 test("steps retain an explicit visual-evidence gate", () => {
   const plan = normalizePlan({ nodes: [{ title: "Polish board", requiresVisualEvidence: true }] });
   assert.equal(plan.nodes[0].requiresVisualEvidence, true);
+});
+
+test("edited plans reject unknown dependencies, duplicate ids, and cycles", () => {
+  assert.throws(() => normalizeEditedPlan({ nodes: [{ id: "a", title: "A", dependsOn: ["missing"] }] }), /unknown dependency/);
+  assert.throws(() => normalizeEditedPlan({ nodes: [{ id: "a", title: "A" }, { id: "a", title: "Again" }] }), /duplicate id/);
+  assert.throws(() => normalizeEditedPlan({ nodes: [
+    { id: "a", title: "A", dependsOn: ["b"] },
+    { id: "b", title: "B", dependsOn: ["a"] }
+  ] }), /dependency cycle/);
 });

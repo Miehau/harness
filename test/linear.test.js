@@ -50,3 +50,23 @@ test("hides tickets with unresolved blockers", async () => {
   });
   assert.deepEqual((await client.tickets()).tickets.map(({ id }) => id), ["ready", "unblocked"]);
 });
+
+test("writes comments, reads answers, and moves an issue through its workflow", async () => {
+  const requests = [];
+  const client = new LinearClient({
+    apiKey: "secret",
+    fetchImpl: async (_url, input) => {
+      const request = JSON.parse(input.body);
+      requests.push(request);
+      if (request.query.includes("AgentPlanComments")) return { ok: true, json: async () => ({ data: { issue: { comments: { nodes: [{ id: "answer", body: "Answer: yes" }] } } } }) };
+      if (request.query.includes("AgentPlanComment")) return { ok: true, json: async () => ({ data: { commentCreate: { success: true, comment: { id: "c1", body: request.variables.body } } } }) };
+      if (request.query.includes("AgentPlanStates")) return { ok: true, json: async () => ({ data: { workflowStates: { nodes: [{ id: "started", name: "In Progress", type: "started" }] } } }) };
+      return { ok: true, json: async () => ({ data: { issueUpdate: { success: true } } }) };
+    }
+  });
+  const ticket = { id: "issue", provider: "linear", team: { id: "team" } };
+  assert.equal((await client.comment(ticket, "Question")).id, "c1");
+  assert.equal((await client.comments(ticket))[0].body, "Answer: yes");
+  assert.equal((await client.transition(ticket, "in_progress")).id, "started");
+  assert.deepEqual(requests.at(-1).variables, { issueId: "issue", stateId: "started" });
+});
