@@ -3,7 +3,7 @@ import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
-import { isGitRepository } from "./git.js";
+import { isGitRepository, snapshotTree } from "./git.js";
 
 const exec = promisify(execFile);
 
@@ -154,9 +154,17 @@ export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId }
     let branchExists = true;
     try { await git(sourceCwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]); }
     catch { branchExists = false; }
+    const baselineTree = await snapshotTree(sourceCwd);
+    let head = null;
+    let headTree = null;
+    try {
+      head = await git(sourceCwd, ["rev-parse", "HEAD"]);
+      headTree = await git(sourceCwd, ["rev-parse", "HEAD^{tree}"]);
+    } catch {}
+    const start = head && baselineTree === headTree ? head : await git(sourceCwd, ["commit-tree", baselineTree, ...(head ? ["-p", head] : []), "-m", "Ticket workspace snapshot"], { env: identity });
     await git(sourceCwd, branchExists
       ? ["worktree", "add", worktree, branch]
-      : ["worktree", "add", "-b", branch, worktree, "HEAD"]);
+      : ["worktree", "add", "-b", branch, worktree, start]);
   }
   return { sourceCwd, cwd: worktree, branch };
 }

@@ -34,3 +34,18 @@ test("requests backlog, todo, and in-progress workflow types", async () => {
   await client.tickets();
   assert.match(request.query, /\["backlog", "unstarted", "started"\]/);
 });
+
+test("hides tickets with unresolved blockers", async () => {
+  const ticket = (id, inverseRelations = { nodes: [] }) => ({ id, identifier: `MM-${id}`, title: id, labels: { nodes: [] }, inverseRelations });
+  const blocks = (state) => ({ nodes: [{ type: "blocks", issue: { state: { type: state } } }] });
+  const client = new LinearClient({
+    apiKey: "secret",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ data: { viewer: { id: "me" }, issues: { nodes: [
+        ticket("ready"), ticket("blocked", blocks("started")), ticket("unblocked", blocks("completed"))
+      ] } } })
+    })
+  });
+  assert.deepEqual((await client.tickets()).tickets.map(({ id }) => id), ["ready", "unblocked"]);
+});

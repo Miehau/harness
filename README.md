@@ -15,6 +15,8 @@ A local-first visual workspace for shaping development tasks with Pi, generating
 - Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
 - Live run events and output.
 - Per-run Git tree diffs without modifying the user's index, plus one requirement-linked commit for each accepted step.
+- Dirty-worktree snapshot initialization and scope-enforced worker write tools with no arbitrary shell escape hatch.
+- One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
 - Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
 - Screenshot references passed into the selected step's Pi session.
 - Local JSON persistence under `~/.agent-plan-workspace`.
@@ -48,13 +50,16 @@ Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptanc
 5. Review the supervisor response, live output, exact diff, and produced artifact.
 6. Accept the step, or choose Auto when approving the graph. Manual runs pause for every verified batch; Auto accepts its commits and continues. Downstream dependencies unlock only after every required predecessor is accepted.
 
+Architecture owns `.agent-plan/verify.mjs`. The framework always calls `node .agent-plan/verify.mjs` when present, falling back to a root `npm test` only for older repositories. Visual steps must write browser screenshots to `AGENT_PLAN_EVIDENCE_DIR`; missing evidence fails the gate and captured images are attached to independent review.
+
 ## Deliberate MVP limits
 
 - Pi is the only implemented harness.
 - Groups can contain steps, not nested groups.
 - Dependency-ready siblings run in isolated worktrees. Accepted worktree commits are cherry-picked into the run worktree in review order; conflicts stop for human attention.
+- Existing tracked and untracked files seed the ticket worktree without touching the user's index. Final integration waits until the target repository is clean.
 - Built-in Pi tools respect the selected permission. Any third-party Pi extension still runs with the authority it defines, so review installed extensions before use.
-- Write scopes are verified against the resulting diff. They are not a filesystem sandbox.
+- Write workers intentionally have no arbitrary shell tool; their `edit` and `write` tools reject paths outside the approved scope before mutation.
 
 ## Checks
 

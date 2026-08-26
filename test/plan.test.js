@@ -72,3 +72,8 @@ test("steps retain selective product context references", () => {
   assert.deepEqual(plan.nodes[0].deltaIds, ["DELTA-3"]);
   assert.equal(plan.nodes[0].productContext, "Only this behavior.");
 });
+
+test("steps retain an explicit visual-evidence gate", () => {
+  const plan = normalizePlan({ nodes: [{ title: "Polish board", requiresVisualEvidence: true }] });
+  assert.equal(plan.nodes[0].requiresVisualEvidence, true);
+});

@@ -517,7 +517,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Running repository checks" });
-          checks = await harness.runRepositoryChecks({ cwd, signal });
+          checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: currentStep.requiresVisualEvidence });
         }
         signal?.throwIfAborted();
         const afterTree = await snapshotTree(cwd);
@@ -569,6 +569,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
             design, diff, output: result.output, runId: latest.runId, round,
+            images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
             onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
             signal
@@ -710,7 +711,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
           setStage(run, "handoff", "active", "Verifying merged result");
         });
         activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
-        const checks = await harness.runRepositoryChecks({ cwd, signal });
+        const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
         if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
         await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
       }
@@ -766,7 +767,8 @@ async function finalReviewLoop(ticketId, signal) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
     activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal });
+    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+    const reviewImages = await harness.evidenceImages(checks.evidence);
     signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);
     const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
@@ -776,6 +778,7 @@ async function finalReviewLoop(ticketId, signal) {
       plan: current.plan,
       artifacts: current.artifacts,
       diff,
+      images: reviewImages,
       role,
       round,
       runId: current.runId,
@@ -852,7 +855,7 @@ async function finalReviewLoop(ticketId, signal) {
     const beforeFix = await snapshotTree(current.workspace.cwd);
     const result = await harness.runStep({
       cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
-      images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
+      images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
       profile: current.stageProfiles.implementation,
       onEvent: (event) => activity.onEvent(event, "review fixer"),
       signal

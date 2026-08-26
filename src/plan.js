@@ -44,6 +44,7 @@ function normalizeStep(raw, used, defaultHarness) {
     productContext: String(raw.productContext || "").trim(),
     expectedArtifacts: strings(raw.expectedArtifacts),
     acceptanceCriteria: strings(raw.acceptanceCriteria),
+    requiresVisualEvidence: raw.requiresVisualEvidence === true,
     dependsOn: strings(raw.dependsOn),
     required: raw.required !== false,
     status: stepStatuses.has(raw.status) ? raw.status : "ready",

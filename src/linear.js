@@ -13,6 +13,12 @@ const query = `query AgentPlanTickets {
       team { id key name }
       assignee { id name email }
       labels { nodes { id name color } }
+      inverseRelations {
+        nodes {
+          type
+          issue { id identifier title state { name type } }
+        }
+      }
     }
   }
 }`;
@@ -39,10 +45,11 @@ export class LinearClient {
     return {
       configured: true,
       viewer: payload.data.viewer,
-      tickets: payload.data.issues.nodes.map((ticket) => ({
-        ...ticket,
-        labels: ticket.labels?.nodes || []
-      }))
+      tickets: payload.data.issues.nodes
+        .filter((ticket) => !(ticket.inverseRelations?.nodes || []).some((relation) =>
+          relation.type === "blocks" && !["completed", "canceled"].includes(relation.issue?.state?.type)
+        ))
+        .map((ticket) => ({ ...ticket, labels: ticket.labels?.nodes || [] }))
     };
   }
 }

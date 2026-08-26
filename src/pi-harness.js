@@ -1,14 +1,16 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
+import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { assertScopedWrite } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
 import { flattenSteps, normalizePlan } from "./plan.js";
 import { stagePrompt } from "./profiles.js";
 
 const exec = promisify(execFile);
+const verificationEntry = ".agent-plan/verify.mjs";
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -60,6 +62,7 @@ STEP:
   "productContext": "only the concise PRD and implementation-delta context relevant to this step",
   "expectedArtifacts": ["named outputs"],
   "acceptanceCriteria": ["observable criterion"],
+  "requiresVisualEvidence": false,
   "dependsOn": ["step-or-group-id"],
   "required": true
 }
@@ -73,7 +76,8 @@ Rules:
 - Decompose implementation into a ticket-specific sequence of coherent, human-reviewable behavior slices. Each write step must leave the worktree valid, have a focused diff, and be independently understandable and verifiable.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - For frontend/backend work, establish one shared contract first, run independently testable conformance implementations as parallel siblings, then add a serial integration step depending on that group. Put cross-branch integration tests in the integration step and continue depth-first with the next vertical outcome.
-- Treat the repository's root npm test script as the deterministic gate when present. Every isolated step must keep its own applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
+- Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
+- Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
 - Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
 - Every step must have a useful prompt, expected artifact, and acceptance criterion.`;
@@ -242,6 +246,8 @@ export function stepContext({ plan, step, artifacts }) {
 ## Architecture horizon
 Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
 
+Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. Do not add a dependency only for this wrapper.
+
 ### Already completed
 ${summarize(steps.filter((item) => item.status === "accepted"))}
 
@@ -285,7 +291,41 @@ ${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise ru
 ## Acceptance criteria
 ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 
-Work only within the stated permission and write scope. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
+
+Work only within the stated permission and write scope. Write workers intentionally have no arbitrary shell; the framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+}
+
+export function ensureVerificationContractStep(plan, contractExists) {
+  if (contractExists || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(verificationEntry)))) return plan;
+  const id = findContractId(plan);
+  const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
+  const nodes = structuredClone(plan.nodes);
+  for (const node of nodes) for (const step of node.type === "group" ? node.children : [node]) step.dependsOn = [...new Set([id, ...(step.dependsOn || [])])];
+  return normalizePlan({ ...plan, nodes: [{
+    id,
+    type: "step",
+    role: "architecture",
+    title: "Establish the repository verification contract",
+    description: `Create ${verificationEntry} as the single dependency-free entry point for this repository's tests, lint, type checks, builds${visual ? ", and browser screenshot capture" : ""}.`,
+    prompt: `Inspect the existing project commands and create ${verificationEntry} with Node standard-library process calls. Propagate every failed command. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
+    permission: "write",
+    writeScope: ".agent-plan",
+    acceptanceCriteria: [`node ${verificationEntry} runs the repository's relevant deterministic checks from one stable entry point`],
+    expectedArtifacts: [verificationEntry],
+    dependsOn: []
+  }, ...nodes] });
+}
+
+function outsideContractScope(writeScope) {
+  return !String(writeScope || "").split(",").map((item) => item.trim()).some((item) => item === ".agent-plan" || item === ".agent-plan/**" || item === "*" || item === "**");
+}
+
+function findContractId(plan) {
+  const ids = new Set(flattenSteps(plan).map((step) => step.id));
+  let id = "verification-contract";
+  for (let suffix = 2; ids.has(id); suffix++) id = `verification-contract-${suffix}`;
+  return id;
 }
 
 function checkpointTool(capture) {
@@ -363,6 +403,24 @@ function workerReportTool(capture) {
   });
 }
 
+export function scopedWorkerTools(cwd, writeScope) {
+  const check = (path) => assertScopedWrite(cwd, path, writeScope);
+  return [
+    createEditToolDefinition(cwd, { operations: {
+      access: async (path) => access(await check(path)),
+      readFile,
+      writeFile: async (path, content) => writeFile(await check(path), content)
+    } }),
+    createWriteToolDefinition(cwd, { operations: {
+      mkdir: async (path) => {
+        if (resolve(path) !== resolve(cwd)) await check(path);
+        await mkdir(path, { recursive: true });
+      },
+      writeFile: async (path, content) => writeFile(await check(path), content)
+    } })
+  ];
+}
+
 export class PiHarness {
   constructor({ dataDir, publish }) {
     this.dataDir = dataDir;
@@ -436,22 +494,55 @@ export class PiHarness {
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  async runRepositoryChecks({ cwd, signal }) {
-    let packageJson;
-    try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
+  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false }) {
+    let command = `node ${verificationEntry}`;
+    let args = [join(cwd, verificationEntry)];
+    try { await access(args[0]); }
     catch (error) {
-      if (error.code === "ENOENT") return { status: "skipped", command: null, summary: "No root package.json; no deterministic check was discovered.", output: "" };
-      return { status: "failed", command: "npm test", summary: "Root package.json could not be read.", output: error.message };
+      if (error.code !== "ENOENT") return { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
+      let packageJson;
+      try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
+      catch (packageError) {
+        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
+      }
+      if (!packageJson.scripts?.test) {
+        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
+      }
+      command = "npm test";
+      args = ["test"];
     }
-    if (!packageJson.scripts?.test) return { status: "skipped", command: null, summary: "No root npm test script; no deterministic check was discovered.", output: "" };
+    let evidenceDir = null;
+    if (requireVisualEvidence) {
+      const evidenceRoot = join(this.dataDir, "visual-evidence");
+      await mkdir(evidenceRoot, { recursive: true });
+      evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
+    }
     const startedAt = Date.now();
     try {
-      const { stdout, stderr } = await exec("npm", ["test"], { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CI: "1" } });
-      return { status: "passed", command: "npm test", summary: "npm test passed.", output: eventText([stdout, stderr].filter(Boolean).join("\n")), durationMs: Date.now() - startedAt };
+      const executable = command === "npm test" ? "npm" : process.execPath;
+      const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CI: "1", ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) } });
+      const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
+        .filter((entry) => entry.isFile() && /\.(?:png|jpe?g|webp)$/i.test(entry.name))
+        .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }));
+      if (requireVisualEvidence && !evidence.length) return { status: "failed", command, summary: `${command} passed but produced no visual evidence.`, output: eventText([stdout, stderr].filter(Boolean).join("\n")), evidence, durationMs: Date.now() - startedAt };
+      return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output: eventText([stdout, stderr].filter(Boolean).join("\n")), evidence, durationMs: Date.now() - startedAt };
     } catch (error) {
       if (signal?.aborted) throw error;
-      return { status: "failed", command: "npm test", summary: "npm test failed.", output: eventText([error.stdout, error.stderr, error.message].filter(Boolean).join("\n")), durationMs: Date.now() - startedAt };
+      return { status: "failed", command, summary: `${command} failed.`, output: eventText([error.stdout, error.stderr, error.message].filter(Boolean).join("\n")), evidence: [], durationMs: Date.now() - startedAt };
     }
+  }
+
+  async evidenceImages(evidence = []) {
+    return Promise.all(evidence.map(async ({ path }) => ({
+      type: "image",
+      source: {
+        type: "base64",
+        mediaType: path.toLowerCase().endsWith(".png") ? "image/png" : path.toLowerCase().endsWith(".webp") ? "image/webp" : "image/jpeg",
+        data: (await readFile(path)).toString("base64")
+      }
+    })));
   }
 
   supervisorTurn(work, key = "shared") {
@@ -554,7 +645,13 @@ export class PiHarness {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
       const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
       const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
-      return { plan: normalizePlan(parsed), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
+      let contractExists = true;
+      try { await access(join(cwd, verificationEntry)); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        contractExists = false;
+      }
+      return { plan: ensureVerificationContractStep(normalizePlan(parsed), contractExists), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);
   }
 
@@ -682,14 +779,14 @@ If user input or approval is required, call workflow_checkpoint and include step
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, runId, round, profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, images = [], runId, round, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: ["read", "grep", "find", "ls", "bash"],
+      tools: ["read", "grep", "find", "ls"],
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
@@ -724,6 +821,7 @@ Write scope: ${step.writeScope || "none"}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
+Visual evidence required: ${step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 
 Worker artifact:
 ${output}
@@ -745,7 +843,7 @@ Return ONLY JSON:
   }]
 }
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, or diff evidence. For an explicit visual acceptance criterion, inspect the markup and CSS for concrete implementation; browser-default presentation does not satisfy a requirement for an intentional interface. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
       const parsed = jsonReply(rawOutput);
@@ -832,7 +930,7 @@ ${diff.patch || "No textual diff"}`);
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -883,7 +981,7 @@ Return ONLY JSON:
   }]
 }
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository or diff evidence. Do not modify files.`));
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`), { images });
       signal?.throwIfAborted();
       const parsed = jsonReply(lastAssistantText(session));
       return {
@@ -914,15 +1012,16 @@ Every reported finding triggers an automatic correction round. Report concrete d
       manager = SessionManager.create(cwd, sessionDir);
     }
     const tools = step.permission === "write"
-      ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
+      ? ["read", "grep", "find", "ls", "edit", "write"]
       : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
     let report = null;
     tools.push("worker_report");
+    const scopedTools = step.permission === "write" ? scopedWorkerTools(cwd, step.writeScope) : [];
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
       tools,
-      customTools: [workerReportTool((value) => { report = value; })],
+      customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
       sessionManager: manager
     });
     session.setSessionName(step.agentId);

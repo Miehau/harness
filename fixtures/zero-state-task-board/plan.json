@@ -14,13 +14,14 @@
           "title": "Derive the domain architecture",
           "description": "Model the product domain before proposing repository structure. Identify important nouns, verbs, state transitions, invariants, cohesive units that change together, external boundaries, and dependency direction. Then map every downstream ticket, including automation, onto the smallest sound architecture. Record the approved architecture in docs/domain-architecture.md so later workers can inspect the same durable design.",
           "permission": "write",
-          "writeScope": "docs",
+          "writeScope": "docs,.agent-plan",
           "acceptanceCriteria": [
             "The artifact defines a consistent domain language, behaviors, states, and invariants",
             "Boundaries are justified by responsibilities that change together rather than technical file types",
             "Domain logic is independent from UI, persistence, server, and automation adapters",
             "Every downstream ticket and runtime constraint has an explicit architectural owner",
             "docs/domain-architecture.md records the architecture for later workers",
+            ".agent-plan/verify.mjs is the repository's dependency-free verification entry point",
             "The resulting repository structure contains no speculative abstractions"
           ],
           "dependsOn": []
@@ -61,6 +62,7 @@
             "The task-creation interface has intentional, responsive visual hierarchy and states rather than browser-default styling",
             "npm test covers the new behavior and succeeds"
           ],
+          "requiresVisualEvidence": true,
           "dependsOn": ["foundation"]
         },
         {

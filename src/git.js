@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -25,7 +25,8 @@ export async function snapshotTree(cwd) {
   const index = join(directory, "index");
   const env = { ...process.env, GIT_INDEX_FILE: index };
   try {
-    await git(cwd, ["read-tree", "HEAD"], { env });
+    try { await git(cwd, ["read-tree", "HEAD"], { env }); }
+    catch { await git(cwd, ["read-tree", "--empty"], { env }); }
     await git(cwd, ["add", "-A"], { env });
     return await git(cwd, ["write-tree"], { env });
   } finally {
@@ -64,9 +65,31 @@ export async function applyPatch(cwd, patch) {
 }
 
 export function outsideWriteScope(files, writeScope) {
-  if (!writeScope || writeScope === "**" || writeScope === "*") return [];
-  const prefixes = writeScope.split(",")
+  if (writeScope === "**" || writeScope === "*") return [];
+  const prefixes = String(writeScope || "").split(",")
     .map((scope) => scope.trim().replace(/\/\*\*$/, "").replace(/\/\*$/, "").replace(/^\.\//, ""))
     .filter(Boolean);
   return files.filter((file) => !prefixes.some((prefix) => file === prefix || file.startsWith(`${prefix}/`)));
+}
+
+export async function assertScopedWrite(cwd, inputPath, writeScope) {
+  const root = resolve(cwd);
+  const absolute = resolve(root, String(inputPath || "").replace(/^@/, ""));
+  const repositoryPath = relative(root, absolute).split(sep).join("/");
+  if (!repositoryPath || isAbsolute(repositoryPath) || repositoryPath === ".." || repositoryPath.startsWith("../") || outsideWriteScope([repositoryPath], writeScope).length) {
+    throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
+  }
+
+  let existing = absolute;
+  while (true) {
+    try { await access(existing); break; }
+    catch (error) {
+      if (error.code !== "ENOENT" || existing === root) throw error;
+      existing = dirname(existing);
+    }
+  }
+  const [realRoot, realExisting] = await Promise.all([realpath(root), realpath(existing)]);
+  const escaped = relative(realRoot, realExisting);
+  if (isAbsolute(escaped) || escaped === ".." || escaped.startsWith(`..${sep}`)) throw new Error(`Write blocked through a symlink outside the workspace: ${inputPath}`);
+  return absolute;
 }

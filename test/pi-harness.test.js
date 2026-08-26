@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatCommitMessage, formatTicketHorizon, PiHarness, stepContext } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, PiHarness, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 
@@ -60,6 +60,18 @@ test("architecture workers see completed and future plan outcomes", () => {
   assert.match(prompt, /Already completed[\s\S]*Create skeleton: Launch the empty app\./);
   assert.match(prompt, /Current architecture outcome[\s\S]*Design the domain: Define boundaries for the full board\./);
   assert.match(prompt, /Planned after this ticket[\s\S]*Persist tasks: Survive browser reloads\./);
+  assert.match(prompt, /node \.agent-plan\/verify\.mjs/);
+});
+
+test("existing projects get one architecture-owned verification contract before feature work", () => {
+  const plan = ensureVerificationContractStep(normalizePlan({ nodes: [
+    { id: "feature", title: "Build feature", permission: "write", writeScope: "src,test", requiresVisualEvidence: true }
+  ] }), false);
+  assert.equal(plan.nodes[0].role, "architecture");
+  assert.equal(plan.nodes[0].writeScope, ".agent-plan");
+  assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
+  assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
+  assert.equal(ensureVerificationContractStep(plan, true), plan);
 });
 
 test("synthetic review steps can omit optional planning arrays", () => {
@@ -78,6 +90,45 @@ test("runs the repository's root npm test script as a deterministic gate", async
     assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "failed");
   } finally {
     await rm(root, { recursive: true });
+  }
+});
+
+test("prefers the repository verification contract and requires visual evidence when declared", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-contract-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "pi-contract-state-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
+      writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
+    `);
+    const harness = new PiHarness({ dataDir });
+    const result = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(result.status, "passed");
+    assert.equal(result.command, "node .agent-plan/verify.mjs");
+    assert.equal(result.evidence.length, 1);
+    assert.equal((await harness.evidenceImages(result.evidence))[0].source.mediaType, "image/png");
+
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// no screenshot\n");
+    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true })).status, "failed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("hard worker tools allow scoped writes and block sibling paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-"));
+  try {
+    await mkdir(join(root, "allowed"));
+    const write = scopedWorkerTools(root, "allowed").find((tool) => tool.name === "write");
+    await write.execute("allowed", { path: "allowed/result.txt", content: "ok" });
+    assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
+    await assert.rejects(write.execute("blocked", { path: "blocked.txt", content: "nope" }), /Write blocked outside scope/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

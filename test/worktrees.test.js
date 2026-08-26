@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { isGitRepository, snapshotTree } from "../src/git.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
+
+const exec = promisify(execFile);
 
 test("isolated sibling worktrees produce commits that integrate into the zero-state run", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-"));
@@ -62,6 +66,40 @@ test("integrates a completed ticket branch into the opened working directory", a
     assert.match(result.commit, /^[a-f0-9]{40}$/);
     assert.equal(verified, true);
     assert.equal(await readFile(join(cwd, "integrated.txt"), "utf8"), "ready\n");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("seeds a ticket worktree from uncommitted source files without touching the source index", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-dirty-source-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    await writeFile(join(cwd, "tracked.txt"), "committed\n");
+    await commitWorkspace(cwd, "feat: tracked baseline");
+    await writeFile(join(cwd, "tracked.txt"), "dirty tracked\n");
+    await writeFile(join(cwd, "dirty.txt"), "not committed\n");
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-change" }, runId: "run-1" });
+    assert.equal(await readFile(join(workspace.cwd, "tracked.txt"), "utf8"), "dirty tracked\n");
+    assert.equal(await readFile(join(workspace.cwd, "dirty.txt"), "utf8"), "not committed\n");
+    assert.equal(await readFile(join(cwd, "tracked.txt"), "utf8"), "dirty tracked\n");
+    assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd })).stdout, "");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("initializes a ticket worktree from an existing project before its first commit", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-unborn-source-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await mkdir(cwd);
+    await exec("git", ["init", "-q", "-b", "main"], { cwd });
+    await writeFile(join(cwd, "app.js"), "export const ready = true;\n");
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-first" }, runId: "run-1" });
+    assert.equal(await readFile(join(workspace.cwd, "app.js"), "utf8"), "export const ready = true;\n");
+    await assert.rejects(exec("git", ["rev-parse", "HEAD"], { cwd }));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
