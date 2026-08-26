@@ -8,13 +8,14 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
+import { admissionCandidates, occupiedTicketIds } from "./admission.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
 import { JiraClient } from "./jira.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
 import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
-import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
+import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizeEditedPlan, normalizePlan } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
@@ -45,9 +46,17 @@ const activeTickets = new Map();
 const activeMerges = new Set();
 const mergeQueues = new Map();
 let ticketCache = new Map();
+let trackerRefresh = null;
+let pollTimer = null;
 
 function executionCapacity(state = store.read()) {
   return normalizeSettings(state.settings).maxConcurrentTickets;
+}
+
+function ensureTicketCapacity(ticketId, state = store.read()) {
+  const occupied = occupiedTicketIds(state);
+  const capacity = executionCapacity(state);
+  if (!occupied.has(ticketId) && occupied.size >= capacity) throw new Error(`${capacity} ticket slots are occupied, including approval checkpoints`);
 }
 
 function publish(event) {
@@ -179,6 +188,155 @@ async function body(request) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
+function trackerBacked(ticket) { return ["linear", "jira"].includes(ticket?.provider); }
+
+async function trackerAction(ticketId, key, action) {
+  const run = ticketRun(store.read(), ticketId);
+  if (!trackerBacked(run.ticket)) return null;
+  if (run.trackerEvents?.[key]) return run.trackerEvents[key].result;
+  const result = await action(run.ticket);
+  await update((state) => {
+    const current = ticketRun(state, ticketId);
+    current.trackerEvents ||= {};
+    current.trackerEvents[key] = { at: new Date().toISOString(), result: result || null };
+    current.trackerSyncError = null;
+  });
+  return result;
+}
+
+function checkpointMessage(run, checkpoint) {
+  const questions = (checkpoint.questions || []).map((question, index) => `${index + 1}. ${question}`).join("\n");
+  return [
+    `[agent-plan-question:${checkpoint.id}]`,
+    checkpoint.title,
+    questions || checkpoint.prompt,
+    "Reply in this ticket with `Answer: ...`. The first such reply continues the run. You can also answer in the local dashboard."
+  ].filter(Boolean).join("\n\n");
+}
+
+async function mirrorCheckpoint(ticketId) {
+  const run = ticketRun(store.read(), ticketId);
+  const checkpoint = run.checkpoint;
+  if (!checkpoint || checkpoint.trackerQuestion || !trackerBacked(run.ticket)) return;
+  try {
+    const comment = await trackers.comment(run.ticket, checkpointMessage(run, checkpoint));
+    await update((state) => {
+      const current = ticketRun(state, ticketId);
+      if (current.checkpoint?.id === checkpoint.id) current.checkpoint.trackerQuestion = {
+        commentId: comment?.id, createdAt: comment?.createdAt || new Date().toISOString()
+      };
+      current.trackerSyncError = null;
+    });
+  } catch (error) {
+    await update((state) => {
+      const current = state.ticketRuns[ticketId];
+      if (current) current.trackerSyncError = `Could not mirror checkpoint: ${error.message}`;
+    });
+  }
+}
+
+async function beginTicket(ticket, { automaticAdmission = false } = {}) {
+  if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
+  ensureTicketCapacity(ticket.id);
+  await update((state) => {
+    state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
+    if (!state.ticketRuns[ticket.id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = {
+      id: ticket.id,
+      runId: randomUUID(),
+      ticket,
+      automaticAdmission,
+      status: "preparing",
+      workspace: null,
+      stageProfiles: structuredClone(state.stageProfiles),
+      stages: initialStages(),
+      checkpoint: null,
+      plan: null,
+      artifacts: [],
+      activeRuns: {},
+      trackerEvents: {},
+      sessionFile: null,
+      auto: false,
+      lastError: null,
+      createdAt: new Date().toISOString()
+    };
+  });
+  prepareTicket(ticket.id).catch(() => {});
+  return ticket.id;
+}
+
+async function acceptCheckpointAnswer(ticketId, answers, source) {
+  const before = ticketRun(store.read(), ticketId);
+  const checkpoint = before.checkpoint;
+  if (!checkpoint || checkpoint.answerAcceptedAt) return false;
+  await update((state) => {
+    const current = ticketRun(state, ticketId);
+    if (current.checkpoint?.id === checkpoint.id) Object.assign(current.checkpoint, {
+      answerAcceptedAt: new Date().toISOString(), answerSource: source
+    });
+  });
+  if (source === "dashboard" && trackerBacked(before.ticket)) {
+    trackers.comment(before.ticket, `Answer (dashboard):\n\n${answers || "Approved without changes."}\n\n[agent-plan-answer:${checkpoint.id}]`).catch(async (error) => {
+      await update((state) => { if (state.ticketRuns[ticketId]) state.ticketRuns[ticketId].trackerSyncError = `Could not mirror dashboard answer: ${error.message}`; });
+    });
+  }
+  if (checkpoint.kind === "requirements_review") continueAfterRequirements(ticketId, answers).catch(() => {});
+  else startTicketWork(ticketId, (signal) => designTicket(ticketId, answers, signal)).catch(() => {});
+  return true;
+}
+
+async function syncTrackerAnswers() {
+  const unanswered = Object.values(store.read().ticketRuns).filter((run) =>
+    trackerBacked(run.ticket) && run.checkpoint && !run.checkpoint.trackerQuestion && ["requirements_review", "technical_input", "needs_input"].includes(run.checkpoint.kind)
+  );
+  await Promise.all(unanswered.map((run) => mirrorCheckpoint(run.id)));
+  const runs = Object.values(store.read().ticketRuns).filter((run) =>
+    trackerBacked(run.ticket) && run.checkpoint?.trackerQuestion && !run.checkpoint.answerAcceptedAt && ["requirements_review", "technical_input", "needs_input"].includes(run.checkpoint.kind)
+  );
+  await Promise.all(runs.map(async (run) => {
+    try {
+      const checkpoint = run.checkpoint;
+      const comments = await trackers.comments(run.ticket);
+      const answer = comments
+        .filter((comment) => comment.id !== checkpoint.trackerQuestion.commentId)
+        .filter((comment) => !checkpoint.trackerQuestion.createdAt || !comment.createdAt || Date.parse(comment.createdAt) >= Date.parse(checkpoint.trackerQuestion.createdAt))
+        .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0))
+        .map((comment) => String(comment.body || "").match(/^\s*Answer\s*:\s*([\s\S]+)/i)?.[1]?.trim())
+        .find(Boolean);
+      if (answer) await acceptCheckpointAnswer(run.id, answer, "tracker");
+    } catch (error) {
+      await update((state) => { if (state.ticketRuns[run.id]) state.ticketRuns[run.id].trackerSyncError = `Could not read tracker answers: ${error.message}`; });
+    }
+  }));
+}
+
+async function admitAutomaticTickets(tickets) {
+  const state = store.read();
+  if (state.settings.projectMode !== "automatic") return [];
+  const admitted = [];
+  for (const ticket of admissionCandidates(tickets, state, executionCapacity(state))) admitted.push(await beginTicket(ticket, { automaticAdmission: true }));
+  return admitted;
+}
+
+async function refreshTrackers({ admit = true } = {}) {
+  if (trackerRefresh) return trackerRefresh;
+  trackerRefresh = (async () => {
+    const result = await trackers.tickets();
+    ticketCache = new Map(result.tickets.map((ticket) => [ticket.id, ticket]));
+    await syncTrackerAnswers();
+    if (admit) await admitAutomaticTickets(result.tickets);
+    publish({ type: "tickets", ticketSources: result });
+    return result;
+  })().finally(() => { trackerRefresh = null; });
+  return trackerRefresh;
+}
+
+function scheduleTrackerPolling() {
+  clearInterval(pollTimer);
+  const interval = normalizeSettings(store.read().settings).pollIntervalSeconds * 1000;
+  pollTimer = setInterval(() => refreshTrackers().catch(() => {}), interval);
+  pollTimer.unref();
+}
+
 async function pickDirectory() {
   if (process.platform !== "darwin") throw new Error("Native repository selection currently requires macOS");
   try {
@@ -278,6 +436,7 @@ async function prepareTicket(ticketId) {
         prompt: clarified.artifact, questions: clarified.questions, createdAt: new Date().toISOString()
       };
     });
+    await mirrorCheckpoint(ticketId);
   } catch (error) {
     if (signal.aborted) return;
     await update((state) => {
@@ -330,6 +489,7 @@ async function continueAfterRequirements(ticketId, answers) {
           prompt: clarified.artifact, questions: clarified.questions, createdAt: new Date().toISOString()
         };
       });
+      await mirrorCheckpoint(ticketId);
       return;
     }
     activity = captureStageActivity(ticketId, "explore", run.runId);
@@ -404,6 +564,7 @@ async function continueAfterRequirements(ticketId, answers) {
         };
       }
     });
+    if (explored.questions.length) await mirrorCheckpoint(ticketId);
     if (!explored.questions.length) await designTicket(ticketId, "No technical exceptions were raised.", signal);
   } catch (error) {
     if (signal.aborted) return;
@@ -981,10 +1142,37 @@ async function advanceTicket(ticketId, signal) {
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) await finalReviewLoop(ticketId, signal);
 }
 
+function approvedPlanComment(run) {
+  const steps = flattenSteps(run.plan).map((step, index) => `${index + 1}. ${step.title}${step.dependsOn?.length ? ` (after ${step.dependsOn.join(", ")})` : ""}`);
+  return [
+    "Implementation plan approved in Agent Plan Workspace.",
+    run.plan.summary,
+    ...steps,
+    "The ticket snapshot is now frozen for this run. Progress and blockers will be posted here."
+  ].filter(Boolean).join("\n\n");
+}
+
+async function ensureTrackerExecutionStarted(ticketId) {
+  const run = ticketRun(store.read(), ticketId);
+  if (!trackerBacked(run.ticket)) return;
+  await trackerAction(ticketId, "execution_started", (ticket) => trackers.transition(ticket, "in_progress"));
+  await trackerAction(ticketId, "approved_plan", (ticket) => trackers.comment(ticket, approvedPlanComment(ticketRun(store.read(), ticketId))));
+}
+
+async function mirrorExecutionBlocker(ticketId, error) {
+  const run = store.read().ticketRuns[ticketId];
+  if (!trackerBacked(run?.ticket)) return;
+  const digest = createHash("sha256").update(error.message).digest("hex").slice(0, 12);
+  await trackerAction(ticketId, `blocker:${digest}`, (ticket) => trackers.comment(ticket,
+    `Agent Plan Workspace paused this run and needs attention.\n\n${error.message}\n\nResume from the local dashboard after resolving the blocker.`
+  )).catch(() => {});
+}
+
 async function runTicket(ticketId) {
   return startTicketWork(ticketId, async (signal) => {
     try {
       signal.throwIfAborted();
+      await ensureTrackerExecutionStarted(ticketId);
       await ensureLocalWorkspace(ticketId);
       await update((state) => {
         const run = ticketRun(state, ticketId);
@@ -1004,6 +1192,7 @@ async function runTicket(ticketId) {
         const activeStage = run.stages.find((stage) => stage.status === "active");
         if (activeStage) { activeStage.status = "blocked"; activeStage.summary = error.message; }
       });
+      await mirrorExecutionBlocker(ticketId, error);
     }
   });
 }
@@ -1038,18 +1227,21 @@ async function api(request, response, url) {
     const profiles = normalizeStageProfiles(input.profiles);
     const requestedCapacity = Number(input.settings?.maxConcurrentTickets);
     if (!Number.isInteger(requestedCapacity) || requestedCapacity < 1 || requestedCapacity > 32) throw new Error("Maximum concurrent tickets must be an integer from 1 to 32");
+    if (!["manual", "automatic"].includes(input.settings?.projectMode)) throw new Error("Project mode must be manual or automatic");
+    const requestedPollInterval = Number(input.settings?.pollIntervalSeconds);
+    if (!Number.isInteger(requestedPollInterval) || requestedPollInterval < 15 || requestedPollInterval > 3600) throw new Error("Polling interval must be an integer from 15 to 3600 seconds");
     const settings = normalizeSettings(input.settings);
     await harness.validateProfiles(profiles);
     const state = await update((draft) => {
       draft.stageProfiles = profiles;
       draft.settings = settings;
     });
+    scheduleTrackerPolling();
+    if (settings.projectMode === "automatic") refreshTrackers().catch(() => {});
     return json(response, 200, state);
   }
   if (request.method === "GET" && url.pathname === "/api/tickets") {
-    const result = await trackers.tickets();
-    ticketCache = new Map(result.tickets.map((ticket) => [ticket.id, ticket]));
-    return json(response, 200, result);
+    return json(response, 200, await refreshTrackers());
   }
   if (request.method === "GET" && url.pathname === "/api/events") {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -1069,38 +1261,28 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/local/load") {
     const input = await body(request);
+    ensureTicketCapacity("new-local-run");
     return json(response, 201, await loadLocalRun(String(input.path || "fixtures/zero-state-task-board")));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/tickets/start") {
+    const input = await body(request);
+    const ids = [...new Set(Array.isArray(input.ticketIds) ? input.ticketIds.map(String) : [])];
+    if (!ids.length) throw new Error("Select at least one ticket");
+    const tickets = ids.map((id) => ticketCache.get(id));
+    if (tickets.some((ticket) => !ticket)) throw new Error("Refresh the ticket sources before starting the selection");
+    const available = executionCapacity() - occupiedTicketIds(store.read()).size;
+    if (tickets.length > available) throw new Error(`Only ${Math.max(0, available)} ticket slots are available`);
+    for (const ticket of tickets) await beginTicket(ticket);
+    return json(response, 202, { accepted: true, ticketIds: ids });
   }
 
   const start = url.pathname.match(/^\/api\/tickets\/([^/]+)\/start$/);
   if (request.method === "POST" && start) {
     const id = decodeURIComponent(start[1]);
-    const capacity = executionCapacity();
-    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already active; wait for one to reach a checkpoint`);
     const input = await body(request);
     const ticket = ticketCache.get(id) || input.ticket;
-    if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
-    await update((state) => {
-      state.selectedTicketId = id;
-      if (!state.ticketRuns[id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[id].status)) state.ticketRuns[id] = {
-        id,
-        runId: randomUUID(),
-        ticket,
-        status: "preparing",
-        workspace: null,
-        stageProfiles: structuredClone(state.stageProfiles),
-        stages: initialStages(),
-        checkpoint: null,
-        plan: null,
-        artifacts: [],
-        activeRuns: {},
-        sessionFile: null,
-        auto: false,
-        lastError: null,
-        createdAt: new Date().toISOString()
-      };
-    });
-    prepareTicket(id).catch(() => {});
+    await beginTicket(ticket);
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -1117,8 +1299,7 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
-    const capacity = executionCapacity();
-    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already active; wait for one to reach a checkpoint`);
+    ensureTicketCapacity(id);
     if (run.status === "cancelled") await update((state) => {
       const current = ticketRun(state, id);
       current.status = "interrupted";
@@ -1146,24 +1327,45 @@ async function api(request, response, url) {
     const answers = String(input.answers || "");
     if (run.checkpoint?.kind === "requirements_review") {
       if (!answers.trim() && run.checkpoint.questions?.length) throw new Error("Answer the open requirements questions before approval");
-      continueAfterRequirements(id, answers).catch(() => {});
+      await acceptCheckpointAnswer(id, answers, "dashboard");
     }
-    else startTicketWork(id, (signal) => designTicket(id, answers, signal)).catch(() => {});
+    else if (["technical_input", "needs_input"].includes(run.checkpoint?.kind)) {
+      if (!answers.trim()) throw new Error("Answer the open technical questions before continuing");
+      await acceptCheckpointAnswer(id, answers, "dashboard");
+    }
+    else throw new Error("This ticket has no open question");
     return json(response, 202, { accepted: true, ticketId: id });
+  }
+
+  const editPlan = url.pathname.match(/^\/api\/tickets\/([^/]+)\/plan$/);
+  if (request.method === "POST" && editPlan) {
+    const id = decodeURIComponent(editPlan[1]);
+    const run = ticketRun(store.read(), id);
+    if (!planApprovalPending(run)) throw new Error("Plans can only be edited at the approval checkpoint");
+    const input = await body(request);
+    const plan = normalizeEditedPlan(input.plan);
+    const state = await update((draft) => {
+      const current = ticketRun(draft, id);
+      current.plan = plan;
+      current.planEditedAt = new Date().toISOString();
+    });
+    return json(response, 200, state);
   }
 
   const approve = url.pathname.match(/^\/api\/tickets\/([^/]+)\/approve$/);
   if (request.method === "POST" && approve) {
     const id = decodeURIComponent(approve[1]);
-    const capacity = executionCapacity();
-    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already running`);
+    ensureTicketCapacity(id);
     const run = ticketRun(store.read(), id);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
     const input = await body(request);
     await update((state) => {
       const current = ticketRun(state, id);
-      current.auto = Boolean(input.auto);
+      current.auto = input.auto === undefined ? Boolean(current.automaticAdmission) : Boolean(input.auto);
       current.status = "awaiting_approval";
+      current.ticketSnapshot = structuredClone(current.ticket);
+      current.trackerRevision = current.ticket.updatedAt || null;
+      current.planApprovedAt = new Date().toISOString();
       current.lastError = null;
     });
     runTicket(id).catch(() => {});
@@ -1238,9 +1440,11 @@ const server = createServer(async (request, response) => {
   catch (error) { if (!response.headersSent) json(response, 400, { error: error.message }); else response.end(); }
 });
 
+scheduleTrackerPolling();
 server.listen(port, host, () => {
   console.log(`Agent Plan Workspace: http://${host}:${port}`);
   console.log(`Repository: ${store.read().workspace.cwd}`);
   console.log(`Trackers: ${trackers.configured ? "configured" : "set Linear or Jira environment variables"}`);
   console.log(`Data: ${dataDir}`);
+  refreshTrackers().catch((error) => console.error(`Tracker refresh failed: ${error.message}`));
 });

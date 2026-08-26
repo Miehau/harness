@@ -23,6 +23,7 @@
         <div><span class="eyebrow">Local or tracker</span><h1>Work queue</h1></div>
         <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh tickets" title="Refresh tickets">↻</button></div>
       </header>
+      <div class="ticket-batch-actions"><button id="start-selected" class="button primary" type="button" disabled>Start selected</button></div>
       <form id="local-load" class="source-connect local-load">
         <strong>Load local fixture</strong>
         <p>Read feature.md and plan.json from the open repository.</p>
@@ -64,10 +65,10 @@
 </dialog>
 
 <dialog id="plan-dialog">
-  <form method="dialog" class="dialog-shell">
+  <form id="plan-form" class="dialog-shell">
     <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></header>
     <textarea id="plan-json" spellcheck="false"></textarea>
-    <footer><span id="plan-json-error" class="error-text"></span><button class="button" value="cancel">Close</button></footer>
+    <footer><span id="plan-json-error" class="error-text"></span><div class="plan-actions"><button class="button" type="button" data-close-plan>Cancel</button><button class="button primary" type="submit">Save plan</button></div></footer>
   </form>
 </dialog>
 
@@ -75,6 +76,8 @@
   <form id="profiles-form" class="dialog-shell">
     <header><div><span class="eyebrow">Framework configuration</span><h2>Stage profiles</h2></div><button id="close-profiles" class="icon-button" type="button" aria-label="Close">×</button></header>
     <p class="profiles-note">Models, reasoning, persistent agent instructions, and local execution capacity. Changes apply to new runs.</p>
+    <label class="dialog-field">Project mode<select id="project-mode" name="projectMode"><option value="manual">Manual intake</option><option value="automatic">Automatic ready-ticket intake</option></select></label>
+    <label class="dialog-field">Tracker polling interval (seconds)<input id="poll-interval-seconds" name="pollIntervalSeconds" type="number" min="15" max="3600" required></label>
     <label class="dialog-field">Maximum concurrent tickets<input id="max-concurrent-tickets" name="maxConcurrentTickets" type="number" min="1" max="32" required></label>
     <div id="profile-fields" class="profile-fields"></div>
     <footer><span class="profiles-provider">Provider: openai-codex</span><button class="button primary" type="submit">Save profiles</button></footer>

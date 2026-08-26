@@ -70,6 +70,11 @@ input:focus, select:focus, textarea:focus { border-color: #6e9fee; box-shadow: 0
 .ticket-filter { flex: none; padding: 10px 12px 6px; }
 .ticket-filter input { width: 100%; padding: 8px 10px; font-size: 12px; }
 .ticket-list { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 5px 9px 12px; }
+.ticket-batch-actions { padding: 0 10px 8px; }
+.ticket-batch-actions .button { width: 100%; }
+.ticket-entry { display: flex; align-items: flex-start; gap: 7px; }
+.ticket-entry .ticket-card { min-width: 0; flex: 1; }
+.ticket-check { margin-top: 12px; accent-color: #8b7cf6; }
 .ticket-group { margin-bottom: 15px; }
 .ticket-group > header { display: flex; align-items: center; justify-content: space-between; padding: 7px 5px; color: #90979f; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .07em; text-transform: uppercase; }
 .ticket-group > header b { border-radius: 99px; padding: 2px 6px; background: #25292d; font-size: 9px; }
@@ -835,6 +840,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 @media (max-width: 720px) {
   .topbar { height: auto; min-height: 52px; }
   .layout.ticket-layout { grid-template-columns: 1fr; padding: 5px; }
+  .ticket-pane { display: flex; }
   .queue-toggle { display: none; }
   .stage-overview { grid-template-columns: 1fr; }
 }
@@ -890,7 +896,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 
 #workspace-dialog, #free-text-dialog { width: min(680px, calc(100vw - 32px)); }
 .dialog-field { display: grid; gap: 7px; margin: 14px; color: #9299a1; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .07em; text-transform: uppercase; }
-.dialog-field input, .dialog-field textarea { width: 100%; padding: 10px 11px; color: #e6e9ef; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5; text-transform: none; }
+.dialog-field input, .dialog-field textarea, .dialog-field select { width: 100%; padding: 10px 11px; color: #e6e9ef; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5; text-transform: none; }
 .dialog-field textarea { min-height: 180px; margin: 0; resize: vertical; }
 .directory-picker { display: flex; gap: 8px; }
 .directory-picker input { min-width: 0; flex: 1; }
@@ -935,4 +941,13 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 
 @media (max-width: 1000px) {
   .layout.ticket-layout { --queue-width: 270px; }
+}
+
+@media (max-width: 720px) {
+  .layout.ticket-layout {
+    --queue-width: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(300px, 44%) minmax(0, 56%);
+  }
+  .ticket-pane { display: flex; }
 }

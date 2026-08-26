@@ -17,6 +17,7 @@ let activeTab = ["run", "diff", "artifacts", "ticket", "prompt"].includes(savedV
 let toastTimer;
 let clearTimer;
 let clearArmed = false;
+const selectedTicketIds = new Set();
 const liveRuns = new Map();
 const liveStages = new Map();
 const sessionTraces = new Map();
@@ -53,6 +54,8 @@ function renderProfiles() {
   }).join("");
   $("#profile-fields").innerHTML = cards;
   $("#max-concurrent-tickets").value = state.settings?.maxConcurrentTickets || 2;
+  $("#project-mode").value = state.settings?.projectMode || "manual";
+  $("#poll-interval-seconds").value = state.settings?.pollIntervalSeconds || 60;
 }
 
 function runFor(id = state?.selectedTicketId) { return id ? state?.ticketRuns?.[id] || null : null; }
@@ -90,12 +93,13 @@ function ticketCard(ticket) {
   const run = runFor(ticket.id);
   const selected = ticket.id === state.selectedTicketId ? "selected" : "";
   const priority = ticket.priority ? `<span>P${ticket.priority}</span>` : "";
-  return `<button class="ticket-card ${selected}" type="button" data-ticket="${escapeHtml(ticket.id)}">
+  const selectable = !run && ["linear", "jira"].includes(ticket.provider);
+  return `<div class="ticket-entry">${selectable ? `<input class="ticket-check" type="checkbox" data-check-ticket="${escapeHtml(ticket.id)}" aria-label="Select ${escapeHtml(ticket.identifier)}" ${selectedTicketIds.has(ticket.id) ? "checked" : ""}>` : ""}<button class="ticket-card ${selected}" type="button" data-ticket="${escapeHtml(ticket.id)}">
     <span class="ticket-row"><b>${escapeHtml(ticket.identifier)}</b>${priority}<i class="tracker-state-dot" style="--state-color:${escapeHtml(ticket.state.color || "#777")}"></i></span>
     <strong>${escapeHtml(ticket.title)}</strong>
     <span class="ticket-meta">${escapeHtml(ticket.state.name)} · ${escapeHtml(ticket.team?.name || ticket.provider || "Tracker")} · ${escapeHtml(statusLabel(run))}</span>
     ${run ? `<span class="ticket-progress"><i style="width:${runProgress(run)}%"></i></span>` : ""}
-  </button>`;
+  </button></div>`;
 }
 
 function runProgress(run) {
@@ -123,8 +127,12 @@ function renderTickets() {
   }).join("");
   const localHtml = `<section class="ticket-group"><header><span>Local runs</span><b>${local.length}</b></header>${local.map(ticketCard).join("") || `<div class="ticket-empty">Load feature.md and plan.json to start.</div>`}</section>`;
   $("#ticket-list").innerHTML = localHtml + (ticketSources.configured ? trackerHtml : `<div class="ticket-empty large">Configure Linear or Jira environment variables to load active tickets.</div>`);
-  const active = Object.values(state.ticketRuns || {}).filter((run) => ["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status)).length;
-  $("#run-capacity").textContent = `${active} / ${state.settings?.maxConcurrentTickets || 2} active`;
+  for (const id of [...selectedTicketIds]) if (!ticketSources.tickets.some((ticket) => ticket.id === id && !runFor(id))) selectedTicketIds.delete(id);
+  const selectedStart = $("#start-selected");
+  selectedStart.disabled = selectedTicketIds.size === 0;
+  selectedStart.textContent = selectedTicketIds.size ? `Start ${selectedTicketIds.size} selected` : "Start selected";
+  const occupied = Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)).length;
+  $("#run-capacity").textContent = `${occupied} / ${state.settings?.maxConcurrentTickets || 2} occupied · ${state.settings?.projectMode || "manual"}`;
 }
 
 function stagesHtml(run) {
@@ -151,7 +159,7 @@ function checkpointHtml(run) {
   if (checkpoint.kind === "review_blocked") {
     return `<div class="checkpoint"><div class="checkpoint-icon">!</div><div class="checkpoint-copy"><span class="eyebrow">Final review blocked</span><strong>${escapeHtml(checkpoint.title)}</strong><p>${checkpoint.findings?.length || 0} blocking finding${checkpoint.findings?.length === 1 ? "" : "s"} require human attention.</p></div></div>`;
   }
-  return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-approve-ticket="${escapeHtml(run.id)}">Run manually</button><button class="button success" type="button" data-auto-ticket="${escapeHtml(run.id)}">Auto run graph</button></div></div>`;
+  return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" data-approve-ticket="${escapeHtml(run.id)}">Run manually</button><button class="button success" type="button" data-auto-ticket="${escapeHtml(run.id)}">Auto run graph</button></div></div>`;
 }
 
 function renderHeader() {
@@ -168,7 +176,7 @@ function renderHeader() {
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p></div><div class="plan-actions">${action}${reviewAction}</div></div>${stagesHtml(run)}${checkpointHtml(run)}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p></div><div class="plan-actions">${action}${reviewAction}</div></div>${stagesHtml(run)}${checkpointHtml(run)}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function stepHtml(step) {
@@ -438,6 +446,24 @@ document.addEventListener("click", async (event) => {
     finally { clearButton.disabled = false; clearButton.textContent = "Clear queue"; }
     return;
   }
+  const ticketCheck = event.target.closest("[data-check-ticket]");
+  if (ticketCheck) {
+    if (ticketCheck.checked) selectedTicketIds.add(ticketCheck.dataset.checkTicket);
+    else selectedTicketIds.delete(ticketCheck.dataset.checkTicket);
+    renderTickets();
+    return;
+  }
+  const startSelected = event.target.closest("#start-selected");
+  if (startSelected) {
+    const ticketIds = [...selectedTicketIds];
+    try {
+      await api("/api/tickets/start", { method: "POST", body: JSON.stringify({ ticketIds }) });
+      selectedTicketIds.clear();
+      renderTickets();
+      notify(`${ticketIds.length} ticket workflow${ticketIds.length === 1 ? "" : "s"} started`);
+    } catch (error) { notify(error.message); }
+    return;
+  }
   const ticketButton = event.target.closest("[data-ticket]");
   if (ticketButton) {
     state = await api(`/api/tickets/${encodeURIComponent(ticketButton.dataset.ticket)}/select`, { method: "POST", body: "{}" });
@@ -474,6 +500,13 @@ document.addEventListener("click", async (event) => {
     catch (error) { notify(error.message); }
     return;
   }
+  const editPlan = event.target.closest("[data-edit-plan]");
+  if (editPlan) {
+    $("#plan-json").value = JSON.stringify(runFor(editPlan.dataset.editPlan)?.plan, null, 2);
+    $("#plan-json-error").textContent = "";
+    $("#plan-dialog").showModal();
+    return;
+  }
   const approveContext = event.target.closest("[data-approve-context]");
   if (approveContext) {
     try { await api(`/api/tickets/${encodeURIComponent(approveContext.dataset.approveContext)}/context/approve`, { method: "POST", body: "{}" }); notify("Context approved; added to the merge queue"); }
@@ -502,6 +535,7 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("#free-text-open")) $("#free-text-dialog").showModal();
   if (event.target.closest("#profile-settings")) { renderProfiles(); $("#profiles-dialog").showModal(); }
   if (event.target.closest("#close-profiles")) $("#profiles-dialog").close();
+  if (event.target.closest("[data-close-plan]")) $("#plan-dialog").close();
   const queueToggle = event.target.closest("#toggle-ticket-pane");
   if (queueToggle) {
     const collapsed = $(".ticket-layout").classList.toggle("sidebar-collapsed");
@@ -536,10 +570,25 @@ document.addEventListener("submit", async (event) => {
       model: data.get(`${id}-model`), thinking: data.get(`${id}-thinking`), prompt: data.get(`${id}-prompt`)
     }]));
     try {
-      const settings = { maxConcurrentTickets: Number(data.get("maxConcurrentTickets")) };
+      const settings = {
+        maxConcurrentTickets: Number(data.get("maxConcurrentTickets")),
+        projectMode: data.get("projectMode"),
+        pollIntervalSeconds: Number(data.get("pollIntervalSeconds"))
+      };
       state = await api("/api/stage-profiles", { method: "POST", body: JSON.stringify({ profiles, settings }) });
       $("#profiles-dialog").close(); render(); notify("Stage profiles saved for new runs");
     } catch (error) { notify(error.message); }
+    return;
+  }
+  if (event.target.id === "plan-form") {
+    event.preventDefault();
+    try {
+      const plan = JSON.parse($("#plan-json").value);
+      state = await api(`/api/tickets/${encodeURIComponent(runFor().id)}/plan`, { method: "POST", body: JSON.stringify({ plan }) });
+      $("#plan-dialog").close();
+      render();
+      notify("Execution graph saved and validated");
+    } catch (error) { $("#plan-json-error").textContent = error.message; }
     return;
   }
   if (event.target.id === "local-load") {
@@ -575,6 +624,7 @@ const events = new EventSource("/api/events");
 events.onmessage = ({ data }) => {
   const event = JSON.parse(data);
   if (event.type === "state") { state = event.state; render(); return; }
+  if (event.type === "tickets") { ticketSources = event.ticketSources; render(); return; }
   if (event.channel === "run" && event.ticketId && event.stepId) {
     const key = `${event.ticketId}:${event.stepId}`;
     let live = liveRuns.get(key) || { events: [], output: "" };
