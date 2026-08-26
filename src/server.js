@@ -14,7 +14,8 @@ import { JiraClient } from "./jira.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
+import { ensureVerificationContractStep, formatTicketHorizon, PiHarness } from "./pi-harness.js";
+import { projectConfigPath } from "./project-config.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizeEditedPlan, normalizePlan } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
@@ -357,14 +358,19 @@ async function loadLocalRun(inputPath) {
   const source = currentState.workspace.cwd;
   const stageProfiles = currentState.stageProfiles;
   const fixture = await loadLocalFixture(source, inputPath);
+  const [contractExists, projectConfigExists] = await Promise.all([
+    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    stat(join(source, projectConfigPath)).then(() => true, () => false)
+  ]);
+  const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);
   const runId = randomUUID();
-  const slug = safeName(fixture.plan.title).slice(0, 32);
+  const slug = safeName(plan.title).slice(0, 32);
   const id = `local-${slug}-${runId.slice(0, 8)}`;
   const ticket = {
     id,
     identifier: `LOCAL-${slug}`,
-    title: fixture.plan.title,
-    description: fixture.plan.summary || fixture.feature.split("\n").find((line) => line.trim() && !line.startsWith("#")) || "Local zero-state fixture",
+    title: plan.title,
+    description: plan.summary || fixture.feature.split("\n").find((line) => line.trim() && !line.startsWith("#")) || "Local zero-state fixture",
     source: "local",
     fixturePath: fixture.directory,
     state: { name: "Local fixture", type: "local", color: "#8b7cf6" },
@@ -394,7 +400,7 @@ async function loadLocalRun(inputPath) {
         id: randomUUID(), kind: "awaiting_approval", title: "Approve local execution plan",
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
-      plan: fixture.plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
+      plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
       createdAt: new Date().toISOString()
     };
   });

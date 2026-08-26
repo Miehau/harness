@@ -63,14 +63,16 @@ test("architecture workers see completed and future plan outcomes", () => {
   assert.match(prompt, /node \.agent-plan\/verify\.mjs/);
 });
 
-test("existing projects get one architecture-owned verification contract before feature work", () => {
+test("existing projects get one architecture-owned operating contract before feature work", () => {
   const plan = ensureVerificationContractStep(normalizePlan({ nodes: [
     { id: "feature", title: "Build feature", permission: "write", writeScope: "src,test", requiresVisualEvidence: true }
   ] }), false);
   assert.equal(plan.nodes[0].role, "architecture");
-  assert.equal(plan.nodes[0].writeScope, ".agent-plan");
+  assert.equal(plan.nodes[0].writeScope, ".agent-plan,AGENTS.md,docs");
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
+  assert.match(plan.nodes[0].prompt, /project\.json/);
+  assert.deepEqual(plan.nodes[0].expectedArtifacts, ["docs/architecture.md", "AGENTS.md", ".agent-plan/project.json", ".agent-plan/verify.mjs"]);
   assert.equal(ensureVerificationContractStep(plan, true), plan);
 });
 

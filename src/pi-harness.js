@@ -7,10 +7,13 @@ import { Type } from "typebox";
 import { assertScopedWrite } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
 import { flattenSteps, normalizePlan } from "./plan.js";
+import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
+const agentGuidanceEntry = "AGENTS.md";
+const architectureEntry = "docs/architecture.md";
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -77,6 +80,8 @@ Rules:
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - For frontend/backend work, establish one shared contract first, run independently testable conformance implementations as parallel siblings, then add a serial integration step depending on that group. Put cross-branch integration tests in the integration step and continue depth-first with the next vertical outcome.
 - Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
+- The first architecture write step also creates or updates docs/architecture.md, AGENTS.md, and .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands.
+- Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Return awaiting_approval before adding a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency.
 - Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
 - Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
@@ -247,6 +252,7 @@ export function stepContext({ plan, step, artifacts }) {
 Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
 
 Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. Do not add a dependency only for this wrapper.
+Also own ${architectureEntry}, ${agentGuidanceEntry}, and ${projectConfigPath}. Keep human guidance and architecture prose readable, while keeping commands, allowed environment names/files, and port variables machine-readable in project.json.
 
 ### Already completed
 ${summarize(steps.filter((item) => item.status === "accepted"))}
@@ -293,11 +299,11 @@ ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The reque
 
 Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Write workers intentionally have no arbitrary shell; the framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
 }
 
-export function ensureVerificationContractStep(plan, contractExists) {
-  if (contractExists || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(verificationEntry)))) return plan;
+export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
+  if ((contractExists && projectConfigExists) || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(projectConfigPath)))) return plan;
   const id = findContractId(plan);
   const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
   const nodes = structuredClone(plan.nodes);
@@ -306,15 +312,35 @@ export function ensureVerificationContractStep(plan, contractExists) {
     id,
     type: "step",
     role: "architecture",
-    title: "Establish the repository verification contract",
-    description: `Create ${verificationEntry} as the single dependency-free entry point for this repository's tests, lint, type checks, builds${visual ? ", and browser screenshot capture" : ""}.`,
-    prompt: `Inspect the existing project commands and create ${verificationEntry} with Node standard-library process calls. Propagate every failed command. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
+    title: "Establish the repository operating contract",
+    description: `Record the architecture, agent guidance, machine-executable commands, environment allow-list, and the repository's deterministic verification entry point.`,
+    prompt: `Inspect the repository and create or update ${architectureEntry}, ${agentGuidanceEntry}, ${projectConfigPath}, and ${verificationEntry}. Keep architecture prose separate from machine-readable commands. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
     permission: "write",
-    writeScope: ".agent-plan",
-    acceptanceCriteria: [`node ${verificationEntry} runs the repository's relevant deterministic checks from one stable entry point`],
-    expectedArtifacts: [verificationEntry],
+    writeScope: ".agent-plan,AGENTS.md,docs",
+    acceptanceCriteria: [
+      `${architectureEntry} records important boundaries and conventions`,
+      `${agentGuidanceEntry} tells later agents how to work in this repository`,
+      `${projectConfigPath} declares executable commands separately from prose`,
+      `node ${verificationEntry} runs the repository's relevant deterministic checks from one stable entry point`
+    ],
+    expectedArtifacts: [architectureEntry, agentGuidanceEntry, projectConfigPath, verificationEntry],
     dependsOn: []
   }, ...nodes] });
+}
+
+export function projectCommandTool(cwd, signal) {
+  return defineTool({
+    name: "project_command",
+    label: "Project command",
+    description: `Run one named argv command declared in ${projectConfigPath}; arbitrary shell strings and extra arguments are not accepted.`,
+    promptSnippet: "Run a repository-approved development command",
+    promptGuidelines: ["Use this for focused tests, lint, type checks, formatting, and builds declared by the repository."],
+    parameters: Type.Object({ name: Type.String() }),
+    async execute(_toolCallId, { name }) {
+      const result = await runProjectCommand(cwd, name, { signal });
+      return { content: [{ type: "text", text: result.output || `${name} ${result.status}` }], details: result, isError: result.status === "failed" };
+    }
+  });
 }
 
 function outsideContractScope(writeScope) {
@@ -520,17 +546,20 @@ export class PiHarness {
       evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
     }
     const startedAt = Date.now();
+    const config = await loadProjectConfig(cwd);
+    const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
     try {
       const executable = command === "npm test" ? "npm" : process.execPath;
-      const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CI: "1", ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) } });
+      const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
       const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
         .filter((entry) => entry.isFile() && /\.(?:png|jpe?g|webp)$/i.test(entry.name))
         .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }));
-      if (requireVisualEvidence && !evidence.length) return { status: "failed", command, summary: `${command} passed but produced no visual evidence.`, output: eventText([stdout, stderr].filter(Boolean).join("\n")), evidence, durationMs: Date.now() - startedAt };
-      return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output: eventText([stdout, stderr].filter(Boolean).join("\n")), evidence, durationMs: Date.now() - startedAt };
+      const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
+      if (requireVisualEvidence && !evidence.length) return { status: "failed", command, summary: `${command} passed but produced no visual evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+      return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
     } catch (error) {
       if (signal?.aborted) throw error;
-      return { status: "failed", command, summary: `${command} failed.`, output: eventText([error.stdout, error.stderr, error.message].filter(Boolean).join("\n")), evidence: [], durationMs: Date.now() - startedAt };
+      return { status: "failed", command, summary: `${command} failed.`, output: eventText(redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment)), evidence: [], durationMs: Date.now() - startedAt };
     }
   }
 
@@ -651,7 +680,13 @@ export class PiHarness {
         if (error.code !== "ENOENT") throw error;
         contractExists = false;
       }
-      return { plan: ensureVerificationContractStep(normalizePlan(parsed), contractExists), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
+      let projectConfigExists = true;
+      try { await access(join(cwd, projectConfigPath)); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        projectConfigExists = false;
+      }
+      return { plan: ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);
   }
 
@@ -1016,7 +1051,8 @@ Every reported finding triggers an automatic correction round. Report concrete d
       : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
     let report = null;
     tools.push("worker_report");
-    const scopedTools = step.permission === "write" ? scopedWorkerTools(cwd, step.writeScope) : [];
+    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, step.writeScope), projectCommandTool(cwd, signal)] : [];
+    if (step.permission === "write") tools.push("project_command");
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,

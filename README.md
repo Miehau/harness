@@ -15,7 +15,8 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
 - Live run events and output.
 - Per-run Git tree diffs without modifying the user's index, plus one requirement-linked commit for each accepted step.
-- Dirty-worktree snapshot initialization and scope-enforced worker write tools with no arbitrary shell escape hatch.
+- Dirty-worktree snapshot initialization, scope-enforced writes, and named project commands with no arbitrary shell-string escape hatch.
+- A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
 - One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
 - Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
 - Screenshot references passed into the selected step's Pi session.
@@ -68,6 +69,8 @@ Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptanc
 6. Accept the step, or choose Auto when approving the graph. Manual runs pause for every verified batch; Auto accepts its commits and continues. Downstream dependencies unlock only after every required predecessor is accepted.
 
 Architecture owns `.agent-plan/verify.mjs`. The framework always calls `node .agent-plan/verify.mjs` when present, falling back to a root `npm test` only for older repositories. Visual steps must write browser screenshots to `AGENT_PLAN_EVIDENCE_DIR`; missing evidence fails the gate and captured images are attached to independent review.
+
+The first architecture slice also creates or updates `docs/architecture.md`, `AGENTS.md`, and `.agent-plan/project.json`. Workers can invoke only named argv commands from that file. The harness passes a minimal process environment plus explicitly allow-listed variable names and values loaded from explicitly allow-listed, Git-ignored local env files; command output is redacted before it enters run history.
 
 ## Deliberate MVP limits
 
