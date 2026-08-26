@@ -51,6 +51,15 @@ JIRA_PROJECT_KEY=PROJ
 
 Linear and Jira can be configured together. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key.
 
+Remote delivery uses the repository's existing `origin` plus an environment-only forge token:
+
+```bash
+GITHUB_TOKEN=... # GitHub, or
+GITLAB_TOKEN=... # GitLab
+```
+
+Tracker-backed runs rebase onto the remote target, push one ticket branch, open one pull/merge request, monitor existing CI and review feedback, apply focused feedback fixes, and squash-merge only when the remote gates allow it. After merge, the opened local checkout is fast-forwarded only when it is clean and safely behind the target; otherwise the dashboard records why synchronization was skipped.
+
 Versions before this change could persist a Linear key under `~/.agent-plan-workspace/credentials`. The harness no longer reads or writes that directory; remove the legacy directory manually after confirming you no longer need it.
 
 ## Local zero-state fixture

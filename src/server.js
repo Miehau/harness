@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
 import { admissionCandidates, occupiedTicketIds } from "./admission.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
+import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
@@ -803,7 +804,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
   return work;
 }
 
-async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signal, attempt }) {
+async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signal, attempt, operation = "merge" }) {
   signal?.throwIfAborted();
   const current = ticketRun(store.read(), ticketId);
   await update((state) => {
@@ -816,8 +817,8 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   const requirementIds = flattenSteps(current.plan).flatMap((step) => step.requirementIds || []).filter((id, index, all) => all.indexOf(id) === index);
   const step = {
     id: `merge-conflict-${attempt}`, type: "step", role: "implementation",
-    title: "Resolve merge-queue conflicts", description: `Reconcile ${current.ticket.identifier} with the latest opened repository state.`,
-    prompt: `A Git merge is already in progress in this isolated integration worktree. Resolve only these conflicted files: ${conflicts.join(", ")}. Preserve the verified ticket behavior and compatible changes already integrated into the target branch. Do not abort, restart, or commit the merge. Run focused checks, leave every conflict resolved, and report exactly what was reconciled.`,
+    title: `Resolve ${operation} conflicts`, description: `Reconcile ${current.ticket.identifier} with the latest target branch.`,
+    prompt: `A Git ${operation} is already in progress in this isolated ticket worktree. Resolve only these conflicted files: ${conflicts.join(", ")}. Preserve the verified ticket behavior and compatible target-branch changes. Do not abort, restart, or commit the ${operation}. Run focused checks, leave every conflict resolved, and report exactly what was reconciled.`,
     contextPolicy: "seeded", harness: "pi", agentId: `merge-conflict-resolver:${current.ticket.identifier}`,
     permission: "write", writeScope: conflicts.join(", "), skills: [], references: conflicts,
     requirementIds, capabilityIds: [], deltaIds: [], productContext: "Resolve only the concrete merge conflict without expanding ticket scope.",
@@ -841,8 +842,148 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   });
 }
 
+function waitForDelivery(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref();
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason || new Error("Delivery cancelled")); }, { once: true });
+  });
+}
+
+async function fixRemoteFeedback(ticketId, feedback, signal) {
+  const current = ticketRun(store.read(), ticketId);
+  const step = {
+    id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
+    title: "Address remote review feedback", description: "Apply the smallest change that resolves concrete pull-request feedback.",
+    prompt: `Address these remote review comments. Preserve approved behavior and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
+    contextPolicy: "seeded", harness: "pi", agentId: `remote-review-fixer:${current.ticket.identifier}`,
+    permission: "write", writeScope: "*", skills: [], references: [], requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
+    expectedArtifacts: ["remote-review-fix.md"], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
+  };
+  const result = await harness.runStep({
+    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
+    onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
+  });
+  if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
+  const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: false });
+  if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+  const commit = await commitWorkspace(current.workspace.cwd, `fix: address remote review feedback\n\nWhy: The reviewed change must resolve concrete maintainer feedback before merge.\nRequirement: ${current.ticket.identifier}`);
+  const artifact = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
+  });
+  await update((state) => { ticketRun(state, ticketId).artifacts.push(artifact); });
+  return commit;
+}
+
+async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
+  if (activeMerges.has(ticketId)) throw new Error("This ticket is already being delivered");
+  activeMerges.add(ticketId);
+  const promise = (async () => {
+    const current = ticketRun(store.read(), ticketId);
+    const sourceCwd = current.workspace.sourceCwd;
+    const { remote, base } = await remoteContext(sourceCwd);
+    const forge = deliveryForRemote(remote);
+    const attempt = (current.merge?.attempt || 0) + 1;
+    const activity = captureStageActivity(ticketId, "handoff", current.runId);
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.merge = { status: "rebasing", attempt, sourceCwd, branch: run.workspace.branch, base, remote, feedbackIds: run.merge?.feedbackIds || [] };
+      run.status = "rebasing";
+      run.checkpoint = null;
+      setStage(run, "handoff", "active", `Rebasing onto origin/${base}`);
+    });
+    const rebase = () => rebaseOntoRemote(current.workspace.cwd, base, {
+      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
+    });
+    await rebase();
+    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+    if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+    await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+    const change = await forge.create({
+      branch: current.workspace.branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
+      body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || "See changed files."].join("\n\n")
+    });
+    await trackerAction(ticketId, "remote_change", (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      Object.assign(run.merge, { status: "waiting_for_checks", change, checks, openedAt: new Date().toISOString() });
+      run.status = "waiting_for_checks";
+      setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
+    });
+
+    let mergeResult = null;
+    let lastRebaseHead = null;
+    for (;;) {
+      signal?.throwIfAborted();
+      const delivery = await forge.status(change);
+      const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
+      const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
+      await update((state) => {
+        const run = ticketRun(state, ticketId);
+        Object.assign(run.merge, { status: feedback.length ? "addressing_feedback" : delivery.checks === "pending" ? "waiting_for_checks" : "waiting_for_merge", remoteStatus: delivery, checkedAt: new Date().toISOString() });
+        run.status = run.merge.status;
+        setStage(run, "handoff", "active", feedback.length ? `Addressing ${feedback.length} review comment${feedback.length === 1 ? "" : "s"}` : `Remote checks: ${delivery.checks}; merge: ${delivery.mergeState}`);
+      });
+      if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
+      if (feedback.length) {
+        await fixRemoteFeedback(ticketId, feedback, signal);
+        await rebase();
+        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+        await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
+        await update((state) => { ticketRun(state, ticketId).merge.feedbackIds.push(...feedback.map((item) => item.id)); });
+        continue;
+      }
+      if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
+      const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
+      if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) { mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`); break; }
+      if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
+        lastRebaseHead = delivery.headSha;
+        await rebase();
+        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+        continue;
+      }
+      await waitForDelivery(20000, signal);
+    }
+
+    const sync = await safeSyncLocal(sourceCwd, base);
+    const integratedAt = new Date().toISOString();
+    const productContext = contextContent == null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
+    const handoff = await persistArtifact(dataDir, current.ticket, {
+      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+      content: `# ${current.ticket.identifier} handoff\n\nRemote review: ${change.url}\n\nSquash commit: \`${mergeResult.commit}\`\n\nLocal sync: ${sync.status}${sync.reason ? ` — ${sync.reason}` : ""}.`
+    });
+    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, `Merged after remote checks and review: ${change.url}\n\nSquash commit: ${mergeResult.commit}`));
+    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync };
+      Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync });
+      if (productContext) run.productContextPath = productContext.path;
+      run.artifacts.push(handoff);
+      run.status = "completed";
+      run.lastError = null;
+      run.completedAt = integratedAt;
+      setStage(run, "handoff", "completed", `Merged via ${change.url}`).activity = activity.snapshot();
+    });
+    return { commit: mergeResult.commit, change, sync };
+  })().catch(async (error) => {
+    if (!signal?.aborted) await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.status = "needs_attention";
+      run.lastError = error.message;
+      if (run.merge) Object.assign(run.merge, { status: "failed", error: error.message, failedAt: new Date().toISOString() });
+      setStage(run, "handoff", "blocked", error.message);
+    });
+    await mirrorExecutionBlocker(ticketId, error);
+    throw error;
+  }).finally(() => activeMerges.delete(ticketId));
+  return { position: 1, promise };
+}
+
 async function scheduleTicketIntegration(ticketId, { diff, contextContent = null, signal } = {}) {
   const queuedRun = ticketRun(store.read(), ticketId);
+  if (queuedRun.ticket.source !== "local") return scheduleRemoteDelivery(ticketId, { diff, contextContent, signal });
   if (["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) throw new Error("This ticket is already in the merge queue");
   const sourceCwd = queuedRun.workspace.sourceCwd;
   const attempt = (queuedRun.merge?.attempt || 0) + 1;

@@ -57,9 +57,9 @@ export class JsonStore {
             if (["running", "fixing"].includes(step.status)) step.status = "interrupted";
           }
         }
-        if (["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge"].includes(run.status)) {
+        if (["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge"].includes(run.status)) {
           run.status = "interrupted";
-          if (["queued", "merging", "resolving_conflicts", "verifying"].includes(run.merge?.status)) run.merge.status = "interrupted";
+          if (["queued", "merging", "resolving_conflicts", "verifying", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge"].includes(run.merge?.status)) run.merge.status = "interrupted";
         }
       }
     } catch (error) {
