@@ -281,6 +281,8 @@ h3 { font-size: 14px; }
 .supervisor-review > div { margin-top: 8px; }
 .artifact header, .reference header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
 .artifact-name { font-weight: 600; }
+.artifact-open { border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.artifact-open:hover { color: #9fc2f4; text-decoration: underline; }
 .artifact-source { color: #9098a0; font-size: 11px; }
 .artifact-body { max-height: 620px; overflow: auto; color: #d6dbe0; font-size: 13px; line-height: 1.6; }
 .artifact-path { display: block; margin-bottom: 9px; color: #7f8993; font-size: 9px; overflow-wrap: anywhere; white-space: normal; }

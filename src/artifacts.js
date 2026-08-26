@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 export function safeName(value) {
   return String(value || "artifact")
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[-.]+|[-.]+$/g, "") || "artifact";
+}
+
+export function artifactPathForOpen(artifacts, id, dataDir) {
+  const path = artifacts?.find((artifact) => artifact.id === id)?.path;
+  const root = `${resolve(dataDir)}${sep}`;
+  return path && resolve(path).startsWith(root) ? resolve(path) : null;
 }
 
 export async function persistArtifact(dataDir, ticket, { name, content, runId = "legacy", stageId = "run", kind = "agent-output", stepId = null, attemptId = null }) {

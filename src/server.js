@@ -7,7 +7,7 @@ import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
 import { persistLinearApiKey, readLinearApiKey } from "./credentials.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
@@ -66,10 +66,15 @@ function publishStepEvent(ticketId, stepId, runId, event) {
 }
 
 function captureStageActivity(ticketId, stageId, runId) {
-  const startedAt = new Date().toISOString();
-  const events = [];
-  let rawOutput = "";
+  const existing = store.read().ticketRuns[ticketId]?.stages?.find((stage) => stage.id === stageId)?.activity;
+  const startedAt = existing?.startedAt || new Date().toISOString();
+  const events = [...(existing?.events || [])];
+  let rawOutput = existing?.rawOutput || "";
+  let lastEventAt = existing?.lastEventAt || startedAt;
+  let lastEvent = existing?.lastEvent || "";
+  let warning = Boolean(existing?.warning);
   const lastThinkingAt = new Map();
+  const current = () => ({ startedAt, lastEventAt, lastEvent, warning, rawOutput: rawOutput.slice(-100000), events: events.slice(-200) });
   return {
     onEvent(event, actor) {
       const now = Date.now();
@@ -78,11 +83,21 @@ function captureStageActivity(ticketId, stageId, runId) {
       if (event.type === "thinking") lastThinkingAt.set(activityKey, now);
       const item = { ...event, ...(actor ? { actor } : {}), at: new Date(now).toISOString() };
       if (item.type === "text_delta") rawOutput += item.delta || "";
-      else events.push(item);
+      else {
+        events.push(item);
+        lastEventAt = item.at;
+        lastEvent = item.label || lastEvent;
+        warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
+        const activity = current();
+        update((state) => {
+          const stage = state.ticketRuns[ticketId]?.stages?.find((candidate) => candidate.id === stageId);
+          if (stage) stage.activity = activity;
+        }, { publish: false }).catch(() => {});
+      }
       publish({ channel: "stage", ticketId, stageId, runId, ...item });
     },
     snapshot() {
-      return { startedAt, completedAt: new Date().toISOString(), rawOutput: rawOutput.slice(-100000), events: events.slice(-200) };
+      return { ...current(), completedAt: new Date().toISOString() };
     }
   };
 }
@@ -1010,6 +1025,16 @@ async function runTicket(ticketId) {
 async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
   if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
+  const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/open$/);
+  if (request.method === "POST" && openArtifact) {
+    if (process.platform !== "darwin") throw new Error("Opening artifacts in the default editor currently requires macOS");
+    const run = ticketRun(store.read(), decodeURIComponent(openArtifact[1]));
+    const path = artifactPathForOpen(run.artifacts, decodeURIComponent(openArtifact[2]), dataDir);
+    const file = path ? await stat(path).catch(() => null) : null;
+    if (!file?.isFile()) throw new Error("Artifact file not found");
+    await runFile("open", [path]);
+    return json(response, 200, { opened: true });
+  }
   if (request.method === "POST" && url.pathname === "/api/queue/clear") {
     let cleared = 0;
     const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set([...activeTickets.keys(), ...activeMerges])); });

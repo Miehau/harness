@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { persistArtifact, persistProductContext, readProductContext, safeName } from "../src/artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -25,6 +25,12 @@ test("isolates step attempts within one ticket run", async () => {
 test("safeName constrains directory components", () => {
   assert.equal(safeName("../MM 42"), "mm-42");
   assert.equal(safeName(".."), "artifact");
+});
+
+test("only resolves recorded artifacts inside app storage", () => {
+  assert.equal(artifactPathForOpen([{ id: "safe", path: "/data/runs/result.md" }], "safe", "/data"), "/data/runs/result.md");
+  assert.equal(artifactPathForOpen([{ id: "unsafe", path: "/tmp/secret" }], "unsafe", "/data"), null);
+  assert.equal(artifactPathForOpen([], "missing", "/data"), null);
 });
 
 test("keeps one living product context per source workspace", async () => {

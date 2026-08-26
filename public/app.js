@@ -9,9 +9,11 @@ const escapeHtml = (value = "") => String(value)
 let state = null;
 let linear = { configured: false, viewer: null, tickets: [] };
 let codexModels = [];
-let selectedStepId = null;
-let selectedStageId = null;
-let activeTab = "run";
+let savedView = {};
+try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); } catch {}
+let selectedStepId = savedView.selectedStepId || null;
+let selectedStageId = savedView.selectedStageId || null;
+let activeTab = ["run", "diff", "artifacts", "ticket", "prompt"].includes(savedView.activeTab) ? savedView.activeTab : "run";
 let toastTimer;
 let clearTimer;
 let clearArmed = false;
@@ -21,6 +23,10 @@ const sessionTraces = new Map();
 const pendingSessionTraces = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function rememberView() {
+  localStorage.setItem("agent-plan-view", JSON.stringify({ selectedStepId, selectedStageId, activeTab }));
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
@@ -264,7 +270,7 @@ function stageActivityPanel(run, stage) {
   const milestones = stageMilestones(run, stage);
   if (!live && !stage.activity && !milestones.length) return `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
   const active = stage.status === "active";
-  const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: stage.updatedAt, lastEvent: stage.summary }, live)) : "";
+  const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: activity.lastEventAt || stage.updatedAt, lastEvent: activity.lastEvent || stage.summary, warning: activity.warning }, live)) : "";
   return `<div class="stage-activity">${pulse}<section class="run-events"><span class="eyebrow">Timeline</span><div>${milestones.length ? milestoneTimelineHtml(milestones) : timelineHtml(activity.events || [], active)}</div></section></div>`;
 }
 
@@ -322,7 +328,7 @@ function diffPanel(step) {
 }
 
 function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
-  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(artifact.name)}</span><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
+  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in the default editor">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
 function renderInspector() {
@@ -383,7 +389,7 @@ function render() {
   $("#workspace-path-display").textContent = state.workspace.cwd;
   $("#workspace-settings").title = state.workspace.cwd;
   const run = runFor();
-  if (selectedStageId && !run?.stages?.some((stage) => stage.id === selectedStageId)) selectedStageId = null;
+  if (selectedStageId && !run?.stages?.some((stage) => stage.id === selectedStageId)) { selectedStageId = null; rememberView(); }
   if (!selectedStageId) selectedStepId = preferredStepId(run?.plan, selectedStepId);
   renderTickets();
   renderHeader();
@@ -399,6 +405,12 @@ async function refreshTickets() {
 }
 
 document.addEventListener("click", async (event) => {
+  const openArtifact = event.target.closest("[data-open-artifact]");
+  if (openArtifact) {
+    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/artifacts/${encodeURIComponent(openArtifact.dataset.openArtifact)}/open`, { method: "POST", body: "{}" }); notify("Artifact opened in the default editor"); }
+    catch (error) { notify(error.message); }
+    return;
+  }
   const clearButton = event.target.closest("#clear-queue");
   if (clearButton) {
     if (!clearArmed) {
@@ -418,7 +430,7 @@ document.addEventListener("click", async (event) => {
       state = result.state;
       linear.tickets = linear.tickets.filter((ticket) => state.ticketRuns[ticket.id]);
       const cleared = before.size - new Set([...Object.keys(state.ticketRuns), ...linear.tickets.map((ticket) => ticket.id)]).size;
-      selectedStepId = null; selectedStageId = null; render(); notify(`${cleared} queue item${cleared === 1 ? "" : "s"} removed`);
+      selectedStepId = null; selectedStageId = null; rememberView(); render(); notify(`${cleared} queue item${cleared === 1 ? "" : "s"} removed`);
     } catch (error) { notify(error.message); }
     finally { clearButton.disabled = false; clearButton.textContent = "Clear queue"; }
     return;
@@ -426,7 +438,7 @@ document.addEventListener("click", async (event) => {
   const ticketButton = event.target.closest("[data-ticket]");
   if (ticketButton) {
     state = await api(`/api/tickets/${encodeURIComponent(ticketButton.dataset.ticket)}/select`, { method: "POST", body: "{}" });
-    selectedStepId = null; selectedStageId = null; activeTab = "run"; render(); return;
+    selectedStepId = null; selectedStageId = null; activeTab = "run"; rememberView(); render(); return;
   }
   const start = event.target.closest("[data-start-ticket]");
   if (start) {
@@ -466,7 +478,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const selectStep = event.target.closest("[data-select-step]");
-  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; render(); return; }
+  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; rememberView(); render(); return; }
   const acceptStep = event.target.closest("[data-accept-step]");
   if (acceptStep) {
     try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(acceptStep.dataset.acceptStep)}/accept`, { method: "POST", body: "{}" }); notify("Step accepted; continuing to the next slice"); }
@@ -474,11 +486,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const stage = event.target.closest("[data-stage]");
-  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; render(); return; }
+  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; rememberView(); render(); return; }
   const step = event.target.closest("[data-step]");
-  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; activeTab = "run"; render(); return; }
+  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; activeTab = "run"; rememberView(); render(); return; }
   const tab = event.target.closest("[data-tab]");
-  if (tab) { activeTab = tab.dataset.tab; renderInspector(); }
+  if (tab) { activeTab = tab.dataset.tab; rememberView(); renderInspector(); }
   if (event.target.closest("#workspace-settings")) $("#workspace-dialog").showModal();
   if (event.target.closest("#pick-workspace")) {
     try { $("#workspace-path").value = (await api("/api/workspace/pick", { method: "POST", body: "{}" })).cwd; }
@@ -539,7 +551,7 @@ document.addEventListener("submit", async (event) => {
     const path = new FormData(event.target).get("path");
     try {
       const result = await api("/api/local/load", { method: "POST", body: JSON.stringify({ path }) });
-      state = result.state; selectedStepId = null; selectedStageId = null; activeTab = "run"; render(); notify("Local zero-state fixture loaded");
+      state = result.state; selectedStepId = null; selectedStageId = null; activeTab = "run"; rememberView(); render(); notify("Local zero-state fixture loaded");
     } catch (error) { notify(error.message); }
     return;
   }
@@ -587,7 +599,8 @@ events.onmessage = ({ data }) => {
   }
   if (event.channel === "stage" && event.ticketId && event.stageId) {
     const key = `${event.ticketId}:${event.stageId}`;
-    let live = liveStages.get(key) || { events: [], output: "", startedAt: new Date().toISOString() };
+    const persisted = state.ticketRuns?.[event.ticketId]?.stages?.find((stage) => stage.id === event.stageId)?.activity;
+    let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "", startedAt: new Date().toISOString() };
     live.runId = event.runId;
     if (event.type === "text_delta") live.output += event.delta || "";
