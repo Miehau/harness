@@ -16,7 +16,7 @@ import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, planApprovalPending } from "./execution.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -296,26 +296,60 @@ async function prepareTicket(ticketId) {
 async function continueAfterRequirements(ticketId, answers) {
   return startTicketWork(ticketId, async (signal) => {
    let activity;
+   let activityStage = "explore";
    try {
     signal.throwIfAborted();
     const before = store.read();
     const run = ticketRun(before, ticketId);
+    if (answers.trim()) {
+      activityStage = "requirements";
+      activity = captureStageActivity(ticketId, "requirements", run.runId);
+      await update((state) => {
+        const current = ticketRun(state, ticketId);
+        current.status = "clarifying";
+        setStage(current, "requirements", "active", "Pi is revising requirements from your answers");
+        current.checkpoint = null;
+      });
+      const clarified = await harness.refineRequirements({
+        cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
+        sessionFile: run.requirementsSessionFile, answers,
+        profile: run.stageProfiles.requirements, onEvent: activity.onEvent, signal
+      });
+      signal.throwIfAborted();
+      const artifact = await persistArtifact(dataDir, run.ticket, {
+        runId: run.runId, name: "requirements-draft.md", content: clarified.artifact,
+        stageId: "requirements", kind: "requirements-draft"
+      });
+      await update((state) => {
+        const current = ticketRun(state, ticketId);
+        current.requirementsSessionFile = clarified.sessionFile;
+        current.artifacts.push(artifact);
+        current.status = "awaiting_requirements";
+        setStage(current, "requirements", "blocked", "Review the revised requirements or answer a follow-up").activity = activity.snapshot();
+        current.checkpoint = {
+          id: randomUUID(), kind: "requirements_review", title: "Review revised ticket requirements",
+          prompt: clarified.artifact, questions: clarified.questions, createdAt: new Date().toISOString()
+        };
+      });
+      return;
+    }
     activity = captureStageActivity(ticketId, "explore", run.runId);
+    const approved = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements");
     const draft = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements-draft");
     const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
-    if (!draft || !productContext) throw new Error("Requirements draft or product context snapshot not found");
-    const requirements = `${draft.content}\n\n## User clarification\n${answers || "Approved without changes."}`;
+    if ((!approved && !draft) || !productContext) throw new Error("Requirements draft or product context snapshot not found");
+    const requirements = approved?.content || `${draft.content}\n\n## User clarification\nApproved without changes.`;
     const ticketHorizon = formatTicketHorizon(run.ticket, [
       ...ticketCache.values(),
       ...Object.values(before.ticketRuns).map((ticketRun) => ticketRun.ticket)
     ]);
-    const requirementArtifact = await persistArtifact(dataDir, run.ticket, {
+    const requirementArtifact = approved ? null : await persistArtifact(dataDir, run.ticket, {
       runId: run.runId, name: "requirements.md", content: requirements,
       stageId: "requirements", kind: "requirements"
     });
     await update((state) => {
       const current = ticketRun(state, ticketId);
-      current.artifacts.push(requirementArtifact);
+      if (requirementArtifact) current.artifacts.push(requirementArtifact);
       current.checkpoint = null;
       current.status = "preparing";
       setStage(current, "requirements", "completed", "Approved requirements persisted");
@@ -379,7 +413,7 @@ async function continueAfterRequirements(ticketId, answers) {
       if (current) {
         current.status = "failed";
         current.lastError = error.message;
-        if (activity) current.stages.find((stage) => stage.id === "explore").activity = activity.snapshot();
+        if (activity) current.stages.find((stage) => stage.id === activityStage).activity = activity.snapshot();
       }
     });
    }
@@ -1067,14 +1101,18 @@ async function api(request, response, url) {
   if (request.method === "POST" && resume) {
     const id = decodeURIComponent(resume[1]);
     const run = ticketRun(store.read(), id);
-    if (!["interrupted", "cancelled", "needs_attention"].includes(run.status) || !run.plan) throw new Error("This run cannot be resumed from its current stage");
+    const stage = resumeStage(run);
+    if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
     if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already active; wait for one to reach a checkpoint");
     if (run.status === "cancelled") await update((state) => {
       const current = ticketRun(state, id);
       current.status = "interrupted";
       for (const step of flattenSteps(current.plan)) if (step.status === "cancelled") step.status = "interrupted";
     });
-    runTicket(id).catch(() => {});
+    if (stage === "requirements") prepareTicket(id).catch(() => {});
+    else if (stage === "explore") continueAfterRequirements(id, "").catch(() => {});
+    else if (stage === "design") startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)).catch(() => {});
+    else runTicket(id).catch(() => {});
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -1091,7 +1129,10 @@ async function api(request, response, url) {
     const input = await body(request);
     const run = ticketRun(store.read(), id);
     const answers = String(input.answers || "");
-    if (run.checkpoint?.kind === "requirements_review") continueAfterRequirements(id, answers).catch(() => {});
+    if (run.checkpoint?.kind === "requirements_review") {
+      if (!answers.trim() && run.checkpoint.questions?.length) throw new Error("Answer the open requirements questions before approval");
+      continueAfterRequirements(id, answers).catch(() => {});
+    }
     else startTicketWork(id, (signal) => designTicket(id, answers, signal)).catch(() => {});
     return json(response, 202, { accepted: true, ticketId: id });
   }

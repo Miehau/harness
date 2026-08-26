@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending } from "../src/execution.js";
+import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -60,4 +60,9 @@ test("clearing the queue preserves active runs", () => {
 test("a preserved plan checkpoint remains approvable after setup fails", () => {
   assert.equal(planApprovalPending({ status: "needs_attention", plan: { nodes: [] }, checkpoint: { kind: "awaiting_approval" } }), true);
   assert.equal(planApprovalPending({ status: "needs_attention", plan: { nodes: [] }, checkpoint: null }), false);
+});
+
+test("an interrupted pre-plan run resumes its active workflow stage", () => {
+  assert.equal(resumeStage({ status: "interrupted", plan: null, stages: [{ id: "explore", status: "active" }] }), "explore");
+  assert.equal(resumeStage({ status: "interrupted", plan: { nodes: [] }, stages: [] }), "run");
 });

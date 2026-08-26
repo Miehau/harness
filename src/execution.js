@@ -26,6 +26,11 @@ export function planApprovalPending(run) {
   return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval");
 }
 
+export function resumeStage(run) {
+  if (!["interrupted", "cancelled", "needs_attention"].includes(run?.status)) return null;
+  return run.plan ? "run" : run.stages?.find((stage) => stage.status === "active")?.id || null;
+}
+
 export function nextRunnableStep(plan) {
   return flattenSteps(plan).find((step) =>
     ["ready", "interrupted"].includes(step.status) && blockingReasons(plan, step).length === 0

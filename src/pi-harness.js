@@ -88,6 +88,17 @@ Return ONLY valid JSON:
   "questions": ["one focused question", "another focused question"]
 }`;
 
+const requirementsFollowUpInstruction = `Continue the requirements clarification with the user. You still have no repository tools.
+1. Incorporate the user's answers into the complete PRD addendum and requirements contract.
+2. Ask only remaining consequential product questions whose answers could change the implementation.
+3. Questions may be empty when the contract is ready for the user's explicit approval.
+
+Return ONLY valid JSON:
+{
+  "artifact": "the complete revised markdown PRD addendum and requirements contract",
+  "questions": ["one focused follow-up question"]
+}`;
+
 const ticketExplorationInstruction = `The requirements have already been clarified and approved. You may inspect the repository but must not modify it.
 1. Validate the supplied capability ledger against relevant code, tests, conventions, and dependency boundaries.
 2. Produce a verified implementation delta with stable CAP-* and DELTA-* IDs, classifying behavior as shipped, partial, missing, or conflicting.
@@ -494,6 +505,19 @@ export class PiHarness {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
       const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      const parsed = jsonReply(reply);
+      return {
+        artifact: String(parsed.artifact || ""),
+        questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
+        sessionFile: session.sessionFile
+      };
+    }, `${ticket.id}:${runId}:requirements`);
+  }
+
+  async refineRequirements({ cwd, ticket, runId, sessionFile, answers, profile, onEvent, signal }) {
+    return this.supervisorTurn(async () => {
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsFollowUpInstruction)}\n\n# User response\n${answers}`, { publishText: false, onEvent, signal });
       const parsed = jsonReply(reply);
       return {
         artifact: String(parsed.artifact || ""),

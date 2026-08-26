@@ -25,6 +25,30 @@ test("ticket horizon excludes the current ticket and puts same-team work first",
   assert.match(horizon, /A-2 \[Backlog\] Shared foundation — Reuse the task model/);
 });
 
+test("requirements clarification reuses the private session for follow-up questions", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let opened;
+  let prompt;
+  harness.planningSession = async (...args) => {
+    opened = args;
+    return { sessionFile: "/tmp/requirements.jsonl" };
+  };
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return JSON.stringify({ artifact: "# Revised requirements", questions: ["Should archived tasks remain searchable?"] });
+  };
+
+  const result = await harness.refineRequirements({
+    cwd: "/repo", ticket: { id: "ticket-1" }, runId: "run-1",
+    sessionFile: "/tmp/requirements.jsonl", answers: "Yes, keep them searchable."
+  });
+
+  assert.equal(opened[1], "/tmp/requirements.jsonl");
+  assert.equal(opened[3].repositoryAccess, false);
+  assert.match(prompt, /Yes, keep them searchable\./);
+  assert.deepEqual(result.questions, ["Should archived tasks remain searchable?"]);
+});
+
 test("architecture workers see completed and future plan outcomes", () => {
   const plan = normalizePlan({ title: "Board", nodes: [
     { id: "skeleton", title: "Create skeleton", description: "Launch the empty app.", status: "accepted" },
