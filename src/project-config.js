@@ -40,11 +40,13 @@ export function normalizeProjectConfig(value = {}) {
   const pass = strings(value.environment?.pass);
   for (const name of pass) if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) throw new Error(`Invalid environment variable name: ${name}`);
   const files = strings(value.environment?.files);
+  const portVariables = strings(value.ports?.variables);
+  for (const name of portVariables) if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) throw new Error(`Invalid port environment variable name: ${name}`);
   return {
     version: 1,
     commands,
     environment: { pass: [...new Set(pass)], files: [...new Set(files)] },
-    ports: { variables: [...new Set(strings(value.ports?.variables))] }
+    ports: { variables: [...new Set(portVariables)] }
   };
 }
 

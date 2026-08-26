@@ -23,6 +23,7 @@ import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
 import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
+import { PreviewManager } from "./previews.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -42,6 +43,7 @@ await store.init();
 
 const trackers = new TrackerHub([new LinearClient(), new JiraClient()]);
 const harness = new PiHarness({ dataDir, publish });
+const previews = new PreviewManager({ dataDir });
 const clients = new Set();
 const activeSteps = new Map();
 const activeTickets = new Map();
@@ -110,6 +112,28 @@ function repositoryCheckReview(checks) {
     }] : [],
     checks
   };
+}
+
+async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, stepId = null }) {
+  let preview = null;
+  let evidence = [];
+  if (required) {
+    preview = await previews.ensure({ id: previewId, cwd });
+    if (preview) evidence = await previews.capture(previewId);
+  }
+  const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required && !preview });
+  checks.evidence = [...(checks.evidence || []), ...evidence];
+  if (required && !checks.evidence.length) Object.assign(checks, { status: "failed", summary: "Visual verification produced no desktop or mobile evidence." });
+  if (preview || evidence.length) await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.previews ||= {};
+    if (preview) run.previews[previewId] = preview;
+    for (const item of evidence) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
+      id: randomUUID(), name: item.name, path: item.path, kind: "visual-evidence", stageId: "verify", stepId,
+      summary: `${item.viewport.width}×${item.viewport.height} · ${item.url}`, createdAt: new Date().toISOString()
+    });
+  });
+  return checks;
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
@@ -690,7 +714,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Running repository checks" });
-          checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: currentStep.requiresVisualEvidence });
+          checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, stepId });
         }
         signal?.throwIfAborted();
         const afterTree = await snapshotTree(cwd);
@@ -866,7 +890,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
-  const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: false });
+  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence) });
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
   const commit = await commitWorkspace(current.workspace.cwd, `fix: address remote review feedback\n\nWhy: The reviewed change must resolve concrete maintainer feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
@@ -897,7 +921,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
     });
     await rebase();
-    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
     if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
     await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
     const change = await forge.create({
@@ -1024,7 +1048,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
           setStage(run, "handoff", "active", "Verifying merged result");
         });
         activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
-        const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
         if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
         await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
       }
@@ -1080,7 +1104,7 @@ async function finalReviewLoop(ticketId, signal) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
     activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-    const checks = await harness.runRepositoryChecks({ cwd: current.workspace.cwd, signal, requireVisualEvidence: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
     const reviewImages = await harness.evidenceImages(checks.evidence);
     signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);

@@ -18,6 +18,7 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - Dirty-worktree snapshot initialization, scope-enforced writes, and named project commands with no arbitrary shell-string escape hatch.
 - A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
 - One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
+- Ticket-isolated local previews on unique ports with harness-captured Chromium desktop and mobile evidence.
 - Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
 - Screenshot references passed into the selected step's Pi session.
 - Local JSON persistence under `~/.agent-plan-workspace`.
@@ -80,6 +81,8 @@ Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptanc
 Architecture owns `.agent-plan/verify.mjs`. The framework always calls `node .agent-plan/verify.mjs` when present, falling back to a root `npm test` only for older repositories. Visual steps must write browser screenshots to `AGENT_PLAN_EVIDENCE_DIR`; missing evidence fails the gate and captured images are attached to independent review.
 
 The first architecture slice also creates or updates `docs/architecture.md`, `AGENTS.md`, and `.agent-plan/project.json`. Workers can invoke only named argv commands from that file. The harness passes a minimal process environment plus explicitly allow-listed variable names and values loaded from explicitly allow-listed, Git-ignored local env files; command output is redacted before it enters run history.
+
+When `project.json` declares a `preview` or `dev` command, visual tickets receive a localhost preview with their own allocated port. The configured port variables are set only for that preview process. The harness captures 1440×900 desktop and 390×844 mobile Chromium images, attaches them to independent review, and exposes the live preview URL in the run header.
 
 ## Deliberate MVP limits
 
