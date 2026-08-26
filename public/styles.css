@@ -57,12 +57,12 @@ input:focus, select:focus, textarea:focus { border-color: #6e9fee; box-shadow: 0
 .ticket-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid #292d31; background: #111315; }
 .ticket-header { min-height: 70px; }
 .ticket-header .icon-button { flex: none; }
-.linear-status { flex: none; border-bottom: 1px solid #292d31; }
-.linear-connect { display: grid; gap: 8px; margin: 12px; border: 1px solid #44404c; border-radius: 10px; padding: 12px; background: #18161c; }
-.linear-connect strong { font-size: 13px; }
-.linear-connect p { color: #969da5; font-size: 11px; line-height: 1.45; }
-.linear-connect input { width: 100%; padding: 8px 9px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.linear-connect .button { justify-self: end; }
+.tracker-status { flex: none; border-bottom: 1px solid #292d31; }
+.source-connect { display: grid; gap: 8px; margin: 12px; border: 1px solid #44404c; border-radius: 10px; padding: 12px; background: #18161c; }
+.source-connect strong { font-size: 13px; }
+.source-connect p { color: #969da5; font-size: 11px; line-height: 1.45; }
+.source-connect input { width: 100%; padding: 8px 9px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-connect .button { justify-self: end; }
 .local-load { flex: none; margin-bottom: 0; }
 .connected { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 10px 14px; color: #c7cdd3; font-size: 11px; }
 .connected small { color: #858d95; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -81,7 +81,7 @@ input:focus, select:focus, textarea:focus { border-color: #6e9fee; box-shadow: 0
 .ticket-row i { margin-left: auto; }
 .ticket-card > strong { overflow: hidden; font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .ticket-meta { color: #858d95; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.linear-state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--state-color); }
+.tracker-state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--state-color); }
 .ticket-progress { height: 2px; overflow: hidden; border-radius: 99px; background: #2a2f34; }
 .ticket-progress i { display: block; height: 100%; background: #79a8f5; }
 .ticket-empty { border: 1px dashed #30353a; border-radius: 8px; padding: 12px; color: #777f87; font-size: 11px; text-align: center; }
@@ -486,9 +486,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 h1 { margin-top: 6px; font-size: 20px; font-weight: 650; letter-spacing: -.03em; }
 h2 { font-weight: 650; letter-spacing: -.025em; }
 
-.linear-status { border-color: var(--stroke); }
+.tracker-status { border-color: var(--stroke); }
 .local-load { border-color: rgb(110 159 238 / .2); background: linear-gradient(145deg, rgb(110 159 238 / .10), rgb(255 255 255 / .025)); }
-.linear-connect {
+.source-connect {
   gap: 10px;
   margin: 14px;
   border-color: rgb(139 124 246 / .19);
@@ -497,8 +497,8 @@ h2 { font-weight: 650; letter-spacing: -.025em; }
   background: linear-gradient(145deg, rgb(139 124 246 / .10), rgb(255 255 255 / .025));
   box-shadow: inset 0 1px 0 rgb(255 255 255 / .025);
 }
-.linear-connect strong { font-size: 14px; }
-.linear-connect p { color: var(--muted); line-height: 1.55; }
+.source-connect strong { font-size: 14px; }
+.source-connect p { color: var(--muted); line-height: 1.55; }
 .connected { padding: 12px 16px; }
 .ticket-filter { padding: 12px 14px 7px; }
 .ticket-filter input { padding: 10px 11px; background: rgb(5 7 12 / .34); }
@@ -888,7 +888,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .source-button small { color: #7f8998; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
 .source-button b { color: #a99fff; font-size: 11px; }
 
-#workspace-dialog, #free-text-dialog, #linear-dialog { width: min(680px, calc(100vw - 32px)); }
+#workspace-dialog, #free-text-dialog { width: min(680px, calc(100vw - 32px)); }
 .dialog-field { display: grid; gap: 7px; margin: 14px; color: #9299a1; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .07em; text-transform: uppercase; }
 .dialog-field input, .dialog-field textarea { width: 100%; padding: 10px 11px; color: #e6e9ef; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5; text-transform: none; }
 .dialog-field textarea { min-height: 180px; margin: 0; resize: vertical; }

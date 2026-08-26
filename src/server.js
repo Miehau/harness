@@ -8,14 +8,15 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
-import { persistLinearApiKey, readLinearApiKey } from "./credentials.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
+import { JiraClient } from "./jira.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
 import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
-import { JsonStore } from "./store.js";
+import { JsonStore, normalizeSettings } from "./store.js";
+import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
 import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
@@ -36,7 +37,7 @@ const dataDir = process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-
 const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
 await store.init();
 
-const linear = new LinearClient({ apiKey: await readLinearApiKey(dataDir, store.read().workspace.cwd) || process.env.LINEAR_API_KEY });
+const trackers = new TrackerHub([new LinearClient(), new JiraClient()]);
 const harness = new PiHarness({ dataDir, publish });
 const clients = new Set();
 const activeSteps = new Map();
@@ -44,6 +45,10 @@ const activeTickets = new Map();
 const activeMerges = new Set();
 const mergeQueues = new Map();
 let ticketCache = new Map();
+
+function executionCapacity(state = store.read()) {
+  return normalizeSettings(state.settings).maxConcurrentTickets;
+}
 
 function publish(event) {
   const encoded = `data: ${JSON.stringify(event)}\n\n`;
@@ -1029,30 +1034,20 @@ async function api(request, response, url) {
     return json(response, 200, await harness.sessionTrace(step.sessionFile));
   }
   if (request.method === "POST" && url.pathname === "/api/stage-profiles") {
-    const profiles = normalizeStageProfiles((await body(request)).profiles);
+    const input = await body(request);
+    const profiles = normalizeStageProfiles(input.profiles);
+    const requestedCapacity = Number(input.settings?.maxConcurrentTickets);
+    if (!Number.isInteger(requestedCapacity) || requestedCapacity < 1 || requestedCapacity > 32) throw new Error("Maximum concurrent tickets must be an integer from 1 to 32");
+    const settings = normalizeSettings(input.settings);
     await harness.validateProfiles(profiles);
-    const state = await update((draft) => { draft.stageProfiles = profiles; });
+    const state = await update((draft) => {
+      draft.stageProfiles = profiles;
+      draft.settings = settings;
+    });
     return json(response, 200, state);
   }
   if (request.method === "GET" && url.pathname === "/api/tickets") {
-    const result = await linear.tickets();
-    ticketCache = new Map(result.tickets.map((ticket) => [ticket.id, ticket]));
-    return json(response, 200, result);
-  }
-  if (request.method === "POST" && url.pathname === "/api/linear/connect") {
-    const input = await body(request);
-    const apiKey = String(input.apiKey || "").trim();
-    if (!apiKey) throw new Error("Linear API key is required");
-    const previousApiKey = linear.apiKey;
-    linear.apiKey = apiKey;
-    let result;
-    try {
-      result = await linear.tickets();
-      await persistLinearApiKey(dataDir, store.read().workspace.cwd, apiKey);
-    } catch (error) {
-      linear.apiKey = previousApiKey;
-      throw error;
-    }
+    const result = await trackers.tickets();
     ticketCache = new Map(result.tickets.map((ticket) => [ticket.id, ticket]));
     return json(response, 200, result);
   }
@@ -1068,9 +1063,7 @@ async function api(request, response, url) {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));
     if (!isAbsolute(cwd) || !(await stat(cwd)).isDirectory()) throw new Error("Workspace must be an existing absolute directory");
-    const linearApiKey = await readLinearApiKey(dataDir, cwd) || process.env.LINEAR_API_KEY;
     const state = await update((draft) => { draft.workspace = { cwd }; });
-    linear.apiKey = linearApiKey;
     ticketCache = new Map();
     return json(response, 200, state);
   }
@@ -1082,10 +1075,11 @@ async function api(request, response, url) {
   const start = url.pathname.match(/^\/api\/tickets\/([^/]+)\/start$/);
   if (request.method === "POST" && start) {
     const id = decodeURIComponent(start[1]);
-    if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already active; wait for one to reach a checkpoint");
+    const capacity = executionCapacity();
+    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already active; wait for one to reach a checkpoint`);
     const input = await body(request);
     const ticket = ticketCache.get(id) || input.ticket;
-    if (!ticket?.id) throw new Error("Refresh Linear and select a ticket first");
+    if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
     await update((state) => {
       state.selectedTicketId = id;
       if (!state.ticketRuns[id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[id].status)) state.ticketRuns[id] = {
@@ -1123,7 +1117,8 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
-    if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already active; wait for one to reach a checkpoint");
+    const capacity = executionCapacity();
+    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already active; wait for one to reach a checkpoint`);
     if (run.status === "cancelled") await update((state) => {
       const current = ticketRun(state, id);
       current.status = "interrupted";
@@ -1160,7 +1155,8 @@ async function api(request, response, url) {
   const approve = url.pathname.match(/^\/api\/tickets\/([^/]+)\/approve$/);
   if (request.method === "POST" && approve) {
     const id = decodeURIComponent(approve[1]);
-    if (activeTickets.size >= 2 && !activeTickets.has(id)) throw new Error("Two tickets are already running");
+    const capacity = executionCapacity();
+    if (activeTickets.size >= capacity && !activeTickets.has(id)) throw new Error(`${capacity} tickets are already running`);
     const run = ticketRun(store.read(), id);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
     const input = await body(request);
@@ -1245,6 +1241,6 @@ const server = createServer(async (request, response) => {
 server.listen(port, host, () => {
   console.log(`Agent Plan Workspace: http://${host}:${port}`);
   console.log(`Repository: ${store.read().workspace.cwd}`);
-  console.log(`Linear: ${linear.configured ? "configured" : "set LINEAR_API_KEY or connect in the UI"}`);
+  console.log(`Trackers: ${trackers.configured ? "configured" : "set Linear or Jira environment variables"}`);
   console.log(`Data: ${dataDir}`);
 });

@@ -29,6 +29,7 @@ export class LinearClient {
     this.fetch = fetchImpl;
   }
 
+  get provider() { return "linear"; }
   get configured() { return Boolean(this.apiKey); }
 
   async tickets() {
@@ -49,7 +50,7 @@ export class LinearClient {
         .filter((ticket) => !(ticket.inverseRelations?.nodes || []).some((relation) =>
           relation.type === "blocks" && !["completed", "canceled"].includes(relation.issue?.state?.type)
         ))
-        .map((ticket) => ({ ...ticket, labels: ticket.labels?.nodes || [] }))
+        .map((ticket) => ({ ...ticket, provider: "linear", labels: ticket.labels?.nodes || [] }))
     };
   }
 }

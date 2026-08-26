@@ -20,17 +20,17 @@
     <button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide work queue" title="Hide work queue">‹</button>
     <aside id="ticket-pane" class="ticket-pane">
       <header class="pane-header ticket-header">
-        <div><span class="eyebrow">Local or Linear</span><h1>Work queue</h1></div>
-        <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh Linear" title="Refresh Linear">↻</button></div>
+        <div><span class="eyebrow">Local or tracker</span><h1>Work queue</h1></div>
+        <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh tickets" title="Refresh tickets">↻</button></div>
       </header>
-      <form id="local-load" class="linear-connect local-load">
+      <form id="local-load" class="source-connect local-load">
         <strong>Load local fixture</strong>
         <p>Read feature.md and plan.json from the open repository.</p>
         <input name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required>
         <button class="button primary" type="submit">Load</button>
       </form>
       <button id="free-text-open" class="source-button" type="button"><span><strong>Free text</strong><small>Describe a new task</small></span><b>New task</b></button>
-      <div id="linear-status" class="linear-status"></div>
+      <div id="tracker-status" class="tracker-status"></div>
       <div class="ticket-filter"><input id="ticket-search" type="search" placeholder="Filter tickets…" aria-label="Filter tickets"></div>
       <div id="ticket-list" class="ticket-list" aria-live="polite"></div>
       <footer class="ticket-pane-footer"><span id="run-capacity">0 / 2 active</span><span>isolated worktrees · merge queue</span></footer>
@@ -63,15 +63,6 @@
   </form>
 </dialog>
 
-<dialog id="linear-dialog">
-  <form id="linear-connect" class="dialog-shell">
-    <header><div><span class="eyebrow">Integration</span><h2>Connect Linear</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
-    <p class="profiles-note">The personal API key stays in this server process and is never written to disk.</p>
-    <label class="dialog-field">Personal API key<input name="apiKey" type="password" placeholder="lin_api_…" autocomplete="off" required></label>
-    <footer><span></span><button class="button primary" type="submit">Connect Linear</button></footer>
-  </form>
-</dialog>
-
 <dialog id="plan-dialog">
   <form method="dialog" class="dialog-shell">
     <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></header>
@@ -83,7 +74,8 @@
 <dialog id="profiles-dialog">
   <form id="profiles-form" class="dialog-shell">
     <header><div><span class="eyebrow">Framework configuration</span><h2>Stage profiles</h2></div><button id="close-profiles" class="icon-button" type="button" aria-label="Close">×</button></header>
-    <p class="profiles-note">Models, reasoning, and persistent agent instructions. Changes apply to new runs.</p>
+    <p class="profiles-note">Models, reasoning, persistent agent instructions, and local execution capacity. Changes apply to new runs.</p>
+    <label class="dialog-field">Maximum concurrent tickets<input id="max-concurrent-tickets" name="maxConcurrentTickets" type="number" min="1" max="32" required></label>
     <div id="profile-fields" class="profile-fields"></div>
     <footer><span class="profiles-provider">Provider: openai-codex</span><button class="button primary" type="submit">Save profiles</button></footer>
   </form>

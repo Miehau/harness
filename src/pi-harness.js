@@ -596,7 +596,7 @@ export class PiHarness {
   async clarifyRequirements({ cwd, ticket, runId, productContext, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Linear ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Tracker ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = jsonReply(reply);
       return {
         artifact: String(parsed.artifact || ""),

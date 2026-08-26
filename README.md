@@ -1,6 +1,6 @@
 # Agent Plan Workspace
 
-A local-first visual workspace for shaping development tasks with Pi, generating editable execution graphs, and reviewing every agent run through its prompt, progress, exact Git diff, artifacts, and screenshot references.
+A local-first visual workspace for shaping Linear, Jira, and local development tasks with Pi, generating editable execution graphs, and reviewing every agent run through its prompt, progress, exact Git diff, artifacts, and screenshot references. The incremental automation design is recorded in [docs/automation-harness-spec.md](docs/automation-harness-spec.md).
 
 ## MVP capabilities
 
@@ -35,6 +35,23 @@ Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
 
 The app uses Pi's existing authentication and model settings from `~/.pi/agent`. It binds to localhost by default.
 
+Tracker credentials are read from the daemon environment and are never stored by the harness:
+
+```bash
+# Linear
+LINEAR_API_KEY=lin_api_...
+
+# Jira Cloud
+JIRA_BASE_URL=https://example.atlassian.net
+JIRA_EMAIL=developer@example.com
+JIRA_API_TOKEN=...
+JIRA_PROJECT_KEY=PROJ
+```
+
+Linear and Jira can be configured together. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key.
+
+Versions before this change could persist a Linear key under `~/.agent-plan-workspace/credentials`. The harness no longer reads or writes that directory; remove the legacy directory manually after confirming you no longer need it.
+
 ## Local zero-state fixture
 
 The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes or repairs that directory as the zero-state Git repository, seeds a baseline `.gitignore`, renders its own Pi prompts, commits each accepted step, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
@@ -54,7 +71,8 @@ Architecture owns `.agent-plan/verify.mjs`. The framework always calls `node .ag
 
 ## Deliberate MVP limits
 
-- Pi is the only implemented harness.
+- Pi is the intentionally selected harness.
+- Linear and Jira ticket intake is read-only. Tracker lifecycle writeback and polling are planned in the automation specification.
 - Groups can contain steps, not nested groups.
 - Dependency-ready siblings run in isolated worktrees. Accepted worktree commits are cherry-picked into the run worktree in review order; conflicts stop for human attention.
 - Existing tracked and untracked files seed the ticket worktree without touching the user's index. Final integration waits until the target repository is clean.

@@ -19,6 +19,7 @@ test("normalizes Linear tickets and labels", async () => {
   });
   const result = await client.tickets();
   assert.equal(result.configured, true);
+  assert.equal(result.tickets[0].provider, "linear");
   assert.deepEqual(result.tickets[0].labels, [{ id: "l", name: "Feature" }]);
 });
 

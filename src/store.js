@@ -4,13 +4,23 @@ import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 
 function initialState(cwd) {
   return {
-    version: 3,
+    version: 4,
     revision: 0,
     workspace: { cwd },
+    settings: normalizeSettings(),
     stageProfiles: defaultStageProfiles(),
     selectedTicketId: null,
     ticketRuns: {},
     notice: null
+  };
+}
+
+export function normalizeSettings(value = {}) {
+  const maxConcurrentTickets = Number(value.maxConcurrentTickets);
+  return {
+    maxConcurrentTickets: Number.isInteger(maxConcurrentTickets) && maxConcurrentTickets >= 1 && maxConcurrentTickets <= 32
+      ? maxConcurrentTickets
+      : 2
   };
 }
 
@@ -26,9 +36,11 @@ export class JsonStore {
     await mkdir(dirname(this.file), { recursive: true });
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
-      if (saved.version === 3) this.state = saved;
+      if ([3, 4].includes(saved.version)) this.state = saved;
+      this.state.version = 4;
       this.state.workspace ||= { cwd: this.cwd };
       this.state.workspace.cwd ||= this.cwd;
+      this.state.settings = normalizeSettings(this.state.settings);
       this.state.stageProfiles = normalizeStageProfiles(this.state.stageProfiles);
       this.state.ticketRuns ||= {};
       for (const run of Object.values(this.state.ticketRuns)) {
