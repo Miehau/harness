@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
+import { persistLinearApiKey, readLinearApiKey } from "./credentials.js";
 import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
@@ -35,7 +36,7 @@ const dataDir = process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-
 const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
 await store.init();
 
-const linear = new LinearClient();
+const linear = new LinearClient({ apiKey: await readLinearApiKey(dataDir, store.read().workspace.cwd) || process.env.LINEAR_API_KEY });
 const harness = new PiHarness({ dataDir, publish });
 const clients = new Set();
 const activeSteps = new Map();
@@ -1034,8 +1035,18 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/linear/connect") {
     const input = await body(request);
-    linear.apiKey = String(input.apiKey || "").trim();
-    const result = await linear.tickets();
+    const apiKey = String(input.apiKey || "").trim();
+    if (!apiKey) throw new Error("Linear API key is required");
+    const previousApiKey = linear.apiKey;
+    linear.apiKey = apiKey;
+    let result;
+    try {
+      result = await linear.tickets();
+      await persistLinearApiKey(dataDir, store.read().workspace.cwd, apiKey);
+    } catch (error) {
+      linear.apiKey = previousApiKey;
+      throw error;
+    }
     ticketCache = new Map(result.tickets.map((ticket) => [ticket.id, ticket]));
     return json(response, 200, result);
   }
@@ -1051,7 +1062,10 @@ async function api(request, response, url) {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));
     if (!isAbsolute(cwd) || !(await stat(cwd)).isDirectory()) throw new Error("Workspace must be an existing absolute directory");
+    const linearApiKey = await readLinearApiKey(dataDir, cwd) || process.env.LINEAR_API_KEY;
     const state = await update((draft) => { draft.workspace = { cwd }; });
+    linear.apiKey = linearApiKey;
+    ticketCache = new Map();
     return json(response, 200, state);
   }
   if (request.method === "POST" && url.pathname === "/api/local/load") {

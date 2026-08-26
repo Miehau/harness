@@ -502,7 +502,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("submit", async (event) => {
   if (event.target.id === "workspace-form") {
     event.preventDefault();
-    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); render(); }
+    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); await refreshTickets(); }
     catch (error) { notify(error.message); }
     return;
   }
