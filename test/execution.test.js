@@ -54,6 +54,7 @@ test("clearing the queue preserves active runs", () => {
   const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" }, merge: { status: "merging" } } };
   assert.equal(clearInactiveRuns(state, new Set(["stale", "active", "merge"])), 2);
   assert.deepEqual(Object.keys(state.ticketRuns), ["active", "merge"]);
+  assert.deepEqual(Object.keys(state.retainedRuns), ["old", "stale"]);
   assert.equal(state.selectedTicketId, null);
 });
 

@@ -180,6 +180,10 @@ function safeEvent(event) {
   if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "error") {
     return { type: "agent_error", label: event.message.errorMessage || "Model request failed" };
   }
+  if (event.type === "message_end" && event.message?.role === "assistant" && event.message.usage) {
+    const { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 } = event.message.usage;
+    return { type: "usage", input, output, cacheRead, cacheWrite, label: "Usage recorded" };
+  }
   if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, callId: event.toolCallId, args: eventText(event.args), label: `Using ${event.toolName}` };
   if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), replace: true, label: `${event.toolName} is running` };
   if (event.type === "bash_execution_update") return { type: "tool_update", tool: "bash", callId: event.id, detail: eventText(event.delta), label: "Command is running" };

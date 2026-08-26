@@ -12,6 +12,7 @@
     <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span></div>
     <div class="topbar-actions">
       <button id="workspace-settings" class="workspace-picker" type="button" aria-haspopup="dialog"><span>Repository</span><code id="workspace-path-display"></code></button>
+      <button id="retention-open" class="icon-button" type="button" aria-label="Retained run storage" title="Retained run storage">▣</button>
       <button id="profile-settings" class="icon-button" type="button" aria-label="Agent setup" title="Agent setup">⚙</button>
     </div>
   </header>
@@ -53,6 +54,16 @@
     <label class="dialog-field" for="workspace-path">Repository path<div class="directory-picker"><input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" readonly required><button id="pick-workspace" class="button" type="button">Choose…</button></div></label>
     <footer><span></span><button class="button primary" type="submit">Open repository</button></footer>
   </form>
+</dialog>
+
+<dialog id="retention-dialog">
+  <div class="dialog-shell">
+    <header><div><span class="eyebrow">Manual cleanup</span><h2>Retained run storage</h2></div><button id="retention-close" class="icon-button" type="button" aria-label="Close">×</button></header>
+    <div class="retention-controls"><strong id="retention-total"></strong><select id="retention-project" aria-label="Project filter"></select><button class="button" type="button" data-retention-select="project">Select project</button><button class="button" type="button" data-retention-select="30">Older than 30 days</button><button class="button" type="button" data-retention-select="90">Older than 90 days</button><button class="button" type="button" data-retention-select="all">Select all</button></div>
+    <div id="retention-list" class="retention-list"></div>
+    <p class="profiles-note">Cleanup permanently removes the selected run artifacts, ticket worktrees, local branches, and live previews. Remote branches and merged changes are preserved.</p>
+    <footer><span>Completed runs are retained indefinitely until you confirm cleanup.</span><button id="cleanup-retention" class="button danger" type="button" disabled>Clean selected</button></footer>
+  </div>
 </dialog>
 
 <dialog id="free-text-dialog">

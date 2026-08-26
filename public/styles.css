@@ -350,6 +350,20 @@ dialog::backdrop { background: rgb(0 0 0 / .68); }
 .dialog-shell .profile-card textarea { width: 100%; min-height: 104px; margin: 0; padding: 9px; font: inherit; font-size: 12px; line-height: 1.45; resize: vertical; text-transform: none; }
 .profiles-provider { color: #828b9d; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .error-text { flex: 1; color: #f0a0a0; font-size: 12px; }
+.usage-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.usage-strip span { border: 1px solid var(--stroke); border-radius: 999px; padding: 4px 7px; background: rgb(255 255 255 / .035); color: #8f98aa; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.recovery-banner { display: flex; gap: 10px; margin-top: 12px; border: 1px solid rgb(238 180 87 / .28); border-radius: 10px; padding: 10px 12px; background: rgb(155 101 25 / .11); color: #d8bf94; font-size: 12px; }
+.recovery-banner strong { color: #f0d09a; white-space: nowrap; }
+.retention-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--stroke); }
+.retention-controls strong { margin-right: auto; font-size: 13px; }
+.retention-controls select { min-width: 150px; padding: 7px 9px; color: #dfe3ec; }
+.retention-list { display: grid; max-height: min(520px, calc(100vh - 280px)); gap: 7px; overflow-y: auto; padding: 12px; }
+.retention-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--stroke); border-radius: 10px; padding: 10px; background: rgb(255 255 255 / .025); }
+.retention-row span { display: grid; min-width: 0; gap: 3px; }
+.retention-row strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.retention-row small { color: #858ea0; font-size: 10px; }
+.retention-row b { color: #aeb5c4; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.retention-empty { padding: 36px; color: #7f8799; text-align: center; }
 #toast { position: fixed; right: 16px; bottom: 16px; z-index: 10; max-width: min(420px, calc(100vw - 32px)); border: 1px solid #3d444b; border-radius: 9px; padding: 10px 12px; background: #1b1f23; box-shadow: 0 12px 36px rgb(0 0 0 / .4); opacity: 0; pointer-events: none; transform: translateY(8px); transition: 140ms ease; font-size: 12px; }
 #toast.show { opacity: 1; transform: translateY(0); }
 
@@ -711,7 +725,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .workflow-stages ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stage-active .stage-copy small { display: -webkit-box; }
   .workspace-content {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, 38%) minmax(0, 62%);
   }
 }
@@ -944,10 +958,23 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 }
 
 @media (max-width: 720px) {
+  body, .app-shell { min-width: 0; max-width: 100vw; overflow-x: hidden; }
+  .topbar { width: 100%; box-sizing: border-box; }
+  .topbar-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) 36px 36px; align-items: center; flex-direction: row; }
+  .workspace-picker { width: 100%; min-width: 0; max-width: 100%; }
   .layout.ticket-layout {
     --queue-width: auto;
-    grid-template-columns: 1fr;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(300px, 44%) minmax(0, 56%);
   }
+  .ticket-pane, .plan-pane, .plan-header, .plan-heading, .plan-heading > div, .workspace-content, .plan-tree, .inspector { min-width: 0; max-width: 100%; }
   .ticket-pane { display: flex; }
+  .ticket-header { flex-wrap: wrap; }
+  .ticket-header > div:first-child { min-width: 0; }
+  .ticket-header .plan-actions { width: 100%; padding-right: 0; }
+  .plan-heading h2, .plan-heading p { max-width: 100%; overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
+  .recovery-banner { align-items: flex-start; flex-direction: column; }
 }

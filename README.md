@@ -19,6 +19,9 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
 - One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
 - Ticket-isolated local previews on unique ports with harness-captured Chromium desktop and mobile evidence.
+- Retained run storage with disk-usage previews and explicit cleanup by run, ticket, project, or age.
+- Restart-safe paused recovery, including stale-preview health and remote-delivery uncertainty guards.
+- Subscription-oriented usage reporting for elapsed time, model tokens, tool calls, and correction rounds without artificial budgets.
 - Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
 - Screenshot references passed into the selected step's Pi session.
 - Local JSON persistence under `~/.agent-plan-workspace`.
@@ -61,6 +64,10 @@ GITLAB_TOKEN=... # GitLab
 
 Tracker-backed runs rebase onto the remote target, push one ticket branch, open one pull/merge request, monitor existing CI and review feedback, apply focused feedback fixes, and squash-merge only when the remote gates allow it. After merge, the opened local checkout is fast-forwarded only when it is clean and safely behind the target; otherwise the dashboard records why synchronization was skipped.
 
+Completed run artifacts, ticket worktrees, and local branches are retained indefinitely. Use the storage button in the dashboard to inspect their measured disk usage and explicitly clean selected runs. Cleanup stops owned previews and removes only run-owned local resources; it does not delete remote branches or merged changes.
+
+After a restart, in-flight work remains paused and its last checkpoint is shown. Recorded PRs/MRs resume by inspecting the same remote change. If the daemon stopped while an unconfirmed PR/MR creation or squash merge may have been in flight, the dashboard reports the uncertainty and refuses to guess until the forge has been inspected.
+
 Versions before this change could persist a Linear key under `~/.agent-plan-workspace/credentials`. The harness no longer reads or writes that directory; remove the legacy directory manually after confirming you no longer need it.
 
 ## Local zero-state fixture
@@ -87,7 +94,7 @@ When `project.json` declares a `preview` or `dev` command, visual tickets receiv
 ## Deliberate MVP limits
 
 - Pi is the intentionally selected harness.
-- Linear and Jira ticket intake is read-only. Tracker lifecycle writeback and polling are planned in the automation specification.
+- Linear and Jira support polling, dependency-aware intake, comments, answers, and lifecycle transitions; unsupported workflow transitions stop with a visible blocker.
 - Groups can contain steps, not nested groups.
 - Dependency-ready siblings run in isolated worktrees. Accepted worktree commits are cherry-picked into the run worktree in review order; conflicts stop for human attention.
 - Existing tracked and untracked files seed the ticket worktree without touching the user's index. Final integration waits until the target repository is clean.

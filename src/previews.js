@@ -114,6 +114,12 @@ export class PreviewManager {
     return true;
   }
 
+  stopMatching(prefix) {
+    let stopped = 0;
+    for (const id of [...this.active.keys()]) if (id.startsWith(prefix) && this.stop(id)) stopped++;
+    return stopped;
+  }
+
   list() { return [...this.active.values()].map((preview) => preview.public); }
 }
 

@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, stageMilestones } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, runMetrics, stageMilestones } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -17,6 +17,8 @@ let activeTab = ["run", "diff", "artifacts", "ticket", "prompt"].includes(savedV
 let toastTimer;
 let clearTimer;
 let clearArmed = false;
+let cleanupArmed = false;
+let retention = { items: [], totalBytes: 0 };
 const selectedTicketIds = new Set();
 const liveRuns = new Map();
 const liveStages = new Map();
@@ -77,6 +79,27 @@ function statusIcon(status) {
 function statusLabel(run) {
   if (!run) return "not started";
   return run.status.replaceAll("_", " ");
+}
+
+function compactNumber(value) { return Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value || 0); }
+function byteSize(value) { return value < 1024 ? `${value} B` : value < 1024 ** 2 ? `${(value / 1024).toFixed(1)} KB` : value < 1024 ** 3 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${(value / 1024 ** 3).toFixed(1)} GB`; }
+function duration(value) { const hours = Math.floor(value / 3600); const minutes = Math.floor((value % 3600) / 60); return hours ? `${hours}h ${minutes}m` : `${minutes}m`; }
+
+function renderRetention() {
+  const target = $("#retention-list");
+  $("#retention-total").textContent = `${retention.items.length} retained · ${byteSize(retention.totalBytes)}`;
+  const projects = [...new Set(retention.items.map((item) => item.project))];
+  $("#retention-project").innerHTML = `<option value="">Any project</option>${projects.map((project) => `<option>${escapeHtml(project)}</option>`).join("")}`;
+  target.innerHTML = retention.items.length ? retention.items.map((item) => `<label class="retention-row"><input type="checkbox" data-retention-ticket="${escapeHtml(item.ticketId)}"><span><strong>${escapeHtml(item.identifier)} · ${escapeHtml(item.title)}</strong><small>${escapeHtml(item.project)} · ${escapeHtml(item.status)} · ${item.archived ? "archived" : "in queue"} · ${item.artifactCount} artifacts</small></span><b>${byteSize(item.bytes)}</b></label>`).join("") : `<div class="retention-empty">No retained runs.</div>`;
+  $("#cleanup-retention").disabled = true;
+}
+
+async function openRetention() {
+  retention = await api("/api/retention");
+  cleanupArmed = false;
+  $("#cleanup-retention").textContent = "Clean selected";
+  renderRetention();
+  $("#retention-dialog").showModal();
 }
 
 function renderTrackerStatus() {
@@ -171,13 +194,15 @@ function renderHeader() {
     return;
   }
   const preview = Object.values(run?.previews || {}).at(-1);
+  const metrics = runMetrics(run);
+  const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => stage.status === "active" && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => stage.status === "active" && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p></div><div class="plan-actions">${action}${reviewAction}</div></div>${stagesHtml(run)}${checkpointHtml(run)}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${stagesHtml(run)}${checkpointHtml(run)}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function stepHtml(step) {
@@ -417,6 +442,53 @@ async function refreshTickets() {
 }
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("#retention-open")) {
+    try { await openRetention(); } catch (error) { notify(error.message); }
+    return;
+  }
+  if (event.target.closest("#retention-close")) { $("#retention-dialog").close(); return; }
+  const retentionSelect = event.target.closest("[data-retention-select]");
+  if (retentionSelect) {
+    const mode = retentionSelect.dataset.retentionSelect;
+    const project = $("#retention-project").value;
+    const cutoff = Number(mode) ? Date.now() - Number(mode) * 86400000 : null;
+    for (const checkbox of $("#retention-list").querySelectorAll("[data-retention-ticket]")) {
+      const item = retention.items.find((candidate) => candidate.ticketId === checkbox.dataset.retentionTicket);
+      checkbox.checked = mode === "all" || (mode === "project" && project && item.project === project) || (cutoff && Date.parse(item.completedAt || item.createdAt || Date.now()) < cutoff);
+    }
+    cleanupArmed = false;
+    const selected = [...$("#retention-list").querySelectorAll("[data-retention-ticket]:checked")];
+    $("#cleanup-retention").disabled = !selected.length;
+    $("#cleanup-retention").textContent = "Clean selected";
+    return;
+  }
+  const retentionCheck = event.target.closest("[data-retention-ticket]");
+  if (retentionCheck) {
+    cleanupArmed = false;
+    const selected = [...$("#retention-list").querySelectorAll("[data-retention-ticket]:checked")];
+    $("#cleanup-retention").disabled = !selected.length;
+    $("#cleanup-retention").textContent = "Clean selected";
+    return;
+  }
+  const cleanup = event.target.closest("#cleanup-retention");
+  if (cleanup) {
+    const ticketIds = [...$("#retention-list").querySelectorAll("[data-retention-ticket]:checked")].map((item) => item.dataset.retentionTicket);
+    const bytes = retention.items.filter((item) => ticketIds.includes(item.ticketId)).reduce((total, item) => total + item.bytes, 0);
+    if (!cleanupArmed) {
+      cleanupArmed = true;
+      cleanup.textContent = `Confirm ${byteSize(bytes)} cleanup`;
+      return;
+    }
+    cleanup.disabled = true;
+    try {
+      const result = await api("/api/retention/cleanup", { method: "POST", body: JSON.stringify({ ticketIds, confirmed: true }) });
+      state = result.state;
+      retention = result.inventory;
+      renderRetention(); render();
+      notify(`${result.cleaned.length} retained run${result.cleaned.length === 1 ? "" : "s"} cleaned`);
+    } catch (error) { notify(error.message); cleanup.disabled = false; }
+    return;
+  }
   const openArtifact = event.target.closest("[data-open-artifact]");
   if (openArtifact) {
     try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/artifacts/${encodeURIComponent(openArtifact.dataset.openArtifact)}/open`, { method: "POST", body: "{}" }); notify("Artifact opened in the default editor"); }

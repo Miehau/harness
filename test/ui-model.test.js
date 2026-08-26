@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, stageMilestones } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
+
+test("summarizes subscription usage without imposing a budget", () => {
+  const run = {
+    createdAt: "2026-08-24T18:00:00.000Z", completedAt: "2026-08-24T18:02:00.000Z", reviews: [{}, {}],
+    plan: { nodes: [{ type: "step", attempts: [
+      { events: [{ type: "usage", input: 100, output: 20, cacheRead: 50, cacheWrite: 5 }, { type: "tool_start" }] },
+      { events: [{ type: "usage", input: 40, output: 10 }, { type: "tool_start" }] }
+    ] }] }, stages: []
+  };
+  assert.deepEqual(runMetrics(run), { input: 140, output: 30, cacheRead: 50, cacheWrite: 5, calls: 2, correctionRounds: 2, durationSeconds: 120 });
+});
 
 test("builds graph levels and readable diff rows", () => {
   const graph = executionGraph({ nodes: [

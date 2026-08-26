@@ -24,6 +24,8 @@ import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicke
 import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
+import { cleanupRetainedRun, retentionInventory } from "./retention.js";
+import { acquireDaemonLock } from "./daemon-lock.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -38,6 +40,7 @@ const initialCwd = option("--cwd", process.cwd());
 const port = Number(option("--port", process.env.PORT || 4317));
 const host = option("--host", process.env.HOST || "127.0.0.1");
 const dataDir = process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
+const daemonLock = await acquireDaemonLock(join(dataDir, "daemon.lock"));
 const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
 await store.init();
 
@@ -162,6 +165,15 @@ async function cancelTicket(ticketId) {
   await update((state) => {
     const run = ticketRun(state, ticketId);
     markRunCancelled(run);
+  });
+  await stopTicketPreviews(ticketId, "run_cancelled");
+}
+
+async function stopTicketPreviews(ticketId, reason) {
+  previews.stopMatching(`${ticketId}:`);
+  await update((state) => {
+    const run = state.ticketRuns[ticketId];
+    for (const preview of Object.values(run?.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: reason, stoppedAt: new Date().toISOString() });
   });
 }
 
@@ -906,35 +918,47 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
   const promise = (async () => {
     const current = ticketRun(store.read(), ticketId);
     const sourceCwd = current.workspace.sourceCwd;
-    const { remote, base } = await remoteContext(sourceCwd);
+    const resumedChange = current.merge?.change || null;
+    const remoteDetails = current.merge?.remote && current.merge?.base
+      ? { remote: current.merge.remote, base: current.merge.base }
+      : await remoteContext(sourceCwd);
+    const { remote, base } = remoteDetails;
     const forge = deliveryForRemote(remote);
     const attempt = (current.merge?.attempt || 0) + 1;
     const activity = captureStageActivity(ticketId, "handoff", current.runId);
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.merge = { status: "rebasing", attempt, sourceCwd, branch: run.workspace.branch, base, remote, feedbackIds: run.merge?.feedbackIds || [] };
-      run.status = "rebasing";
+      run.merge = resumedChange
+        ? { ...run.merge, status: "waiting_for_checks", attempt, sourceCwd, branch: run.workspace.branch, base, remote }
+        : { status: "rebasing", attempt, sourceCwd, branch: run.workspace.branch, base, remote, feedbackIds: run.merge?.feedbackIds || [] };
+      run.status = resumedChange ? "waiting_for_checks" : "rebasing";
+      run.recovery = null;
       run.checkpoint = null;
-      setStage(run, "handoff", "active", `Rebasing onto origin/${base}`);
+      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Rebasing onto origin/${base}`);
     });
     const rebase = () => rebaseOntoRemote(current.workspace.cwd, base, {
       resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
     });
-    await rebase();
-    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
-    if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
-    await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-    const change = await forge.create({
-      branch: current.workspace.branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
-      body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || "See changed files."].join("\n\n")
-    });
-    await trackerAction(ticketId, "remote_change", (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "waiting_for_checks", change, checks, openedAt: new Date().toISOString() });
-      run.status = "waiting_for_checks";
-      setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
-    });
+    let checks = current.merge?.checks || null;
+    let change = resumedChange;
+    if (!change) {
+      await rebase();
+      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+      if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
+      change = await forge.create({
+        branch: current.workspace.branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
+        body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || "See changed files."].join("\n\n")
+      });
+      await trackerAction(ticketId, "remote_change", (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
+      await update((state) => {
+        const run = ticketRun(state, ticketId);
+        Object.assign(run.merge, { status: "waiting_for_checks", change, checks, openedAt: new Date().toISOString(), externalActionPending: null });
+        run.status = "waiting_for_checks";
+        setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
+      });
+    }
 
     let mergeResult = null;
     let lastRebaseHead = null;
@@ -960,7 +984,11 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       }
       if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
       const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
-      if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) { mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`); break; }
+      if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
+        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "squash_merge"; });
+        mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`);
+        break;
+      }
       if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
         lastRebaseHead = delivery.headSha;
         await rebase();
@@ -982,7 +1010,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     await update((state) => {
       const run = ticketRun(state, ticketId);
       run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync };
-      Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync });
+      Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync, externalActionPending: null });
       if (productContext) run.productContextPath = productContext.path;
       run.artifacts.push(handoff);
       run.status = "completed";
@@ -990,6 +1018,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       run.completedAt = integratedAt;
       setStage(run, "handoff", "completed", `Merged via ${change.url}`).activity = activity.snapshot();
     });
+    await stopTicketPreviews(ticketId, "run_completed");
     return { commit: mergeResult.commit, change, sync };
   })().catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
@@ -1019,6 +1048,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
       const run = ticketRun(state, ticketId);
       run.merge = { status: "queued", position, attempt, queuedAt, sourceCwd, branch: run.workspace.branch, conflicts: [] };
       run.status = "queued_for_merge";
+      run.recovery = null;
       run.checkpoint = null;
       setStage(run, "handoff", "active", `Merge queue position ${position}`);
     });
@@ -1071,6 +1101,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
       run.lastError = null;
       run.completedAt = integratedAt;
     });
+    await stopTicketPreviews(ticketId, "run_completed");
     return integration;
   });
   await queuedState;
@@ -1348,6 +1379,7 @@ async function runTicket(ticketId) {
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.status = "running";
+        run.recovery = null;
         run.checkpoint = null;
         setStage(run, "design", "completed", "Plan approved");
         setStage(run, "implement", "active", "Executing dependency-ready steps");
@@ -1385,6 +1417,29 @@ async function api(request, response, url) {
     let cleared = 0;
     const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set([...activeTickets.keys(), ...activeMerges])); });
     return json(response, 200, { cleared, state });
+  }
+  if (request.method === "GET" && url.pathname === "/api/retention") {
+    return json(response, 200, await retentionInventory(store.read(), dataDir));
+  }
+  if (request.method === "POST" && url.pathname === "/api/retention/cleanup") {
+    const input = await body(request);
+    const ticketIds = [...new Set(Array.isArray(input.ticketIds) ? input.ticketIds.map(String) : [])];
+    if (!input.confirmed || !ticketIds.length) throw new Error("Confirm at least one retained run for cleanup");
+    const cleaned = [];
+    for (const id of ticketIds) {
+      if (activeTickets.has(id) || activeMerges.has(id)) throw new Error(`Cannot clean active run ${id}`);
+      const snapshot = store.read();
+      const run = snapshot.ticketRuns[id] || snapshot.retainedRuns?.[id];
+      if (!run) throw new Error(`Retained run not found: ${id}`);
+      if (!["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)) throw new Error(`Run ${id} is not safe to clean`);
+      cleaned.push(await cleanupRetainedRun({ run, dataDir, previewManager: previews }));
+      await update((draft) => {
+        delete draft.ticketRuns[id];
+        delete draft.retainedRuns?.[id];
+        if (draft.selectedTicketId === id) draft.selectedTicketId = null;
+      });
+    }
+    return json(response, 200, { cleaned, inventory: await retentionInventory(store.read(), dataDir), state: store.read() });
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
   if (request.method === "GET" && sessionTrace) {
@@ -1468,6 +1523,14 @@ async function api(request, response, url) {
   if (request.method === "POST" && resume) {
     const id = decodeURIComponent(resume[1]);
     const run = ticketRun(store.read(), id);
+    if (run.recovery?.kind === "delivery") {
+      if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
+      ensureTicketCapacity(id);
+      const contextContent = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")?.content || null;
+      const diff = run.reviews?.at(-1)?.diff || null;
+      scheduleTicketIntegration(id, { diff, contextContent }).catch(() => {});
+      return json(response, 202, { accepted: true, ticketId: id, recovery: "delivery" });
+    }
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
     ensureTicketCapacity(id);
@@ -1619,3 +1682,9 @@ server.listen(port, host, () => {
   console.log(`Data: ${dataDir}`);
   refreshTrackers().catch((error) => console.error(`Tracker refresh failed: ${error.message}`));
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {
+  await daemonLock.release();
+  process.exit(0);
+});
+server.once("close", () => daemonLock.release().catch(() => {}));

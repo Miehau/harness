@@ -45,6 +45,28 @@ export function preferredStepId(plan, currentId) {
   return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
+export function runMetrics(run, now = Date.now()) {
+  if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, correctionRounds: 0, durationSeconds: 0 };
+  const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
+  const attempts = steps.flatMap((step) => step.attempts || []);
+  const stageEvents = (run.stages || []).flatMap((stage) => stage.activity?.events || []);
+  const events = [...attempts.flatMap((attempt) => attempt.events || []), ...stageEvents];
+  const usage = events.filter((event) => event.type === "usage").reduce((total, event) => ({
+    input: total.input + Number(event.input || 0),
+    output: total.output + Number(event.output || 0),
+    cacheRead: total.cacheRead + Number(event.cacheRead || 0),
+    cacheWrite: total.cacheWrite + Number(event.cacheWrite || 0)
+  }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  const end = run.completedAt || (run.status === "completed" ? run.integration?.integratedAt : null) || now;
+  const start = Date.parse(run.createdAt || end);
+  return {
+    ...usage,
+    calls: events.filter((event) => event.type === "tool_start").length,
+    correctionRounds: steps.reduce((total, step) => total + Math.max(0, (step.attempts?.length || 0) - 1), 0) + Math.max(0, (run.reviews?.length || 0) - 1),
+    durationSeconds: Math.max(0, Math.floor((new Date(end).getTime() - start) / 1000))
+  };
+}
+
 function firstLine(value, fallback = "") {
   return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim().replace(/[*`]/g, "").slice(0, 120) || fallback;
 }
