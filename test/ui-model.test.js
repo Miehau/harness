@@ -41,6 +41,15 @@ test("tool activity preserves event order and pairs details", () => {
   assert.equal(eventTimeline([{ type: "tool_start", tool: "edit", at: "1" }, { type: "tool_end", tool: "edit", at: "2" }])[0].hasDetails, false);
 });
 
+test("cumulative tool updates replace earlier snapshots", () => {
+  const [item] = eventTimeline([
+    { type: "tool_start", callId: "1", tool: "read", at: "1" },
+    { type: "tool_update", callId: "1", tool: "read", detail: "partial", replace: true, at: "2" },
+    { type: "tool_update", callId: "1", tool: "read", detail: "complete", replace: true, at: "3" }
+  ]);
+  assert.equal(item.output, "complete");
+});
+
 test("activity gives persisted reasoning and worker reports meaningful titles and details", () => {
   const timeline = eventTimeline([
     { type: "reasoning_summary", detail: "**Mapped** task lifecycle invariants", at: "1" },

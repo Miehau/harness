@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { appendBounded, pushBounded } from "./execution.js";
 import { flattenSteps, normalizePlan } from "./plan.js";
 import { stagePrompt } from "./profiles.js";
 
@@ -157,7 +158,7 @@ function eventText(value) {
   catch { text = String(value); }
   text ??= String(value ?? "");
   // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
-  return text.length > 50000 ? `${text.slice(0, 50000)}\n\n[truncated after 50,000 characters]` : text;
+  return text.length > 10000 ? `${text.slice(0, 10000)}\n\n[truncated after 10,000 characters]` : text;
 }
 
 function safeEvent(event) {
@@ -171,7 +172,7 @@ function safeEvent(event) {
     return { type: "agent_error", label: event.message.errorMessage || "Model request failed" };
   }
   if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, callId: event.toolCallId, args: eventText(event.args), label: `Using ${event.toolName}` };
-  if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), label: `${event.toolName} is running` };
+  if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), replace: true, label: `${event.toolName} is running` };
   if (event.type === "bash_execution_update") return { type: "tool_update", tool: "bash", callId: event.id, detail: eventText(event.delta), label: "Command is running" };
   if (event.type === "tool_execution_end") return { type: "tool_end", tool: event.toolName, callId: event.toolCallId, result: eventText(event.result), isError: event.isError, label: event.isError ? `${event.toolName} failed` : `Reviewing ${event.toolName} result` };
   if (event.type === "agent_start" || event.type === "turn_start") return { type: event.type, label: "Model is reasoning" };
@@ -388,15 +389,15 @@ export class PiHarness {
       const at = new Date(message.timestamp || entry.timestamp || Date.now()).toISOString();
       if (message.role === "user") trace.prompt = textFromContent(message.content);
       if (message.role === "assistant") for (const part of message.content || []) {
-        if (part.type === "text") trace.rawOutput += part.text || "";
+        if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, part.text, 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
           try {
-            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) trace.events.push({ type: "reasoning_summary", detail: summary.text, at });
+            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) pushBounded(trace.events, { type: "reasoning_summary", detail: summary.text, at }, 200);
           } catch {}
         }
-        if (part.type === "toolCall") trace.events.push({ type: "tool_start", tool: part.name, callId: part.id, args: eventText(part.arguments), at });
+        if (part.type === "toolCall") pushBounded(trace.events, { type: "tool_start", tool: part.name, callId: part.id, args: eventText(part.arguments), at }, 200);
       }
-      if (message.role === "toolResult") trace.events.push({ type: "tool_end", tool: message.toolName, callId: message.toolCallId, result: eventText(textFromContent(message.content)), isError: Boolean(message.isError), at });
+      if (message.role === "toolResult") pushBounded(trace.events, { type: "tool_end", tool: message.toolName, callId: message.toolCallId, result: eventText(textFromContent(message.content)), isError: Boolean(message.isError), at }, 200);
     }
     return trace;
   }
@@ -947,7 +948,7 @@ ${stripFrontmatter(content).trim()}
       if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
       if (safe.type === "thinking") lastThinkingAt = Date.now();
       if (safe.type === "text_delta") output += safe.delta;
-      else events.push({ ...safe, at: new Date().toISOString() });
+      else pushBounded(events, { ...safe, at: new Date().toISOString() }, 100);
       onEvent?.(safe);
     });
     try {
@@ -965,7 +966,7 @@ ${stripFrontmatter(content).trim()}
         output: report?.artifact || rawOutput,
         report: report || { status: "completed", summary: rawOutput, artifact: rawOutput },
         sessionFile: session.sessionFile,
-        events: events.slice(-100)
+        events
       };
     } finally {
       unsubscribe();

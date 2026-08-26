@@ -17,7 +17,7 @@ import { formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizePlan } from "./plan.js";
 import { JsonStore } from "./store.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
+import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -47,7 +47,10 @@ let ticketCache = new Map();
 
 function publish(event) {
   const encoded = `data: ${JSON.stringify(event)}\n\n`;
-  for (const response of clients) response.write(encoded);
+  for (const response of clients) {
+    if (response.destroyed) clients.delete(response);
+    else if (!response.writableNeedDrain) response.write(encoded);
+  }
 }
 
 function publishState(state = store.read()) { publish({ type: "state", state }); }
@@ -67,39 +70,14 @@ function publishStepEvent(ticketId, stepId, runId, event) {
 
 function captureStageActivity(ticketId, stageId, runId) {
   const existing = store.read().ticketRuns[ticketId]?.stages?.find((stage) => stage.id === stageId)?.activity;
-  const startedAt = existing?.startedAt || new Date().toISOString();
-  const events = [...(existing?.events || [])];
-  let rawOutput = existing?.rawOutput || "";
-  let lastEventAt = existing?.lastEventAt || startedAt;
-  let lastEvent = existing?.lastEvent || "";
-  let warning = Boolean(existing?.warning);
-  const lastThinkingAt = new Map();
-  const current = () => ({ startedAt, lastEventAt, lastEvent, warning, rawOutput: rawOutput.slice(-100000), events: events.slice(-200) });
-  return {
-    onEvent(event, actor) {
-      const now = Date.now();
-      const activityKey = actor || "stage";
-      if (event.type === "thinking" && now - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
-      if (event.type === "thinking") lastThinkingAt.set(activityKey, now);
-      const item = { ...event, ...(actor ? { actor } : {}), at: new Date(now).toISOString() };
-      if (item.type === "text_delta") rawOutput += item.delta || "";
-      else {
-        events.push(item);
-        lastEventAt = item.at;
-        lastEvent = item.label || lastEvent;
-        warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
-        const activity = current();
-        update((state) => {
-          const stage = state.ticketRuns[ticketId]?.stages?.find((candidate) => candidate.id === stageId);
-          if (stage) stage.activity = activity;
-        }, { publish: false }).catch(() => {});
-      }
-      publish({ channel: "stage", ticketId, stageId, runId, ...item });
-    },
-    snapshot() {
-      return { ...current(), completedAt: new Date().toISOString() };
-    }
-  };
+  return createActivityCapture({
+    existing,
+    persist: (activity) => update((state) => {
+      const stage = state.ticketRuns[ticketId]?.stages?.find((candidate) => candidate.id === stageId);
+      if (stage) stage.activity = activity;
+    }, { publish: false }),
+    emit: (event) => publish({ channel: "stage", ticketId, stageId, runId, ...event })
+  });
 }
 
 function repositoryCheckReview(checks) {

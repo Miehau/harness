@@ -20,6 +20,7 @@ let clearArmed = false;
 const liveRuns = new Map();
 const liveStages = new Map();
 const sessionTraces = new Map();
+const appendLiveOutput = (value, delta) => `${value || ""}${delta || ""}`.slice(-100000);
 const pendingSessionTraces = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -585,7 +586,7 @@ events.onmessage = ({ data }) => {
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "" };
     live.runId = event.runId;
     if (event.type === "prompt") live.prompt = event.content;
-    else if (event.type === "text_delta") live.output += event.delta;
+    else if (event.type === "text_delta") live.output = appendLiveOutput(live.output, event.delta);
     else live.events.push({ ...event, at: new Date().toISOString() });
     live.events = live.events.slice(-200);
     if (event.type !== "thinking" || !live.label) live.label = event.label || live.label;
@@ -603,7 +604,7 @@ events.onmessage = ({ data }) => {
     let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "", startedAt: new Date().toISOString() };
     live.runId = event.runId;
-    if (event.type === "text_delta") live.output += event.delta || "";
+    if (event.type === "text_delta") live.output = appendLiveOutput(live.output, event.delta);
     else live.events.push(event);
     live.events = live.events.slice(-200);
     live.lastAt = new Date().toISOString();

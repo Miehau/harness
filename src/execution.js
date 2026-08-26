@@ -1,5 +1,75 @@
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 
+export function appendBounded(value, addition, limit) {
+  const chunk = String(addition || "");
+  if (chunk.length >= limit) return chunk.slice(-limit);
+  const current = String(value || "");
+  return `${current.slice(Math.max(0, current.length + chunk.length - limit))}${chunk}`;
+}
+
+export function pushBounded(items, item, limit) {
+  items.push(item);
+  if (items.length > limit) items.splice(0, items.length - limit);
+}
+
+export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
+  const startedAt = existing.startedAt || new Date(now()).toISOString();
+  const events = (existing.events || []).slice(-eventLimit);
+  let rawOutput = appendBounded("", existing.rawOutput, outputLimit);
+  let lastEventAt = existing.lastEventAt || startedAt;
+  let lastEvent = existing.lastEvent || "";
+  let warning = Boolean(existing.warning);
+  let completedAt = existing.completedAt;
+  let persistence;
+  let dirty = false;
+  const lastThinkingAt = new Map();
+  const current = () => ({
+    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(),
+    ...(completedAt ? { completedAt } : {})
+  });
+  const save = () => {
+    dirty = true;
+    if (persistence || !persist) return;
+    persistence = (async () => {
+      while (dirty) {
+        dirty = false;
+        await persist(current());
+      }
+    })().catch(() => {}).finally(() => {
+      persistence = null;
+      if (dirty) save();
+    });
+  };
+  return {
+    onEvent(event, actor) {
+      const timestamp = now();
+      const activityKey = actor || "stage";
+      if (event.type === "thinking" && timestamp - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
+      if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
+      const item = { ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() };
+      if (item.type === "text_delta") rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
+      else {
+        pushBounded(events, item, eventLimit);
+        lastEventAt = item.at;
+        lastEvent = item.label || lastEvent;
+        warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
+        save();
+      }
+      emit?.(item);
+    },
+    snapshot() {
+      completedAt ||= new Date(now()).toISOString();
+      return current();
+    },
+    async flush() {
+      do {
+        if (dirty && !persistence) save();
+        await persistence;
+      } while (dirty || persistence);
+    }
+  };
+}
+
 export function markRunCancelled(run, at = new Date().toISOString()) {
   run.status = "cancelled";
   run.cancelledAt = at;

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, clearInactiveRuns, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage } from "../src/execution.js";
+import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -65,4 +65,38 @@ test("a preserved plan checkpoint remains approvable after setup fails", () => {
 test("an interrupted pre-plan run resumes its active workflow stage", () => {
   assert.equal(resumeStage({ status: "interrupted", plan: null, stages: [{ id: "explore", status: "active" }] }), "explore");
   assert.equal(resumeStage({ status: "interrupted", plan: { nodes: [] }, stages: [] }), "run");
+});
+
+test("activity capture bounds memory and coalesces pending persistence", async () => {
+  let releaseFirstWrite;
+  const firstWrite = new Promise((resolve) => { releaseFirstWrite = resolve; });
+  let writes = 0;
+  let activeWrites = 0;
+  let maxActiveWrites = 0;
+  const capture = createActivityCapture({
+    outputLimit: 100,
+    eventLimit: 5,
+    now: () => 1,
+    persist: async () => {
+      writes++;
+      activeWrites++;
+      maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+      if (writes === 1) await firstWrite;
+      activeWrites--;
+    }
+  });
+
+  capture.onEvent({ type: "tool_start", label: "Started" });
+  for (let index = 0; index < 1000; index++) {
+    capture.onEvent({ type: "tool_update", detail: "x".repeat(1000) });
+    capture.onEvent({ type: "text_delta", delta: "output" });
+  }
+
+  assert.equal(writes, 1);
+  assert.equal(capture.snapshot().events.length, 5);
+  assert.equal(capture.snapshot().rawOutput.length, 100);
+  releaseFirstWrite();
+  await capture.flush();
+  assert.equal(writes, 2);
+  assert.equal(maxActiveWrites, 1);
 });

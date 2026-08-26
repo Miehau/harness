@@ -110,7 +110,7 @@ export function eventTimeline(events = []) {
         item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: event.tool, at: event.at, args: "", output: "", result: "", status: "running", isError: false };
         items.push(item);
       }
-      if (event.type === "tool_update") item.output += event.detail || "";
+      if (event.type === "tool_update") item.output = event.replace ? event.detail || "" : item.output + (event.detail || "");
       else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : "finished", isError: Boolean(event.isError) });
       continue;
     }
