@@ -87,12 +87,101 @@ export function clearInactiveRuns(state, activeTicketIds) {
     const run = state.ticketRuns[id];
     if (activeTicketIds.has(id) && running.has(run.status)) continue;
     state.retainedRuns ||= {};
-    state.retainedRuns[id] = run;
+    state.retainedRuns[`${id}:${run.runId || "legacy"}`] = run;
     delete state.ticketRuns[id];
     cleared++;
   }
   if (state.selectedTicketId && !state.ticketRuns[state.selectedTicketId]) state.selectedTicketId = null;
   return cleared;
+}
+
+export function archiveRun(state, ticketId) {
+  const run = state.ticketRuns?.[ticketId];
+  if (!run) throw new Error("Ticket run not found");
+  state.retainedRuns ||= {};
+  state.retainedRuns[`${ticketId}:${run.runId || "legacy"}`] = run;
+  delete state.ticketRuns[ticketId];
+  return run;
+}
+
+function resetStagesFrom(run, stageId) {
+  const index = run.stages.findIndex((stage) => stage.id === stageId);
+  if (index < 0) throw new Error(`Unknown restart stage: ${stageId}`);
+  for (const [stageIndex, stage] of run.stages.entries()) {
+    if (stageIndex < index) continue;
+    Object.assign(stage, { status: "pending", summary: stageIndex === index ? "Queued for restart" : "" });
+    delete stage.activity;
+    delete stage.diff;
+    delete stage.baseTree;
+  }
+}
+
+function resetStep(step) {
+  const attempts = step.attempts?.length || 0;
+  Object.assign(step, { status: "ready", attempts: [], artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
+  for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
+  return attempts;
+}
+
+export function rewindRun(run, target, at = new Date().toISOString()) {
+  if (!run?.plan && !["stage:explore", "stage:design"].includes(target)) throw new Error("This run has no plan to restart");
+  const previousStages = (run.stages || []).map(({ id, status }) => ({ id, status }));
+  const previousSteps = flattenSteps(run.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }));
+  const previousStatus = run.status;
+  const previousCheckpoint = run.checkpoint?.kind || null;
+  let stageId;
+  let restoredTree = null;
+  let resetStepIds = [];
+  let discardedAttempts = 0;
+
+  if (target === "stage:explore" || target === "stage:design") {
+    stageId = target.slice(6);
+    restoredTree = run.baselineTree;
+    if (!restoredTree) throw new Error("This stage has no recorded repository baseline");
+    run.plan = null;
+    run.sessionFile = null;
+    delete run.planApprovedAt;
+  } else if (target === "stage:verify") {
+    if (!flattenSteps(run.plan).length || flattenSteps(run.plan).some((step) => step.status !== "accepted")) throw new Error("Verification can restart only after every implementation step is accepted");
+    stageId = "verify";
+    run.reviews = [];
+  } else {
+    const stepId = String(target || "").replace(/^step:/, "");
+    const steps = flattenSteps(run.plan);
+    const selectedIndex = steps.findIndex((step) => step.id === stepId);
+    if (selectedIndex < 0) throw new Error("Restart step not found");
+    const selected = steps[selectedIndex];
+    restoredTree = selected.baseTree || run.baselineTree;
+    if (!restoredTree) throw new Error("This step has no recorded code checkpoint");
+    const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
+    const reset = steps.slice(Math.max(0, firstIndex));
+    resetStepIds = reset.map((step) => step.id);
+    discardedAttempts = reset.reduce((total, step) => total + resetStep(step), 0);
+    stageId = "implement";
+  }
+
+  resetStagesFrom(run, stageId);
+  run.status = "interrupted";
+  run.checkpoint = null;
+  run.activeRuns = {};
+  run.lastError = null;
+  run.recovery = null;
+  for (const key of ["completedAt", "merge", "integration", "deliveredDiff", "productContextPath"]) delete run[key];
+  const audit = {
+    id: `restart-${(run.restartHistory?.length || 0) + 1}`,
+    at,
+    target,
+    fromStatus: previousStatus,
+    fromCheckpoint: previousCheckpoint,
+    previousStages,
+    previousSteps,
+    restoredTree,
+    resetStepIds,
+    discardedAttempts
+  };
+  run.restartHistory ||= [];
+  run.restartHistory.push(audit);
+  return audit;
 }
 
 export function planApprovalPending(run) {

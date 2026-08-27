@@ -3,7 +3,7 @@ import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
-import { diffTrees, isGitRepository, snapshotTree } from "./git.js";
+import { diffTrees, isGitRepository, restoreTree, snapshotTree } from "./git.js";
 
 const exec = promisify(execFile);
 
@@ -132,14 +132,13 @@ export async function integrateBranch({ sourceCwd, branch, integrationCwd, depen
 export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {
   const parent = await git(sourceCwd, ["rev-parse", "HEAD"]);
   const commit = await git(sourceCwd, ["commit-tree", tree, "-p", parent, "-m", "Parallel ticket baseline"], { env: identity });
-  const listed = await git(sourceCwd, ["worktree", "list", "--porcelain"]);
   const root = join(dataDir, "ticket-runs", safeName(ticket.identifier || ticket.id), "runs", safeName(runId), "parallel");
   return Promise.all(steps.map(async (step) => {
     const cwd = join(root, safeName(step.id));
     await mkdir(dirname(cwd), { recursive: true });
-    if (!listed.split("\n\n").some((block) => block.includes(`worktree ${cwd}`))) {
+    if (!(await isGitRepository(cwd))) {
       await git(sourceCwd, ["worktree", "add", "-q", "--detach", cwd, commit]);
-    }
+    } else await restoreTree(cwd, tree);
     return [step.id, { cwd, isolated: true, baseTree: tree }];
   }));
 }

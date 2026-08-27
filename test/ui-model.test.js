@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -167,4 +167,14 @@ test("keeps an explicit step selection when another step awaits review", () => {
   const plan = { nodes: [{ id: "review", status: "review_ready" }, { id: "other", status: "ready" }] };
   assert.equal(preferredStepId(plan, "other"), "other");
   assert.equal(preferredStepId(plan, null), "review");
+});
+
+test("offers only restart points backed by durable checkpoints", () => {
+  const run = {
+    baselineTree: "base", workspace: { cwd: "/worktree" },
+    artifacts: ["requirements", "product-context-snapshot", "implementation-delta"].map((kind) => ({ kind })),
+    plan: { nodes: [{ id: "one", title: "First", status: "accepted", baseTree: "base" }] }
+  };
+  assert.deepEqual(restartOptions(run).map((option) => option.value), ["stage:explore", "stage:design", "step:one", "stage:verify"]);
+  assert.deepEqual(restartOptions({ ...run, merge: { status: "queued" } }), []);
 });

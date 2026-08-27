@@ -35,6 +35,13 @@ export async function snapshotTree(cwd) {
   }
 }
 
+export async function restoreTree(cwd, tree) {
+  if (!tree || !(await isGitRepository(cwd))) throw new Error("A recorded Git tree is required to restart code");
+  await git(cwd, ["read-tree", "--reset", "-u", tree]);
+  await git(cwd, ["clean", "-fd", "-e", ".jj/"]);
+  return snapshotTree(cwd);
+}
+
 export async function diffTrees(cwd, before, after) {
   if (!before || !after) return { available: false, patch: "", stat: "", files: [] };
   const [patch, stat, names, numstat] = await Promise.all([

@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { assertScopedWrite, diffTrees, normalizeReviewMap, normalizeReviewNotes, outsideWriteScope, reviewNoteFeedback, snapshotTree } from "../src/git.js";
+import { assertScopedWrite, diffTrees, normalizeReviewMap, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "../src/git.js";
 
 const exec = promisify(execFile);
 
@@ -33,6 +33,22 @@ test("tree snapshots isolate one run without modifying the real index", async ()
   } finally {
     await rm(cwd, { recursive: true });
   }
+});
+
+test("restores an exact recorded tree for a programmatic restart", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-restore-test-"));
+  try {
+    await exec("git", ["init", "-q"], { cwd });
+    await writeFile(join(cwd, "tracked.txt"), "checkpoint\n");
+    await exec("git", ["add", "tracked.txt"], { cwd });
+    await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"], { cwd });
+    const checkpoint = await snapshotTree(cwd);
+    await writeFile(join(cwd, "tracked.txt"), "later\n");
+    await writeFile(join(cwd, "later.txt"), "discard me\n");
+    assert.equal(await restoreTree(cwd, checkpoint), checkpoint);
+    assert.equal(await readFile(join(cwd, "tracked.txt"), "utf8"), "checkpoint\n");
+    await assert.rejects(readFile(join(cwd, "later.txt"), "utf8"), /ENOENT/);
+  } finally { await rm(cwd, { recursive: true }); }
 });
 
 test("semantic review maps keep only real hunks and cover omissions", () => {

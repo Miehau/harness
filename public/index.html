@@ -95,6 +95,17 @@
   </form>
 </dialog>
 
+<dialog id="restart-dialog">
+  <form id="restart-form" class="dialog-shell">
+    <input id="restart-run-id" name="ticketId" type="hidden">
+    <header><div><span class="eyebrow">Recorded checkpoints</span><h2>Restart run</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <label class="dialog-field">Restart point<select id="restart-target" name="target" required></select></label>
+    <p id="restart-impact" class="restart-impact"></p>
+    <label class="restart-confirm"><input id="restart-confirm" name="confirmed" type="checkbox" required><span>I understand that code after this checkpoint will be replaced. The previous run and restart audit remain available.</span></label>
+    <footer><span>Remote delivery is never rewound automatically.</span><button class="button danger" type="submit">Restart run</button></footer>
+  </form>
+</dialog>
+
 <dialog id="profiles-dialog">
   <form id="profiles-form" class="dialog-shell">
     <header><div><span class="eyebrow">Framework configuration</span><h2>Stage profiles</h2></div><button id="close-profiles" class="icon-button" type="button" aria-label="Close">×</button></header>

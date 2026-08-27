@@ -29,6 +29,13 @@ test("isolated sibling worktrees produce commits that integrate into the zero-st
     await writeFile(join(worktrees.feature.cwd, "src", "app.js"), "export const ready = true;\n");
     await mkdir(join(worktrees.ci.cwd, ".github", "workflows"), { recursive: true });
     await writeFile(join(worktrees.ci.cwd, ".github", "workflows", "ci.yml"), "name: CI\n");
+    await createParallelWorktrees({ sourceCwd: workspace.cwd, dataDir, ticket, runId: "run-1", tree: base, steps: [{ id: "feature" }, { id: "ci" }] });
+    await assert.rejects(readFile(join(worktrees.feature.cwd, "src", "app.js"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(join(worktrees.ci.cwd, ".github", "workflows", "ci.yml"), "utf8"), /ENOENT/);
+    await mkdir(join(worktrees.feature.cwd, "src"));
+    await writeFile(join(worktrees.feature.cwd, "src", "app.js"), "export const ready = true;\n");
+    await mkdir(join(worktrees.ci.cwd, ".github", "workflows"), { recursive: true });
+    await writeFile(join(worktrees.ci.cwd, ".github", "workflows", "ci.yml"), "name: CI\n");
     for (const cwd of [worktrees.feature.cwd, worktrees.ci.cwd]) await cherryPickCommit(workspace.cwd, await commitWorkspace(cwd, "feat: verified slice\n\nWhy: The ticket needs it.\nRequirement: REQ-test"));
     assert.equal(await readFile(join(workspace.cwd, "src", "app.js"), "utf8"), "export const ready = true;\n");
     assert.equal(await readFile(join(workspace.cwd, ".github", "workflows", "ci.yml"), "utf8"), "name: CI\n");

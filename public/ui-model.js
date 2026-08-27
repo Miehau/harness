@@ -45,6 +45,26 @@ export function preferredStepId(plan, currentId) {
   return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
+export function restartOptions(run) {
+  if (!run || run.merge || run.integration) return [];
+  const artifacts = run.artifacts || [];
+  const options = [];
+  if (run.workspace?.cwd && run.baselineTree && artifacts.some((artifact) => artifact.kind === "requirements")) {
+    options.push({ value: "stage:explore", label: "Explore code again", detail: "Restore the repository baseline, then regenerate exploration and the plan." });
+  }
+  if (run.workspace?.cwd && run.baselineTree && ["requirements", "product-context-snapshot", "implementation-delta"].every((kind) => artifacts.some((artifact) => artifact.kind === kind))) {
+    options.push({ value: "stage:design", label: "Design & plan again", detail: "Keep requirements and exploration, discard the current plan, and design again." });
+  }
+  const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
+  for (const step of steps) {
+    if (step.baseTree || run.baselineTree) options.push({ value: `step:${step.id}`, label: `Step · ${step.title}`, detail: "Restore the checkpoint before this step and rerun it and every later step." });
+  }
+  if (steps.length && steps.every((step) => step.status === "accepted")) {
+    options.push({ value: "stage:verify", label: "Review & verify again", detail: "Keep accepted code and rerun combined checks and independent review." });
+  }
+  return options;
+}
+
 export function runMetrics(run, now = Date.now()) {
   if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, correctionRounds: 0, durationSeconds: 0 };
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);

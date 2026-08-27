@@ -9,7 +9,7 @@ import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
 import { admissionCandidates, occupiedTicketIds } from "./admission.js";
-import { diffTrees, normalizeReviewNotes, outsideWriteScope, reviewNoteFeedback, snapshotTree } from "./git.js";
+import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
@@ -22,7 +22,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage, rewindRun } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -291,28 +291,19 @@ async function beginTicket(ticket, { automaticAdmission = false } = {}) {
   ensureTicketCapacity(ticket.id);
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
-    if (!state.ticketRuns[ticket.id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = {
-      id: ticket.id,
-      runId: randomUUID(),
-      ticket,
-      automaticAdmission,
-      status: "preparing",
-      workspace: null,
-      stageProfiles: structuredClone(state.stageProfiles),
-      stages: initialStages(),
-      checkpoint: null,
-      plan: null,
-      artifacts: [],
-      activeRuns: {},
-      trackerEvents: {},
-      sessionFile: null,
-      auto: false,
-      lastError: null,
-      createdAt: new Date().toISOString()
-    };
+    if (!state.ticketRuns[ticket.id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
   });
   prepareTicket(ticket.id).catch(() => {});
   return ticket.id;
+}
+
+function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
+  return {
+    id: ticket.id, runId, ticket, automaticAdmission, status: "preparing", workspace: null,
+    stageProfiles: structuredClone(stageProfiles), stages: initialStages(), checkpoint: null, plan: null,
+    artifacts: [], activeRuns: {}, trackerEvents: {}, sessionFile: null, auto: false, lastError: null,
+    createdAt: new Date().toISOString()
+  };
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source) {
@@ -1471,6 +1462,110 @@ async function runTicket(ticketId) {
   });
 }
 
+function assertRestartable(run) {
+  if (activeTickets.has(run.id) || activeMerges.has(run.id)) throw new Error("Cancel the active run before restarting it");
+  if (run.merge || run.integration) throw new Error("A run that reached delivery cannot be restarted automatically; start a new ticket instead");
+}
+
+async function restartAuditArtifact(run, audit) {
+  return persistArtifact(dataDir, run.ticket, {
+    runId: run.runId,
+    stageId: "restart-audit",
+    name: `${audit.id}.json`,
+    kind: "restart-audit",
+    content: JSON.stringify({ ...audit, runId: run.runId, ticketId: run.id }, null, 2)
+  });
+}
+
+async function freshLocalRun(previous, runId) {
+  const source = store.read().workspace.cwd;
+  const fixture = await loadLocalFixture(source, previous.ticket.fixturePath);
+  const [contractExists, projectConfigExists] = await Promise.all([
+    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    stat(join(source, projectConfigPath)).then(() => true, () => false)
+  ]);
+  const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);
+  const artifacts = await Promise.all([
+    persistArtifact(dataDir, previous.ticket, { runId, name: "feature.md", content: fixture.feature, stageId: "requirements", kind: "feature-brief" }),
+    persistArtifact(dataDir, previous.ticket, { runId, name: "plan.json", content: fixture.planSource, stageId: "design", kind: "plan-source" }),
+    persistArtifact(dataDir, previous.ticket, {
+      runId, name: "run-manifest.json", stageId: "design", kind: "run-manifest",
+      content: JSON.stringify({
+        frameworkVersion: packageMetadata.version,
+        piDependency: packageMetadata.dependencies["@earendil-works/pi-coding-agent"],
+        nodeVersion: process.version,
+        stageProfiles: previous.stageProfiles,
+        baselineTree: null,
+        featureSha256: createHash("sha256").update(fixture.feature).digest("hex"),
+        planSha256: createHash("sha256").update(fixture.planSource).digest("hex")
+      }, null, 2)
+    })
+  ]);
+  return {
+    id: previous.id, runId, ticket: previous.ticket, workspace: null, baselineTree: null, status: "awaiting_approval",
+    stages: localStages(), checkpoint: {
+      id: randomUUID(), kind: "awaiting_approval", title: "Approve fresh local execution plan",
+      prompt: fixture.feature, createdAt: new Date().toISOString()
+    },
+    plan, stageProfiles: structuredClone(previous.stageProfiles), artifacts, activeRuns: {}, auto: false,
+    sessionFile: null, lastError: null, createdAt: new Date().toISOString()
+  };
+}
+
+async function startFreshRun(ticketId) {
+  const previous = ticketRun(store.read(), ticketId);
+  assertRestartable(previous);
+  const at = new Date().toISOString();
+  const audit = {
+    id: `restart-${(previous.restartHistory?.length || 0) + 1}`,
+    at, target: "fresh", fromStatus: previous.status, fromCheckpoint: previous.checkpoint?.kind || null,
+    previousRunId: previous.runId, nextRunId: randomUUID(),
+    previousStages: previous.stages.map(({ id, status }) => ({ id, status })),
+    previousSteps: flattenSteps(previous.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }))
+  };
+  const fixture = previous.ticket.source === "local" ? await freshLocalRun(previous, audit.nextRunId) : null;
+  if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
+  const artifact = await restartAuditArtifact(previous, audit);
+  previews.stopMatching(`${ticketId}:`);
+  await update((state) => {
+    const old = ticketRun(state, ticketId);
+    old.restartHistory ||= [];
+    old.restartHistory.push(audit);
+    old.artifacts.push(artifact);
+    archiveRun(state, ticketId);
+    state.ticketRuns[ticketId] = fixture || newTicketRun(old.ticket, old.stageProfiles, { runId: audit.nextRunId });
+    state.ticketRuns[ticketId].startedFreshFrom = { runId: old.runId, auditArtifactId: artifact.id, at };
+    state.selectedTicketId = ticketId;
+  });
+  if (!fixture) prepareTicket(ticketId).catch(() => {});
+  return audit;
+}
+
+async function restartFrom(ticketId, target) {
+  const previous = ticketRun(store.read(), ticketId);
+  assertRestartable(previous);
+  const at = new Date().toISOString();
+  const preview = structuredClone(previous);
+  const audit = rewindRun(preview, target, at);
+  if (audit.restoredTree) {
+    if (!previous.workspace?.cwd) throw new Error("The run has no worktree to restore");
+    const restored = await restoreTree(previous.workspace.cwd, audit.restoredTree);
+    if (restored !== audit.restoredTree) throw new Error("The worktree did not match the selected restart checkpoint");
+  }
+  const artifact = await restartAuditArtifact(previous, audit);
+  previews.stopMatching(`${ticketId}:`);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    rewindRun(run, target, at);
+    run.artifacts.push(artifact);
+    for (const previewState of Object.values(run.previews || {})) Object.assign(previewState, { status: "stopped", stoppedReason: "run_restart", stoppedAt: at });
+  });
+  if (target === "stage:explore") continueAfterRequirements(ticketId, "").catch(() => {});
+  else if (target === "stage:design") startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)).catch(() => {});
+  else runTicket(ticketId).catch(() => {});
+  return audit;
+}
+
 async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
   if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
@@ -1507,12 +1602,12 @@ async function api(request, response, url) {
     if (!input.confirmed || !ticketIds.length) throw new Error("Confirm at least one retained run for cleanup");
     const cleaned = [];
     for (const id of ticketIds) {
-      if (activeTickets.has(id) || activeMerges.has(id)) throw new Error(`Cannot clean active run ${id}`);
       const snapshot = store.read();
       const run = snapshot.ticketRuns[id] || snapshot.retainedRuns?.[id];
       if (!run) throw new Error(`Retained run not found: ${id}`);
+      if (activeTickets.has(run.id) || activeMerges.has(run.id)) throw new Error(`Cannot clean active run ${run.id}`);
       if (!["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)) throw new Error(`Run ${id} is not safe to clean`);
-      cleaned.push(await cleanupRetainedRun({ run, dataDir, previewManager: previews }));
+      cleaned.push(await cleanupRetainedRun({ run, dataDir, previewManager: snapshot.ticketRuns[run.id] && id !== run.id ? null : previews }));
       await update((draft) => {
         delete draft.ticketRuns[id];
         delete draft.retainedRuns?.[id];
@@ -1648,6 +1743,18 @@ async function api(request, response, url) {
     else if (stage === "design") startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)).catch(() => {});
     else runTicket(id).catch(() => {});
     return json(response, 202, { accepted: true, ticketId: id });
+  }
+
+  const restart = url.pathname.match(/^\/api\/tickets\/([^/]+)\/restart$/);
+  if (request.method === "POST" && restart) {
+    const id = decodeURIComponent(restart[1]);
+    const input = await body(request);
+    if (input.confirmed !== true) throw new Error("Confirm the restart after reviewing its impact");
+    const target = String(input.target || "");
+    if (target === "fresh") await startFreshRun(id);
+    else if (/^(?:stage:(?:explore|design|verify)|step:[a-z0-9][a-z0-9-]*)$/.test(target)) await restartFrom(id, target);
+    else throw new Error("Choose a valid stage or step restart point");
+    return json(response, 202, { accepted: true, ticketId: id, target });
   }
 
   const cancel = url.pathname.match(/^\/api\/tickets\/([^/]+)\/cancel$/);

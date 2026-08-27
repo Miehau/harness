@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage, rewindRun } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -54,7 +54,7 @@ test("clearing the queue preserves active runs", () => {
   const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" }, merge: { status: "merging" } } };
   assert.equal(clearInactiveRuns(state, new Set(["stale", "active", "merge"])), 2);
   assert.deepEqual(Object.keys(state.ticketRuns), ["active", "merge"]);
-  assert.deepEqual(Object.keys(state.retainedRuns), ["old", "stale"]);
+  assert.deepEqual(Object.keys(state.retainedRuns), ["old:legacy", "stale:legacy"]);
   assert.equal(state.selectedTicketId, null);
 });
 
@@ -66,6 +66,46 @@ test("a preserved plan checkpoint remains approvable after setup fails", () => {
 test("an interrupted pre-plan run resumes its active workflow stage", () => {
   assert.equal(resumeStage({ status: "interrupted", plan: null, stages: [{ id: "explore", status: "active" }] }), "explore");
   assert.equal(resumeStage({ status: "interrupted", plan: { nodes: [] }, stages: [] }), "run");
+});
+
+test("archives repeated ticket runs without overwriting their audit history", () => {
+  const state = { ticketRuns: { ticket: { id: "ticket", runId: "run-2" } }, retainedRuns: { "ticket:run-1": { runId: "run-1" } } };
+  archiveRun(state, "ticket");
+  assert.deepEqual(Object.keys(state.retainedRuns), ["ticket:run-1", "ticket:run-2"]);
+  assert.equal(state.ticketRuns.ticket, undefined);
+});
+
+test("rewinds a step and every later step to its recorded tree", () => {
+  const plan = normalizePlan({ nodes: [
+    { id: "one", title: "One", status: "accepted" },
+    { id: "two", title: "Two", status: "review_ready" },
+    { id: "three", title: "Three", status: "ready", dependsOn: ["two"] }
+  ] });
+  Object.assign(plan.nodes[0], { baseTree: "base", attempts: [{}] });
+  Object.assign(plan.nodes[1], { baseTree: "after-one", attempts: [{}, {}] });
+  const run = {
+    status: "awaiting_step_review", checkpoint: { kind: "step_review" }, activeRuns: {}, baselineTree: "base", plan,
+    stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((id) => ({ id, status: "completed", activity: {} }))
+  };
+  const audit = rewindRun(run, "step:two", "2026-08-27T12:00:00.000Z");
+  assert.equal(audit.restoredTree, "after-one");
+  assert.deepEqual(audit.resetStepIds, ["two", "three"]);
+  assert.equal(audit.discardedAttempts, 2);
+  assert.deepEqual(run.plan.nodes.map((step) => step.status), ["accepted", "ready", "ready"]);
+  assert.equal(run.stages.find((stage) => stage.id === "implement").status, "pending");
+  assert.equal(run.restartHistory[0].fromCheckpoint, "step_review");
+});
+
+test("restarts verification without discarding accepted implementation", () => {
+  const run = {
+    status: "needs_attention", checkpoint: null, activeRuns: {}, reviews: [{}],
+    stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((id) => ({ id, status: "completed" })),
+    plan: normalizePlan({ nodes: [{ id: "one", title: "One", status: "accepted" }] })
+  };
+  rewindRun(run, "stage:verify");
+  assert.equal(run.plan.nodes[0].status, "accepted");
+  assert.deepEqual(run.reviews, []);
+  assert.equal(run.stages.find((stage) => stage.id === "verify").status, "pending");
 });
 
 test("activity capture bounds memory and coalesces pending persistence", async () => {

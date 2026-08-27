@@ -71,6 +71,8 @@ Completed run artifacts, ticket worktrees, and local branches are retained indef
 
 After a restart, in-flight work remains paused and its last checkpoint is shown. Recorded PRs/MRs resume by inspecting the same remote change. If the daemon stopped while an unconfirmed PR/MR creation or squash merge may have been in flight, the dashboard reports the uncertainty and refuses to guess until the forge has been inspected.
 
+Paused or failed work can also start fresh or restart from a recorded exploration, design, implementation-step, or verification checkpoint. Checkpoint restarts restore the exact stored Git tree, reset all later work, use fresh agent sessions, and retain a machine-readable audit artifact; fresh starts archive the previous run under its unique run ID. Runs that reached delivery are never rewound automatically.
+
 ## Local zero-state fixture
 
 The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes or repairs that directory as the zero-state Git repository, seeds a baseline `.gitignore`, renders its own Pi prompts, commits each accepted step, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
