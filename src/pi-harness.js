@@ -1,12 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { assertScopedWrite } from "./git.js";
+import { assertScopedWrite, diffOutline, normalizeReviewMap } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
-import { flattenSteps, normalizePlan } from "./plan.js";
+import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
 import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
 
@@ -57,6 +58,9 @@ STEP:
   "harness": "pi",
   "permission": "none | read | write",
   "writeScope": "comma-separated repository paths, blank unless write",
+  "expectedFiles": ["concrete repository files likely to change"],
+  "estimatedChangedLines": 0,
+  "reviewBudget": { "maxFiles": ${defaultReviewBudget.maxFiles}, "maxChangedLines": ${defaultReviewBudget.maxChangedLines}, "justification": "blank unless this is an indivisible exception" },
   "skills": ["explicit skills when useful"],
   "references": ["files or screenshots to include"],
   "requirementIds": ["REQ-stable-id"],
@@ -77,6 +81,8 @@ Rules:
 - A downstream step depending on a group waits for every required child to be accepted.
 - Code-writing steps should be serial by default. Deliberately parallel writes must be siblings with disjoint write scopes; they run in isolated worktrees and block if their patches conflict during integration.
 - Decompose implementation into a ticket-specific sequence of coherent, human-reviewable behavior slices. Each write step must leave the worktree valid, have a focused diff, and be independently understandable and verifiable.
+- Keep each ordinary write step within ${defaultReviewBudget.maxFiles} reviewable files and ${defaultReviewBudget.maxChangedLines} changed lines. List expectedFiles and estimate changed lines from repository evidence. A larger indivisible step requires a concrete reviewBudget.justification; never enlarge the numbers merely to make a broad step pass.
+- Ordinary planned write steps must use finite write scopes. Do not use "*" or "**" unless reviewBudget.justification explains why the change is genuinely indivisible.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - For frontend/backend work, establish one shared contract first, run independently testable conformance implementations as parallel siblings, then add a serial integration step depending on that group. Put cross-branch integration tests in the integration step and continue depth-first with the next vertical outcome.
 - Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
@@ -303,7 +309,7 @@ ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The reque
 
 Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
@@ -321,6 +327,8 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
     prompt: `Inspect the repository and create or update ${architectureEntry}, ${agentGuidanceEntry}, ${projectConfigPath}, and ${verificationEntry}. Keep architecture prose separate from machine-readable commands. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
     permission: "write",
     writeScope: ".agent-plan,AGENTS.md,docs",
+    expectedFiles: [architectureEntry, agentGuidanceEntry, projectConfigPath, verificationEntry],
+    estimatedChangedLines: 180,
     acceptanceCriteria: [
       `${architectureEntry} records important boundaries and conventions`,
       `${agentGuidanceEntry} tells later agents how to work in this repository`,
@@ -429,6 +437,30 @@ function workerReportTool(capture) {
         details: params,
         terminate: true
       };
+    }
+  });
+}
+
+function reviewNoteTool(capture) {
+  return defineTool({
+    name: "review_note",
+    label: "Review note",
+    description: "Attach concise review-only context to an exact range of changed lines.",
+    promptSnippet: "Annotate non-obvious changed lines for the reviewer",
+    promptGuidelines: ["Use only after the final edit. In one to three direct sentences, explain what the block does now and why the non-obvious decision matters. Add no more than five unless the reviewer asks for updates."],
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "Existing rn- ID when updating a note after review feedback" })),
+      path: Type.String({ description: "Repository-relative changed file path" }),
+      side: Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]),
+      startLine: Type.Integer({ minimum: 1 }),
+      endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+      kind: Type.Union([Type.Literal("intent"), Type.Literal("invariant"), Type.Literal("risk"), Type.Literal("test")]),
+      text: Type.String({ description: "One to three direct sentences explaining what the block does now and why the non-obvious decision matters" })
+    }),
+    async execute(_toolCallId, params) {
+      const note = { ...params, id: /^rn-[a-z0-9_-]{1,64}$/i.test(params.id || "") ? params.id : `rn-${randomUUID().slice(0, 8)}`, endLine: params.endLine ?? params.startLine };
+      capture(note);
+      return { content: [{ type: "text", text: `Recorded ${note.id} for ${note.path}:${note.startLine}-${note.endLine}` }], details: note };
     }
   });
 }
@@ -690,7 +722,16 @@ export class PiHarness {
         if (error.code !== "ENOENT") throw error;
         projectConfigExists = false;
       }
-      return { plan: ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists), artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
+      let plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists);
+      let violations = planReviewViolations(plan);
+      if (violations.length) {
+        const revision = await this.visibleSupervisorPrompt(session, `Revise the complete JSON plan so every implementation step is a coherent review unit. Resolve each deterministic violation below by splitting behavior slices or adding a concrete indivisibility justification; do not merely raise a budget. Return the complete JSON plan only.\n\n${violations.map((item) => `- ${item}`).join("\n")}`, { publishText: false, onEvent, signal });
+        Object.assign(parsed, JSON.parse(revision.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || revision.slice(revision.indexOf("{"), revision.lastIndexOf("}") + 1)));
+        plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists);
+        violations = planReviewViolations(plan);
+      }
+      if (violations.length) throw new Error(`Planner returned oversized review steps: ${violations.join("; ")}`);
+      return { plan, artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);
   }
 
@@ -934,6 +975,15 @@ Return ONLY JSON:
     }
   }
 
+  async generateReviewMap({ cwd, ticket, step, diff, runId, profile, signal }) {
+    return this.supervisorTurn(async () => {
+      const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-${step.id}-review-map`, { repositoryAccess: false, profile });
+      const outline = diffOutline(diff.patch);
+      const reply = await this.visibleSupervisorPrompt(session, stagePrompt(profile, `Create a concise semantic navigation map for this canonical Git diff. Group related behavior into 2–7 review intents. This is navigation metadata only: do not rewrite, summarize away, or invent changes. Assign each numbered hunk exactly once. Return ONLY valid JSON:\n{\n  "groups": [{ "title": "short intent", "summary": "what a reviewer should verify", "items": [{ "fileIndex": 0, "hunks": [0] }] }]\n}\n\n# Step\n${step.title}\n${step.description || ""}\n\n# Numbered files and hunks\n${JSON.stringify(outline, null, 2)}\n\n# Canonical diff\n${diff.patch}`), { publishText: false, signal });
+      return normalizeReviewMap(jsonReply(reply), diff.patch);
+    }, `${ticket.id}:${runId}:${step.id}:review-map`);
+  }
+
   async updateProductContext({ cwd, ticket, currentContext, artifacts, diff, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "product-context");
@@ -1054,9 +1104,10 @@ Every reported finding triggers an automatic correction round. Report concrete d
       ? ["read", "grep", "find", "ls", "edit", "write"]
       : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
     let report = null;
+    const reviewNotes = [];
     tools.push("worker_report");
-    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, step.writeScope), projectCommandTool(cwd, signal)] : [];
-    if (step.permission === "write") tools.push("project_command");
+    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, step.writeScope), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
+    if (step.permission === "write") tools.push("project_command", "review_note");
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
@@ -1104,6 +1155,7 @@ ${stripFrontmatter(content).trim()}
         rawOutput,
         output: report?.artifact || rawOutput,
         report: report || { status: "completed", summary: rawOutput, artifact: rawOutput },
+        reviewNotes,
         sessionFile: session.sessionFile,
         events
       };

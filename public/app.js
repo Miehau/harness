@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, runMetrics, stageMilestones } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -14,6 +14,7 @@ try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); }
 let selectedStepId = savedView.selectedStepId || null;
 let selectedStageId = savedView.selectedStageId || null;
 let activeTab = ["run", "diff", "artifacts", "ticket", "prompt"].includes(savedView.activeTab) ? savedView.activeTab : "run";
+let diffExpanded = false;
 let toastTimer;
 let clearTimer;
 let clearArmed = false;
@@ -26,6 +27,7 @@ const liveStages = new Map();
 const sessionTraces = new Map();
 const appendLiveOutput = (value, delta) => `${value || ""}${delta || ""}`.slice(-100000);
 const pendingSessionTraces = new Set();
+const diffModels = new Map();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -221,7 +223,8 @@ function renderHeader() {
 function stepHtml(step) {
   const selected = step.id === selectedStepId ? "selected" : "";
   const profile = runFor()?.stageProfiles?.[step.role || "implementation"];
-  return `<button class="step status-${escapeHtml(step.status)} ${selected}" data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>`;
+  const budget = step.permission === "write" && step.reviewBudget ? ` · ≤${step.reviewBudget.maxFiles} files/${step.reviewBudget.maxChangedLines} lines` : "";
+  return `<button class="step status-${escapeHtml(step.status)} ${selected}" data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}${escapeHtml(budget)}</span></span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>`;
 }
 
 function graphUnitHtml(unit) {
@@ -371,17 +374,66 @@ function refreshLiveRun({ events = false } = {}) {
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
 
-function diffPanel(step) {
-  if (!step.diff?.available) return `<div class="empty compact"><div><strong>No diff captured</strong>A clean tree comparison is recorded for each step.</div></div>`;
-  const diff = parseDiff(step.diff.patch);
-  return `<div class="diff-overview"><div><strong>${step.diff.files.length} changed files</strong><span>${escapeHtml(step.diff.stat || "Exact tree diff")}</span></div><div class="diff-total"><b>+${diff.additions}</b><i>−${diff.deletions}</i></div></div><div class="diff-files">${diff.files.map((file, index) => `<details class="diff-file" ${index === 0 ? "open" : ""}><summary><span class="diff-file-name">${escapeHtml(file.name)}</span><span class="diff-numbers"><b>+${file.additions}</b><i>−${file.deletions}</i></span></summary><div class="diff-code">${file.rows.map((row) => `<div class="diff-line ${row.kind}"><span>${row.old}</span><span>${row.new}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div></details>`).join("")}</div>`;
+function reviewNoteCard(note, feedbackFormId) {
+  const lines = `${note.side === "LEFT" ? "old" : "new"} lines ${note.startLine}${note.endLine === note.startLine ? "" : `–${note.endLine}`}`;
+  const editor = feedbackFormId ? `<div class="review-note-editor"><textarea rows="2" data-review-note-feedback="${escapeHtml(note.id)}" placeholder="What should change in this code?"></textarea><button class="button" type="button" data-add-note-review="${escapeHtml(note.id)}" data-review-form="${escapeHtml(feedbackFormId)}">Queue code change</button></div>` : "";
+  return `<aside class="review-note ${escapeHtml(note.kind)}" data-review-note-id="${escapeHtml(note.id)}" data-review-form="${escapeHtml(feedbackFormId || "")}"><header><strong>${escapeHtml(note.kind)}</strong><span>${escapeHtml(note.id)} · ${escapeHtml(lines)}</span></header><p>${escapeHtml(note.text)}</p>${editor}</aside>`;
+}
+
+function diffRows(rows, notes = [], feedbackFormId = null) {
+  const after = new Map();
+  for (const note of notes) {
+    let index = -1;
+    rows.forEach((row, candidate) => {
+      const line = note.side === "LEFT" ? row.old : row.new;
+      if (Number.isInteger(line) && line >= note.startLine && line <= note.endLine) index = candidate;
+    });
+    if (index >= 0) after.set(index, [...(after.get(index) || []), note]);
+  }
+  return `<div class="diff-code">${rows.map((row, index) => `<div class="diff-line ${row.kind}"><span>${row.old}</span><span>${row.new}</span><code>${escapeHtml(row.text)}</code></div>${(after.get(index) || []).map((note) => reviewNoteCard(note, feedbackFormId)).join("")}`).join("")}</div>`;
+}
+
+function compactDiffLabel(diff) {
+  if (!diff?.files?.length) return "No changed files";
+  return `${diff.files.length} file${diff.files.length === 1 ? "" : "s"} · +${diff.additions || 0} −${diff.deletions || 0}`;
+}
+
+function diffPanel(record, { id = `diff-${diffModels.size + 1}`, budget = null, reviewMap = null, reviewNotes = [], mapStepId = null, feedbackStepId = null, artifactId = null, actions = true } = {}) {
+  if (!record?.available) return `<div class="empty compact"><div><strong>No repository changes</strong>This scope has a clean tree comparison.</div></div>`;
+  const feedbackFormId = feedbackStepId ? `review-notes-${String(id).replace(/[^a-z0-9_-]/gi, "-")}` : null;
+  const parsed = parseDiff(record.patch);
+  for (const file of parsed.files) {
+    for (const hunk of file.hunks) hunk.reviewNotes = [];
+    for (const note of reviewNotesForRows(reviewNotes, file.name, file.rows)) {
+      file.hunks.find((hunk) => reviewNotesForRows([note], file.name, hunk.rows).length)?.reviewNotes.push(note);
+    }
+  }
+  diffModels.set(id, { ...parsed, reviewNotes, feedbackFormId });
+  const indexed = parsed.files.map((file, index) => ({ file, index })).sort((left, right) => (right.file.additions + right.file.deletions) - (left.file.additions + left.file.deletions));
+  const warning = [
+    record.truncated ? `<div class="diff-warning">This stored patch was truncated at 600 KB. File totals remain complete, but the visible patch is partial.</div>` : "",
+    budget?.exceeded ? `<div class="diff-warning danger"><strong>Review budget exceeded.</strong> ${escapeHtml(budget.reasons.join("; "))}. Auto-accept is disabled.</div>` : "",
+    reviewNotes.some((note) => note.status === "stale") ? `<div class="diff-warning">Some agent review notes became stale after rewriting and are hidden.</div>` : ""
+  ].join("");
+  const map = reviewMap?.groups?.length ? `<section class="review-map"><header><span class="eyebrow">Semantic review map</span><span>Navigation only · Git remains canonical</span></header>${reviewMap.groups.map((group) => `<article><strong>${escapeHtml(group.title)}</strong><p>${escapeHtml(group.summary || "")}</p><div>${group.items.map((item) => `<button type="button" data-diff-jump="${escapeHtml(id)}" data-diff-file-name="${escapeHtml(item.file)}" data-diff-hunk-index="${Number(item.hunk || 0)}">${escapeHtml(item.file)}${Number.isInteger(item.hunk) ? ` · hunk ${item.hunk + 1}` : ""}</button>`).join("")}</div></article>`).join("")}</section>` : mapStepId ? `<button class="button diff-map-generate" type="button" data-generate-review-map="${escapeHtml(mapStepId)}">Generate semantic review map</button>` : "";
+  const toolbar = actions ? `<div class="diff-actions"><button class="button" type="button" data-expand-diff>${diffExpanded ? "Collapse" : "Expand"}</button>${artifactId ? `<button class="button" type="button" data-open-artifact="${escapeHtml(artifactId)}">Zed ↗</button>` : ""}</div>` : "";
+  const noteCount = reviewNotes.filter((note) => note.status === "current").length;
+  const rewriteRequest = feedbackFormId && noteCount ? `<form id="${escapeHtml(feedbackFormId)}" class="review-note-bulk" data-request-note-changes="${escapeHtml(feedbackStepId)}"><div><strong>Code change requests</strong><span data-review-queue-count>No code changes queued yet.</span></div><button class="button" type="submit" data-send-note-review disabled>Send code change requests</button></form>` : "";
+  return `${toolbar}${warning}<div class="diff-overview"><div><strong>${record.files.length} changed files</strong><span>Canonical Git diff${noteCount ? ` · ${noteCount} agent note${noteCount === 1 ? "" : "s"}` : ""}</span></div><div class="diff-total"><b>+${record.additions ?? parsed.additions}</b><i>−${record.deletions ?? parsed.deletions}</i></div></div>${map}<nav class="diff-index" aria-label="Changed files">${indexed.map(({ file, index }) => `<button type="button" data-diff-jump="${escapeHtml(id)}" data-diff-file-index="${index}"><span>${escapeHtml(file.name)}</span><b>+${file.additions}</b><i>−${file.deletions}</i></button>`).join("")}</nav><div class="diff-files">${parsed.files.map((file, fileIndex) => `<details class="diff-file" data-diff-view="${escapeHtml(id)}" data-diff-file-index="${fileIndex}" ${fileIndex === indexed[0]?.index ? "open" : ""}><summary><span class="diff-file-name">${escapeHtml(file.name)}</span><span class="diff-numbers">${file.binary ? `<em>binary</em>` : `<b>+${file.additions}</b><i>−${file.deletions}</i>`}</span></summary><div class="diff-hunks">${file.hunks.map((hunk, hunkIndex) => `<details class="diff-hunk" data-diff-view="${escapeHtml(id)}" data-diff-file-index="${fileIndex}" data-diff-hunk-index="${hunkIndex}" ${fileIndex === indexed[0]?.index && hunkIndex === 0 ? "open data-hydrated=\"true\"" : ""}><summary><span>${escapeHtml(hunk.context || hunk.header)}</span><span class="diff-numbers"><b>+${hunk.additions}</b><i>−${hunk.deletions}</i></span></summary>${fileIndex === indexed[0]?.index && hunkIndex === 0 ? diffRows(hunk.rows, hunk.reviewNotes, feedbackFormId) : ""}</details>`).join("") || `<div class="run-empty">No textual hunks.</div>`}</div></details>`).join("")}</div>${rewriteRequest}`;
+}
+
+function stepDiffPanel(step) {
+  const attempts = (step.attempts || []).filter((attempt) => attempt.diff?.available);
+  const patchArtifact = [...(runFor()?.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "git-diff");
+  return `${diffPanel(step.diff, { id: `step-${step.id}`, budget: step.reviewBudgetResult, reviewMap: step.reviewMap, reviewNotes: step.reviewNotes, mapStepId: step.id, feedbackStepId: step.status === "review_ready" ? step.id : null, artifactId: patchArtifact?.id })}${attempts.length ? `<details class="attempt-diffs"><summary>Attempt deltas <span>${attempts.length}</span></summary>${attempts.map((attempt, index) => `<details><summary>${escapeHtml(attempt.attemptId || `Attempt ${index + 1}`)} · ${escapeHtml(compactDiffLabel(attempt.diff))}</summary>${diffPanel(attempt.diff, { id: `step-${step.id}-attempt-${index}`, actions: false })}</details>`).join("")}</details>` : ""}`;
 }
 
 function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
-  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in the default editor">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
+  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in Zed">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
 function renderInspector() {
+  diffModels.clear();
   const target = $("#inspector");
   const openEvents = new Set([...target.querySelectorAll("details.run-event[open]")].map((item) => item.dataset.eventKey));
   const openGroups = new Set([...target.querySelectorAll("details.activity-group[open]")].map((item) => item.dataset.groupKey));
@@ -393,7 +445,7 @@ function renderInspector() {
     const profileId = ({ explore: "exploration", design: "architecture", implement: "implementation", verify: "verification" })[stage.id] || stage.id;
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<details class="stage-artifacts"><summary>Artifacts <span>${artifacts.length}</span></summary><div class="tab-panel">${artifactsPanel(null, artifacts)}</div></details><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<details class="stage-artifacts"><summary>Artifacts <span>${artifacts.length}</span></summary><div class="tab-panel">${artifactsPanel(null, artifacts)}</div></details><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     return;
   }
   if (!step) {
@@ -402,12 +454,13 @@ function renderInspector() {
   }
   loadSessionTrace(run, step);
   const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
-  const panels = { run: runPanel(step), diff: diffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
+  const panels = { run: runPanel(step), diff: stepDiffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
   const isolated = Boolean(step.workspace?.isolated);
   const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
-  const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><p>Accepting commits this step. The next batch starts after every verified item at this barrier is accepted.</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button></section>` : "";
+  const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
+  const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button></section>` : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
-  target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission · ${escapeHtml(step.status.replaceAll("_", " "))}</span></footer></div>`;
+  target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs">${[["run","Run"],["diff","Diff"],["artifacts","Artifacts"],["ticket","Ticket"],["prompt","Prompt"]].map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span>${escapeHtml(step.contextPolicy)} context · ${escapeHtml(step.permission)} permission · ${escapeHtml(step.status.replaceAll("_", " "))}${escapeHtml(changeLabel)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
@@ -433,6 +486,48 @@ async function loadSessionTrace(run, step) {
   finally { pendingSessionTraces.delete(requestKey); }
 }
 
+function hydrateDiffHunk(target) {
+  if (!target || target.dataset.hydrated) return;
+  const model = diffModels.get(target.dataset.diffView);
+  const hunk = model?.files?.[Number(target.dataset.diffFileIndex)]?.hunks?.[Number(target.dataset.diffHunkIndex)];
+  if (!hunk) return;
+  target.insertAdjacentHTML("beforeend", diffRows(hunk.rows, hunk.reviewNotes, model.feedbackFormId));
+  target.dataset.hydrated = "true";
+}
+
+function jumpToDiff(target) {
+  const view = target.dataset.diffJump;
+  const model = diffModels.get(view);
+  let fileIndex = Number(target.dataset.diffFileIndex);
+  if (!Number.isInteger(fileIndex) && target.dataset.diffFileName) fileIndex = model?.files?.findIndex((file) => file.name === target.dataset.diffFileName);
+  const file = [...document.querySelectorAll("details.diff-file")].find((item) => item.dataset.diffView === view && Number(item.dataset.diffFileIndex) === fileIndex);
+  if (!file) return;
+  file.open = true;
+  const hunkIndex = Number(target.dataset.diffHunkIndex);
+  const hunks = [...file.querySelectorAll("details.diff-hunk")];
+  const hunk = Number.isInteger(hunkIndex) ? hunks.find((item) => Number(item.dataset.diffHunkIndex) === hunkIndex) : hunks[0];
+  if (hunk) { hunk.open = true; hydrateDiffHunk(hunk); }
+  (hunk || file).scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function setDiffExpanded(expanded) {
+  diffExpanded = expanded;
+  $("#inspector")?.classList.toggle("diff-expanded", expanded);
+  document.body.classList.toggle("diff-expanded-open", expanded);
+  for (const button of document.querySelectorAll("[data-expand-diff]")) button.textContent = expanded ? "Collapse" : "Expand";
+}
+
+document.addEventListener("toggle", (event) => {
+  const hunk = event.target.closest?.("details.diff-hunk");
+  if (hunk?.open) { hydrateDiffHunk(hunk); return; }
+  const file = event.target.closest?.("details.diff-file");
+  if (file?.open) {
+    const first = file.querySelector("details.diff-hunk");
+    if (first) { first.open = true; hydrateDiffHunk(first); }
+  }
+}, true);
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && diffExpanded) setDiffExpanded(false); });
+
 function render() {
   if (!state) return;
   $("#workspace-path").value = state.workspace.cwd;
@@ -454,7 +549,45 @@ async function refreshTickets() {
   finally { $("#refresh-tickets").classList.remove("spinning"); }
 }
 
+function reviewCards(formId) {
+  return [...document.querySelectorAll(".review-note")].filter((card) => card.dataset.reviewForm === formId);
+}
+
+function updateReviewQueue(formId) {
+  const form = document.getElementById(formId);
+  if (!form) return;
+  const count = reviewCards(formId).filter((card) => card.dataset.queued === "true").length;
+  form.querySelector("[data-review-queue-count]").textContent = count ? `${count} code change${count === 1 ? "" : "s"} ready to send.` : "No code changes queued yet.";
+  form.querySelector("[data-send-note-review]").disabled = !count;
+}
+
 document.addEventListener("click", async (event) => {
+  const addNote = event.target.closest("[data-add-note-review]");
+  if (addNote) {
+    const card = addNote.closest(".review-note");
+    const queued = card.dataset.queued === "true";
+    if (!queued && !card.querySelector("textarea").value.trim()) { notify("Describe the rewrite first"); return; }
+    card.dataset.queued = queued ? "false" : "true";
+    card.classList.toggle("queued", !queued);
+    addNote.textContent = queued ? "Queue code change" : "Undo";
+    updateReviewQueue(addNote.dataset.reviewForm);
+    return;
+  }
+  if (event.target.closest("[data-expand-diff]")) { setDiffExpanded(!diffExpanded); return; }
+  const diffJump = event.target.closest("[data-diff-jump]");
+  if (diffJump) { jumpToDiff(diffJump); return; }
+  const generateReviewMap = event.target.closest("[data-generate-review-map]");
+  if (generateReviewMap) {
+    generateReviewMap.disabled = true;
+    generateReviewMap.textContent = "Generating review map…";
+    try {
+      const result = await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(generateReviewMap.dataset.generateReviewMap)}/review-map`, { method: "POST", body: "{}" });
+      state = result.state;
+      render();
+      notify("Semantic review map generated");
+    } catch (error) { generateReviewMap.disabled = false; generateReviewMap.textContent = "Generate semantic review map"; notify(error.message); }
+    return;
+  }
   if (event.target.closest("#tracker-settings")) {
     try { await openTrackerSettings(); } catch (error) { notify(error.message); }
     return;
@@ -508,7 +641,7 @@ document.addEventListener("click", async (event) => {
   }
   const openArtifact = event.target.closest("[data-open-artifact]");
   if (openArtifact) {
-    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/artifacts/${encodeURIComponent(openArtifact.dataset.openArtifact)}/open`, { method: "POST", body: "{}" }); notify("Artifact opened in the default editor"); }
+    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/artifacts/${encodeURIComponent(openArtifact.dataset.openArtifact)}/open`, { method: "POST", body: "{}" }); notify("Opened in Zed"); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -718,10 +851,21 @@ document.addEventListener("submit", async (event) => {
     try { await api(`/api/tickets/${encodeURIComponent(ticketId)}/clarify`, { method: "POST", body: JSON.stringify({ answers }) }); notify(requirementsReview ? (answers ? "Answers sent; requirements are being revised" : "Requirements approved; isolated exploration started") : "Technical decision sent; design is being prepared"); }
     catch (error) { notify(error.message); }
   }
+  const noteStepId = event.target.dataset.requestNoteChanges;
+  if (noteStepId) {
+    event.preventDefault();
+    const noteRequests = reviewCards(event.target.id).filter((card) => card.dataset.queued === "true").map((card) => ({ id: card.dataset.reviewNoteId, feedback: card.querySelector("textarea").value.trim() }));
+    if (!noteRequests.length) { notify("Add at least one section to the review"); return; }
+    if (noteRequests.some((request) => !request.feedback)) { notify("Describe each queued rewrite"); return; }
+    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(noteStepId)}/changes`, { method: "POST", body: JSON.stringify({ noteRequests }) }); notify(`Review sent for ${noteRequests.length} section${noteRequests.length === 1 ? "" : "s"}`); }
+    catch (error) { notify(error.message); }
+    return;
+  }
   const stepId = event.target.dataset.requestChanges;
   if (stepId) {
     event.preventDefault();
-    const feedback = new FormData(event.target).get("feedback");
+    const form = new FormData(event.target);
+    const feedback = form.get("feedback");
     try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(stepId)}/changes`, { method: "POST", body: JSON.stringify({ feedback }) }); notify("Focused correction started"); }
     catch (error) { notify(error.message); }
   }

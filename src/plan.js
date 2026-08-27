@@ -1,6 +1,25 @@
 import { randomUUID } from "node:crypto";
 
 const stepStatuses = new Set(["draft", "ready", "running", "review_ready", "fixing", "needs_attention", "needs_input", "awaiting_approval", "accepted", "failed", "interrupted", "cancelled"]);
+export const defaultReviewBudget = Object.freeze({ maxFiles: 8, maxChangedLines: 400 });
+
+function positiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function normalizeReviewBudget(raw = {}) {
+  return {
+    maxFiles: positiveInteger(raw?.maxFiles, defaultReviewBudget.maxFiles),
+    maxChangedLines: positiveInteger(raw?.maxChangedLines, defaultReviewBudget.maxChangedLines),
+    justification: String(raw?.justification || "").trim()
+  };
+}
+
+function excludedFromReviewBudget(path) {
+  return /(^|\/)(?:dist|build|coverage|vendor|generated)(?:\/|$)/i.test(path)
+    || /(^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/i.test(path);
+}
 
 function idFrom(value, used) {
   const base = String(value || "step")
@@ -36,6 +55,9 @@ function normalizeStep(raw, used, defaultHarness) {
     agentId: String(raw.agentId || `worker:${id}`),
     permission: ["none", "read", "write"].includes(raw.permission) ? raw.permission : "read",
     writeScope: String(raw.writeScope || "").trim(),
+    expectedFiles: strings(raw.expectedFiles),
+    estimatedChangedLines: Math.max(0, Number(raw.estimatedChangedLines) || 0),
+    reviewBudget: normalizeReviewBudget(raw.reviewBudget),
     skills: strings(raw.skills),
     references: strings(raw.references),
     requirementIds: strings(raw.requirementIds),
@@ -52,9 +74,47 @@ function normalizeStep(raw, used, defaultHarness) {
     artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
     attachments: Array.isArray(raw.attachments) ? raw.attachments : [],
     diff: raw.diff || null,
+    vcsChange: raw.vcsChange || null,
     sessionFile: raw.sessionFile || null,
     supervisorReview: raw.supervisorReview || null,
     lastError: raw.lastError || null
+  };
+}
+
+export function planReviewViolations(plan) {
+  return flattenSteps(plan).flatMap((step) => {
+    if (step.permission !== "write") return [];
+    const budget = normalizeReviewBudget(step.reviewBudget);
+    const exception = budget.justification;
+    const violations = [];
+    if (!step.expectedFiles.length) violations.push(`${step.title}: expectedFiles must name the predicted review surface`);
+    if (!step.estimatedChangedLines) violations.push(`${step.title}: estimatedChangedLines must be a positive review estimate`);
+    if (/^(?:\*|\*\*)$/.test(step.writeScope) && !exception) violations.push(`${step.title}: broad write scope requires a review-budget justification`);
+    if (budget.maxFiles > defaultReviewBudget.maxFiles && !exception) violations.push(`${step.title}: maxFiles above ${defaultReviewBudget.maxFiles} requires justification`);
+    if (budget.maxChangedLines > defaultReviewBudget.maxChangedLines && !exception) violations.push(`${step.title}: maxChangedLines above ${defaultReviewBudget.maxChangedLines} requires justification`);
+    if (step.expectedFiles.length > budget.maxFiles && !exception) violations.push(`${step.title}: ${step.expectedFiles.length} expected files exceed the ${budget.maxFiles}-file review budget`);
+    if (step.estimatedChangedLines > budget.maxChangedLines && !exception) violations.push(`${step.title}: ${step.estimatedChangedLines} estimated changed lines exceed the ${budget.maxChangedLines}-line review budget`);
+    return violations;
+  });
+}
+
+export function diffReviewBudget(step, diff) {
+  const budget = normalizeReviewBudget(step?.reviewBudget);
+  const fileStats = (diff?.fileStats || (diff?.files || []).map((path) => ({ path, additions: 0, deletions: 0 })))
+    .filter((file) => !excludedFromReviewBudget(file.path));
+  const files = fileStats.length;
+  const changedLines = fileStats.reduce((total, file) => total + Number(file.additions || 0) + Number(file.deletions || 0), 0);
+  const reasons = [
+    files > budget.maxFiles ? `${files} reviewable files exceed the ${budget.maxFiles}-file budget` : null,
+    changedLines > budget.maxChangedLines ? `${changedLines} changed lines exceed the ${budget.maxChangedLines}-line budget` : null
+  ].filter(Boolean);
+  return {
+    ...budget,
+    files,
+    changedLines,
+    excludedFiles: Math.max(0, (diff?.files?.length || 0) - files),
+    reasons,
+    exceeded: reasons.length > 0 && !budget.justification
   };
 }
 

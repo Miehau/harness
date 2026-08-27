@@ -78,7 +78,10 @@ test("existing projects get one architecture-owned operating contract before fea
 
 test("synthetic review steps can omit optional planning arrays", () => {
   const step = { id: "review-fix", title: "Fix review findings", role: "implementation", harness: "pi", contextPolicy: "seeded", permission: "write" };
-  assert.match(stepContext({ plan: { title: "Review", nodes: [step] }, step, artifacts: [] }), /Skills requested: none/);
+  const prompt = stepContext({ plan: { title: "Review", nodes: [step] }, step, artifacts: [] });
+  assert.match(prompt, /Skills requested: none/);
+  assert.match(prompt, /use review_note for up to five non-obvious changed sections/);
+  assert.match(prompt, /one to three informative, direct sentences/);
 });
 
 test("runs the repository's root npm test script as a deterministic gate", async () => {

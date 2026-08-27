@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -25,9 +25,29 @@ test("builds graph levels and readable diff rows", () => {
   const diff = parseDiff("diff --git a/a.ts b/a.ts\nindex 123..456 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-old\n+new\n same");
   assert.equal(diff.files[0].name, "a.ts");
   assert.deepEqual([diff.additions, diff.deletions], [1, 1]);
+  assert.equal(diff.files[0].hunks.length, 1);
+  assert.equal(diff.files[0].hunks[0].context, "");
   assert.deepEqual(diff.files[0].rows.filter((row) => row.kind !== "hunk").map((row) => [row.kind, row.old, row.new]), [
     ["delete", 1, ""], ["add", "", 1], ["context", 2, 2]
   ]);
+});
+
+test("new-file metadata does not hide the first real diff hunk", () => {
+  const diff = parseDiff("diff --git a/new.ts b/new.ts\nnew file mode 100644\nindex 0000000..1234567\n--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1,2 @@\n+one\n+two");
+  assert.equal(diff.files[0].hunks.length, 1);
+  assert.equal(diff.files[0].hunks[0].header, "@@ -0,0 +1,2 @@");
+  assert.deepEqual(diff.files[0].hunks[0].rows.map((row) => row.text), ["one", "two"]);
+});
+
+test("review notes attach only to their current old or new diff lines", () => {
+  const rows = parseDiff("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -3 +3 @@\n-old\n+new").files[0].hunks[0].rows;
+  const notes = [
+    { id: "left", path: "a.ts", side: "LEFT", startLine: 3, endLine: 3, status: "current" },
+    { id: "right", path: "a.ts", side: "RIGHT", startLine: 3, endLine: 3, status: "current" },
+    { id: "stale", path: "a.ts", side: "RIGHT", startLine: 3, endLine: 3, status: "stale" },
+    { id: "other", path: "b.ts", side: "RIGHT", startLine: 3, endLine: 3, status: "current" }
+  ];
+  assert.deepEqual(reviewNotesForRows(notes, "a.ts", rows).map((note) => note.id), ["left", "right"]);
 });
 
 test("live run heartbeat distinguishes active, stale, and permission-risk states", () => {

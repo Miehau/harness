@@ -64,6 +64,7 @@ test("integrates a completed ticket branch into the opened working directory", a
       verify: async ({ cwd: integrationCwd }) => { verified = (await readFile(join(integrationCwd, "integrated.txt"), "utf8")) === "ready\n"; }
     });
     assert.match(result.commit, /^[a-f0-9]{40}$/);
+    assert.deepEqual(result.diff.files, ["integrated.txt"]);
     assert.equal(verified, true);
     assert.equal(await readFile(join(cwd, "integrated.txt"), "utf8"), "ready\n");
   } finally {

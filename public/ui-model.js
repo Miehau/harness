@@ -189,7 +189,7 @@ export function stageMilestones(run, stage) {
         title: "Focused fixes completed.",
         status: "fixed",
         at: review.fix.artifact?.createdAt || review.createdAt,
-        detail: [review.fix.report?.summary, review.fix.diff?.stat].filter(Boolean).join("\n\n")
+        detail: [review.fix.report?.summary, review.fix.diff ? `${review.fix.diff.files?.length || 0} files · +${review.fix.diff.additions || 0} −${review.fix.diff.deletions || 0}` : null].filter(Boolean).join("\n\n")
       });
     }
     if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
@@ -237,29 +237,46 @@ export function parseDiff(patch = "") {
     let newLine = null;
     let additions = 0;
     let deletions = 0;
+    const hunks = [];
+    const metadata = [];
+    let currentHunk = null;
     for (const line of block.split("\n").slice(1)) {
       const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
       if (hunk) {
         oldLine = Number(hunk[1]);
         newLine = Number(hunk[2]);
+        currentHunk = { id: `hunk-${hunks.length + 1}`, header: line, context: hunk[3].trim(), rows: [], additions: 0, deletions: 0 };
+        hunks.push(currentHunk);
         rows.push({ kind: "hunk", old: "", new: "", text: `@@ ${hunk[3].trim()}`.trim() });
       } else if (line.startsWith("+") && !line.startsWith("+++")) {
-        rows.push({ kind: "add", old: "", new: newLine++, text: line.slice(1) });
+        const row = { kind: "add", old: "", new: newLine++, text: line.slice(1) };
+        rows.push(row); currentHunk?.rows.push(row); if (currentHunk) currentHunk.additions++;
         additions++;
       } else if (line.startsWith("-") && !line.startsWith("---")) {
-        rows.push({ kind: "delete", old: oldLine++, new: "", text: line.slice(1) });
+        const row = { kind: "delete", old: oldLine++, new: "", text: line.slice(1) };
+        rows.push(row); currentHunk?.rows.push(row); if (currentHunk) currentHunk.deletions++;
         deletions++;
       } else if (oldLine !== null && !line.startsWith("\\")) {
-        rows.push({ kind: "context", old: oldLine++, new: newLine++, text: line.startsWith(" ") ? line.slice(1) : line });
+        const row = { kind: "context", old: oldLine++, new: newLine++, text: line.startsWith(" ") ? line.slice(1) : line };
+        rows.push(row); currentHunk?.rows.push(row);
       } else if (!/^(index |--- |\+\+\+ )/.test(line) && line) {
-        rows.push({ kind: "meta", old: "", new: "", text: line });
+        const row = { kind: "meta", old: "", new: "", text: line };
+        rows.push(row); metadata.push(row);
       }
     }
-    return { name, additions, deletions, rows };
+    if (!hunks.length && metadata.length) hunks.push({ id: "meta", header: "File metadata", context: "File metadata", rows: metadata, additions: 0, deletions: 0 });
+    return { name, additions, deletions, rows, hunks, binary: /^(?:GIT binary patch|Binary files )/m.test(block) };
   });
   return {
     files,
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0)
   };
+}
+
+export function reviewNotesForRows(notes = [], path, rows = []) {
+  return notes.filter((note) => note.status === "current" && note.path === path && rows.some((row) => {
+    const line = note.side === "LEFT" ? row.old : row.new;
+    return Number.isInteger(line) && line >= note.startLine && line <= note.endLine;
+  }));
 }

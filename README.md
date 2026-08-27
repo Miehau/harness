@@ -15,6 +15,9 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
 - Live run events and output.
 - Per-run Git tree diffs without modifying the user's index, plus one requirement-linked commit for each accepted step.
+- Review-sized implementation budgets (8 files or 400 changed lines by default), with plan-time splitting, justified atomic exceptions, and automatic-mode stops when actual work exceeds its budget.
+- Canonical step, attempt, verification-stage, handoff, and delivered diffs, navigable by file and lazily expanded Git hunk; optional model-generated review maps only link back to those exact hunks.
+- Review-only agent notes attach intent, invariants, risks, or test evidence to exact old/new diff lines and batch selected sections into one rewrite request without entering the repository change.
 - Dirty-worktree snapshot initialization, scope-enforced writes, and named project commands with no arbitrary shell-string escape hatch.
 - A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
 - One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
@@ -106,3 +109,5 @@ npm test
 node --check src/server.js
 node --check public/app.js
 ```
+
+Jujutsu is the default history layer: each serial implementation step is an editable change whose stable change ID survives evolving revisions. Accepted changes are exported as ordinary Git commits before the existing review and delivery flow. Dependency-ready siblings run serially in this mode for now. Use `--vcs git` (or `AGENT_PLAN_VCS=git`) only when a repository needs the compatibility path.

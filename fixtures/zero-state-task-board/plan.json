@@ -15,6 +15,8 @@
           "description": "Model the product domain before proposing repository structure. Identify important nouns, verbs, state transitions, invariants, cohesive units that change together, external boundaries, and dependency direction. Then map every downstream ticket, including automation, onto the smallest sound architecture. Record the approved architecture in docs/domain-architecture.md so later workers can inspect the same durable design.",
           "permission": "write",
           "writeScope": "docs,.agent-plan",
+          "expectedFiles": ["docs/domain-architecture.md", ".agent-plan/verify.mjs"],
+          "estimatedChangedLines": 180,
           "acceptanceCriteria": [
             "The artifact defines a consistent domain language, behaviors, states, and invariants",
             "Boundaries are justified by responsibilities that change together rather than technical file types",
@@ -33,6 +35,13 @@
           "description": "Create the minimum application shell, package scripts, and deterministic test entry point without implementing task behavior.",
           "permission": "write",
           "writeScope": "**",
+          "expectedFiles": ["package.json", ".gitignore", "public/index.html", "src/app.js", "test/app.test.js"],
+          "estimatedChangedLines": 180,
+          "reviewBudget": {
+            "maxFiles": 8,
+            "maxChangedLines": 400,
+            "justification": "The zero-state skeleton has no narrower existing directory boundary, and these files form one runnable baseline."
+          },
           "acceptanceCriteria": [
             "npm start launches a page without runtime errors",
             "npm test succeeds",
@@ -55,6 +64,8 @@
           "description": "Implement the first vertical product slice: creating valid tasks and displaying the current list. Establish the board's intentionally designed visual baseline now: use a coherent layout, hierarchy, control states, and feedback rather than browser-default presentation.",
           "permission": "write",
           "writeScope": "src,public,test",
+          "expectedFiles": ["src/app.js", "public/index.html", "public/styles.css", "test/app.test.js"],
+          "estimatedChangedLines": 260,
           "acceptanceCriteria": [
             "Users can create non-empty tasks",
             "Empty submissions are rejected",
@@ -72,6 +83,8 @@
           "description": "Add continuous integration that uses the package scripts established by the skeleton.",
           "permission": "write",
           "writeScope": ".github/workflows",
+          "expectedFiles": [".github/workflows/verify.yml"],
+          "estimatedChangedLines": 35,
           "acceptanceCriteria": [
             "The workflow runs for pushes and pull requests",
             "The workflow uses Node.js 22 and npm test",
@@ -94,6 +107,8 @@
           "description": "Add the active-to-completed transition while preserving task creation.",
           "permission": "write",
           "writeScope": "src,public,test",
+          "expectedFiles": ["src/app.js", "public/index.html", "public/styles.css", "test/app.test.js"],
+          "estimatedChangedLines": 140,
           "acceptanceCriteria": [
             "Active tasks can be completed",
             "Completed state is visible and accessible",
@@ -109,6 +124,8 @@
           "description": "Add the completed-to-active transition without changing completion semantics.",
           "permission": "write",
           "writeScope": "src,public,test",
+          "expectedFiles": ["src/app.js", "public/index.html", "test/app.test.js"],
+          "estimatedChangedLines": 100,
           "acceptanceCriteria": [
             "Completed tasks can be restored to active",
             "Completion and task creation remain working",
@@ -123,6 +140,8 @@
           "description": "Add explicit task removal after completion and restoration are established.",
           "permission": "write",
           "writeScope": "src,public,test",
+          "expectedFiles": ["src/app.js", "public/index.html", "test/app.test.js"],
+          "estimatedChangedLines": 100,
           "acceptanceCriteria": [
             "Active and completed tasks can be removed",
             "Creation, completion, and restoration remain working",
@@ -139,6 +158,8 @@
       "description": "Store task data locally and recover safely during application startup.",
       "permission": "write",
       "writeScope": "src,public,test",
+      "expectedFiles": ["src/app.js", "test/app.test.js"],
+      "estimatedChangedLines": 120,
       "acceptanceCriteria": [
         "Tasks and completion state survive a browser reload",
         "Invalid stored data does not break startup",

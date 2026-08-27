@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { blockingReasons, dependencyArtifacts, findNode, groupStatus, normalizeEditedPlan, normalizePlan } from "../src/plan.js";
+import { blockingReasons, dependencyArtifacts, diffReviewBudget, findNode, groupStatus, normalizeEditedPlan, normalizePlan, planReviewViolations } from "../src/plan.js";
 
 function planFixture() {
   return normalizePlan({
@@ -56,8 +56,10 @@ test("steps retain named worker agents and checkpoint statuses", () => {
 });
 
 test("review-ready is a valid persisted step state", () => {
-  const plan = normalizePlan({ nodes: [{ title: "Review me", status: "review_ready" }] });
+  const vcsChange = { system: "jj", changeId: "change", commitId: "revision" };
+  const plan = normalizePlan({ nodes: [{ title: "Review me", status: "review_ready", vcsChange }] });
   assert.equal(plan.nodes[0].status, "review_ready");
+  assert.deepEqual(plan.nodes[0].vcsChange, vcsChange);
 });
 
 test("cancelled is a valid resumable persisted step state", () => {
@@ -76,6 +78,24 @@ test("steps retain selective product context references", () => {
 test("steps retain an explicit visual-evidence gate", () => {
   const plan = normalizePlan({ nodes: [{ title: "Polish board", requiresVisualEvidence: true }] });
   assert.equal(plan.nodes[0].requiresVisualEvidence, true);
+});
+
+test("flags broad or predicted oversized review steps unless explicitly justified", () => {
+  const broad = normalizePlan({ nodes: [{ title: "Build everything", permission: "write", writeScope: "**", expectedFiles: Array.from({ length: 9 }, (_, index) => `src/${index}.js`), estimatedChangedLines: 200 }] });
+  assert.equal(planReviewViolations(broad).length, 2);
+  broad.nodes[0].reviewBudget.justification = "One generated protocol surface must change atomically.";
+  assert.deepEqual(planReviewViolations(broad), []);
+});
+
+test("measures actual review size while excluding lockfiles", () => {
+  const step = normalizePlan({ nodes: [{ title: "Focused change", permission: "write", writeScope: "src", reviewBudget: { maxFiles: 1, maxChangedLines: 5 } }] }).nodes[0];
+  const result = diffReviewBudget(step, { files: ["src/app.js", "package-lock.json"], fileStats: [
+    { path: "src/app.js", additions: 4, deletions: 2 }, { path: "package-lock.json", additions: 200, deletions: 100 }
+  ] });
+  assert.equal(result.files, 1);
+  assert.equal(result.changedLines, 6);
+  assert.equal(result.exceeded, true);
+  assert.equal(result.excludedFiles, 1);
 });
 
 test("edited plans reject unknown dependencies, duplicate ids, and cycles", () => {

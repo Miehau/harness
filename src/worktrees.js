@@ -3,7 +3,7 @@ import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
-import { isGitRepository, snapshotTree } from "./git.js";
+import { diffTrees, isGitRepository, snapshotTree } from "./git.js";
 
 const exec = promisify(execFile);
 
@@ -83,6 +83,7 @@ export async function cherryPickCommit(cwd, commit) {
 export async function integrateBranch({ sourceCwd, branch, integrationCwd, dependencyCwd, resolveConflicts, verify }) {
   if (await git(sourceCwd, ["status", "--porcelain"])) throw new Error(`Cannot integrate ${branch}: the working directory has uncommitted changes`);
   const sourceHead = await git(sourceCwd, ["rev-parse", "HEAD"]);
+  const sourceTree = await git(sourceCwd, ["rev-parse", "HEAD^{tree}"]);
   const listed = await git(sourceCwd, ["worktree", "list", "--porcelain"]);
   if (listed.split("\n\n").some((block) => block.includes(`worktree ${integrationCwd}`))) await git(sourceCwd, ["worktree", "remove", "--force", integrationCwd]);
   await rm(integrationCwd, { recursive: true, force: true });
@@ -120,7 +121,8 @@ export async function integrateBranch({ sourceCwd, branch, integrationCwd, depen
     if ((await git(sourceCwd, ["rev-parse", "HEAD"])) !== sourceHead) throw new Error("The working directory advanced while its merge was being verified; retry the queue item");
     const commit = await git(integrationCwd, ["rev-parse", "HEAD"]);
     await git(sourceCwd, ["merge", "--ff-only", commit], { env: identity });
-    return { commit, conflicts };
+    const deliveredTree = await git(sourceCwd, ["rev-parse", "HEAD^{tree}"]);
+    return { commit, conflicts, diff: await diffTrees(sourceCwd, sourceTree, deliveredTree) };
   } finally {
     await git(sourceCwd, ["worktree", "remove", "--force", integrationCwd]).catch(() => {});
     await rm(integrationCwd, { recursive: true, force: true });

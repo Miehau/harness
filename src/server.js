@@ -9,15 +9,16 @@ import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
 import { admissionCandidates, occupiedTicketIds } from "./admission.js";
-import { diffTrees, outsideWriteScope, snapshotTree } from "./git.js";
+import { diffTrees, normalizeReviewNotes, outsideWriteScope, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
 import { JiraClient } from "./jira.js";
+import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
 import { ensureVerificationContractStep, formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
-import { blockingReasons, dependencyArtifacts, dependencySteps, findNode, flattenSteps, normalizeEditedPlan, normalizePlan } from "./plan.js";
+import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
@@ -40,6 +41,8 @@ const option = (name, fallback) => {
 const initialCwd = option("--cwd", process.cwd());
 const port = Number(option("--port", process.env.PORT || 4317));
 const host = option("--host", process.env.HOST || "127.0.0.1");
+const vcsMode = option("--vcs", process.env.AGENT_PLAN_VCS || "jj");
+if (!["git", "jj"].includes(vcsMode)) throw new Error(`Unsupported VCS mode: ${vcsMode}`);
 const dataDir = process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
 const daemonLock = await acquireDaemonLock(join(dataDir, "daemon.lock"));
 const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
@@ -570,6 +573,10 @@ async function continueAfterRequirements(ticketId, answers) {
     const workspace = await ensureTicketWorktree({
       sourceCwd: before.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId
     });
+    if (vcsMode === "jj") {
+      await initializeJjWorkspace(workspace.cwd);
+      workspace.vcs = "jj";
+    }
     const baselineTree = await snapshotTree(workspace.cwd);
     await update((state) => {
       const current = ticketRun(state, ticketId);
@@ -692,6 +699,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted"].includes(step.status))) return;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
+      let vcsChange = null;
+      if (run.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
+        vcsChange = await beginJjChange(stepCwd, { changeId: step.vcsChange?.changeId, title: step.title });
+        await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).vcsChange = vcsChange; });
+      }
       const beforeTree = await snapshotTree(stepCwd);
       const stepBaseTree = step.baseTree || beforeTree;
       await update((state) => {
@@ -724,6 +736,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
+        const attemptBaseTree = await snapshotTree(cwd);
         const result = await harness.runStep({
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, images: [],
           forkSessionFile: nextFeedback ? null : findForkSession(latest.plan, currentStep), resumeSessionFile: null,
@@ -739,15 +752,21 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, stepId });
         }
         signal?.throwIfAborted();
+        if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
         const afterTree = await snapshotTree(cwd);
         const diff = await diffTrees(cwd, stepBaseTree, afterTree);
+        const attemptDiff = await diffTrees(cwd, attemptBaseTree, afterTree);
+        const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
+        const reviewBudget = diffReviewBudget(currentStep, diff);
         const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, currentStep.writeScope);
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
+        const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: currentStep.expectedArtifacts[0] || `${currentStep.id}-result.md`, content: result.output, kind: "agent-output" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "prompt.md", content: result.prompt, kind: "agent-prompt" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "context.json", content: JSON.stringify({ profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation, contextPolicy: currentStep.contextPolicy, permission: currentStep.permission, writeScope: currentStep.writeScope, skills: currentStep.skills, references: currentStep.references, requirementIds: currentStep.requirementIds, capabilityIds: currentStep.capabilityIds, deltaIds: currentStep.deltaIds, productContext: currentStep.productContext, artifacts: contextArtifacts.map(({ id, name, path }) => ({ id, name, path })) }, null, 2), kind: "context-manifest" }),
-          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" })
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
         if (violations.length || result.report.status !== "completed") {
           const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
@@ -756,10 +775,14 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
             target.diff = diff;
+            target.reviewNotes = reviewNotes;
+            target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
+            target.reviewBudgetResult = reviewBudget;
+            if (vcsChange) target.vcsChange = vcsChange;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
@@ -813,9 +836,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
           target.diff = diff;
+          target.reviewNotes = reviewNotes;
+          target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
+          target.reviewBudgetResult = reviewBudget;
+          if (vcsChange) target.vcsChange = vcsChange;
           target.sessionFile = result.sessionFile;
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, verification });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });
@@ -825,9 +852,10 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const target = findNode(current.plan, stepId);
             target.status = "review_ready";
             target.commitMessage = commitMessage;
+            if (target.reviewBudgetResult?.exceeded) current.auto = false;
             current.status = "awaiting_step_review";
-            current.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `Review: ${target.title}`, createdAt: new Date().toISOString() };
-            setStage(current, "implement", "blocked", `${target.title} is verified and awaiting your review`);
+            current.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `${target.reviewBudgetResult?.exceeded ? "Oversized review required" : "Review"}: ${target.title}`, createdAt: new Date().toISOString() };
+            setStage(current, "implement", "blocked", target.reviewBudgetResult?.exceeded ? target.reviewBudgetResult.reasons.join("; ") : `${target.title} is verified and awaiting your review`);
           });
           return;
         }
@@ -898,6 +926,7 @@ function waitForDelivery(milliseconds, signal) {
 
 async function fixRemoteFeedback(ticketId, feedback, signal) {
   const current = ticketRun(store.read(), ticketId);
+  const beforeTree = await snapshotTree(current.workspace.cwd);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
     title: "Address remote review feedback", description: "Apply the smallest change that resolves concrete pull-request feedback.",
@@ -914,11 +943,18 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
   const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence) });
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+  const afterTree = await snapshotTree(current.workspace.cwd);
+  const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
   const commit = await commitWorkspace(current.workspace.cwd, `fix: address remote review feedback\n\nWhy: The reviewed change must resolve concrete maintainer feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
     runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
   });
-  await update((state) => { ticketRun(state, ticketId).artifacts.push(artifact); });
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.artifacts.push(artifact);
+    run.merge.feedbackFixes ||= [];
+    run.merge.feedbackFixes.push({ feedback, diff, artifact, commit, createdAt: new Date().toISOString() });
+  });
   return commit;
 }
 
@@ -1008,6 +1044,8 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       await waitForDelivery(20000, signal);
     }
 
+    const deliveredTree = await snapshotTree(current.workspace.cwd);
+    const deliveredDiff = await diffTrees(current.workspace.cwd, `origin/${base}^{tree}`, deliveredTree);
     const sync = await safeSyncLocal(sourceCwd, base);
     const integratedAt = new Date().toISOString();
     const productContext = contextContent == null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
@@ -1019,7 +1057,9 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync };
+      run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync, diff: deliveredDiff };
+      run.deliveredDiff = deliveredDiff;
+      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: deliveredDiff });
       Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync, externalActionPending: null });
       if (productContext) run.productContextPath = productContext.path;
       run.artifacts.push(handoff);
@@ -1101,7 +1141,9 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
     });
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: integration.commit, integratedAt };
+      run.integration = { sourceCwd, branch: current.workspace.branch, commit: integration.commit, integratedAt, diff: integration.diff };
+      run.deliveredDiff = integration.diff;
+      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: integration.diff });
       Object.assign(run.merge, { status: "integrated", commit: integration.commit, conflicts: integration.conflicts, integratedAt });
       if (productContext) run.productContextPath = productContext.path;
       run.artifacts.push(handoff);
@@ -1132,10 +1174,13 @@ async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
   const activity = captureStageActivity(ticketId, "verify", started.runId);
+  const implementationTree = await snapshotTree(started.workspace.cwd);
+  const implementationDiff = await diffTrees(started.workspace.cwd, started.baselineTree, implementationTree);
+  const verificationBaseTree = started.stages.find((stage) => stage.id === "verify")?.baseTree || implementationTree;
   await update((state) => {
     const run = ticketRun(state, ticketId);
-    setStage(run, "implement", "completed", `${flattenSteps(run.plan).length} implementation slices accepted`);
-    setStage(run, "verify", "active", "Independent reviewers are inspecting the combined implementation");
+    Object.assign(setStage(run, "implement", "completed", `${flattenSteps(run.plan).length} implementation slices accepted`), { diff: implementationDiff });
+    Object.assign(setStage(run, "verify", "active", "Independent reviewers are inspecting the combined implementation"), { baseTree: verificationBaseTree });
     run.status = "reviewing";
     run.checkpoint = null;
     run.reviews ||= [];
@@ -1150,6 +1195,7 @@ async function finalReviewLoop(ticketId, signal) {
     signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);
     const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
+    const verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
@@ -1180,7 +1226,7 @@ async function finalReviewLoop(ticketId, signal) {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
-      run.stages.find((stage) => stage.id === "verify").activity = activity.snapshot();
+      Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });
     if (!findings.length) {
       await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
@@ -1239,17 +1285,19 @@ async function finalReviewLoop(ticketId, signal) {
       signal
     });
     signal?.throwIfAborted();
+    const afterFix = await snapshotTree(current.workspace.cwd);
+    const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
+    const verificationDiffAfterFix = await diffTrees(current.workspace.cwd, verificationBaseTree, afterFix);
     if (result.report.status !== "completed") {
       await update((state) => {
         const run = ticketRun(state, ticketId);
-        setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention");
+        Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
+        run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, createdAt: new Date().toISOString() };
         run.status = "needs_attention";
         run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
       });
       return;
     }
-    const afterFix = await snapshotTree(current.workspace.cwd);
-    const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
     const fixArtifact = await persistArtifact(dataDir, current.ticket, {
       runId: current.runId, name: fixStep.expectedArtifacts[0], content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
     });
@@ -1257,7 +1305,7 @@ async function finalReviewLoop(ticketId, signal) {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(fixArtifact);
       run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, artifact: fixArtifact };
-      setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`).activity = activity.snapshot();
+      Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
     });
   }
 }
@@ -1299,7 +1347,12 @@ async function acceptStep(ticketId, stepId) {
   if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
   const message = step.commitMessage || `feat: ${step.title}\n\nWhy: ${step.description || step.title}\nRequirement: ${step.requirementIds.join(", ") || step.acceptanceCriteria.join("; ") || "Complete the approved execution-plan slice"}`;
   let commit;
-  if (step.workspace?.isolated) {
+  let vcsChange = step.vcsChange || null;
+  if (current.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
+    if (!vcsChange?.changeId) throw new Error("The editable Jujutsu change is missing for this step");
+    vcsChange = await acceptJjChange(current.workspace.cwd, { changeId: vcsChange.changeId, message, bookmark: current.workspace.branch });
+    commit = vcsChange.commitId;
+  } else if (step.workspace?.isolated) {
     let workspaceCommit = step.workspaceCommit;
     if (!workspaceCommit) {
       workspaceCommit = await commitWorkspace(step.workspace.cwd, message);
@@ -1315,6 +1368,7 @@ async function acceptStep(ticketId, stepId) {
     accepted.status = "accepted";
     accepted.acceptedAt = new Date().toISOString();
     if (commit) accepted.commit = commit;
+    if (vcsChange) accepted.vcsChange = vcsChange;
     run.status = "running";
     run.checkpoint = null;
   });
@@ -1329,7 +1383,8 @@ async function advanceTicket(ticketId, signal) {
     for (const step of reviews) await acceptStep(ticketId, step.id);
     return advanceTicket(ticketId, signal);
   }
-  const batch = nextRunnableBatch(run.plan);
+  const ready = nextRunnableBatch(run.plan);
+  const batch = run.workspace.vcs === "jj" ? ready.slice(0, 1) : ready;
   if (batch.length) {
     if (batch.length > 1) {
       const tree = await snapshotTree(run.workspace.cwd);
@@ -1351,7 +1406,13 @@ async function advanceTicket(ticketId, signal) {
     if (ticketRun(store.read(), ticketId).auto) return advanceTicket(ticketId, signal);
     return;
   }
-  if (flattenSteps(run.plan).every((step) => step.status === "accepted")) await finalReviewLoop(ticketId, signal);
+  if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
+    if (run.workspace.vcs === "jj" && !run.workspace.jjFinalized) {
+      await prepareJjForGit(run.workspace.cwd, run.workspace.branch);
+      await update((state) => { ticketRun(state, ticketId).workspace.jjFinalized = true; });
+    }
+    await finalReviewLoop(ticketId, signal);
+  }
 }
 
 function approvedPlanComment(run) {
@@ -1424,12 +1485,12 @@ async function api(request, response, url) {
   }
   const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/open$/);
   if (request.method === "POST" && openArtifact) {
-    if (process.platform !== "darwin") throw new Error("Opening artifacts in the default editor currently requires macOS");
+    if (process.platform !== "darwin") throw new Error("Opening artifacts in Zed currently requires macOS");
     const run = ticketRun(store.read(), decodeURIComponent(openArtifact[1]));
     const path = artifactPathForOpen(run.artifacts, decodeURIComponent(openArtifact[2]), dataDir);
     const file = path ? await stat(path).catch(() => null) : null;
     if (!file?.isFile()) throw new Error("Artifact file not found");
-    await runFile("open", [path]);
+    await runFile("open", ["-a", "Zed", path]);
     return json(response, 200, { opened: true });
   }
   if (request.method === "POST" && url.pathname === "/api/queue/clear") {
@@ -1466,6 +1527,30 @@ async function api(request, response, url) {
     const step = findNode(run.plan, decodeURIComponent(sessionTrace[2]));
     if (!step) throw new Error("Step not found");
     return json(response, 200, await harness.sessionTrace(step.sessionFile));
+  }
+  const reviewMapRoute = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/review-map$/);
+  if (request.method === "POST" && reviewMapRoute) {
+    const ticketId = decodeURIComponent(reviewMapRoute[1]);
+    const stepId = decodeURIComponent(reviewMapRoute[2]);
+    const run = ticketRun(store.read(), ticketId);
+    const step = findNode(run.plan, stepId);
+    if (!step?.diff?.available || !step.diff.patch) throw new Error("This step has no textual diff to map");
+    const reviewMap = await harness.generateReviewMap({
+      cwd: step.workspace?.cwd || run.workspace.cwd, ticket: run.ticket, step, diff: step.diff, runId: run.runId,
+      profile: run.stageProfiles.verification
+    });
+    const artifact = await persistArtifact(dataDir, run.ticket, {
+      runId: run.runId, stageId: "implement", stepId, name: "review-map.json", content: JSON.stringify(reviewMap, null, 2), kind: "semantic-review-map"
+    });
+    const state = await update((draft) => {
+      const current = ticketRun(draft, ticketId);
+      const target = findNode(current.plan, stepId);
+      target.reviewMap = reviewMap;
+      target.artifacts ||= [];
+      target.artifacts.push(artifact);
+      current.artifacts.push(artifact);
+    });
+    return json(response, 200, { reviewMap, state });
   }
   if (request.method === "POST" && url.pathname === "/api/stage-profiles") {
     const input = await body(request);
@@ -1597,6 +1682,8 @@ async function api(request, response, url) {
     if (!planApprovalPending(run)) throw new Error("Plans can only be edited at the approval checkpoint");
     const input = await body(request);
     const plan = normalizeEditedPlan(input.plan);
+    const violations = planReviewViolations(plan);
+    if (violations.length) throw new Error(violations.join("; "));
     const state = await update((draft) => {
       const current = ticketRun(draft, id);
       current.plan = plan;
@@ -1611,6 +1698,8 @@ async function api(request, response, url) {
     ensureTicketCapacity(id);
     const run = ticketRun(store.read(), id);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
+    const violations = planReviewViolations(run.plan);
+    if (violations.length) throw new Error(`Split or justify oversized plan steps before approval: ${violations.join("; ")}`);
     const input = await body(request);
     await update((state) => {
       const current = ticketRun(state, id);
@@ -1642,8 +1731,10 @@ async function api(request, response, url) {
     const step = findNode(current.plan, stepId);
     if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
     if (decision === "changes") {
-      const feedback = String(input.feedback || "").trim();
-      if (!feedback) throw new Error("Describe the changes you want");
+      const noteRequests = Array.isArray(input.noteRequests)
+        ? input.noteRequests
+        : [...(Array.isArray(input.noteIds) ? input.noteIds : []), input.noteId].map((id) => ({ id, feedback: input.feedback }));
+      const feedback = reviewNoteFeedback(step.reviewNotes, noteRequests, input.feedback);
       await update((state) => {
         const run = ticketRun(state, ticketId);
         delete findNode(run.plan, stepId).workspaceCommit;
