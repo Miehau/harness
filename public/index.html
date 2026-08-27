@@ -56,6 +56,18 @@
   </form>
 </dialog>
 
+<dialog id="tracker-dialog">
+  <form id="tracker-form" class="dialog-shell">
+    <header><div><span class="eyebrow">Local harness credentials</span><h2>Ticket trackers</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <p class="profiles-note">Saved outside the repository with owner-only file permissions. Leave a secret blank to keep its current value.</p>
+    <div class="tracker-credentials">
+      <fieldset><legend>Linear <span id="linear-credential-status"></span></legend><label>API key<input name="linearApiKey" type="password" autocomplete="off" placeholder="lin_api_…"></label><label class="credential-clear"><input name="clearLinear" type="checkbox"> Remove saved Linear key</label></fieldset>
+      <fieldset><legend>Jira Cloud <span id="jira-credential-status"></span></legend><label>Base URL<input name="jiraBaseUrl" type="url" placeholder="https://example.atlassian.net"></label><label>Email<input name="jiraEmail" type="email" autocomplete="username"></label><label>API token<input name="jiraApiToken" type="password" autocomplete="off" placeholder="Leave blank to keep saved token"></label><label>Project key<input name="jiraProjectKey" pattern="[A-Za-z][A-Za-z0-9_]*" placeholder="APP"></label><label class="credential-clear"><input name="clearJira" type="checkbox"> Remove saved Jira credentials</label></fieldset>
+    </div>
+    <footer><span>Environment variables remain available as a fallback.</span><button class="button primary" type="submit">Save and connect</button></footer>
+  </form>
+</dialog>
+
 <dialog id="retention-dialog">
   <div class="dialog-shell">
     <header><div><span class="eyebrow">Manual cleanup</span><h2>Retained run storage</h2></div><button id="retention-close" class="icon-button" type="button" aria-label="Close">×</button></header>

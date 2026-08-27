@@ -40,7 +40,7 @@ Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
 
 The app uses Pi's existing authentication and model settings from `~/.pi/agent`. It binds to localhost by default.
 
-Tracker credentials are read from the daemon environment and are never stored by the harness:
+Tracker credentials can be entered from the Ticket trackers popup. They are saved outside the repository at `~/.agent-plan-workspace/credentials.json` with owner-only (`0600`) permissions and are never copied into run state, prompts, logs, or artifacts. Environment variables remain available as a fallback:
 
 ```bash
 # Linear
@@ -53,7 +53,7 @@ JIRA_API_TOKEN=...
 JIRA_PROJECT_KEY=PROJ
 ```
 
-Linear and Jira can be configured together. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key.
+Linear and Jira can be configured together and reconnect immediately after saving. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key. Saved credentials take precedence over environment variables; each saved provider can be removed from the same popup.
 
 Remote delivery uses the repository's existing `origin` plus an environment-only forge token:
 
@@ -67,8 +67,6 @@ Tracker-backed runs rebase onto the remote target, push one ticket branch, open 
 Completed run artifacts, ticket worktrees, and local branches are retained indefinitely. Use the storage button in the dashboard to inspect their measured disk usage and explicitly clean selected runs. Cleanup stops owned previews and removes only run-owned local resources; it does not delete remote branches or merged changes.
 
 After a restart, in-flight work remains paused and its last checkpoint is shown. Recorded PRs/MRs resume by inspecting the same remote change. If the daemon stopped while an unconfirmed PR/MR creation or squash merge may have been in flight, the dashboard reports the uncertainty and refuses to guess until the forge has been inspected.
-
-Versions before this change could persist a Linear key under `~/.agent-plan-workspace/credentials`. The harness no longer reads or writes that directory; remove the legacy directory manually after confirming you no longer need it.
 
 ## Local zero-state fixture
 

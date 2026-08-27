@@ -55,7 +55,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 
 ## Environment and local previews
 
-- Harness and project credentials come only from the daemon environment or explicitly allow-listed ignored local development files. Never persist credentials in harness state, commits, diffs, prompts, logs, or evidence.
+- Tracker credentials may come from the daemon environment or the dashboard's owner-only local credential file. Project credentials come only from the daemon environment or explicitly allow-listed ignored local development files. Never persist credentials in harness run state, commits, diffs, prompts, logs, or evidence.
 - Every active UI worktree receives its own local preview and unique ports for each service. Persist assignments when practical, detect collisions, and never kill unrelated processes.
 - The dashboard shows preview URLs and health. Stop preview processes and release ports when a run completes or is discarded.
 - Retain the completed ticket worktree and local branch until manual cleanup.
@@ -90,7 +90,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 
 ## Incremental delivery order
 
-1. Persist this specification and introduce configurable daemon policy plus provider-neutral Linear/Jira intake using environment-only credentials.
+1. Persist this specification and introduce configurable daemon policy plus provider-neutral Linear/Jira intake using local owner-only or environment credentials.
 2. Add automatic polling, project modes, just-in-time admission, dependency-aware manual multi-start, and tracker lifecycle writeback.
 3. Add repository initialization, executable project commands, environment allow-lists, and sandboxed command execution.
 4. Replace direct-main integration with GitHub/GitLab PR/MR adapters, existing-CI gates, review feedback handling, squash merge, and safe local fast-forward.

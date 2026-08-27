@@ -19,6 +19,7 @@ let clearTimer;
 let clearArmed = false;
 let cleanupArmed = false;
 let retention = { items: [], totalBytes: 0 };
+let trackerSettings = null;
 const selectedTicketIds = new Set();
 const liveRuns = new Map();
 const liveStages = new Map();
@@ -102,14 +103,26 @@ async function openRetention() {
   $("#retention-dialog").showModal();
 }
 
+async function openTrackerSettings() {
+  trackerSettings = await api("/api/tracker-settings");
+  const form = $("#tracker-form");
+  form.reset();
+  form.elements.jiraBaseUrl.value = trackerSettings.jira.baseUrl;
+  form.elements.jiraEmail.value = trackerSettings.jira.email;
+  form.elements.jiraProjectKey.value = trackerSettings.jira.projectKey;
+  $("#linear-credential-status").textContent = trackerSettings.linear.configured ? (trackerSettings.linear.stored ? "saved" : "from environment") : "not configured";
+  $("#jira-credential-status").textContent = trackerSettings.jira.configured ? (trackerSettings.jira.stored ? "saved" : "from environment") : "not configured";
+  $("#tracker-dialog").showModal();
+}
+
 function renderTrackerStatus() {
   const target = $("#tracker-status");
   if (!ticketSources.configured) {
-    target.innerHTML = `<div class="source-button"><span><strong>Ticket trackers</strong><small>Set Linear or Jira environment variables, then restart</small></span><b>Offline</b></div>`;
+    target.innerHTML = `<button id="tracker-settings" class="source-button" type="button"><span><strong>Ticket trackers</strong><small>Add Linear or Jira credentials</small></span><b>Configure</b></button>`;
     return;
   }
   const errors = ticketSources.sources.filter((source) => source.error).map((source) => `${source.provider}: ${source.error}`);
-  target.innerHTML = `<div class="connected"><span class="connection-dot"></span><span>${escapeHtml(ticketSources.viewer?.name || "Trackers configured")}</span><small>${errors.length ? escapeHtml(errors.join(" · ")) : `${ticketSources.tickets.length} active ticket${ticketSources.tickets.length === 1 ? "" : "s"}`}</small></div>`;
+  target.innerHTML = `<button id="tracker-settings" class="source-button connected" type="button"><span class="connection-dot"></span><span>${escapeHtml(ticketSources.viewer?.name || "Trackers configured")}</span><small>${errors.length ? escapeHtml(errors.join(" · ")) : `${ticketSources.tickets.length} active ticket${ticketSources.tickets.length === 1 ? "" : "s"}`}</small></button>`;
 }
 
 function ticketCard(ticket) {
@@ -149,7 +162,7 @@ function renderTickets() {
     return `<section class="ticket-group"><header><span>${label}</span><b>${items.length}</b></header>${items.map(ticketCard).join("") || `<div class="ticket-empty">No ${label.toLowerCase()} tickets</div>`}</section>`;
   }).join("");
   const localHtml = `<section class="ticket-group"><header><span>Local runs</span><b>${local.length}</b></header>${local.map(ticketCard).join("") || `<div class="ticket-empty">Load feature.md and plan.json to start.</div>`}</section>`;
-  $("#ticket-list").innerHTML = localHtml + (ticketSources.configured ? trackerHtml : `<div class="ticket-empty large">Configure Linear or Jira environment variables to load active tickets.</div>`);
+  $("#ticket-list").innerHTML = localHtml + (ticketSources.configured ? trackerHtml : `<div class="ticket-empty large">Add Linear or Jira credentials to load active tickets.</div>`);
   for (const id of [...selectedTicketIds]) if (!ticketSources.tickets.some((ticket) => ticket.id === id && !runFor(id))) selectedTicketIds.delete(id);
   const selectedStart = $("#start-selected");
   selectedStart.disabled = selectedTicketIds.size === 0;
@@ -442,6 +455,10 @@ async function refreshTickets() {
 }
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("#tracker-settings")) {
+    try { await openTrackerSettings(); } catch (error) { notify(error.message); }
+    return;
+  }
   if (event.target.closest("#retention-open")) {
     try { await openRetention(); } catch (error) { notify(error.message); }
     return;
@@ -621,6 +638,26 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  if (event.target.id === "tracker-form") {
+    event.preventDefault();
+    const form = event.target;
+    const data = new FormData(form);
+    const input = {
+      linearApiKey: data.get("linearApiKey"), clearLinear: data.get("clearLinear") === "on",
+      clearJira: data.get("clearJira") === "on"
+    };
+    if (trackerSettings?.jira.stored || data.get("jiraApiToken")) Object.assign(input, {
+      jiraBaseUrl: data.get("jiraBaseUrl"), jiraEmail: data.get("jiraEmail"),
+      jiraApiToken: data.get("jiraApiToken"), jiraProjectKey: data.get("jiraProjectKey")
+    });
+    try {
+      const result = await api("/api/tracker-settings", { method: "POST", body: JSON.stringify(input) });
+      trackerSettings = result.settings;
+      ticketSources = result.ticketSources;
+      $("#tracker-dialog").close(); render(); notify("Tracker credentials saved and connection refreshed");
+    } catch (error) { notify(error.message); }
+    return;
+  }
   if (event.target.id === "workspace-form") {
     event.preventDefault();
     try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); await refreshTickets(); }

@@ -26,6 +26,7 @@ import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
+import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } from "./credentials.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -44,7 +45,16 @@ const daemonLock = await acquireDaemonLock(join(dataDir, "daemon.lock"));
 const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
 await store.init();
 
-const trackers = new TrackerHub([new LinearClient(), new JiraClient()]);
+const credentialStore = new CredentialStore(join(dataDir, "credentials.json"));
+let savedCredentials = await credentialStore.load();
+function trackerHub() {
+  const credentials = effectiveTrackerCredentials(savedCredentials);
+  return new TrackerHub([
+    new LinearClient({ apiKey: credentials.linear.apiKey }),
+    new JiraClient(credentials.jira)
+  ]);
+}
+let trackers = trackerHub();
 const harness = new PiHarness({ dataDir, publish });
 const previews = new PreviewManager({ dataDir });
 const clients = new Set();
@@ -1403,6 +1413,15 @@ async function runTicket(ticketId) {
 async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
   if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
+  if (request.method === "GET" && url.pathname === "/api/tracker-settings") return json(response, 200, publicTrackerSettings(savedCredentials));
+  if (request.method === "POST" && url.pathname === "/api/tracker-settings") {
+    if (trackerRefresh) await trackerRefresh.catch(() => {});
+    savedCredentials = await credentialStore.save(await body(request));
+    trackers = trackerHub();
+    ticketCache = new Map();
+    const ticketSources = await refreshTrackers({ admit: false });
+    return json(response, 200, { settings: publicTrackerSettings(savedCredentials), ticketSources });
+  }
   const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/open$/);
   if (request.method === "POST" && openArtifact) {
     if (process.platform !== "darwin") throw new Error("Opening artifacts in the default editor currently requires macOS");
@@ -1678,7 +1697,7 @@ scheduleTrackerPolling();
 server.listen(port, host, () => {
   console.log(`Agent Plan Workspace: http://${host}:${port}`);
   console.log(`Repository: ${store.read().workspace.cwd}`);
-  console.log(`Trackers: ${trackers.configured ? "configured" : "set Linear or Jira environment variables"}`);
+  console.log(`Trackers: ${trackers.configured ? "configured" : "add Linear or Jira credentials in the dashboard"}`);
   console.log(`Data: ${dataDir}`);
   refreshTrackers().catch((error) => console.error(`Tracker refresh failed: ${error.message}`));
 });

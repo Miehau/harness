@@ -364,6 +364,14 @@ dialog::backdrop { background: rgb(0 0 0 / .68); }
 .retention-row small { color: #858ea0; font-size: 10px; }
 .retention-row b { color: #aeb5c4; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .retention-empty { padding: 36px; color: #7f8799; text-align: center; }
+.tracker-credentials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.tracker-credentials fieldset { display: grid; align-content: start; gap: 10px; border: 1px solid var(--stroke); border-radius: 11px; padding: 12px; }
+.tracker-credentials legend { padding: 0 5px; font-weight: 650; }
+.tracker-credentials legend span { margin-left: 5px; color: #8d96a8; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.tracker-credentials label { display: grid; gap: 5px; color: #949dae; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.tracker-credentials input { width: 100%; min-width: 0; padding: 9px 10px; color: #e2e6ed; text-transform: none; }
+.tracker-credentials .credential-clear { display: flex; align-items: center; gap: 7px; text-transform: none; }
+.tracker-credentials .credential-clear input { width: auto; }
 #toast { position: fixed; right: 16px; bottom: 16px; z-index: 10; max-width: min(420px, calc(100vw - 32px)); border: 1px solid #3d444b; border-radius: 9px; padding: 10px 12px; background: #1b1f23; box-shadow: 0 12px 36px rgb(0 0 0 / .4); opacity: 0; pointer-events: none; transform: translateY(8px); transition: 140ms ease; font-size: 12px; }
 #toast.show { opacity: 1; transform: translateY(0); }
 
@@ -977,4 +985,5 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .ticket-header .plan-actions { width: 100%; padding-right: 0; }
   .plan-heading h2, .plan-heading p { max-width: 100%; overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
   .recovery-banner { align-items: flex-start; flex-direction: column; }
+  .tracker-credentials { grid-template-columns: minmax(0, 1fr); }
 }
