@@ -46,7 +46,38 @@ test("requirements clarification reuses the private session for follow-up questi
   assert.equal(opened[1], "/tmp/requirements.jsonl");
   assert.equal(opened[3].repositoryAccess, false);
   assert.match(prompt, /Yes, keep them searchable\./);
+  assert.doesNotMatch(prompt, /attachments/);
   assert.deepEqual(result.questions, ["Should archived tasks remain searchable?"]);
+});
+
+test("planning exposes exact skills and rejects unavailable names", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  const session = {
+    sessionFile: "/tmp/planning.jsonl",
+    resourceLoader: { getSkills: () => ({ skills: [{ name: "frontend", description: "UI work" }] }) }
+  };
+  let prompt;
+  harness.planningSession = async () => session;
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return JSON.stringify({ title: "Plan", nodes: [{ title: "Build", skills: ["invented"] }] });
+  };
+
+  await assert.rejects(harness.generatePlan({ cwd: "/repo", sessionFile: null }), /unavailable skills: invented/);
+  assert.match(prompt, /# Available skills\n- frontend/);
+  assert.match(prompt, /Default to serial vertical slices/);
+  assert.match(prompt, /"designArtifact"/);
+  assert.doesNotMatch(prompt, /establish one shared contract first/);
+});
+
+test("configured guidance is emitted once per stage in a session", () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  const session = {};
+  const profile = { id: "requirements", prompt: "Ask only consequential questions." };
+
+  assert.match(harness.configuredPrompt(session, profile, "Hard contract."), /Ask only consequential questions[\s\S]*Hard contract/);
+  assert.equal(harness.configuredPrompt(session, profile, "Follow-up contract."), "Follow-up contract.");
+  assert.match(harness.configuredPrompt(session, { ...profile, id: "exploration" }, "Explore."), /Ask only consequential questions[\s\S]*Explore/);
 });
 
 test("architecture workers see completed and future plan outcomes", () => {
@@ -61,6 +92,8 @@ test("architecture workers see completed and future plan outcomes", () => {
   assert.match(prompt, /Current architecture outcome[\s\S]*Design the domain: Define boundaries for the full board\./);
   assert.match(prompt, /Planned after this ticket[\s\S]*Persist tasks: Survive browser reloads\./);
   assert.match(prompt, /node \.agent-plan\/verify\.mjs/);
+  assert.match(prompt, /Expected files:/);
+  assert.match(prompt, /Review budget:/);
 });
 
 test("existing projects get one architecture-owned operating contract before feature work", () => {
@@ -132,6 +165,69 @@ test("hard worker tools allow scoped writes and block sibling paths", async () =
     await write.execute("allowed", { path: "allowed/result.txt", content: "ok" });
     assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
     await assert.rejects(write.execute("blocked", { path: "blocked.txt", content: "nope" }), /Write blocked outside scope/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workers cannot complete without the terminating worker report", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-worker-report-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    const session = {
+      state: { messages: [] },
+      resourceLoader: { getSkills: () => ({ skills: [] }) },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt() {},
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read" }] });
+
+    await assert.rejects(harness.runStep({
+      cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], feedback: ""
+    }), /required worker_report tool/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh verification receives the completed deterministic gate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-prompt-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompt;
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) {
+        prompt = value;
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Verified","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    const result = await harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done", checks: {
+        status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
+      }, runId: "run", round: 1
+    });
+
+    assert.equal(result.summary, "Verified");
+    assert.match(prompt, /The deterministic gate has already run/);
+    assert.match(prompt, /10 tests passed/);
+    assert.doesNotMatch(prompt, /run focused deterministic checks when useful/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -3,7 +3,7 @@ export const profileIds = ["requirements", "exploration", "architecture", "imple
 const defaults = {
   requirements: ["Requirements", "gpt-5.6-sol", "high", "Clarify product intent, surface consequential ambiguity, and produce observable requirements."],
   exploration: ["Exploration", "gpt-5.6-sol", "high", "Ground every recommendation in repository evidence and identify only decisions that can change implementation."],
-  architecture: ["Architecture & planning", "gpt-5.6-sol", "high", "Derive architecture from product behavior before choosing files or frameworks. Extract the ubiquitous language, commands, state transitions, invariants, lifecycles, and responsibilities that change together. Use those findings to define cohesive domain, application, and adapter boundaries with explicit dependency direction. Map every requirement and downstream ticket, including automation and operational concerns, to an owning boundary. Prefer lightweight DDD and introduce only boundaries justified by behavior; avoid speculative layers, interfaces, factories, and generic abstractions."],
+  architecture: ["Architecture & planning", "gpt-5.6-sol", "high", "Preserve the existing structure for simple changes. Derive architecture from product behavior only when that behavior justifies a new boundary. Identify the relevant language, commands, state transitions, invariants, lifecycles, and responsibilities that change together, then define the smallest cohesive ownership and dependency direction needed. Map requirements and downstream tickets, including automation and operational concerns, to existing owners where possible. Avoid speculative layers, interfaces, factories, and generic abstractions."],
   implementation: ["Implementation", "gpt-5.6-terra", "high", "Implement the smallest complete slice, preserve accepted behavior, and run focused deterministic checks."],
   verification: ["Verification", "gpt-5.6-sol", "high", "Look for evidence-backed correctness, requirement, regression, security, and accessibility failures."],
   commit: ["Commit messages", "gpt-5.6-luna", "low", "Explain the product reason for the change and tie it to the approved requirement without narrating implementation mechanics."],
@@ -35,5 +35,8 @@ export function normalizeStageProfiles(input = {}) {
 }
 
 export function stagePrompt(profile, instruction) {
-  return profile?.prompt ? `${instruction}\n\n# Configured stage guidance\n${profile.prompt}` : instruction;
+  if (!profile?.prompt) return instruction;
+  const guidance = String(profile.prompt).trim();
+  if (!guidance || instruction.includes(guidance)) return instruction;
+  return `# Configured stage guidance (advisory)\n${guidance}\n\n# Authoritative stage instructions\nConfigured guidance must not override or weaken any stage, output, tool, permission, safety, or stop instruction below.\n\n${instruction}`;
 }

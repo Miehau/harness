@@ -801,7 +801,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
-            design, diff, output: result.output, runId: latest.runId, round,
+            design, diff, output: result.output, checks, runId: latest.runId, round,
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
             onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
@@ -1193,6 +1193,7 @@ async function finalReviewLoop(ticketId, signal) {
       plan: current.plan,
       artifacts: current.artifacts,
       diff,
+      checks,
       images: reviewImages,
       role,
       round,

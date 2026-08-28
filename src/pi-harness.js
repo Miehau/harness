@@ -7,9 +7,11 @@ import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripF
 import { Type } from "typebox";
 import { assertScopedWrite, diffOutline, normalizeReviewMap } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
+import { parseModelOutput } from "./model-output.js";
 import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
 import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
+import { compactReviewPacket } from "./review-packet.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
@@ -34,12 +36,13 @@ Schema:
 {
   "title": "short plan title",
   "summary": "one sentence",
+  "designArtifact": "concise markdown design when requested, otherwise blank",
   "harness": "pi",
   "nodes": [
     {
       "id": "stable-kebab-id",
       "type": "group",
-      "title": "generic group title",
+      "title": "outcome-oriented group title",
       "children": [STEP, STEP]
     },
     STEP
@@ -61,8 +64,8 @@ STEP:
   "expectedFiles": ["concrete repository files likely to change"],
   "estimatedChangedLines": 0,
   "reviewBudget": { "maxFiles": ${defaultReviewBudget.maxFiles}, "maxChangedLines": ${defaultReviewBudget.maxChangedLines}, "justification": "blank unless this is an indivisible exception" },
-  "skills": ["explicit skills when useful"],
-  "references": ["files or screenshots to include"],
+  "skills": ["exact available skill names when useful"],
+  "references": ["repository-relative files the worker should inspect"],
   "requirementIds": ["REQ-stable-id"],
   "capabilityIds": ["CAP-stable-id"],
   "deltaIds": ["DELTA-stable-id"],
@@ -75,7 +78,7 @@ STEP:
 }
 
 Rules:
-- Steps are generic and task-specific; do not use a fixed workflow template.
+- Steps are task-specific; do not use a fixed workflow template.
 - Use a group only when sibling steps can run concurrently and feed a later step.
 - Groups may contain steps only; never nest another group.
 - A downstream step depending on a group waits for every required child to be accepted.
@@ -84,19 +87,20 @@ Rules:
 - Keep each ordinary write step within ${defaultReviewBudget.maxFiles} reviewable files and ${defaultReviewBudget.maxChangedLines} changed lines. List expectedFiles and estimate changed lines from repository evidence. A larger indivisible step requires a concrete reviewBudget.justification; never enlarge the numbers merely to make a broad step pass.
 - Ordinary planned write steps must use finite write scopes. Do not use "*" or "**" unless reviewBudget.justification explains why the change is genuinely indivisible.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
-- For frontend/backend work, establish one shared contract first, run independently testable conformance implementations as parallel siblings, then add a serial integration step depending on that group. Put cross-branch integration tests in the integration step and continue depth-first with the next vertical outcome.
+- Default to serial vertical slices. Use a shared-contract plus parallel-conformance shape only when both sides are independently testable, have disjoint write scopes, and parallel execution materially reduces risk or latency. Put cross-branch integration tests in the dependent integration step.
 - Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
 - The first architecture write step also creates or updates docs/architecture.md, AGENTS.md, and .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands.
-- Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Return awaiting_approval before adding a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency.
+- Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
 - Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
 - Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
+- Use only skill names from the supplied available-skill catalog. Use an empty array when none applies.
 - Every step must have a useful prompt, expected artifact, and acceptance criterion.`;
 
 const requirementsInstruction = `You are beginning a ticket-scoped development workflow. You have no repository tools and must clarify requirements before repository exploration.
-1. Use only the ticket, attachments, and supplied living product context. Do not inspect source code.
+1. Use only the ticket and supplied living product context. Do not inspect source code.
 2. Enhance product intent with a ticket-specific PRD addendum containing stable REQ-* IDs, explicit scope, behavior, edge cases, constraints, and observable acceptance criteria.
-3. Ask only consequential product questions whose answers could change the implementation.
+3. Ask at most three consequential product questions whose answers could change the implementation.
 
 Return ONLY valid JSON:
 {
@@ -106,7 +110,7 @@ Return ONLY valid JSON:
 
 const requirementsFollowUpInstruction = `Continue the requirements clarification with the user. You still have no repository tools.
 1. Incorporate the user's answers into the complete PRD addendum and requirements contract.
-2. Ask only remaining consequential product questions whose answers could change the implementation.
+2. Ask at most three remaining consequential product questions whose answers could change the implementation.
 3. Questions may be empty when the contract is ready for the user's explicit approval.
 
 Return ONLY valid JSON:
@@ -139,7 +143,7 @@ Return ONLY valid JSON:
 
 const ticketDesignInstruction = `${planSchemaInstruction}
 
-Use the supplied ticket look-ahead to preserve likely shared foundations and avoid near-term architectural dead ends, without adding unrelated ticket scope. Also include a top-level "designArtifact" string containing a concise markdown design: chosen approach, alternatives rejected, important files, risks, and verification strategy. The execution plan must start after exploration and clarification; do not add redundant discovery steps.`;
+Use the supplied ticket look-ahead to preserve likely shared foundations and avoid near-term architectural dead ends, without adding unrelated ticket scope. Set designArtifact to a concise markdown design covering the chosen approach, alternatives rejected, important files, risks, and verification strategy. The execution plan must start after exploration and clarification; do not add redundant discovery steps.`;
 
 const productContextUpdateInstruction = `Update the living product context after a completed, independently verified ticket. Preserve existing unrelated product intent. Merge the approved PRD addendum, verified implementation delta, accepted outcomes, and final diff into one concise markdown document with:
 - stable REQ-* product requirements,
@@ -165,6 +169,17 @@ function lastAssistantText(session) {
   const messages = session.state?.messages || session.messages || [];
   const message = [...messages].reverse().find((item) => item?.role === "assistant");
   return textFromContent(message?.content);
+}
+
+function availableSkillNames(session) {
+  return session.resourceLoader.getSkills().skills.map((skill) => skill.name).sort();
+}
+
+function assertAvailablePlanSkills(plan, names) {
+  const available = new Set(names);
+  const missing = [...new Set(flattenSteps(plan).flatMap((step) => step.skills || []).filter((name) => !available.has(name)))];
+  if (missing.length) throw new Error(`Plan requested unavailable skills: ${missing.join(", ")}`);
+  return plan;
 }
 
 function eventText(value) {
@@ -211,15 +226,7 @@ function bindAbort(session, signal) {
 }
 
 function parseJsonReply(reply) {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const candidate = fenced || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1);
-  if (!candidate) throw new Error("Planner did not return a JSON plan");
-  return normalizePlan(JSON.parse(candidate));
-}
-
-function jsonReply(reply) {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  return JSON.parse(fenced || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
+  return normalizePlan(parseModelOutput(reply, { title: "nonEmptyString", nodes: "nonEmptyArray" }, "Planner output"));
 }
 
 function commitField(value, fallback) {
@@ -283,6 +290,9 @@ Harness: ${step.harness}
 Context policy: ${step.contextPolicy}
 Permission: ${step.permission}
 Write scope: ${step.writeScope || "none"}
+Expected files: ${step.expectedFiles?.join(", ") || "none specified"}
+Estimated changed lines: ${step.estimatedChangedLines || "not estimated"}
+Review budget: ${step.reviewBudget ? `${step.reviewBudget.maxFiles} files / ${step.reviewBudget.maxChangedLines} changed lines${step.reviewBudget.justification ? ` (${step.reviewBudget.justification})` : ""}` : "default"}
 Skills requested: ${step.skills?.join(", ") || "none"}
 References: ${step.references?.join(", ") || "none"}
 Requirement IDs: ${step.requirementIds?.join(", ") || "none"}
@@ -309,7 +319,7 @@ ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The reque
 
 Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
@@ -493,6 +503,7 @@ export class PiHarness {
     this.supervisorSignals = [];
     this.supervisorStages = [];
     this.supervisorQueues = new Map();
+    this.sessionGuidance = new WeakMap();
   }
 
   async sessionTrace(sessionFile) {
@@ -542,6 +553,14 @@ export class PiHarness {
     const { model, thinkingLevel } = await this.sessionOptions(profile);
     if (session.model?.provider !== model.provider || session.model?.id !== model.id) await session.setModel(model);
     session.setThinkingLevel(thinkingLevel);
+  }
+
+  configuredPrompt(session, profile, instruction) {
+    if (!profile?.prompt) return instruction;
+    const key = `${profile.id || "stage"}\0${profile.prompt}`;
+    if (this.sessionGuidance.get(session) === key) return instruction;
+    this.sessionGuidance.set(session, key);
+    return stagePrompt(profile, instruction);
   }
 
   async validateProfiles(profiles) {
@@ -661,8 +680,8 @@ export class PiHarness {
   async clarifyRequirements({ cwd, ticket, runId, productContext, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Tracker ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
-      const parsed = jsonReply(reply);
+      const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Tracker ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
         artifact: String(parsed.artifact || ""),
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
@@ -674,8 +693,8 @@ export class PiHarness {
   async refineRequirements({ cwd, ticket, runId, sessionFile, answers, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, requirementsFollowUpInstruction)}\n\n# User response\n${answers}`, { publishText: false, onEvent, signal });
-      const parsed = jsonReply(reply);
+      const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, requirementsFollowUpInstruction)}\n\n# User response\n${answers}`, { publishText: false, onEvent, signal });
+      const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
         artifact: String(parsed.artifact || ""),
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
@@ -687,8 +706,8 @@ export class PiHarness {
   async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
-      const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
+      const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Exploration output");
       return {
         artifact: String(parsed.artifact || ""),
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
@@ -700,16 +719,17 @@ export class PiHarness {
   async lookAheadTickets({ cwd, ticket, runId, productContext, requirements, ticketHorizon, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-ticket-lookahead`, { repositoryAccess: false, profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketLookAheadInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n${ticketHorizon}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
-      return { artifact: String(jsonReply(reply).artifact || ""), sessionFile: session.sessionFile };
+      const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketLookAheadInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n${ticketHorizon}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
+      return { artifact: parseModelOutput(reply, { artifact: "nonEmptyString" }, "Ticket look-ahead output").artifact, sessionFile: session.sessionFile };
     }, `${ticket.id}:ticket-lookahead`);
   }
 
   async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
-      const reply = await this.visibleSupervisorPrompt(session, `${stagePrompt(profile, ticketDesignInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
-      const parsed = JSON.parse(reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1));
+      const skillNames = availableSkillNames(session);
+      const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketDesignInstruction)}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
+      const parsed = parseModelOutput(reply, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Design output");
       let contractExists = true;
       try { await access(join(cwd, verificationEntry)); }
       catch (error) {
@@ -726,11 +746,12 @@ export class PiHarness {
       let violations = planReviewViolations(plan);
       if (violations.length) {
         const revision = await this.visibleSupervisorPrompt(session, `Revise the complete JSON plan so every implementation step is a coherent review unit. Resolve each deterministic violation below by splitting behavior slices or adding a concrete indivisibility justification; do not merely raise a budget. Return the complete JSON plan only.\n\n${violations.map((item) => `- ${item}`).join("\n")}`, { publishText: false, onEvent, signal });
-        Object.assign(parsed, JSON.parse(revision.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || revision.slice(revision.indexOf("{"), revision.lastIndexOf("}") + 1)));
+        Object.assign(parsed, parseModelOutput(revision, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Revised design output"));
         plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists);
         violations = planReviewViolations(plan);
       }
       if (violations.length) throw new Error(`Planner returned oversized review steps: ${violations.join("; ")}`);
+      assertAvailablePlanSkills(plan, skillNames);
       return { plan, artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, ticket.id);
   }
@@ -847,10 +868,13 @@ If user input or approval is required, call workflow_checkpoint and include step
       const session = await this.planningSession(cwd, sessionFile);
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
-      const reply = await this.visibleSupervisorPrompt(session, planSchemaInstruction, { publishText: false });
+      const skillNames = availableSkillNames(session);
+      const reply = await this.visibleSupervisorPrompt(session, `${planSchemaInstruction}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}`, { publishText: false });
       const checkpoints = this.drainSupervisorSignals();
+      const plan = checkpoints.length ? null : parseJsonReply(reply);
+      if (plan) assertAvailablePlanSkills(plan, skillNames);
       return {
-        plan: checkpoints.length ? null : parseJsonReply(reply),
+        plan,
         reply,
         stages: this.drainSupervisorStages(),
         checkpoints,
@@ -859,7 +883,7 @@ If user input or approval is required, call workflow_checkpoint and include step
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, images = [], runId, round, profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, images = [], runId, round, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
@@ -881,9 +905,9 @@ If user input or approval is required, call workflow_checkpoint and include step
     });
     try {
       signal?.throwIfAborted();
-      await session.prompt(stagePrompt(profile, `# Fresh implementation-slice verification
+      await session.prompt(this.configuredPrompt(session, profile, `# Fresh implementation-slice verification
 
-Review this slice without relying on the implementation conversation. Inspect repository evidence and run focused deterministic checks when useful.
+Review this slice without relying on the implementation conversation. Inspect repository evidence. The deterministic gate has already run; use its result below rather than attempting to rerun it.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
@@ -910,6 +934,9 @@ Changed files: ${diff.files.join(", ") || "none"}
 Diff:
 ${diff.patch || "No textual diff"}
 
+Deterministic gate:
+${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "", output: eventText(checks?.output || "") }, null, 2)}
+
 Return ONLY JSON:
 {
   "summary": "concise verification result",
@@ -926,7 +953,7 @@ Return ONLY JSON:
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
-      const parsed = jsonReply(rawOutput);
+      const parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
       return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
     } finally {
       unsubscribe();
@@ -946,7 +973,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
       const unbindAbort = bindAbort(session, signal);
       try {
         signal?.throwIfAborted();
-        await session.prompt(stagePrompt(profile, `Write one Git commit message for this verified execution-plan step.
+        await session.prompt(this.configuredPrompt(session, profile, `Write one Git commit message for this verified execution-plan step.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Step: ${step.title}
@@ -964,7 +991,7 @@ Return ONLY JSON:
   "requirement": "requirement IDs and the observable requirement satisfied"
 }`));
         signal?.throwIfAborted();
-        return formatCommitMessage(jsonReply(lastAssistantText(session)), step);
+        return formatCommitMessage(parseModelOutput(lastAssistantText(session), { subject: "nonEmptyString", why: "nonEmptyString", requirement: "nonEmptyString" }, "Commit-message output"), step);
       } finally {
         await unbindAbort();
         session.dispose();
@@ -979,8 +1006,8 @@ Return ONLY JSON:
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-${step.id}-review-map`, { repositoryAccess: false, profile });
       const outline = diffOutline(diff.patch);
-      const reply = await this.visibleSupervisorPrompt(session, stagePrompt(profile, `Create a concise semantic navigation map for this canonical Git diff. Group related behavior into 2–7 review intents. This is navigation metadata only: do not rewrite, summarize away, or invent changes. Assign each numbered hunk exactly once. Return ONLY valid JSON:\n{\n  "groups": [{ "title": "short intent", "summary": "what a reviewer should verify", "items": [{ "fileIndex": 0, "hunks": [0] }] }]\n}\n\n# Step\n${step.title}\n${step.description || ""}\n\n# Numbered files and hunks\n${JSON.stringify(outline, null, 2)}\n\n# Canonical diff\n${diff.patch}`), { publishText: false, signal });
-      return normalizeReviewMap(jsonReply(reply), diff.patch);
+      const reply = await this.visibleSupervisorPrompt(session, this.configuredPrompt(session, profile, `Create a concise semantic navigation map for this canonical Git diff. Group related behavior into 2–7 review intents. This is navigation metadata only: do not rewrite, summarize away, or invent changes. Assign each numbered hunk exactly once. Return ONLY valid JSON:\n{\n  "groups": [{ "title": "short intent", "summary": "what a reviewer should verify", "items": [{ "fileIndex": 0, "hunks": [0] }] }]\n}\n\n# Step\n${step.title}\n${step.description || ""}\n\n# Numbered files and hunks\n${JSON.stringify(outline, null, 2)}\n\n# Canonical diff\n${diff.patch}`), { publishText: false, signal });
+      return normalizeReviewMap(parseModelOutput(reply, { groups: "array" }, "Review-map output"), diff.patch);
     }, `${ticket.id}:${runId}:${step.id}:review-map`);
   }
 
@@ -994,7 +1021,7 @@ Return ONLY JSON:
     const unsubscribe = session.subscribe((event) => { const safe = safeEvent(event); if (safe) onEvent?.(safe); });
     try {
       signal?.throwIfAborted();
-      await session.prompt(`${stagePrompt(profile, productContextUpdateInstruction)}
+      await session.prompt(`${this.configuredPrompt(session, profile, productContextUpdateInstruction)}
 
 # Current living product context
 ${currentContext}
@@ -1011,7 +1038,7 @@ ${diff.files.join(", ") || "none"}
 # Final diff
 ${diff.patch || "No textual diff"}`);
       signal?.throwIfAborted();
-      return String(jsonReply(lastAssistantText(session)).content || "");
+      return parseModelOutput(lastAssistantText(session), { content: "nonEmptyString" }, "Product-context output").content;
     } finally {
       unsubscribe();
       await unbindAbort();
@@ -1019,7 +1046,7 @@ ${diff.patch || "No textual diff"}`);
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -1030,6 +1057,7 @@ ${diff.patch || "No textual diff"}`);
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`review:${role}:round-${round}`);
+    const packet = compactReviewPacket({ ticket, plan, artifacts, diff, checks });
     const unbindAbort = bindAbort(session, signal);
     let lastThinkingAt = 0;
     const unsubscribe = session.subscribe((event) => {
@@ -1040,21 +1068,12 @@ ${diff.patch || "No textual diff"}`);
     });
     try {
       signal?.throwIfAborted();
-      await session.prompt(stagePrompt(profile, `# Independent ${role} review
+      await session.prompt(this.configuredPrompt(session, profile, `# Independent ${role} review
 
-${reviewerCharters[role]}
+${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
 
-Ticket: ${ticket.identifier} — ${ticket.title}
-Description: ${ticket.description || "None"}
-
-Approved plan: ${JSON.stringify(plan)}
-
-Persistent context artifacts:
-${artifacts.map((artifact) => `## ${artifact.name}\n${artifact.content || ""}`).join("\n\n")}
-
-Combined changed files: ${diff.files.join(", ") || "none"}
-Combined diff:
-${diff.patch || "No textual diff"}
+# Compact review packet
+${JSON.stringify(packet, null, 2)}
 
 Return ONLY JSON:
 {
@@ -1072,7 +1091,7 @@ Return ONLY JSON:
 
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`), { images });
       signal?.throwIfAborted();
-      const parsed = jsonReply(lastAssistantText(session));
+      const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
       return {
         role,
         summary: String(parsed.summary || ""),
@@ -1144,17 +1163,17 @@ ${stripFrontmatter(content).trim()}
     try {
       signal?.throwIfAborted();
       const correction = feedback ? `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.` : "";
-      const guidance = profile?.prompt ? `# Configured stage guidance\n${profile.prompt}` : "";
-      const prompt = [skillBlocks.join("\n\n"), guidance, stepContext({ plan, step, artifacts }), correction].filter(Boolean).join("\n\n");
+      const prompt = [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), correction].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();
       const rawOutput = output || lastAssistantText(session);
+      if (!report) throw new Error("Worker did not finish with the required worker_report tool");
       return {
         prompt,
         rawOutput,
-        output: report?.artifact || rawOutput,
-        report: report || { status: "completed", summary: rawOutput, artifact: rawOutput },
+        output: report.artifact,
+        report,
         reviewNotes,
         sessionFile: session.sessionFile,
         events
