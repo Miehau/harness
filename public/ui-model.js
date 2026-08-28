@@ -45,6 +45,22 @@ export function preferredStepId(plan, currentId) {
   return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
+export function stepInspectorSummary(step) {
+  const attempts = step?.attempts || [];
+  const latest = attempts.at(-1);
+  const findings = latest?.verification?.findings || [];
+  const needsAttention = ["needs_attention", "failed", "interrupted", "cancelled"].includes(step?.status);
+  const finding = firstLine(step?.lastError || findings[0]?.claim || findings[0]?.message || (typeof findings[0] === "string" ? findings[0] : "") || latest?.violations?.[0], "The worker needs attention before the workflow can continue.");
+  return {
+    needsAttention,
+    finding,
+    findingCount: Math.max(findings.length, needsAttention ? 1 : 0),
+    criteria: step?.acceptanceCriteria || [],
+    artifactCount: step?.artifacts?.length || 0,
+    attemptCount: attempts.length
+  };
+}
+
 export function restartOptions(run) {
   if (!run || run.merge || run.integration) return [];
   const artifacts = run.artifacts || [];

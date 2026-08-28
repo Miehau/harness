@@ -23,13 +23,13 @@ export class CredentialStore {
         baseUrl: clean(input.jiraBaseUrl) || current.baseUrl,
         email: clean(input.jiraEmail) || current.email,
         apiToken: clean(input.jiraApiToken) || current.apiToken,
-        projectKey: clean(input.jiraProjectKey) || current.projectKey
+        epicKey: clean(input.jiraEpicKey).toUpperCase() || current.epicKey
       };
       if (Object.values(jira).some(Boolean)) {
         if (!/^https?:\/\//i.test(jira.baseUrl || "")) throw new Error("Jira base URL must start with http:// or https://");
         if (!jira.email?.includes("@")) throw new Error("Jira email is required");
         if (!jira.apiToken) throw new Error("Jira API token is required");
-        if (!/^[a-z][a-z0-9_]*$/i.test(jira.projectKey || "")) throw new Error("Jira project key must contain only letters, numbers, and underscores");
+        if (!/^[a-z][a-z0-9_]*-\d+$/i.test(jira.epicKey || "")) throw new Error("Jira epic key must be an issue key such as APP-42");
         credentials.jira = jira;
       }
     }
@@ -50,7 +50,7 @@ export function effectiveTrackerCredentials(saved = {}, environment = process.en
       baseUrl: saved.jira?.baseUrl || environment.JIRA_BASE_URL || "",
       email: saved.jira?.email || environment.JIRA_EMAIL || "",
       apiToken: saved.jira?.apiToken || environment.JIRA_API_TOKEN || "",
-      projectKey: saved.jira?.projectKey || environment.JIRA_PROJECT_KEY || ""
+      epicKey: saved.jira?.epicKey || environment.JIRA_EPIC_KEY || ""
     }
   };
 }
@@ -60,11 +60,11 @@ export function publicTrackerSettings(saved = {}, environment = process.env) {
   return {
     linear: { configured: Boolean(effective.linear.apiKey), stored: Boolean(saved.linear?.apiKey) },
     jira: {
-      configured: Boolean(effective.jira.baseUrl && effective.jira.email && effective.jira.apiToken && effective.jira.projectKey),
+      configured: Boolean(effective.jira.baseUrl && effective.jira.email && effective.jira.apiToken && effective.jira.epicKey),
       stored: Boolean(saved.jira?.apiToken),
       baseUrl: saved.jira?.baseUrl || environment.JIRA_BASE_URL || "",
       email: saved.jira?.email || environment.JIRA_EMAIL || "",
-      projectKey: saved.jira?.projectKey || environment.JIRA_PROJECT_KEY || ""
+      epicKey: saved.jira?.epicKey || environment.JIRA_EPIC_KEY || ""
     }
   };
 }

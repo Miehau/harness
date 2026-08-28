@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -167,6 +167,24 @@ test("keeps an explicit step selection when another step awaits review", () => {
   const plan = { nodes: [{ id: "review", status: "review_ready" }, { id: "other", status: "ready" }] };
   assert.equal(preferredStepId(plan, "other"), "other");
   assert.equal(preferredStepId(plan, null), "review");
+});
+
+test("step inspector surfaces real attention findings without inventing criterion progress", () => {
+  const summary = stepInspectorSummary({
+    status: "needs_attention",
+    acceptanceCriteria: ["One", "Two"],
+    artifacts: [{ id: "result" }],
+    attempts: [{ verification: { findings: [{ claim: "Final-admin protection is unresolved" }] } }]
+  });
+  assert.deepEqual(summary, {
+    needsAttention: true,
+    finding: "Final-admin protection is unresolved",
+    findingCount: 1,
+    criteria: ["One", "Two"],
+    artifactCount: 1,
+    attemptCount: 1
+  });
+  assert.equal(stepInspectorSummary({ status: "accepted", lastError: "stale", attempts: [] }).needsAttention, false);
 });
 
 test("offers only restart points backed by durable checkpoints", () => {

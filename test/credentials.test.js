@@ -12,10 +12,11 @@ test("stores tracker secrets locally with owner-only permissions and never expos
     const store = new CredentialStore(file);
     const saved = await store.save({
       linearApiKey: "linear-secret", jiraBaseUrl: "https://example.atlassian.net", jiraEmail: "dev@example.com",
-      jiraApiToken: "jira-secret", jiraProjectKey: "APP"
+      jiraApiToken: "jira-secret", jiraEpicKey: "app-42"
     });
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     assert.equal(effectiveTrackerCredentials(saved, {}).linear.apiKey, "linear-secret");
+    assert.equal(effectiveTrackerCredentials(saved, {}).jira.epicKey, "APP-42");
     assert.deepEqual(publicTrackerSettings(saved, {}).linear, { configured: true, stored: true });
     assert.doesNotMatch(JSON.stringify(publicTrackerSettings(saved, {})), /linear-secret|jira-secret/);
     assert.equal((await store.save({ clearLinear: true, clearJira: true })).linear, undefined);

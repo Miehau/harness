@@ -10,7 +10,7 @@ function response(value) { return { ok: true, text: async () => value == null ? 
 test("adapter lifecycle admits a dependency-ready Jira ticket and closes it after GitLab squash merge", async () => {
   const trackerWrites = [];
   const jira = new JiraClient({
-    baseUrl: "https://example.atlassian.net", email: "agent@example.com", apiToken: "token", projectKey: "APP",
+    baseUrl: "https://example.atlassian.net", email: "agent@example.com", apiToken: "token", epicKey: "APP-42",
     fetchImpl: async (url, input = {}) => {
       if (url.endsWith("/myself")) return response({ accountId: "agent", displayName: "Agent" });
       if (url.endsWith("/search/jql")) return response({ issues: [

@@ -4,15 +4,25 @@ import { JiraClient, jiraDescriptionText, jiraUnresolvedBlockers } from "../src/
 
 test("reports an explicit unconfigured state without a network request", async () => {
   let called = false;
-  const client = new JiraClient({ baseUrl: "", email: "", apiToken: "", projectKey: "", fetchImpl: async () => { called = true; } });
+  const client = new JiraClient({ baseUrl: "", email: "", apiToken: "", epicKey: "", fetchImpl: async () => { called = true; } });
   assert.deepEqual(await client.tickets(), { configured: false, viewer: null, tickets: [] });
+  assert.equal(called, false);
+});
+
+test("rejects an invalid Jira epic key before searching", async () => {
+  let called = false;
+  const client = new JiraClient({
+    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", epicKey: "APP",
+    fetchImpl: async () => { called = true; }
+  });
+  await assert.rejects(client.tickets(), /APP-42/);
   assert.equal(called, false);
 });
 
 test("normalizes Jira Cloud issues and sends environment credentials", async () => {
   const requests = [];
   const client = new JiraClient({
-    baseUrl: "https://example.atlassian.net/", email: "dev@example.com", apiToken: "token", projectKey: "APP",
+    baseUrl: "https://example.atlassian.net/", email: "dev@example.com", apiToken: "token", epicKey: "APP-42",
     fetchImpl: async (url, input = {}) => {
       requests.push({ url, input });
       if (url.endsWith("/myself")) return { ok: true, json: async () => ({ accountId: "me", displayName: "Dev" }) };
@@ -36,7 +46,7 @@ test("normalizes Jira Cloud issues and sends environment credentials", async () 
     labels: [{ id: "feature", name: "feature" }]
   });
   assert.equal(requests[0].input.headers.authorization, `Basic ${Buffer.from("dev@example.com:token").toString("base64")}`);
-  assert.match(JSON.parse(requests.find(({ url }) => url.endsWith("/search/jql")).input.body).jql, /project = "APP"/);
+  assert.match(JSON.parse(requests.find(({ url }) => url.endsWith("/search/jql")).input.body).jql, /parent = "APP-42"/);
 });
 
 test("filters issues with unresolved explicit Jira blockers", async () => {
@@ -44,7 +54,7 @@ test("filters issues with unresolved explicit Jira blockers", async () => {
   const issue = (id, issuelinks = []) => ({ id, key: `APP-${id}`, fields: { summary: id, status: status("new"), project: {}, labels: [], issuelinks } });
   const blockedBy = (key) => ({ type: { inward: "is blocked by", outward: "blocks" }, inwardIssue: { fields: { status: status(key) } } });
   const client = new JiraClient({
-    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", projectKey: "APP",
+    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", epicKey: "APP-42",
     fetchImpl: async (url) => ({ ok: true, json: async () => url.endsWith("/myself") ? {} : { issues: [issue("1"), issue("2", [blockedBy("indeterminate")]), issue("3", [blockedBy("done")])] } })
   });
   assert.deepEqual((await client.tickets()).tickets.map(({ identifier }) => identifier), ["APP-1", "APP-3"]);
@@ -61,7 +71,7 @@ test("extracts readable text from Atlassian document format", () => {
 test("uses Jira comment documents and workflow transitions", async () => {
   const requests = [];
   const client = new JiraClient({
-    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", projectKey: "APP",
+    baseUrl: "https://example.atlassian.net", email: "dev@example.com", apiToken: "token", epicKey: "APP-42",
     fetchImpl: async (url, input = {}) => {
       requests.push({ url, input });
       if (url.includes("/comment") && input.method === "POST") return { ok: true, json: async () => ({ id: "c1", created: "now", body: JSON.parse(input.body).body }) };

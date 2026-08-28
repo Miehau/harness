@@ -53,7 +53,7 @@ LINEAR_API_KEY=lin_api_...
 JIRA_BASE_URL=https://example.atlassian.net
 JIRA_EMAIL=developer@example.com
 JIRA_API_TOKEN=...
-JIRA_PROJECT_KEY=PROJ
+JIRA_EPIC_KEY=PROJ-42
 ```
 
 Linear and Jira can be configured together and reconnect immediately after saving. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key. Saved credentials take precedence over environment variables; each saved provider can be removed from the same popup.

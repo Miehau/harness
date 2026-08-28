@@ -51,18 +51,18 @@ export class JiraClient {
     baseUrl = process.env.JIRA_BASE_URL,
     email = process.env.JIRA_EMAIL,
     apiToken = process.env.JIRA_API_TOKEN,
-    projectKey = process.env.JIRA_PROJECT_KEY,
+    epicKey = process.env.JIRA_EPIC_KEY,
     fetchImpl = fetch
   } = {}) {
     this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
     this.email = email;
     this.apiToken = apiToken;
-    this.projectKey = projectKey;
+    this.epicKey = epicKey;
     this.fetch = fetchImpl;
   }
 
   get provider() { return "jira"; }
-  get configured() { return Boolean(this.baseUrl && this.email && this.apiToken && this.projectKey); }
+  get configured() { return Boolean(this.baseUrl && this.email && this.apiToken && this.epicKey); }
 
   async request(path, options = {}) {
     const response = await this.fetch(`${this.baseUrl}${path}`, {
@@ -83,13 +83,13 @@ export class JiraClient {
 
   async tickets() {
     if (!this.configured) return { configured: false, viewer: null, tickets: [] };
-    if (!/^[a-z][a-z0-9_]*$/i.test(this.projectKey)) throw new Error("JIRA_PROJECT_KEY must contain only letters, numbers, and underscores");
+    if (!/^[a-z][a-z0-9_]*-\d+$/i.test(this.epicKey)) throw new Error("JIRA_EPIC_KEY must be an issue key such as APP-42");
     const [viewer, result] = await Promise.all([
       this.request("/rest/api/3/myself"),
       this.request("/rest/api/3/search/jql", {
         method: "POST",
         body: JSON.stringify({
-          jql: `project = "${this.projectKey}" AND statusCategory != Done ORDER BY priority ASC, updated DESC`,
+          jql: `parent = "${this.epicKey}" AND statusCategory != Done ORDER BY priority ASC, updated DESC`,
           maxResults: 100,
           fields: ["summary", "description", "priority", "status", "assignee", "labels", "project", "issuelinks", "updated"]
         })
