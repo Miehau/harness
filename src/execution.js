@@ -185,7 +185,57 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
 }
 
 export function planApprovalPending(run) {
-  return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval");
+  return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId);
+}
+
+export function selectWorkerSession(step, { forkSessionFile = null, feedback = "" } = {}) {
+  const resume = Boolean(feedback) || ["needs_input", "awaiting_approval", "interrupted", "fixing"].includes(step?.status);
+  if (resume && step?.sessionFile && step.contextPolicy !== "fresh") {
+    return { resumeSessionFile: step.sessionFile, forkSessionFile: null };
+  }
+  return {
+    resumeSessionFile: null,
+    forkSessionFile: step?.contextPolicy === "fork" ? forkSessionFile || null : null
+  };
+}
+
+export function workerReportCheckpoint(step, report, { source = "worker" } = {}) {
+  if (!report || !["needs_input", "awaiting_approval"].includes(report.status)) return null;
+  const request = String(report.request || report.summary || "").trim();
+  return {
+    kind: report.status,
+    title: String(report.summary || (report.status === "needs_input" ? `${step.title} needs a decision` : `Approve ${step.title}`)).trim(),
+    prompt: request || "The worker paused for a user decision before continuing.",
+    questions: report.status === "needs_input" ? [request || "How should this worker continue?"] : [],
+    stepId: step.id,
+    source
+  };
+}
+
+export function workflowGateCheckpoint(signal, { step = null, source = "supervisor" } = {}) {
+  if (!signal) return null;
+  const kind = signal.kind === "needs_input" ? "needs_input" : "awaiting_approval";
+  const prompt = String(signal.prompt || "").trim() || "The supervisor paused for a user decision before continuing.";
+  const title = String(signal.title || (kind === "needs_input" ? "Supervisor needs a decision" : "Supervisor approval required")).trim();
+  return {
+    kind,
+    title,
+    prompt,
+    questions: kind === "needs_input"
+      ? (Array.isArray(signal.questions) && signal.questions.length ? signal.questions.map(String) : [prompt])
+      : [],
+    stepId: signal.stepId || step?.id || null,
+    source
+  };
+}
+
+export function supervisorReviewCheckpoint(step, review) {
+  return workflowGateCheckpoint(review?.checkpoints?.[0], { step, source: "supervisor" });
+}
+
+export function stepCheckpointResumeKind(checkpoint) {
+  if (!checkpoint?.stepId) return null;
+  return checkpoint.source === "supervisor" ? "supervisor" : "worker";
 }
 
 export function resumeStage(run) {
@@ -209,7 +259,7 @@ export function nextRunnableStep(plan) {
 }
 
 export function nextRunnableBatch(plan) {
-  if (flattenSteps(plan).some((step) => step.status === "review_ready")) return [];
+  if (flattenSteps(plan).some((step) => ["review_ready", "needs_input", "awaiting_approval"].includes(step.status))) return [];
   const first = nextRunnableStep(plan);
   if (!first) return [];
   const group = parentGroup(plan, first.id);

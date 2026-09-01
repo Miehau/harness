@@ -791,66 +791,68 @@ export class PiHarness {
     }
   }
 
-  async listSkills({ cwd, sessionFile }) {
-    const session = await this.planningSession(cwd, sessionFile);
+  async listSkills({ cwd, sessionFile, sessionKey }) {
+    const session = await this.planningSession(cwd, sessionFile, sessionKey);
     return session.resourceLoader.getSkills().skills
       .map(({ name, description }) => ({ name, description }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  async activateWorkflow({ cwd, sessionFile, skillName }) {
+  async activateWorkflow({ cwd, sessionFile, sessionKey, skillName, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile);
+      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
       const skill = session.resourceLoader.getSkills().skills.find((item) => item.name === skillName);
       if (!skill) throw new Error(`Pi skill not found: ${skillName}`);
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
-      const reply = await this.visibleSupervisorPrompt(session, `/skill:${skillName} ${supervisorInstruction}`);
+      const reply = await this.visibleSupervisorPrompt(session, `/skill:${skillName} ${supervisorInstruction}`, { onEvent, signal });
       return {
         reply,
         stages: this.drainSupervisorStages(),
         checkpoints: this.drainSupervisorSignals(),
         sessionFile: session.sessionFile
       };
-    });
+    }, sessionKey || "shared");
   }
 
-  async continueWorkflow({ cwd, sessionFile, checkpoint, response }) {
+  async continueWorkflow({ cwd, sessionFile, sessionKey, checkpoint, response, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile);
+      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
-      const reply = await this.visibleSupervisorPrompt(session, `The user resolved workflow checkpoint “${checkpoint.title}”. Response: ${response || "Approved"}. Continue the binding workflow. If another gate is required, use workflow_checkpoint.`);
+      const reply = await this.visibleSupervisorPrompt(session, `The user resolved workflow checkpoint “${checkpoint.title}”. Response: ${response || "Approved"}. Continue the binding workflow. If another gate is required, use workflow_checkpoint.`, { onEvent, signal });
       return {
         reply,
         stages: this.drainSupervisorStages(),
         checkpoints: this.drainSupervisorSignals(),
         sessionFile: session.sessionFile
       };
-    });
+    }, sessionKey || "shared");
   }
 
-  async reviewWorkerReport({ cwd, sessionFile, step, report, diff }) {
+  async reviewWorkerReport({ cwd, sessionFile, sessionKey, step, report, diff, profile, onEvent, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile);
+      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
-    await session.prompt(`Review this structured worker report under the active binding workflow, if one is loaded; otherwise use the plan and acceptance criteria.
+      const reply = await this.visibleSupervisorPrompt(session, this.configuredPrompt(session, profile, `Review this structured worker report under the active binding workflow, if one is loaded; otherwise use the plan and acceptance criteria.
 
 Step ID: ${step.id}
 Step: ${step.title}
 Worker: ${step.agentId}
+Acceptance criteria:
+${(step.acceptanceCriteria || []).map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 Report: ${JSON.stringify(report)}
-Changed files: ${diff.files.join(", ") || "none"}
+Changed files: ${diff?.files?.join(", ") || "none"}
 
-If user input or approval is required, call workflow_checkpoint and include stepId. Otherwise give a concise review and allow normal user acceptance.`);
+If user input or approval is required, call workflow_checkpoint and include stepId. Otherwise give a concise review and allow normal user acceptance.`), { onEvent, signal });
       return {
-        reply: lastAssistantText(session),
+        reply,
         stages: this.drainSupervisorStages(),
         checkpoints: this.drainSupervisorSignals(),
         sessionFile: session.sessionFile
       };
-    });
+    }, sessionKey || "shared");
   }
 
   async chat({ cwd, sessionFile, message, images = [] }) {
@@ -1168,8 +1170,16 @@ ${stripFrontmatter(content).trim()}
     });
     try {
       signal?.throwIfAborted();
-      const correction = feedback ? `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.` : "";
-      const prompt = [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), correction].filter(Boolean).join("\n\n");
+      const continuation = feedback
+        ? resumeSessionFile
+          ? `The user responded to this worker session.\n\n${feedback}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
+          : `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.`
+        : resumeSessionFile
+          ? "Continue the interrupted work from this existing session. Your final action MUST be the worker_report tool."
+          : "";
+      const prompt = resumeSessionFile
+        ? continuation
+        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();
