@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -54,6 +54,27 @@ test("commits accepted workspace changes and skips an empty follow-up commit", a
     assert.equal(await commitWorkspace(cwd, "Implement: feature again"), null);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("ticket worktrees reuse installed dependencies without committing them", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-dependencies-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    await mkdir(join(cwd, "backend-ts"));
+    await writeFile(join(cwd, "backend-ts", "package.json"), "{}\n");
+    await commitWorkspace(cwd, "feat: add backend package");
+    await mkdir(join(cwd, "node_modules", "eslint"), { recursive: true });
+    await mkdir(join(cwd, "backend-ts", "node_modules", "hono"), { recursive: true });
+
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-change" }, runId: "run-1" });
+
+    assert.equal(await readlink(join(workspace.cwd, "node_modules", "eslint")), join(cwd, "node_modules", "eslint"));
+    assert.equal(await readlink(join(workspace.cwd, "backend-ts", "node_modules", "hono")), join(cwd, "backend-ts", "node_modules", "hono"));
+    assert.equal((await exec("git", ["status", "--porcelain"], { cwd: workspace.cwd })).stdout, "");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

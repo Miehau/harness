@@ -1134,6 +1134,17 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .attention-summary .eyebrow { color: #f0b05d; }
 .attention-summary strong { color: #f0d7b1; font-size: 13px; line-height: 1.45; }
 .attention-summary .attention-action { width: max-content; min-height: 30px; margin-top: 2px; border-color: rgb(220 148 47 / .38); background: rgb(126 78 14 / .18); color: #f4b75f; font-size: 11px; }
+.attention-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.worker-activity { display: grid; gap: 10px; border: 1px solid rgb(121 168 245 / .22); border-radius: 10px; padding: 12px; background: rgb(18 27 41 / .55); }
+.worker-activity > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.worker-activity > header strong { display: block; margin-top: 4px; color: #d5dbe5; font-size: 12px; line-height: 1.4; }
+.worker-activity > header .button { min-height: 28px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
+.worker-activity .run-heartbeat { margin: 0; }
+.worker-activity-list { display: grid; gap: 1px; }
+.worker-activity-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 1px; border-top: 1px solid rgb(255 255 255 / .055); font-size: 11px; }
+.worker-activity-row span { min-width: 0; overflow: hidden; color: #bcc5d2; text-overflow: ellipsis; white-space: nowrap; }
+.worker-activity-row small { flex: none; color: #778397; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.worker-activity-row.warning span { color: #efb2b6; }
 .worker-outcome { display: grid; gap: 9px; }
 .worker-outcome > p { margin: 0; color: #a9b0be; font-size: 12px; line-height: 1.5; }
 .worker-outcome dl { display: grid; gap: 0; margin: 4px 0 0; }

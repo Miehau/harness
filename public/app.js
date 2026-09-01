@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -183,10 +183,10 @@ function checkpointHtml(run) {
   if (!checkpoint) return "";
   if (checkpoint.kind === "requirements_review") {
     const questions = checkpoint.questions || [];
-    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Requirements gate · repository not accessed</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract" open><summary>Review requirements contract</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional correction<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a correction…"></textarea></label>`}</div><button class="button success" type="submit">${questions.length ? "Send answers" : "Approve requirements"}</button></form>`;
+    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Requirements gate · repository not accessed</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract" open><summary>Review requirements contract</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional correction<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a correction…"></textarea></label>`}</div><button class="button success" type="submit">${questions.length ? "Send answers" : "Approve requirements"}</button></form>`;
   }
   if (["needs_input", "technical_input"].includes(checkpoint.kind)) {
-    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Technical decision gate</span><strong>${escapeHtml(checkpoint.title)}</strong>${checkpoint.questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}</div><button class="button primary" type="submit">Continue</button></form>`;
+    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Technical decision gate</span><strong>${escapeHtml(checkpoint.title)}</strong>${checkpoint.questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}</div><button class="button primary" type="submit">Continue</button></form>`;
   }
   if (checkpoint.kind === "step_review") {
     return "";
@@ -375,19 +375,33 @@ function rawOutputFor(run, step) {
   return live?.output || cachedTrace(run, step)?.rawOutput || [attempt?.rawOutput, attempt?.verification?.rawOutput].filter(Boolean).join("\n\n") || "";
 }
 
+function stepEvents(run, step) {
+  const attempt = step.attempts?.at(-1);
+  const trace = cachedTrace(run, step);
+  const live = currentLiveRun(run, step);
+  return [...(trace?.events || attempt?.events || []), ...(live?.events || [])];
+}
+
 function runPanel(step) {
   const run = runFor();
   const attempt = step.attempts?.at(-1);
-  const trace = cachedTrace(run, step);
-  const currentLive = currentLiveRun(run, step);
   const active = run.activeRuns?.[step.id];
   const heartbeat = heartbeatHtml(runHeartbeat(active, liveRuns.get(`${run.id}:${step.id}`)));
-  const events = [...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])];
+  const events = stepEvents(run, step);
   const raw = `<section class="raw-output"><span class="eyebrow">Raw assistant output</span><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutputFor(run, step) || "No assistant text yet. Open event details below to inspect tool calls and their output."))}</pre></section>`;
   return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}${raw}<section class="run-events"><span class="eyebrow">Activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active))}</div></section>`;
 }
 
+function workerActivityHtml(run, step) {
+  const active = run.activeRuns?.[step.id];
+  const pulse = runHeartbeat(active, liveRuns.get(`${run.id}:${step.id}`));
+  const items = recentActivity(stepEvents(run, step));
+  const rows = items.map((item) => `<div class="worker-activity-row ${item.isError ? "warning" : ""}"><span>${escapeHtml(item.title)}</span><small>${escapeHtml(item.status)} · ${escapeHtml((item.at || "").slice(11, 19))}</small></div>`).join("");
+  return `<section class="worker-activity" data-worker-activity><header><div><span class="eyebrow">${active ? "Live activity" : "Latest activity"}</span><strong>${escapeHtml(pulse?.label || items[0]?.title || "No worker actions recorded yet")}</strong></div><button class="button" type="button" data-tab="run">Open full activity →</button></header>${pulse ? heartbeatHtml(pulse) : ""}<div class="worker-activity-list">${rows || `<div class="run-empty">Waiting for the worker's first action.</div>`}</div></section>`;
+}
+
 function overviewPanel(step) {
+  const run = runFor();
   const summary = stepInspectorSummary(step);
   const status = step.status.replaceAll("_", " ");
   const outcome = summary.needsAttention
@@ -396,9 +410,18 @@ function overviewPanel(step) {
       : step.status === "review_ready" ? "Verification passed. The worker is ready for your review."
         : ["running", "fixing"].includes(step.status) ? "The worker is actively progressing this step."
           : "The worker is waiting for its dependencies or next action.";
-  const attention = summary.needsAttention ? `<section class="attention-summary"><span class="eyebrow">What needs attention</span><strong>${escapeHtml(summary.finding)}</strong><button class="button attention-action" type="button" data-tab="run">Review finding →</button></section>` : "";
+  const attention = summary.needsAttention ? `<section class="attention-summary"><span class="eyebrow">What needs attention</span><strong>${escapeHtml(summary.finding)}</strong><div class="attention-actions"><button class="button attention-action" type="button" data-tab="run">See failure details</button><button class="button primary" type="button" data-resume-ticket="${escapeHtml(run.id)}">Retry worker</button></div></section>` : "";
   const criteria = `<details class="inspector-disclosure"><summary><span>Acceptance criteria</span><b>${summary.criteria.length}</b></summary><div class="criteria-list">${summary.criteria.map((criterion) => `<div><span>○</span>${escapeHtml(criterion)}</div>`).join("") || `<p>No explicit criteria were recorded.</p>`}</div></details>`;
-  return `<section class="worker-overview ${summary.needsAttention ? "needs-attention" : ""}">${attention}<div class="worker-outcome"><span class="eyebrow">Decision</span><p>${escapeHtml(outcome)}</p><dl><div><dt>Result</dt><dd class="status-${escapeHtml(step.status)}">${escapeHtml(status)}</dd></div><div><dt>Blocking</dt><dd>${summary.needsAttention ? "Workflow progress" : step.status === "review_ready" ? "Your review" : "Nothing"}</dd></div><div><dt>Attempts</dt><dd>${summary.attemptCount || "—"}</dd></div></dl></div><div class="inspector-disclosures">${summary.findingCount ? `<button type="button" data-tab="run"><span>Findings</span><b>${summary.findingCount}</b><i>›</i></button>` : ""}${criteria}<button type="button" data-tab="artifacts"><span>Artifacts</span><b>${summary.artifactCount}</b><i>›</i></button><button type="button" data-tab="run"><span>Technical output</span><i>›</i></button><button type="button" data-tab="prompt"><span>Agent prompt</span><i>›</i></button><button type="button" data-tab="ticket"><span>Ticket context</span><i>›</i></button></div></section>`;
+  const action = summary.needsAttention ? "Retry this worker" : step.status === "review_ready" ? "Review and accept" : "None";
+  return `<section class="worker-overview ${summary.needsAttention ? "needs-attention" : ""}">${attention}${workerActivityHtml(run, step)}<div class="worker-outcome"><span class="eyebrow">Decision</span><p>${escapeHtml(outcome)}</p><dl><div><dt>Result</dt><dd class="status-${escapeHtml(step.status)}">${escapeHtml(status)}</dd></div><div><dt>Action needed</dt><dd>${action}</dd></div><div><dt>Attempts</dt><dd>${summary.attemptCount || (run.activeRuns?.[step.id] ? "In progress" : "—")}</dd></div></dl></div><div class="inspector-disclosures">${summary.findingCount ? `<button type="button" data-tab="run"><span>Findings</span><b>${summary.findingCount}</b><i>›</i></button>` : ""}${criteria}<button type="button" data-tab="artifacts"><span>Artifacts</span><b>${summary.artifactCount}</b><i>›</i></button><button type="button" data-tab="run"><span>Full activity and output</span><i>›</i></button><button type="button" data-tab="prompt"><span>Agent prompt</span><i>›</i></button><button type="button" data-tab="ticket"><span>Ticket context</span><i>›</i></button></div></section>`;
+}
+
+function refreshWorkerActivity() {
+  if (activeTab !== "overview") return;
+  const run = runFor();
+  const step = nodeById(selectedStepId);
+  const target = $("[data-worker-activity]");
+  if (run && step && target) target.outerHTML = workerActivityHtml(run, step);
 }
 
 function refreshLiveRun({ events = false } = {}) {
@@ -421,10 +444,7 @@ function refreshLiveRun({ events = false } = {}) {
   if (!target) return;
   const open = new Set([...target.querySelectorAll("details.run-event[open]")].map((item) => item.dataset.eventKey));
   const openGroups = new Set([...target.querySelectorAll("details.activity-group[open]")].map((item) => item.dataset.groupKey));
-  const attempt = step.attempts?.at(-1);
-  const trace = cachedTrace(run, step);
-  const currentLive = currentLiveRun(run, step);
-  target.innerHTML = timelineHtml([...(trace?.events || attempt?.events || []), ...(currentLive?.events || [])], Boolean(run.activeRuns?.[step.id]));
+  target.innerHTML = timelineHtml(stepEvents(run, step), Boolean(run.activeRuns?.[step.id]));
   for (const item of target.querySelectorAll("details.run-event")) item.open = open.has(item.dataset.eventKey);
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
@@ -501,6 +521,8 @@ function renderInspector() {
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
     target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Workflow stage</span><h2>${escapeHtml(stage.title)}</h2></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(stage.status)}</span></header><div class="stage-overview"><div><span class="eyebrow">Latest update</span><strong>${escapeHtml(stage.summary || "Waiting to start")}</strong></div>${profile ? `<div><span class="eyebrow">Agent profile</span><strong>${escapeHtml(profile.model)} · ${escapeHtml(profile.thinking)}</strong></div>` : ""}<div><span class="eyebrow">Artifacts</span><strong>${artifacts.length}</strong></div></div>${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${stageActivityPanel(run, stage)}<details class="stage-artifacts"><summary>Artifacts <span>${artifacts.length}</span></summary><div class="tab-panel">${artifactsPanel(null, artifacts)}</div></details><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
+    for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
   }
   if (!step) {
@@ -513,7 +535,9 @@ function renderInspector() {
   const isolated = Boolean(step.workspace?.isolated);
   const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
-  const reviewActions = step.status === "review_ready" ? `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button></section>` : "";
+  const reviewActions = step.status === "review_ready" ? run.auto
+    ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
+    : `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button></section>` : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
   const tabs = [["overview","Overview"],["diff","Evidence"],["artifacts","Artifacts"],["run","Output"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[activeTab];
@@ -585,8 +609,29 @@ document.addEventListener("toggle", (event) => {
 }, true);
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && diffExpanded) setDiffExpanded(false); });
 
+function clarificationDraft() {
+  const form = document.querySelector("form[data-clarify]");
+  if (!form) return null;
+  const focused = document.activeElement?.form === form ? document.activeElement : null;
+  return {
+    checkpointId: form.dataset.checkpointId,
+    answers: [...new FormData(form).entries()],
+    focus: focused ? { name: focused.name, start: focused.selectionStart, end: focused.selectionEnd } : null
+  };
+}
+
+function restoreClarificationDraft(draft) {
+  if (!draft) return;
+  const form = document.querySelector(`form[data-clarify][data-checkpoint-id="${CSS.escape(draft.checkpointId)}"]`);
+  if (!form) return;
+  for (const [name, value] of draft.answers) form.elements[name].value = value;
+  const focused = draft.focus && form.elements[draft.focus.name];
+  if (focused) { focused.focus(); focused.setSelectionRange(draft.focus.start, draft.focus.end); }
+}
+
 function render() {
   if (!state) return;
+  const draft = clarificationDraft();
   $("#workspace-path").value = state.workspace.cwd;
   $("#workspace-path-display").textContent = state.workspace.cwd;
   $("#workspace-settings").title = state.workspace.cwd;
@@ -602,6 +647,7 @@ function render() {
   renderHeader();
   renderPlanTree();
   renderInspector();
+  restoreClarificationDraft(draft);
 }
 
 async function refreshTickets() {
@@ -763,7 +809,11 @@ document.addEventListener("click", async (event) => {
   }
   const resume = event.target.closest("[data-resume-ticket]");
   if (resume) {
-    try { await api(`/api/tickets/${encodeURIComponent(resume.dataset.resumeTicket)}/resume`, { method: "POST", body: "{}" }); notify("Interrupted run resumed"); }
+    try {
+      activeTab = "run"; rememberView(); renderInspector();
+      await api(`/api/tickets/${encodeURIComponent(resume.dataset.resumeTicket)}/resume`, { method: "POST", body: "{}" });
+      notify("Worker retry started");
+    }
     catch (error) { notify(error.message); }
     return;
   }
@@ -806,8 +856,10 @@ document.addEventListener("click", async (event) => {
   if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; rememberView(); render(); return; }
   const acceptStep = event.target.closest("[data-accept-step]");
   if (acceptStep) {
+    acceptStep.disabled = true;
+    acceptStep.textContent = "Accepting…";
     try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(acceptStep.dataset.acceptStep)}/accept`, { method: "POST", body: "{}" }); notify("Step accepted; continuing to the next slice"); }
-    catch (error) { notify(error.message); }
+    catch (error) { acceptStep.disabled = false; acceptStep.textContent = "Accept commit"; notify(error.message); }
     return;
   }
   const stage = event.target.closest("[data-stage]");
@@ -977,6 +1029,7 @@ events.onmessage = ({ data }) => {
     liveRuns.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
       if (event.type === "prompt" && activeTab === "prompt") renderInspector();
+      else if (activeTab === "overview") refreshWorkerActivity();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
     }
   }
@@ -1005,4 +1058,4 @@ try { codexModels = (await api("/api/models")).models || []; } catch (error) { n
 await refreshTickets();
 render();
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());
-setInterval(refreshLiveRun, 1000);
+setInterval(() => { refreshLiveRun(); refreshWorkerActivity(); }, 1000);

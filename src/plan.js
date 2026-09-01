@@ -87,8 +87,11 @@ export function planReviewViolations(plan) {
     const budget = normalizeReviewBudget(step.reviewBudget);
     const exception = budget.justification;
     const violations = [];
+    const verificationBootstrap = step.expectedFiles.some((path) => [".agent-plan/project.json", ".agent-plan/verify.mjs"].includes(path));
+    const scope = step.writeScope.split(",").map((path) => path.trim().replace(/^\.\//, "").replace(/\/\*\*?$/, "")).filter(Boolean);
     if (!step.expectedFiles.length) violations.push(`${step.title}: expectedFiles must name the predicted review surface`);
     if (!step.estimatedChangedLines) violations.push(`${step.title}: estimatedChangedLines must be a positive review estimate`);
+    if (verificationBootstrap && scope.some((path) => path !== ".agent-plan")) violations.push(`${step.title}: verification bootstrap write scope must contain only .agent-plan; put other changes in a separate ticket-specific step`);
     if (/^(?:\*|\*\*)$/.test(step.writeScope) && !exception) violations.push(`${step.title}: broad write scope requires a review-budget justification`);
     if (budget.maxFiles > defaultReviewBudget.maxFiles && !exception) violations.push(`${step.title}: maxFiles above ${defaultReviewBudget.maxFiles} requires justification`);
     if (budget.maxChangedLines > defaultReviewBudget.maxChangedLines && !exception) violations.push(`${step.title}: maxChangedLines above ${defaultReviewBudget.maxChangedLines} requires justification`);

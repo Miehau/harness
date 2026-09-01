@@ -80,7 +80,7 @@ test("configured guidance is emitted once per stage in a session", () => {
   assert.match(harness.configuredPrompt(session, { ...profile, id: "exploration" }, "Explore."), /Ask only consequential questions[\s\S]*Explore/);
 });
 
-test("architecture workers see completed and future plan outcomes", () => {
+test("architecture workers see completed and future plan outcomes without unrelated verification ownership", () => {
   const plan = normalizePlan({ title: "Board", nodes: [
     { id: "skeleton", title: "Create skeleton", description: "Launch the empty app.", status: "accepted" },
     { id: "architecture", role: "architecture", title: "Design the domain", description: "Define boundaries for the full board." },
@@ -91,21 +91,22 @@ test("architecture workers see completed and future plan outcomes", () => {
   assert.match(prompt, /Already completed[\s\S]*Create skeleton: Launch the empty app\./);
   assert.match(prompt, /Current architecture outcome[\s\S]*Design the domain: Define boundaries for the full board\./);
   assert.match(prompt, /Planned after this ticket[\s\S]*Persist tasks: Survive browser reloads\./);
-  assert.match(prompt, /node \.agent-plan\/verify\.mjs/);
+  assert.doesNotMatch(prompt, /Own the repository verification contract/);
   assert.match(prompt, /Expected files:/);
   assert.match(prompt, /Review budget:/);
 });
 
-test("existing projects get one architecture-owned operating contract before feature work", () => {
+test("existing projects get one focused verification contract before feature work", () => {
   const plan = ensureVerificationContractStep(normalizePlan({ nodes: [
     { id: "feature", title: "Build feature", permission: "write", writeScope: "src,test", requiresVisualEvidence: true }
   ] }), false);
   assert.equal(plan.nodes[0].role, "architecture");
-  assert.equal(plan.nodes[0].writeScope, ".agent-plan,AGENTS.md,docs");
+  assert.equal(plan.nodes[0].writeScope, ".agent-plan");
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
   assert.match(plan.nodes[0].prompt, /project\.json/);
-  assert.deepEqual(plan.nodes[0].expectedArtifacts, ["docs/architecture.md", "AGENTS.md", ".agent-plan/project.json", ".agent-plan/verify.mjs"]);
+  assert.deepEqual(plan.nodes[0].expectedArtifacts, [".agent-plan/project.json", ".agent-plan/verify.mjs"]);
+  assert.doesNotMatch(plan.nodes[0].prompt, /docs\/architecture\.md|AGENTS\.md/);
   assert.equal(ensureVerificationContractStep(plan, true), plan);
 });
 
@@ -165,6 +166,17 @@ test("hard worker tools allow scoped writes and block sibling paths", async () =
     await write.execute("allowed", { path: "allowed/result.txt", content: "ok" });
     assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
     await assert.rejects(write.execute("blocked", { path: "blocked.txt", content: "nope" }), /Write blocked outside scope/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an exact file scope can create its missing parent directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-exact-scope-"));
+  try {
+    const write = scopedWorkerTools(root, "docs/architecture.md").find((tool) => tool.name === "write");
+    await write.execute("architecture", { path: "docs/architecture.md", content: "# Architecture\n" });
+    assert.equal(await readFile(join(root, "docs", "architecture.md"), "utf8"), "# Architecture\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

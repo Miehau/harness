@@ -87,6 +87,17 @@ test("flags broad or predicted oversized review steps unless explicitly justifie
   assert.deepEqual(planReviewViolations(broad), []);
 });
 
+test("keeps verification bootstrap separate from architecture and product changes", () => {
+  const mixed = normalizePlan({ nodes: [{
+    title: "Bootstrap and document",
+    permission: "write",
+    writeScope: ".agent-plan,docs/architecture.md",
+    expectedFiles: [".agent-plan/verify.mjs", "docs/architecture.md"],
+    estimatedChangedLines: 20
+  }] });
+  assert.match(planReviewViolations(mixed)[0], /verification bootstrap write scope must contain only \.agent-plan/);
+});
+
 test("measures actual review size while excluding lockfiles", () => {
   const step = normalizePlan({ nodes: [{ title: "Focused change", permission: "write", writeScope: "src", reviewBudget: { maxFiles: 1, maxChangedLines: 5 } }] }).nodes[0];
   const result = diffReviewBudget(step, { files: ["src/app.js", "package-lock.json"], fileStats: [

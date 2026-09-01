@@ -22,7 +22,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, resumeStage, rewindRun } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, resumeStage, rewindRun } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1734,11 +1734,7 @@ async function api(request, response, url) {
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
     ensureTicketCapacity(id);
-    if (run.status === "cancelled") await update((state) => {
-      const current = ticketRun(state, id);
-      current.status = "interrupted";
-      for (const step of flattenSteps(current.plan)) if (step.status === "cancelled") step.status = "interrupted";
-    });
+    if (["cancelled", "needs_attention"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
     if (stage === "requirements") prepareTicket(id).catch(() => {});
     else if (stage === "explore") continueAfterRequirements(id, "").catch(() => {});
     else if (stage === "design") startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)).catch(() => {});
@@ -1837,7 +1833,9 @@ async function api(request, response, url) {
     const input = await body(request);
     const current = ticketRun(store.read(), ticketId);
     const step = findNode(current.plan, stepId);
-    if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
+    if (!step) throw new Error("This step is not ready for review");
+    if (decision === "accept" && step.status === "accepted") return json(response, 200, { accepted: true, alreadyAccepted: true, ticketId, stepId });
+    if (step.status !== "review_ready") throw new Error("This step is not ready for review");
     if (decision === "changes") {
       const noteRequests = Array.isArray(input.noteRequests)
         ? input.noteRequests

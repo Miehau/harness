@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -15,8 +15,6 @@ import { compactReviewPacket } from "./review-packet.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
-const agentGuidanceEntry = "AGENTS.md";
-const architectureEntry = "docs/architecture.md";
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -88,8 +86,8 @@ Rules:
 - Ordinary planned write steps must use finite write scopes. Do not use "*" or "**" unless reviewBudget.justification explains why the change is genuinely indivisible.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - Default to serial vertical slices. Use a shared-contract plus parallel-conformance shape only when both sides are independently testable, have disjoint write scopes, and parallel execution materially reduces risk or latency. Put cross-branch integration tests in the dependent integration step.
-- Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
-- The first architecture write step also creates or updates docs/architecture.md, AGENTS.md, and .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands.
+- Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes only ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
+- The verification bootstrap also creates or updates .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands. Do not combine this bootstrap with product code, docs/architecture.md, AGENTS.md, or other documentation. Add documentation in a separate ticket-specific step only when the approved requirements directly justify it.
 - Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
 - Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
@@ -268,8 +266,10 @@ export function stepContext({ plan, step, artifacts }) {
 ## Architecture horizon
 Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
 
+${!outsideContractScope(step.writeScope) ? `
 Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. Do not add a dependency only for this wrapper.
-Also own ${architectureEntry}, ${agentGuidanceEntry}, and ${projectConfigPath}. Keep human guidance and architecture prose readable, while keeping commands, allowed environment names/files, and port variables machine-readable in project.json.
+Also own ${projectConfigPath}, keeping commands, allowed environment names/files, and port variables machine-readable. Do not modify architecture or agent-guidance documents unless the approved ticket has a separate, explicit documentation step.
+` : ""}
 
 ### Already completed
 ${summarize(steps.filter((item) => item.status === "accepted"))}
@@ -319,7 +319,7 @@ ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The reque
 
 Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input when a question blocks you, or awaiting_approval when explicit approval is required. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact.`;
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
@@ -332,20 +332,18 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
     id,
     type: "step",
     role: "architecture",
-    title: "Establish the repository operating contract",
-    description: `Record the architecture, agent guidance, machine-executable commands, environment allow-list, and the repository's deterministic verification entry point.`,
-    prompt: `Inspect the repository and create or update ${architectureEntry}, ${agentGuidanceEntry}, ${projectConfigPath}, and ${verificationEntry}. Keep architecture prose separate from machine-readable commands. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
+    title: "Establish repository verification contract",
+    description: `Record machine-executable commands, the environment allow-list, and the repository's deterministic verification entry point.`,
+    prompt: `Inspect the repository and create or update ${projectConfigPath} and ${verificationEntry}. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. Do not modify product code, architecture documentation, or agent guidance. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
     permission: "write",
-    writeScope: ".agent-plan,AGENTS.md,docs",
-    expectedFiles: [architectureEntry, agentGuidanceEntry, projectConfigPath, verificationEntry],
-    estimatedChangedLines: 180,
+    writeScope: ".agent-plan",
+    expectedFiles: [projectConfigPath, verificationEntry],
+    estimatedChangedLines: 100,
     acceptanceCriteria: [
-      `${architectureEntry} records important boundaries and conventions`,
-      `${agentGuidanceEntry} tells later agents how to work in this repository`,
       `${projectConfigPath} declares executable commands separately from prose`,
       `node ${verificationEntry} runs the repository's relevant deterministic checks from one stable entry point`
     ],
-    expectedArtifacts: [architectureEntry, agentGuidanceEntry, projectConfigPath, verificationEntry],
+    expectedArtifacts: [projectConfigPath, verificationEntry],
     dependsOn: []
   }, ...nodes] });
 }
@@ -477,6 +475,10 @@ function reviewNoteTool(capture) {
 
 export function scopedWorkerTools(cwd, writeScope) {
   const check = (path) => assertScopedWrite(cwd, path, writeScope);
+  const scopedDescendant = (path) => {
+    const directory = relative(resolve(cwd), resolve(path)).split(sep).join("/");
+    return String(writeScope || "").split(",").map((item) => item.trim().replace(/^\.\//, "").replace(/\/\*\*?$/, "")).find((item) => item.startsWith(`${directory}/`));
+  };
   return [
     createEditToolDefinition(cwd, { operations: {
       access: async (path) => access(await check(path)),
@@ -485,7 +487,11 @@ export function scopedWorkerTools(cwd, writeScope) {
     } }),
     createWriteToolDefinition(cwd, { operations: {
       mkdir: async (path) => {
-        if (resolve(path) !== resolve(cwd)) await check(path);
+        try { await access(path); }
+        catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          if (resolve(path) !== resolve(cwd)) await check(scopedDescendant(path) || path);
+        }
         await mkdir(path, { recursive: true });
       },
       writeFile: async (path, content) => writeFile(await check(path), content)

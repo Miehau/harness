@@ -205,6 +205,10 @@ export function eventGroups(events = []) {
   return groups;
 }
 
+export function recentActivity(events = [], limit = 4) {
+  return eventGroups(events).flatMap((group) => group.items).slice(-limit).reverse();
+}
+
 function findingDetails(findings) {
   return findings.map((finding, index) => `### Finding ${index + 1} · ${finding.severity || "issue"}\n\n${finding.claim || "Unspecified finding"}${finding.suggestedFix ? `\n\n**Suggested fix:** ${finding.suggestedFix}` : ""}`).join("\n\n");
 }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, resumeStage, rewindRun } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, resumeStage, rewindRun } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -26,6 +26,20 @@ test("dependency-ready siblings in one group form a parallel batch", () => {
   assert.deepEqual(nextRunnableBatch(plan).map((step) => step.id), ["feature", "ci"]);
   plan.nodes[0].children[0].status = "review_ready";
   assert.deepEqual(nextRunnableBatch(plan), []);
+});
+
+test("resuming a run makes attention-blocked workers runnable again", () => {
+  const run = {
+    status: "needs_attention",
+    plan: normalizePlan({ nodes: [
+      { id: "blocked", title: "Blocked", status: "needs_attention" },
+      { id: "later", title: "Later", dependsOn: ["blocked"] }
+    ] })
+  };
+  assert.equal(prepareRunResume(run), true);
+  assert.equal(run.status, "interrupted");
+  assert.equal(run.plan.nodes[0].status, "interrupted");
+  assert.equal(nextRunnableStep(run.plan).id, "blocked");
 });
 
 test("final review keeps every unique actionable finding", () => {

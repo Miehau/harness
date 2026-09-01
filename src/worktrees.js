@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { safeName } from "./artifacts.js";
 import { diffTrees, isGitRepository, restoreTree, snapshotTree } from "./git.js";
@@ -19,6 +19,27 @@ const identity = {
   GIT_COMMITTER_NAME: "Agent Plan Workspace",
   GIT_COMMITTER_EMAIL: "agent-plan@local"
 };
+
+async function linkInstalledDependencies(sourceCwd, targetCwd) {
+  const candidates = ["node_modules"];
+  for (const entry of await readdir(sourceCwd, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name !== "node_modules") candidates.push(join(entry.name, "node_modules"));
+  }
+  for (const dependencyPath of candidates) {
+    try {
+      const source = join(sourceCwd, dependencyPath);
+      const target = join(targetCwd, dependencyPath);
+      await access(source);
+      await access(dirname(target));
+      await git(sourceCwd, ["check-ignore", "-q", relative(sourceCwd, source)]);
+      await mkdir(target, { recursive: true });
+      for (const entry of await readdir(source, { withFileTypes: true })) {
+        try { await symlink(join(source, entry.name), join(target, entry.name), entry.isDirectory() ? "dir" : "file"); }
+        catch (error) { if (error.code !== "EEXIST") throw error; }
+      }
+    } catch {}
+  }
+}
 
 export async function needsLocalWorkspaceRepair(ticket, workspace) {
   return ticket?.source === "local" && !(workspace?.cwd && await isGitRepository(workspace.cwd));
@@ -89,13 +110,7 @@ export async function integrateBranch({ sourceCwd, branch, integrationCwd, depen
   await rm(integrationCwd, { recursive: true, force: true });
   await mkdir(dirname(integrationCwd), { recursive: true });
   await git(sourceCwd, ["worktree", "add", "-q", "--detach", integrationCwd, sourceHead]);
-  if (dependencyCwd) {
-    try {
-      await access(join(dependencyCwd, "node_modules"));
-      await git(integrationCwd, ["check-ignore", "-q", "node_modules"]);
-      await symlink(join(dependencyCwd, "node_modules"), join(integrationCwd, "node_modules"), "dir");
-    } catch {}
-  }
+  if (dependencyCwd) await linkInstalledDependencies(dependencyCwd, integrationCwd);
   let conflicts = [];
   try {
     try {
@@ -139,6 +154,7 @@ export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runI
     if (!(await isGitRepository(cwd))) {
       await git(sourceCwd, ["worktree", "add", "-q", "--detach", cwd, commit]);
     } else await restoreTree(cwd, tree);
+    await linkInstalledDependencies(sourceCwd, cwd);
     return [step.id, { cwd, isolated: true, baseTree: tree }];
   }));
 }
@@ -167,5 +183,6 @@ export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId }
       ? ["worktree", "add", worktree, branch]
       : ["worktree", "add", "-b", branch, worktree, start]);
   }
+  await linkInstalledDependencies(sourceCwd, worktree);
   return { sourceCwd, cwd: worktree, branch };
 }

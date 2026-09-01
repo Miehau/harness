@@ -193,6 +193,15 @@ export function resumeStage(run) {
   return run.plan ? "run" : run.stages?.find((stage) => stage.status === "active")?.id || null;
 }
 
+export function prepareRunResume(run) {
+  if (!["cancelled", "needs_attention"].includes(run?.status)) return false;
+  run.status = "interrupted";
+  for (const step of flattenSteps(run.plan)) {
+    if (["cancelled", "needs_attention", "failed"].includes(step.status)) step.status = "interrupted";
+  }
+  return true;
+}
+
 export function nextRunnableStep(plan) {
   return flattenSteps(plan).find((step) =>
     ["ready", "interrupted"].includes(step.status) && blockingReasons(plan, step).length === 0

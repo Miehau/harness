@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -79,6 +79,14 @@ test("cumulative tool updates replace earlier snapshots", () => {
     { type: "tool_update", callId: "1", tool: "read", detail: "complete", replace: true, at: "3" }
   ]);
   assert.equal(item.output, "complete");
+});
+
+test("recent activity puts the latest worker actions first", () => {
+  const events = ["read", "edit", "test"].flatMap((tool, index) => [
+    { type: "tool_start", callId: String(index), tool, at: String(index) },
+    { type: "tool_end", callId: String(index), tool, result: "done", at: String(index) }
+  ]);
+  assert.deepEqual(recentActivity(events, 2).map((item) => item.tool), ["test", "edit"]);
 });
 
 test("activity gives persisted reasoning and worker reports meaningful titles and details", () => {
