@@ -42,7 +42,7 @@ export function artifactsForStage(artifacts = [], stageId) {
 export function preferredStepId(plan, currentId) {
   const steps = (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   if (steps.some((step) => step.id === currentId)) return currentId;
-  return steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
+  return steps.find((step) => ["needs_input", "awaiting_approval"].includes(step.status))?.id || steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
 export function stepInspectorSummary(step) {

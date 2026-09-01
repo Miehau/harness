@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { planApprovalPending, selectWorkerSession, supervisorReviewCheckpoint, workerReportCheckpoint } from "../src/execution.js";
+import { nextRunnableBatch, planApprovalPending, selectWorkerSession, stepCheckpointResumeKind, supervisorReviewCheckpoint, workerReportCheckpoint, workflowGateCheckpoint } from "../src/execution.js";
 import { findNode, groupStatus, normalizePlan } from "../src/plan.js";
 
 test("plan approval ignores step-level awaiting_approval checkpoints", () => {
@@ -65,4 +65,25 @@ test("a group surfaces worker input before review", () => {
   assert.equal(groupStatus(research), "review");
   research.children[1].status = "running";
   assert.equal(groupStatus(research), "running");
+});
+
+test("workflowGateCheckpoint maps supervisor signals without a step", () => {
+  const gate = workflowGateCheckpoint({ kind: "needs_input", title: "Audience", prompt: "Who is this for?" });
+  assert.equal(gate.source, "supervisor");
+  assert.equal(gate.stepId, null);
+  assert.deepEqual(gate.questions, ["Who is this for?"]);
+  assert.equal(stepCheckpointResumeKind(gate), null);
+  assert.equal(stepCheckpointResumeKind({ stepId: "build", source: "supervisor" }), "supervisor");
+  assert.equal(stepCheckpointResumeKind({ stepId: "build" }), "worker");
+});
+
+test("a sibling waiting for input blocks the next parallel batch", () => {
+  const plan = normalizePlan({ nodes: [{
+    id: "parallel", type: "group", title: "Parallel", children: [
+      { id: "feature", title: "Feature", permission: "write" },
+      { id: "ci", title: "CI", permission: "write" }
+    ]
+  }] });
+  plan.nodes[0].children[0].status = "needs_input";
+  assert.deepEqual(nextRunnableBatch(plan), []);
 });

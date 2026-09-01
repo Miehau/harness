@@ -78,7 +78,7 @@ function nodeById(id, plan = runFor()?.plan) {
 }
 
 function statusIcon(status) {
-  return ({ accepted: "✓", running: "↻", fixing: "↻", review_ready: "◉", failed: "×", needs_attention: "!", interrupted: "!", cancelled: "×", ready: "•" })[status] || "·";
+  return ({ accepted: "✓", running: "↻", fixing: "↻", review_ready: "◉", awaiting_approval: "◉", needs_input: "?", failed: "×", needs_attention: "!", interrupted: "!", cancelled: "×", ready: "•" })[status] || "·";
 }
 
 function statusLabel(run) {
@@ -188,7 +188,14 @@ function checkpointHtml(run) {
     return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Requirements gate · repository not accessed</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract" open><summary>Review requirements contract</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional correction<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a correction…"></textarea></label>`}</div><button class="button success" type="submit">${questions.length ? "Send answers" : "Approve requirements"}</button></form>`;
   }
   if (["needs_input", "technical_input"].includes(checkpoint.kind)) {
-    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Technical decision gate</span><strong>${escapeHtml(checkpoint.title)}</strong>${checkpoint.questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}</div><button class="button primary" type="submit">Continue</button></form>`;
+    const questions = checkpoint.questions?.length ? checkpoint.questions : [checkpoint.prompt || "How should this continue?"];
+    const eyebrow = checkpoint.stepId ? "Worker decision gate" : checkpoint.source === "supervisor" ? "Supervisor workflow gate" : "Technical decision gate";
+    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">${eyebrow}</span><strong>${escapeHtml(checkpoint.title)}</strong>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}</div><button class="button primary" type="submit">Continue</button></form>`;
+  }
+  if (checkpoint.kind === "awaiting_approval" && (checkpoint.stepId || checkpoint.source === "supervisor")) {
+    const questions = checkpoint.questions || [];
+    const eyebrow = checkpoint.stepId ? "Worker approval gate" : "Supervisor workflow gate";
+    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">${eyebrow}</span><strong>${escapeHtml(checkpoint.title)}</strong>${checkpoint.prompt ? `<p>${escapeHtml(checkpoint.prompt)}</p>` : ""}${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional note<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a note…"></textarea></label>`}</div><button class="button success" type="submit">Approve</button></form>`;
   }
   if (checkpoint.kind === "step_review") {
     return "";
