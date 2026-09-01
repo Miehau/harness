@@ -112,6 +112,7 @@ node scripts/test.mjs plan          # one file
 node scripts/test.mjs --map         # src → test
 node scripts/nav.mjs                # live API / UI / module map
 node scripts/seed.mjs --list        # daemon state fixtures
+node src/cli.js list backlog        # same actions as the dashboard
 ```
 
 See [scripts/README.md](scripts/README.md).

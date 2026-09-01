@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Plan"
   short_description: "Test, navigate, and seed this daemon from live source"
-  default_prompt: "Use $agent-plan. Run node scripts/nav.mjs, node scripts/test.mjs, and node scripts/seed.mjs instead of reconstructing the app."
+  default_prompt: "Use $agent-plan. Run node scripts/nav.mjs, node scripts/test.mjs, node scripts/seed.mjs, and node src/cli.js (list backlog, new text, approve, timeline) instead of reconstructing the app."

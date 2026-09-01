@@ -22,4 +22,15 @@ node scripts/seed.mjs review-ready --data-dir /tmp/ap-data --cwd /tmp/ap-cwd
 # then: AGENT_PLAN_DATA_DIR=/tmp/ap-data npm start -- --cwd /tmp/ap-cwd
 ```
 
-Tests import `test/helpers.js` (`withDaemon`, `invoke`, `seedRun`). Seed writes `state-v3.json` through `JsonStore`, so restart/recovery behavior matches production.
+Tests import `test/helpers.js` (`withDaemon`, `invoke`, `seedRun`, `runAgainstDaemon`). Seed writes `state-v3.json` through `JsonStore`, so restart/recovery behavior matches production.
+
+Drive a running daemon with the same actions as the dashboard:
+
+```bash
+node src/cli.js new text "Add an empty-state heading"
+node src/cli.js list backlog
+node src/cli.js select <ticketId>
+node src/cli.js approve          # run manually
+node src/cli.js list timeline
+node src/cli.js queue clear
+```

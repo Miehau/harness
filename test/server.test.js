@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runCli } from "../src/cli.js";
-import { invoke, seedRun, withDaemon } from "./helpers.js";
+import { runAgainstDaemon, invoke, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
   await withDaemon(async (daemon) => {
@@ -73,25 +72,8 @@ test("binding a skill creates run.checkpoint and continue resumes the ticket", a
 test("agent-plan CLI wait is non-zero on needs_attention", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, { status: "needs_attention", lastError: "stalled", checkpoint: { kind: "needs_attention", title: "Correction stalled" } });
-    const calls = [];
-    const fetchImpl = async (url, options = {}) => {
-      calls.push(url);
-      const parsed = new URL(url);
-      const result = await invoke(daemon, options.method || "GET", parsed.pathname + parsed.search, {});
-      return {
-        ok: result.status < 400,
-        status: result.status,
-        async text() { return result.text; }
-      };
-    };
-    const chunks = [];
-    const code = await runCli(["wait", id], {
-      env: { AGENT_PLAN_URL: "http://127.0.0.1:4317", AGENT_PLAN_POLL_MS: "10" },
-      fetchImpl,
-      stdout: { write(value) { chunks.push(value); } },
-      stderr: { write() {} }
-    });
-    assert.equal(code, 1);
-    assert.match(chunks.join(""), /needs_attention/);
+    const result = await runAgainstDaemon(daemon, ["wait", id]);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /needs_attention/);
   });
 });
