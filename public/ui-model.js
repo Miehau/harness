@@ -36,7 +36,7 @@ export function executionGraph(plan) {
 }
 
 export function artifactsForStage(artifacts = [], stageId) {
-  return artifacts.filter((artifact) => artifact.stageId === stageId || (stageId === "verify" && artifact.stageId?.startsWith("review-round-")));
+  return artifacts.filter((artifact) => artifact.stageId === stageId || (stageId === "verify" && artifact.stageId?.startsWith("review-round-")) || (stageId === "handoff" && artifact.kind === "visual-evidence"));
 }
 
 export function preferredStepId(plan, currentId) {
@@ -240,6 +240,13 @@ export function stageMilestones(run, stage) {
     const items = activity?.startedAt ? [{ title: "Handoff started.", status: "started", at: activity.startedAt, detail: "Preparing the final product-context update and repository integration." }] : [];
     const proposal = (run?.artifacts || []).find((artifact) => artifact.kind === "product-context-update");
     if (proposal) items.push({ title: "Product context update prepared.", status: run.checkpoint?.kind === "product_context_review" ? "awaiting approval" : "approved", at: proposal.createdAt, detail: proposal.content });
+    const evidence = (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
+    if (evidence.length) items.push({
+      title: "Visual evidence attached as proof.",
+      status: `${evidence.length} shot${evidence.length === 1 ? "" : "s"}`,
+      at: evidence.at(-1)?.createdAt,
+      detail: evidence.map((shot) => `- \`${shot.name}\``).join("\n")
+    });
     const merge = run?.merge;
     if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository: \`${merge.sourceCwd}\`\n\nTicket branch: \`${merge.branch}\`` });
     if (merge?.startedAt) items.push({ title: "Automated merge started.", status: "merging", at: merge.startedAt, detail: "Git is merging in an isolated integration worktree; the opened repository remains untouched until verification passes." });

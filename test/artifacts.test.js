@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "../src/artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -40,4 +40,24 @@ test("keeps one living product context per source workspace", async () => {
   const saved = await persistProductContext(root, "/projects/meal-minder", "# Product\n\nCAP-1 shipped");
   assert.equal((await readProductContext(root, "/projects/meal-minder")).content, "# Product\n\nCAP-1 shipped");
   assert.equal(saved.path, missing.path);
+});
+
+test("handoff evidence section and tracker comment list screenshot names only when present", () => {
+  const shots = [
+    { kind: "visual-evidence", name: "desktop.png", path: "/data/visual-evidence/desktop.png" },
+    { kind: "visual-evidence", name: "mobile.png", path: "/data/visual-evidence/mobile.png" }
+  ];
+  assert.equal(visualEvidenceHandoffSection([]), "");
+  assert.equal(visualEvidenceHandoffSection([{ kind: "handoff", name: "handoff.md" }]), "");
+  assert.equal(visualEvidenceComment([]), "");
+  const section = visualEvidenceHandoffSection(shots);
+  assert.match(section, /## Evidence/);
+  assert.match(section, /desktop\.png/);
+  assert.match(section, /mobile\.png/);
+  assert.match(section, /\/data\/visual-evidence\/desktop\.png/);
+  const comment = visualEvidenceComment(shots);
+  assert.match(comment, /Visual evidence attached as proof \(2\)/);
+  assert.match(comment, /- desktop\.png/);
+  assert.match(comment, /- mobile\.png/);
+  assert.equal(comment.includes("/data/visual-evidence"), false);
 });

@@ -154,6 +154,20 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
   ]);
 });
 
+test("handoff timeline lists captured visual evidence as proof without inventing shots", () => {
+  const shots = [
+    { kind: "visual-evidence", name: "desktop.png", stageId: "verify", createdAt: "2026-08-25T10:00:30.000Z" },
+    { kind: "visual-evidence", name: "mobile.png", stageId: "verify", createdAt: "2026-08-25T10:00:31.000Z" }
+  ];
+  const withShots = stageMilestones({ artifacts: shots, integration: { sourceCwd: "/repo", commit: "abc", integratedAt: "2026-08-25T10:05:00.000Z" } }, { id: "handoff", status: "completed" });
+  assert.equal(withShots[0].title, "Visual evidence attached as proof.");
+  assert.equal(withShots[0].status, "2 shots");
+  assert.match(withShots[0].detail, /desktop\.png/);
+  assert.match(withShots[0].detail, /mobile\.png/);
+  const withoutShots = stageMilestones({ artifacts: [{ kind: "handoff", name: "handoff.md" }], integration: { sourceCwd: "/repo", commit: "abc", integratedAt: "t" } }, { id: "handoff" });
+  assert.equal(withoutShots.some((item) => /visual evidence/i.test(item.title)), false);
+});
+
 test("free text becomes a local ticket without losing the original request", () => {
   const ticket = freeTextTicket("# Improve search\n\nAdd keyboard navigation.", "A1B2-C3D4");
   assert.deepEqual([ticket.id, ticket.identifier, ticket.title, ticket.source], ["local-text-a1b2-c3d4", "TEXT-A1B2C3D4", "Improve search", "local"]);
@@ -169,6 +183,16 @@ test("filters artifacts for a workflow stage and includes review rounds in verif
   const artifacts = [{ stageId: "design" }, { stageId: "verify" }, { stageId: "review-round-1" }, { stageId: "implement" }];
   assert.equal(artifactsForStage(artifacts, "design").length, 1);
   assert.equal(artifactsForStage(artifacts, "verify").length, 2);
+});
+
+test("handoff artifacts include verify visual-evidence without retagging them", () => {
+  const artifacts = [
+    { stageId: "handoff", kind: "handoff", name: "handoff.md" },
+    { stageId: "verify", kind: "visual-evidence", name: "desktop.png" },
+    { stageId: "verify", kind: "independent-review", name: "requirements.json" }
+  ];
+  assert.deepEqual(artifactsForStage(artifacts, "handoff").map((artifact) => artifact.name), ["handoff.md", "desktop.png"]);
+  assert.deepEqual(artifactsForStage(artifacts, "verify").map((artifact) => artifact.name), ["desktop.png", "requirements.json"]);
 });
 
 test("keeps an explicit step selection when another step awaits review", () => {

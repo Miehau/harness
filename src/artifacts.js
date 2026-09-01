@@ -15,6 +15,22 @@ export function artifactPathForOpen(artifacts, id, dataDir) {
   return path && resolve(path).startsWith(root) ? resolve(path) : null;
 }
 
+export function visualEvidenceArtifacts(artifacts = []) {
+  return (artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
+}
+
+export function visualEvidenceHandoffSection(artifacts = []) {
+  const shots = visualEvidenceArtifacts(artifacts);
+  if (!shots.length) return "";
+  return `\n\n## Evidence\n\n${shots.map((shot) => `- \`${shot.name}\`${shot.path ? ` — \`${shot.path}\`` : ""}`).join("\n")}`;
+}
+
+export function visualEvidenceComment(artifacts = []) {
+  const shots = visualEvidenceArtifacts(artifacts);
+  if (!shots.length) return "";
+  return `\n\nVisual evidence attached as proof (${shots.length}):\n${shots.map((shot) => `- ${shot.name}`).join("\n")}`;
+}
+
 export async function persistArtifact(dataDir, ticket, { name, content, runId = "legacy", stageId = "run", kind = "agent-output", stepId = null, attemptId = null }) {
   const root = join(dataDir, "ticket-runs", safeName(ticket.identifier || ticket.id), "runs", safeName(runId), "artifacts");
   const directory = join(root, safeName(stageId), ...(stepId ? [safeName(stepId)] : []), ...(attemptId ? [safeName(attemptId)] : []));
