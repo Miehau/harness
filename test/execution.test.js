@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, resumeStage, rewindRun } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -154,4 +154,40 @@ test("activity capture bounds memory and coalesces pending persistence", async (
   await capture.flush();
   assert.equal(writes, 2);
   assert.equal(maxActiveWrites, 1);
+});
+
+test("plan approval ignores supervisor workflow gates", () => {
+  assert.equal(planApprovalPending({ plan: { nodes: [] }, checkpoint: { kind: "awaiting_approval", source: "supervisor" } }), false);
+});
+
+test("correction pauses at the round cap or when findings repeat", () => {
+  const findings = [{ claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] }];
+  const first = shouldPauseCorrection({ round: 1, findings, previousFingerprint: "" });
+  assert.equal(first.pause, false);
+  const repeat = shouldPauseCorrection({ round: 2, findings, previousFingerprint: first.fingerprint });
+  assert.equal(repeat.pause, true);
+  assert.match(repeat.reason, /repeated/);
+  const capped = shouldPauseCorrection({ round: 8, findings, previousFingerprint: "other" });
+  assert.equal(capped.pause, true);
+  assert.match(capped.reason, /8 correction rounds/);
+});
+
+test("compact run and public state omit artifact bodies", () => {
+  const run = {
+    id: "t1", runId: "r1", status: "awaiting_approval", lastError: null,
+    checkpoint: { kind: "awaiting_approval", title: "Approve" },
+    workflow: { skillName: "shape-feature", checkpoints: [] },
+    artifacts: [{ id: "a", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret body" }],
+    plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }] }] }
+  };
+  const compact = compactRun(run, 9);
+  assert.equal(compact.revision, 9);
+  assert.equal(compact.status, "awaiting_approval");
+  assert.equal(compact.checkpoint.title, "Approve");
+  assert.equal(compact.workflow.skillName, "shape-feature");
+  assert.equal("artifacts" in compact, false);
+  const published = publicState({ ticketRuns: { t1: run }, retainedRuns: {} });
+  assert.equal(published.ticketRuns.t1.artifacts[0].name, "design.md");
+  assert.equal(published.ticketRuns.t1.artifacts[0].content, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].artifacts[0].content, undefined);
 });

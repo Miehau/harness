@@ -37,3 +37,21 @@ test("starts a named preview with isolated port variables and captures desktop a
     assert.equal(manager.stop("ticket-1"), true);
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
+
+test("stopAll terminates every preview process", () => {
+  const manager = new PreviewManager({});
+  const killed = [];
+  const child = (id) => {
+    const process = new EventEmitter();
+    process.exitCode = null;
+    process.kill = (signal) => { killed.push(id + ":" + signal); process.exitCode = 0; process.emit("exit", 0); };
+    return process;
+  };
+  manager.active.set("a", { child: child("a"), public: { port: 1 } });
+  manager.active.set("b", { child: child("b"), public: { port: 2 } });
+  manager.ports.add(1);
+  manager.ports.add(2);
+  assert.equal(manager.stopAll(), 2);
+  assert.deepEqual(killed, ["a:SIGTERM", "b:SIGTERM"]);
+  assert.equal(manager.list().length, 0);
+});

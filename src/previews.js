@@ -120,6 +120,12 @@ export class PreviewManager {
     return stopped;
   }
 
+  stopAll() {
+    let stopped = 0;
+    for (const id of [...this.active.keys()]) if (this.stop(id)) stopped++;
+    return stopped;
+  }
+
   list() { return [...this.active.values()].map((preview) => preview.public); }
 }
 

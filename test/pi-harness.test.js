@@ -382,3 +382,42 @@ test("continuing a supervisor checkpoint sends the user response", async () => {
   assert.match(prompt, /Ship it/);
   assert.equal(result.reply, "Continuing");
 });
+
+test("reset disposes cached supervisor sessions and clears the queue", () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let disposed = 0;
+  harness.planning.set("ticket-run", { cwd: "/repo", session: { dispose() { disposed++; } } });
+  harness.supervisorQueues.set("ticket-run", Promise.resolve());
+  harness.reset();
+  assert.equal(disposed, 1);
+  assert.equal(harness.planning.size, 0);
+  assert.equal(harness.supervisorQueues.size, 0);
+});
+
+test("explore, design, bind, continue, and review share one supervisor queue key per run", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  const keys = [];
+  const original = harness.supervisorTurn.bind(harness);
+  harness.supervisorTurn = (work, key) => {
+    keys.push(key);
+    return original(work, key);
+  };
+  const session = {
+    sessionFile: "/tmp/plan.jsonl",
+    resourceLoader: { getSkills: () => ({ skills: [{ name: "shape-feature", description: "Shape" }] }) }
+  };
+  harness.planningSession = async () => session;
+  harness.visibleSupervisorPrompt = async () => JSON.stringify({
+    artifact: "# ok", questions: [], title: "Plan", nodes: [{ title: "Build" }], designArtifact: "# design"
+  });
+  const ticket = { id: "ticket-1", identifier: "T-1", title: "Ticket", description: "" };
+  const runId = "run-1";
+  const expected = harness.supervisorRunKey(ticket.id, runId);
+  await harness.exploreTicket({ cwd: "/repo", ticket, runId, productContext: "ctx", requirements: "req" });
+  await harness.designTicket({ cwd: "/repo", ticket, runId, productContext: "ctx", requirements: "req", exploration: "delta", ticketLookAhead: "none" }).catch(() => {});
+  await harness.activateWorkflow({ cwd: "/repo", sessionKey: expected, skillName: "shape-feature" });
+  await harness.continueWorkflow({ cwd: "/repo", sessionKey: expected, checkpoint: { title: "Gate" }, response: "ok" });
+  await harness.reviewWorkerReport({ cwd: "/repo", sessionKey: expected, step: { id: "build", title: "Build", agentId: "w", acceptanceCriteria: [] }, report: { status: "completed" }, diff: { files: [] } });
+  assert.ok(keys.includes(expected));
+  assert.equal(keys.filter((key) => key === expected).length >= 4, true);
+});

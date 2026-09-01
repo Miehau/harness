@@ -573,12 +573,20 @@ export class PiHarness {
     await Promise.all(Object.values(profiles).map((profile) => this.sessionOptions(profile)));
   }
 
-  async models(provider = "openai-codex") {
+  async models(provider) {
     const { ModelRuntime } = await this.sdk();
     this.modelRuntimePromise ||= ModelRuntime.create();
-    return (await this.modelRuntimePromise).getModels(provider)
-      .map(({ id, name, reasoning, contextWindow }) => ({ id, name, reasoning, contextWindow }))
-      .sort((left, right) => left.id.localeCompare(right.id));
+    const runtime = await this.modelRuntimePromise;
+    const models = provider ? runtime.getModels(provider) : runtime.getModels();
+    return models
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        provider: model.provider,
+        reasoning: model.reasoning,
+        contextWindow: model.contextWindow
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id) || String(left.provider || "").localeCompare(String(right.provider || "")));
   }
 
   async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false }) {
@@ -642,9 +650,16 @@ export class PiHarness {
     return turn;
   }
 
+  supervisorRunKey(ticketId, runId) {
+    return `${ticketId}-${runId}`;
+  }
+
   reset() {
-    for (const item of this.planning.values()) item.session.dispose();
+    for (const item of this.planning.values()) {
+      try { item.session.dispose(); } catch {}
+    }
     this.planning.clear();
+    this.supervisorQueues.clear();
     this.supervisorSignals = [];
     this.supervisorStages = [];
   }
@@ -719,7 +734,7 @@ export class PiHarness {
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
         sessionFile: session.sessionFile
       };
-    }, ticket.id);
+    }, this.supervisorRunKey(ticket.id, runId));
   }
 
   async lookAheadTickets({ cwd, ticket, runId, productContext, requirements, ticketHorizon, profile, onEvent, signal }) {
@@ -759,7 +774,7 @@ export class PiHarness {
       if (violations.length) throw new Error(`Planner returned oversized review steps: ${violations.join("; ")}`);
       assertAvailablePlanSkills(plan, skillNames);
       return { plan, artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
-    }, ticket.id);
+    }, this.supervisorRunKey(ticket.id, runId));
   }
 
   drainSupervisorSignals() {

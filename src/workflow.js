@@ -84,3 +84,49 @@ export function applyWorkflowContinuation(workflow, checkpointId, response, acti
   for (const checkpoint of activation.checkpoints || []) addCheckpoint(workflow, checkpoint);
   return workflow;
 }
+
+export function pendingBlockingCheckpoints(workflow) {
+  return pendingCheckpoints(workflow).filter((checkpoint) => checkpoint.blocking !== false);
+}
+
+export function isWorkflowRunCheckpoint(checkpoint) {
+  return Boolean(checkpoint && checkpoint.source === "supervisor" && !checkpoint.stepId);
+}
+
+export function executionBlockedByWorkflow(run) {
+  return workflowBlockers(run?.workflow).length > 0;
+}
+
+export function runCheckpointFromWorkflow(checkpoint) {
+  if (!checkpoint) return null;
+  const kind = checkpoint.kind === "needs_input" ? "needs_input" : "awaiting_approval";
+  const prompt = String(checkpoint.prompt || "Review before continuing");
+  return {
+    id: checkpoint.id,
+    kind,
+    title: String(checkpoint.title || "Supervisor checkpoint"),
+    prompt,
+    questions: kind === "needs_input"
+      ? (Array.isArray(checkpoint.questions) && checkpoint.questions.length ? checkpoint.questions.map(String) : [prompt])
+      : (Array.isArray(checkpoint.questions) ? checkpoint.questions.map(String) : []),
+    stepId: checkpoint.stepId || null,
+    source: checkpoint.source || "supervisor",
+    createdAt: checkpoint.createdAt || new Date().toISOString()
+  };
+}
+
+export function applyPendingWorkflowGate(run) {
+  const pending = pendingBlockingCheckpoints(run?.workflow);
+  if (!pending.length) {
+    if (isWorkflowRunCheckpoint(run?.checkpoint) && run.checkpoint?.id && !(run.workflow?.checkpoints || []).some((item) => item.id === run.checkpoint.id && item.status === "pending")) {
+      run.checkpoint = null;
+    }
+    return null;
+  }
+  const gate = runCheckpointFromWorkflow(pending[0]);
+  run.checkpoint = gate;
+  run.status = gate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
+  const stage = (run.stages || []).find((item) => item.status === "active") || (run.stages || []).find((item) => item.status === "blocked");
+  if (stage) Object.assign(stage, { status: "blocked", summary: gate.title, updatedAt: new Date().toISOString() });
+  return gate;
+}

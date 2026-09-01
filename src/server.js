@@ -4,7 +4,7 @@ import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, normalize } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
@@ -22,32 +22,36 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, resumeStage, rewindRun, selectWorkerSession, supervisorReviewCheckpoint, workerReportCheckpoint } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, findingsFingerprint, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
 import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } from "./credentials.js";
-import { applyWorkflowContinuation, bindWorkflowSkill, initialWorkflow } from "./workflow.js";
+import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
 const publicDir = join(here, "public");
 const packageMetadata = JSON.parse(await readFile(join(here, "package.json"), "utf8"));
-const args = process.argv.slice(2);
-const option = (name, fallback) => {
-  const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : fallback;
-};
-const initialCwd = option("--cwd", process.cwd());
-const port = Number(option("--port", process.env.PORT || 4317));
-const host = option("--host", process.env.HOST || "127.0.0.1");
-const vcsMode = option("--vcs", process.env.AGENT_PLAN_VCS || "jj");
-if (!["git", "jj"].includes(vcsMode)) throw new Error(`Unsupported VCS mode: ${vcsMode}`);
-const dataDir = process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
-const daemonLock = await acquireDaemonLock(join(dataDir, "daemon.lock"));
-const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
-await store.init();
+function cliOption(name, fallback, argv = process.argv.slice(2)) {
+  const index = argv.indexOf(name);
+  return index >= 0 ? argv[index + 1] : fallback;
+}
+
+export async function createDaemon(options = {}) {
+  const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
+  const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
+  const host = options.host || cliOption("--host", process.env.HOST || "127.0.0.1");
+  const vcsMode = options.vcsMode || cliOption("--vcs", process.env.AGENT_PLAN_VCS || "jj");
+  if (!["git", "jj"].includes(vcsMode)) throw new Error(`Unsupported VCS mode: ${vcsMode}`);
+  const dataDir = options.dataDir || process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
+  const apiToken = options.apiToken ?? process.env.AGENT_PLAN_API_TOKEN ?? "";
+  const listen = Boolean(options.listen);
+  const useLock = options.lock !== false;
+  const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
+  const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
+  await store.init();
 
 const credentialStore = new CredentialStore(join(dataDir, "credentials.json"));
 let savedCredentials = await credentialStore.load();
@@ -59,7 +63,7 @@ function trackerHub() {
   ]);
 }
 let trackers = trackerHub();
-const harness = new PiHarness({ dataDir, publish });
+const harness = options.harness || new PiHarness({ dataDir, publish });
 const previews = new PreviewManager({ dataDir });
 const clients = new Set();
 const activeSteps = new Map();
@@ -80,15 +84,31 @@ function ensureTicketCapacity(ticketId, state = store.read()) {
   if (!occupied.has(ticketId) && occupied.size >= capacity) throw new Error(`${capacity} ticket slots are occupied, including approval checkpoints`);
 }
 
-function publish(event) {
-  const encoded = `data: ${JSON.stringify(event)}\n\n`;
-  for (const response of clients) {
-    if (response.destroyed) clients.delete(response);
-    else if (!response.writableNeedDrain) response.write(encoded);
+function writeSse(client, chunk) {
+  if (client.response.destroyed) {
+    clients.delete(client);
+    return;
+  }
+  if (client.response.writableNeedDrain || client.queue.length) {
+    client.queue.push(chunk);
+    if (client.queue.length > 200) client.queue.shift();
+    return;
+  }
+  if (!client.response.write(chunk)) client.draining = true;
+}
+
+function flushSse(client) {
+  while (client.queue.length && !client.response.destroyed && !client.response.writableNeedDrain) {
+    if (!client.response.write(client.queue.shift())) break;
   }
 }
 
-function publishState(state = store.read()) { publish({ type: "state", state }); }
+function publish(event) {
+  const encoded = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of clients) writeSse(client, encoded);
+}
+
+function publishState(state = store.read()) { publish({ type: "state", state: publicState(state) }); }
 
 function publishStepEvent(ticketId, stepId, runId, event) {
   publish({ channel: "run", ticketId, stepId, runId, ...event });
@@ -208,7 +228,29 @@ function skillSession(state, run) {
 function persistWorkflowActivation(run, skillName, activation) {
   run.workflow = bindWorkflowSkill(initialWorkflow(run.workflow), skillName, activation);
   if (activation.sessionFile) run.sessionFile = activation.sessionFile;
+  applyPendingWorkflowGate(run);
   return run.workflow;
+}
+
+function pauseIfWorkflowBlocked(run) {
+  if (!workflowBlockers(run?.workflow).length) return false;
+  applyPendingWorkflowGate(run);
+  return true;
+}
+
+async function surfaceImmediateFailure(ticketId, work) {
+  const tracked = Promise.resolve(work).catch(async (error) => {
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      if (!run || run.lastError) return;
+      run.status = ["preparing", "clarifying"].includes(run.status) ? "failed" : "needs_attention";
+      run.lastError = error.message;
+    });
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const run = store.read().ticketRuns?.[ticketId];
+  if (run && ["failed", "needs_attention"].includes(run.status) && run.lastError) throw new Error(run.lastError);
+  return tracked;
 }
 
 function setStage(run, id, status, summary = "") {
@@ -308,7 +350,7 @@ async function beginTicket(ticket, { automaticAdmission = false } = {}) {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
     if (!state.ticketRuns[ticket.id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
   });
-  prepareTicket(ticket.id).catch(() => {});
+  await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id));
   return ticket.id;
 }
 
@@ -321,9 +363,13 @@ function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId
   };
 }
 
-async function acceptCheckpointAnswer(ticketId, answers, source) {
+async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {
   const before = ticketRun(store.read(), ticketId);
-  const checkpoint = before.checkpoint;
+  let checkpoint = before.checkpoint;
+  if (checkpointId && checkpoint?.id !== checkpointId) {
+    const workflowCheckpoint = (before.workflow?.checkpoints || []).find((item) => item.id === checkpointId && item.status === "pending");
+    if (workflowCheckpoint) checkpoint = runCheckpointFromWorkflow(workflowCheckpoint);
+  }
   if (!checkpoint || checkpoint.answerAcceptedAt) return false;
   await update((state) => {
     const current = ticketRun(state, ticketId);
@@ -336,10 +382,83 @@ async function acceptCheckpointAnswer(ticketId, answers, source) {
       await update((state) => { if (state.ticketRuns[ticketId]) state.ticketRuns[ticketId].trackerSyncError = `Could not mirror dashboard answer: ${error.message}`; });
     });
   }
-  if (checkpoint.kind === "requirements_review") continueAfterRequirements(ticketId, answers).catch(() => {});
-  else if (checkpoint.stepId) resumeStepCheckpoint(ticketId, checkpoint, answers).catch(() => {});
-  else startTicketWork(ticketId, (signal) => designTicket(ticketId, answers, signal)).catch(() => {});
+  if (isWorkflowRunCheckpoint(checkpoint)) await surfaceImmediateFailure(ticketId, continueWorkflowThenResume(ticketId, checkpoint, answers));
+  else if (checkpoint.kind === "requirements_review") await surfaceImmediateFailure(ticketId, continueAfterRequirements(ticketId, answers));
+  else if (checkpoint.stepId) await surfaceImmediateFailure(ticketId, resumeStepCheckpoint(ticketId, checkpoint, answers));
+  else await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => designTicket(ticketId, answers, signal)));
   return true;
+}
+
+async function continueWorkflowThenResume(ticketId, checkpoint, answers) {
+  try {
+    const run = ticketRun(store.read(), ticketId);
+    const activation = await harness.continueWorkflow({
+      ...skillSession(store.read(), run),
+      checkpoint,
+      response: String(answers || "Approved"),
+      profile: run.stageProfiles.architecture
+    });
+    await update((state) => {
+      const current = ticketRun(state, ticketId);
+      current.workflow = initialWorkflow(current.workflow);
+      applyWorkflowContinuation(current.workflow, checkpoint.id, answers, activation);
+      if (activation.sessionFile) current.sessionFile = activation.sessionFile;
+      applyPendingWorkflowGate(current);
+    });
+    const latest = ticketRun(store.read(), ticketId);
+    if (executionBlockedByWorkflow(latest)) {
+      await mirrorCheckpoint(ticketId);
+      return;
+    }
+  } catch (error) {
+    await update((state) => {
+      const current = state.ticketRuns[ticketId];
+      if (!current) return;
+      current.status = "needs_attention";
+      current.lastError = error.message;
+    });
+    return;
+  }
+  if (activeTickets.has(ticketId)) return;
+  await resumeTicketPipeline(ticketId);
+}
+
+async function resumeTicketPipeline(ticketId) {
+  const run = ticketRun(store.read(), ticketId);
+  const stage = workflowResumeStage(run);
+  if (stage === "blocked") return;
+  if (stage === "requirements") return prepareTicket(ticketId);
+  if (stage === "requirements_review") {
+    const draft = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "requirements-draft");
+    if (!run.checkpoint && draft) {
+      await update((state) => {
+        const current = ticketRun(state, ticketId);
+        current.status = "awaiting_requirements";
+        current.checkpoint = {
+          id: randomUUID(), kind: "requirements_review", title: "Approve ticket requirements",
+          prompt: draft.content, questions: [], createdAt: new Date().toISOString()
+        };
+        setStage(current, "requirements", "blocked", "Requirement approval needed before repository access");
+      });
+      await mirrorCheckpoint(ticketId);
+    }
+    return;
+  }
+  if (stage === "explore") return continueAfterRequirements(ticketId, "");
+  if (stage === "design") return startTicketWork(ticketId, (signal) => designTicket(ticketId, "Continue after the supervisor workflow gate.", signal));
+  if (stage === "plan_approval") {
+    if (!run.checkpoint) {
+      await update((state) => {
+        const current = ticketRun(state, ticketId);
+        current.status = "awaiting_approval";
+        const design = [...(current.artifacts || [])].reverse().find((artifact) => artifact.kind === "architecture");
+        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: design?.content || "", createdAt: new Date().toISOString() };
+        setStage(current, "design", "blocked", "Plan ready for approval");
+      });
+    }
+    return;
+  }
+  return runTicket(ticketId);
 }
 
 async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
@@ -552,6 +671,11 @@ async function prepareTicket(ticketId) {
     signal.throwIfAborted();
     const before = store.read();
     const run = ticketRun(before, ticketId);
+    if (executionBlockedByWorkflow(run)) {
+      await update((state) => { pauseIfWorkflowBlocked(ticketRun(state, ticketId)); });
+      await mirrorCheckpoint(ticketId);
+      return;
+    }
     activity = captureStageActivity(ticketId, "requirements", run.runId);
     const productContext = await readProductContext(dataDir, before.workspace.cwd);
     await update((state) => {
@@ -573,6 +697,10 @@ async function prepareTicket(ticketId) {
       const current = ticketRun(state, ticketId);
       current.requirementsSessionFile = clarified.sessionFile;
       current.artifacts.push(contextSnapshot, artifact);
+      if (pauseIfWorkflowBlocked(current)) {
+        setStage(current, "requirements", "blocked", current.checkpoint.title).activity = activity.snapshot();
+        return;
+      }
       current.status = "awaiting_requirements";
       setStage(current, "requirements", "blocked", "Requirement approval needed before repository access").activity = activity.snapshot();
       current.checkpoint = {
@@ -603,6 +731,11 @@ async function continueAfterRequirements(ticketId, answers) {
     signal.throwIfAborted();
     const before = store.read();
     const run = ticketRun(before, ticketId);
+    if (executionBlockedByWorkflow(run)) {
+      await update((state) => { pauseIfWorkflowBlocked(ticketRun(state, ticketId)); });
+      await mirrorCheckpoint(ticketId);
+      return;
+    }
     if (answers.trim()) {
       activityStage = "requirements";
       activity = captureStageActivity(ticketId, "requirements", run.runId);
@@ -705,6 +838,7 @@ async function continueAfterRequirements(ticketId, answers) {
       current.sessionFile = explored.sessionFile;
       current.artifacts.push(explorationArtifact, lookAheadArtifact);
       setStage(current, "explore", explored.questions.length ? "blocked" : "completed", explored.questions.length ? "Technical decision required" : "Code map and ticket look-ahead persisted").activity = activity.snapshot();
+      if (pauseIfWorkflowBlocked(current)) return;
       if (explored.questions.length) {
         current.status = "awaiting_input";
         current.checkpoint = {
@@ -713,6 +847,10 @@ async function continueAfterRequirements(ticketId, answers) {
         };
       }
     });
+    if (executionBlockedByWorkflow(ticketRun(store.read(), ticketId))) {
+      await mirrorCheckpoint(ticketId);
+      return;
+    }
     if (explored.questions.length) await mirrorCheckpoint(ticketId);
     if (!explored.questions.length) await designTicket(ticketId, "No technical exceptions were raised.", signal);
   } catch (error) {
@@ -739,13 +877,23 @@ async function designTicket(ticketId, answers, signal) {
   const exploration = [...run.artifacts].reverse().find((artifact) => artifact.kind === "implementation-delta");
   const ticketLookAhead = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead")?.content || "No nearby ticket implications were found.";
   if (!requirements || !productContext || !exploration) throw new Error("Approved requirements, product context, and implementation delta are required before design");
+  if (executionBlockedByWorkflow(run)) {
+    await update((draft) => { pauseIfWorkflowBlocked(ticketRun(draft, ticketId)); });
+    await mirrorCheckpoint(ticketId);
+    return;
+  }
   await update((draft) => {
     const current = ticketRun(draft, ticketId);
+    if (pauseIfWorkflowBlocked(current)) return;
     current.checkpoint = null;
     current.status = "planning";
     setStage(current, "explore", "completed", "Repository map and technical decisions persisted");
     setStage(current, "design", "active", "Pi is choosing an approach and executable steps");
   });
+  if (executionBlockedByWorkflow(ticketRun(store.read(), ticketId))) {
+    await mirrorCheckpoint(ticketId);
+    return;
+  }
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
@@ -804,6 +952,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const findings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
         if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
       }
+      let previousFingerprint = findingsFingerprint(step.attempts?.at(-1)?.verification?.findings || []);
       for (let round = 1; ; round++) {
         signal?.throwIfAborted();
         const latest = ticketRun(store.read(), ticketId);
@@ -1006,6 +1155,24 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           });
           return;
         }
+        const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
+        if (decision.pause) {
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            const target = findNode(current.plan, stepId);
+            target.status = "needs_attention";
+            target.lastError = decision.reason;
+            current.status = "needs_attention";
+            current.lastError = decision.reason;
+            current.checkpoint = {
+              id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
+              prompt: decision.reason, stepId, source: "verification", createdAt: new Date().toISOString()
+            };
+            setStage(current, "implement", "blocked", decision.reason);
+          });
+          return;
+        }
+        previousFingerprint = decision.fingerprint;
         nextFeedback = `Fresh verification found these actionable issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
       }
     } catch (error) {
@@ -1524,6 +1691,12 @@ async function acceptStep(ticketId, stepId) {
 
 async function advanceTicket(ticketId, signal) {
   signal?.throwIfAborted();
+  const currentRun = ticketRun(store.read(), ticketId);
+  if (executionBlockedByWorkflow(currentRun)) {
+    await update((state) => { pauseIfWorkflowBlocked(ticketRun(state, ticketId)); });
+    await mirrorCheckpoint(ticketId);
+    return;
+  }
   const run = await ensureLocalWorkspace(ticketId);
   const reviews = flattenSteps(run.plan).filter((step) => step.status === "review_ready");
   if (reviews.length) {
@@ -1595,14 +1768,20 @@ async function runTicket(ticketId) {
       signal.throwIfAborted();
       await ensureTrackerExecutionStarted(ticketId);
       await ensureLocalWorkspace(ticketId);
+      let blocked = false;
       await update((state) => {
         const run = ticketRun(state, ticketId);
+        if (pauseIfWorkflowBlocked(run)) { blocked = true; return; }
         run.status = "running";
         run.recovery = null;
         run.checkpoint = null;
         setStage(run, "design", "completed", "Plan approved");
         setStage(run, "implement", "active", "Executing dependency-ready steps");
       });
+      if (blocked) {
+        await mirrorCheckpoint(ticketId);
+        return;
+      }
       await advanceTicket(ticketId, signal);
     } catch (error) {
       if (signal.aborted) return;
@@ -1694,7 +1873,7 @@ async function startFreshRun(ticketId) {
     state.ticketRuns[ticketId].startedFreshFrom = { runId: old.runId, auditArtifactId: artifact.id, at };
     state.selectedTicketId = ticketId;
   });
-  if (!fixture) prepareTicket(ticketId).catch(() => {});
+  if (!fixture) await surfaceImmediateFailure(ticketId, prepareTicket(ticketId));
   return audit;
 }
 
@@ -1717,15 +1896,28 @@ async function restartFrom(ticketId, target) {
     run.artifacts.push(artifact);
     for (const previewState of Object.values(run.previews || {})) Object.assign(previewState, { status: "stopped", stoppedReason: "run_restart", stoppedAt: at });
   });
-  if (target === "stage:explore") continueAfterRequirements(ticketId, "").catch(() => {});
-  else if (target === "stage:design") startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)).catch(() => {});
-  else runTicket(ticketId).catch(() => {});
+  if (target === "stage:explore") await surfaceImmediateFailure(ticketId, continueAfterRequirements(ticketId, ""));
+  else if (target === "stage:design") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)));
+  else await surfaceImmediateFailure(ticketId, runTicket(ticketId));
   return audit;
 }
 
 async function api(request, response, url) {
-  if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
-  if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
+  if (request.method === "GET" && url.pathname === "/api/health") return json(response, 200, { ok: true, version: packageMetadata.version });
+  if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, publicState(store.read()));
+  const compactTicketRun = url.pathname.match(/^\/api\/tickets\/([^/]+)\/run$/);
+  if (request.method === "GET" && compactTicketRun) {
+    const state = store.read();
+    return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
+  }
+  if (request.method === "GET" && url.pathname === "/api/models") {
+    const models = await harness.models();
+    const providers = [...new Set(models.map((model) => model.provider).filter(Boolean))];
+    return json(response, 200, {
+      models,
+      ...(providers.length === 1 ? { provider: providers[0] } : providers.length ? { providers } : {})
+    });
+  }
   if (request.method === "GET" && url.pathname === "/api/skills") {
     const state = store.read();
     const run = state.selectedTicketId ? state.ticketRuns[state.selectedTicketId] : null;
@@ -1777,6 +1969,13 @@ async function api(request, response, url) {
       });
     }
     return json(response, 200, { cleaned, inventory: await retentionInventory(store.read(), dataDir), state: store.read() });
+  }
+  const artifactGet = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)$/);
+  if (request.method === "GET" && artifactGet) {
+    const run = ticketRun(store.read(), decodeURIComponent(artifactGet[1]));
+    const artifact = (run.artifacts || []).find((item) => item.id === decodeURIComponent(artifactGet[2]));
+    if (!artifact) throw new Error("Artifact not found");
+    return json(response, 200, artifact);
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
   if (request.method === "GET" && sessionTrace) {
@@ -1832,9 +2031,11 @@ async function api(request, response, url) {
   }
   if (request.method === "GET" && url.pathname === "/api/events") {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    response.write(`data: ${JSON.stringify({ type: "state", state: store.read() })}\n\n`);
-    clients.add(response);
-    request.on("close", () => clients.delete(response));
+    const client = { response, queue: [] };
+    response.on("drain", () => flushSse(client));
+    response.write(`data: ${JSON.stringify({ type: "state", state: publicState(store.read()) })}\n\n`);
+    clients.add(client);
+    request.on("close", () => clients.delete(client));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/workspace/pick") return json(response, 200, { cwd: await pickDirectory() });
@@ -1842,9 +2043,11 @@ async function api(request, response, url) {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));
     if (!isAbsolute(cwd) || !(await stat(cwd)).isDirectory()) throw new Error("Workspace must be an existing absolute directory");
+    const previous = store.read().workspace?.cwd;
     const state = await update((draft) => { draft.workspace = { cwd }; });
+    if (previous !== cwd) harness.reset();
     ticketCache = new Map();
-    return json(response, 200, state);
+    return json(response, 200, publicState(state));
   }
   if (request.method === "POST" && url.pathname === "/api/local/load") {
     const input = await body(request);
@@ -1899,7 +2102,7 @@ async function api(request, response, url) {
     const state = await update((draft) => {
       persistWorkflowActivation(ticketRun(draft, id), skillName, activation);
     });
-    return json(response, 200, { skillName, state });
+    return json(response, 200, { skillName, state: publicState(state) });
   }
 
   const continueWorkflow = url.pathname.match(/^\/api\/tickets\/([^/]+)\/workflow\/continue$/);
@@ -1911,18 +2114,8 @@ async function api(request, response, url) {
     const workflow = initialWorkflow(run.workflow);
     const checkpoint = workflow.checkpoints.find((item) => item.id === input.checkpointId);
     if (!checkpoint || checkpoint.status !== "pending") throw new Error("Workflow checkpoint not found");
-    const activation = await harness.continueWorkflow({
-      ...skillSession(before, run),
-      checkpoint,
-      response: String(input.response || "Approved")
-    });
-    const state = await update((draft) => {
-      const current = ticketRun(draft, id);
-      current.workflow = initialWorkflow(current.workflow);
-      applyWorkflowContinuation(current.workflow, checkpoint.id, input.response, activation);
-      if (activation.sessionFile) current.sessionFile = activation.sessionFile;
-    });
-    return json(response, 200, { accepted: true, state });
+    await acceptCheckpointAnswer(id, String(input.response || "Approved"), "dashboard", { checkpointId: checkpoint.id });
+    return json(response, 202, { accepted: true, ticketId: id });
   }
 
   const resume = url.pathname.match(/^\/api\/tickets\/([^/]+)\/resume$/);
@@ -1941,10 +2134,10 @@ async function api(request, response, url) {
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
     ensureTicketCapacity(id);
     if (["cancelled", "needs_attention"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
-    if (stage === "requirements") prepareTicket(id).catch(() => {});
-    else if (stage === "explore") continueAfterRequirements(id, "").catch(() => {});
-    else if (stage === "design") startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)).catch(() => {});
-    else runTicket(id).catch(() => {});
+    if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
+    else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
+    else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
+    else await surfaceImmediateFailure(id, runTicket(id));
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -2020,7 +2213,7 @@ async function api(request, response, url) {
       current.planApprovedAt = new Date().toISOString();
       current.lastError = null;
     });
-    runTicket(id).catch(() => {});
+    await surfaceImmediateFailure(id, runTicket(id));
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -2054,11 +2247,11 @@ async function api(request, response, url) {
         run.checkpoint = null;
         setStage(run, "implement", "active", `Revising ${step.title}`);
       });
-      startTicketWork(ticketId, (signal) => executeStep(ticketId, stepId, { feedback, signal })).catch(() => {});
+      await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => executeStep(ticketId, stepId, { feedback, signal })));
       return json(response, 202, { accepted: true, ticketId, stepId });
     }
     await acceptStep(ticketId, stepId);
-    startTicketWork(ticketId, async (signal) => {
+    await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, async (signal) => {
       try { await advanceTicket(ticketId, signal); }
       catch (error) {
         if (signal.aborted) return;
@@ -2068,7 +2261,7 @@ async function api(request, response, url) {
           run.lastError = error.message;
         });
       }
-    }).catch(() => {});
+    }));
     return json(response, 202, { accepted: true, ticketId, stepId });
   }
 
@@ -2090,23 +2283,66 @@ async function staticFile(response, pathname) {
   createReadStream(file).on("error", () => response.destroy()).pipe(response);
 }
 
-const server = createServer(async (request, response) => {
+function authorizeApi(request, response, url) {
+  if (!apiToken || !url.pathname.startsWith("/api/")) return true;
+  const header = request.headers.authorization || request.headers["x-agent-plan-token"] || "";
+  const presented = String(header).startsWith("Bearer ") ? String(header).slice(7) : String(header);
+  if (presented && presented === String(apiToken)) return true;
+  json(response, 401, { error: "Unauthorized" });
+  return false;
+}
+
+async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
-  try { if (url.pathname.startsWith("/api/")) await api(request, response, url); else await staticFile(response, url.pathname); }
-  catch (error) { if (!response.headersSent) json(response, 400, { error: error.message }); else response.end(); }
-});
+  try {
+    if (url.pathname.startsWith("/api/") && !authorizeApi(request, response, url)) return;
+    if (url.pathname.startsWith("/api/")) await api(request, response, url);
+    else await staticFile(response, url.pathname);
+  } catch (error) {
+    if (!response.headersSent) json(response, 400, { error: error.message });
+    else response.end();
+  }
+}
 
-scheduleTrackerPolling();
-server.listen(port, host, () => {
-  console.log(`Agent Plan Workspace: http://${host}:${port}`);
-  console.log(`Repository: ${store.read().workspace.cwd}`);
-  console.log(`Trackers: ${trackers.configured ? "configured" : "add Linear or Jira credentials in the dashboard"}`);
-  console.log(`Data: ${dataDir}`);
-  refreshTrackers().catch((error) => console.error(`Tracker refresh failed: ${error.message}`));
-});
+const server = createServer(handleRequest);
+const sseHeartbeat = setInterval(() => {
+  for (const client of clients) writeSse(client, ":\n\n");
+}, 15000);
+sseHeartbeat.unref();
 
-for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {
-  await daemonLock.release();
-  process.exit(0);
-});
+let closed = false;
+async function close({ exit = false } = {}) {
+  if (closed) return;
+  closed = true;
+  clearInterval(pollTimer);
+  clearInterval(sseHeartbeat);
+  for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
+  await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
+  try { harness.reset(); } catch {}
+  previews.stopAll();
+  await new Promise((resolve) => {
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+  });
+  await daemonLock.release().catch(() => {});
+  if (exit) process.exit(0);
+}
+
+if (listen) {
+  scheduleTrackerPolling();
+  server.listen(port, host, () => {
+    console.log(`Agent Plan Workspace: http://${host}:${port}`);
+    console.log(`Repository: ${store.read().workspace.cwd}`);
+    console.log(`Trackers: ${trackers.configured ? "configured" : "add Linear or Jira credentials in the dashboard"}`);
+    console.log(`Data: ${dataDir}`);
+    refreshTrackers().catch((error) => console.error(`Tracker refresh failed: ${error.message}`));
+  });
+  for (const signalName of ["SIGINT", "SIGTERM"]) process.once(signalName, () => { close({ exit: true }); });
+}
 server.once("close", () => daemonLock.release().catch(() => {}));
+
+return { handleRequest, api, close, store, server, harness, previews, host, port, dataDir };
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) await createDaemon({ listen: true });
