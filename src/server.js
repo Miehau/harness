@@ -289,9 +289,10 @@ async function body(request) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
-    size += chunk.length;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
     if (size > 8 * 1024 * 1024) throw new Error("Request exceeds the 8 MB local limit");
-    chunks.push(chunk);
+    chunks.push(buffer);
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
@@ -1500,6 +1501,7 @@ async function finalReviewLoop(ticketId, signal) {
     run.reviews ||= [];
   });
   const firstRound = Math.max(0, ...(started.reviews || []).map((review) => Number(review.round) || 0)) + 1;
+  let previousFingerprint = findingsFingerprint(started.reviews?.at(-1)?.actionableFindings || []);
   for (let round = firstRound; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
@@ -1581,6 +1583,21 @@ async function finalReviewLoop(ticketId, signal) {
       });
       return;
     }
+    const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
+    if (decision.pause) {
+      await update((state) => {
+        const run = ticketRun(state, ticketId);
+        run.status = "needs_attention";
+        run.lastError = decision.reason;
+        run.checkpoint = {
+          id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
+          prompt: decision.reason, source: "verification", createdAt: new Date().toISOString()
+        };
+        setStage(run, "verify", "blocked", decision.reason).activity = activity.snapshot();
+      });
+      return;
+    }
+    previousFingerprint = decision.fingerprint;
     const fixStep = {
       id: `review-fix-${round}`,
       title: `Fix final review findings — round ${round}`,
