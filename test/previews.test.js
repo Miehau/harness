@@ -33,6 +33,7 @@ test("starts a named preview with isolated port variables and captures desktop a
     assert.equal(spawns[0].options.env.APP_PORT, "47821");
     const evidence = await manager.capture("ticket-1", { source: { CHROMIUM_PATH: process.execPath } });
     assert.deepEqual(evidence.map(({ viewport }) => viewport), [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
+    assert.deepEqual(evidence.map(({ mediaType, mediaKind }) => ({ mediaType, mediaKind })), [{ mediaType: "image/png", mediaKind: "image" }, { mediaType: "image/png", mediaKind: "image" }]);
     assert.equal(captures.length, 2);
     assert.equal(manager.stop("ticket-1"), true);
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }

@@ -80,6 +80,12 @@ test("steps retain an explicit visual-evidence gate", () => {
   assert.equal(plan.nodes[0].requiresVisualEvidence, true);
 });
 
+test("video evidence also enables the visual-evidence gate", () => {
+  const plan = normalizePlan({ nodes: [{ title: "Exercise checkout", requiresVideoEvidence: true }] });
+  assert.equal(plan.nodes[0].requiresVisualEvidence, true);
+  assert.equal(plan.nodes[0].requiresVideoEvidence, true);
+});
+
 test("flags broad or predicted oversized review steps unless explicitly justified", () => {
   const broad = normalizePlan({ nodes: [{ title: "Build everything", permission: "write", writeScope: "**", expectedFiles: Array.from({ length: 9 }, (_, index) => `src/${index}.js`), estimatedChangedLines: 200 }] });
   assert.equal(planReviewViolations(broad).length, 2);

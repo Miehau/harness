@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection } from "../src/artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -25,6 +25,13 @@ test("isolates step attempts within one ticket run", async () => {
 test("safeName constrains directory components", () => {
   assert.equal(safeName("../MM 42"), "mm-42");
   assert.equal(safeName(".."), "artifact");
+});
+
+test("classifies supported visual evidence media without guessing unsupported files", () => {
+  assert.deepEqual(visualEvidenceMedia("screen.PNG"), { mediaType: "image/png", mediaKind: "image" });
+  assert.deepEqual(visualEvidenceMedia("interaction.webm"), { mediaType: "video/webm", mediaKind: "video" });
+  assert.deepEqual(visualEvidenceMedia("interaction.mp4"), { mediaType: "video/mp4", mediaKind: "video" });
+  assert.equal(visualEvidenceMedia("notes.txt"), null);
 });
 
 test("only resolves recorded artifacts inside app storage", () => {

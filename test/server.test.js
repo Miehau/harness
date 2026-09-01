@@ -77,3 +77,40 @@ test("agent-plan CLI wait is non-zero on needs_attention", async () => {
     assert.match(result.stdout, /needs_attention/);
   });
 });
+
+test("final proof checkpoint exposes durable review metadata", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      status: "awaiting_evidence_review",
+      checkpoint: {
+        id: "proof-1", kind: "evidence_review", title: "Review final proof before integration",
+        finalChecks: { status: "passed", summary: "npm test passed" },
+        media: [{ id: "shot-1", name: "desktop.png", path: "/tmp/desktop.png" }],
+        evidenceArtifactIds: ["shot-1"], videoRequired: true
+      }
+    });
+    const compact = await invoke(daemon, "GET", "/api/tickets/" + encodeURIComponent(id) + "/run");
+    assert.equal(compact.json.status, "awaiting_evidence_review");
+    assert.equal(compact.json.checkpoint.kind, "evidence_review");
+    assert.deepEqual(compact.json.checkpoint.evidenceArtifactIds, ["shot-1"]);
+    assert.equal(compact.json.checkpoint.videoRequired, true);
+
+    const legacyApproval = await invoke(daemon, "POST", "/api/tickets/" + encodeURIComponent(id) + "/context/approve");
+    assert.equal(legacyApproval.status, 400);
+    assert.match(legacyApproval.json.error, /Product-context proposal not found/);
+  });
+});
+
+test("final proof changes require concrete feedback", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      status: "awaiting_evidence_review",
+      checkpoint: { id: "proof-2", kind: "evidence_review", title: "Review final proof" }
+    });
+    const result = await invoke(daemon, "POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: { feedback: "   " } });
+    assert.equal(result.status, 400);
+    assert.match(result.json.error, /Describe the final-proof changes required/);
+    const after = await invoke(daemon, "GET", "/api/tickets/" + encodeURIComponent(id) + "/run");
+    assert.equal(after.json.checkpoint.kind, "evidence_review");
+  });
+});

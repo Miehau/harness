@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -166,6 +166,19 @@ test("handoff timeline lists captured visual evidence as proof without inventing
   assert.match(withShots[0].detail, /mobile\.png/);
   const withoutShots = stageMilestones({ artifacts: [{ kind: "handoff", name: "handoff.md" }], integration: { sourceCwd: "/repo", commit: "abc", integratedAt: "t" } }, { id: "handoff" });
   assert.equal(withoutShots.some((item) => /visual evidence/i.test(item.title)), false);
+});
+
+test("final review keeps supported visual proof and its final check summary", () => {
+  const review = finalReview({
+    artifacts: [{ kind: "visual-evidence", name: "desktop.png" }, { kind: "visual-evidence", name: "walkthrough.mp4" }, { kind: "visual-evidence", name: "notes.txt" }],
+    reviews: [{ reviews: [
+      { role: "deterministic", summary: "passed", checks: { status: "passed", summary: "node scripts/test.mjs" } },
+      { role: "integration", summary: "No issues found" }
+    ] }]
+  });
+  assert.deepEqual(review.proof.map((item) => item.media), ["image", "video"]);
+  assert.deepEqual(review.checks, { status: "passed", summary: "node scripts/test.mjs", command: undefined });
+  assert.deepEqual(review.reviews, [{ role: "integration", summary: "No issues found" }]);
 });
 
 test("free text becomes a local ticket without losing the original request", () => {

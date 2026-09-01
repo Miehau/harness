@@ -39,6 +39,25 @@ export function artifactsForStage(artifacts = [], stageId) {
   return artifacts.filter((artifact) => artifact.stageId === stageId || (stageId === "verify" && artifact.stageId?.startsWith("review-round-")) || (stageId === "handoff" && artifact.kind === "visual-evidence"));
 }
 
+const proofMedia = { png: "image", jpg: "image", jpeg: "image", webp: "image", webm: "video", mp4: "video" };
+
+export function finalReview(run) {
+  const extension = (name = "") => String(name).split(".").at(-1).toLowerCase();
+  const review = run?.reviews?.at(-1);
+  const reviews = review?.reviews || [];
+  const checks = reviews.find((item) => item.role === "deterministic")?.checks;
+  const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
+  return {
+    proof: proofArtifacts.map((artifact) => ({
+      ...artifact,
+      media: proofMedia[extension(artifact.name)] || null,
+      mediaUrl: artifact.mediaUrl || (run?.id && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
+    })).filter((artifact) => artifact.media),
+    checks: checks ? { status: checks.status, summary: checks.summary, command: checks.command } : null,
+    reviews: reviews.filter((item) => item.role !== "deterministic").map((item) => ({ role: item.role, summary: item.summary }))
+  };
+}
+
 export function preferredStepId(plan, currentId) {
   const steps = (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   if (steps.some((step) => step.id === currentId)) return currentId;
@@ -328,9 +347,9 @@ export function reviewNotesForRows(notes = [], path, rows = []) {
   }));
 }
 
-const youRunStatuses = new Set(["needs_attention", "failed", "interrupted", "awaiting_approval", "awaiting_input", "awaiting_requirements"]);
+const youRunStatuses = new Set(["needs_attention", "failed", "interrupted", "awaiting_approval", "awaiting_evidence_review", "awaiting_input", "awaiting_requirements"]);
 const youStepStatuses = new Set(["needs_attention", "failed", "interrupted", "review_ready", "needs_input", "awaiting_approval"]);
-const youCheckpointKinds = new Set(["requirements_review", "awaiting_approval", "needs_input", "technical_input", "step_review", "needs_attention", "product_context_review", "review_blocked"]);
+const youCheckpointKinds = new Set(["requirements_review", "evidence_review", "awaiting_approval", "needs_input", "technical_input", "step_review", "needs_attention", "product_context_review", "review_blocked"]);
 const liveStepStatuses = new Set(["running", "fixing"]);
 const railStepStatuses = new Set(["running", "fixing", "needs_attention", "failed", "interrupted", "review_ready", "needs_input", "awaiting_approval", "ready"]);
 
@@ -349,6 +368,7 @@ function fleetState(run) {
   if (!run) return { tone: "idle", label: "queued" };
   const steps = flattenPlanSteps(run.plan);
   if (steps.some((step) => step.status === "review_ready") || run.checkpoint?.kind === "step_review") return { tone: "rev", label: "review" };
+  if (run.checkpoint?.kind === "evidence_review") return { tone: "rev", label: "final review" };
   if (run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId) return { tone: "gate", label: "plan gate" };
   if (run.status === "awaiting_approval" && !run.checkpoint?.stepId) return { tone: "gate", label: "plan gate" };
   const lane = fleetLane(run);

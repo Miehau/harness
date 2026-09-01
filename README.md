@@ -22,6 +22,7 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
 - One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
 - Ticket-isolated local previews on unique ports with harness-captured Chromium desktop and mobile evidence.
+- One final proof-review gate before delivery, combining automated checks with inline screenshots and interaction recordings when required.
 - Retained run storage with disk-usage previews and explicit cleanup by run, ticket, project, or age.
 - Restart-safe paused recovery, including stale-preview health and remote-delivery uncertainty guards.
 - Subscription-oriented usage reporting for elapsed time, model tokens, tool calls, and correction rounds without artificial budgets.

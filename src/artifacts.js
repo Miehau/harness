@@ -2,6 +2,20 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
+const evidenceMediaTypes = new Map([
+  [".png", { mediaType: "image/png", mediaKind: "image" }],
+  [".jpg", { mediaType: "image/jpeg", mediaKind: "image" }],
+  [".jpeg", { mediaType: "image/jpeg", mediaKind: "image" }],
+  [".webp", { mediaType: "image/webp", mediaKind: "image" }],
+  [".webm", { mediaType: "video/webm", mediaKind: "video" }],
+  [".mp4", { mediaType: "video/mp4", mediaKind: "video" }]
+]);
+
+export function visualEvidenceMedia(path) {
+  const extension = String(path || "").toLowerCase().match(/\.[a-z0-9]+$/)?.[0];
+  return extension ? evidenceMediaTypes.get(extension) || null : null;
+}
+
 export function safeName(value) {
   return String(value || "artifact")
     .toLowerCase()

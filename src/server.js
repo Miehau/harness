@@ -6,7 +6,7 @@ import { isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection } from "./artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { admissionCandidates, occupiedTicketIds } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
@@ -152,23 +152,25 @@ function repositoryCheckReview(checks) {
   };
 }
 
-async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, stepId = null }) {
+async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
   let preview = null;
   let evidence = [];
   if (required) {
     preview = await previews.ensure({ id: previewId, cwd });
     if (preview) evidence = await previews.capture(previewId);
   }
-  const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required && !preview });
-  checks.evidence = [...(checks.evidence || []), ...evidence];
+  const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
+  checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
   if (required && !checks.evidence.length) Object.assign(checks, { status: "failed", summary: "Visual verification produced no desktop or mobile evidence." });
-  if (preview || evidence.length) await update((state) => {
+  if (preview || checks.evidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
     if (preview) run.previews[previewId] = preview;
-    for (const item of evidence) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
+    for (const item of checks.evidence) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
       id: randomUUID(), name: item.name, path: item.path, kind: "visual-evidence", stageId: "verify", stepId,
-      summary: `${item.viewport.width}×${item.viewport.height} · ${item.url}`, createdAt: new Date().toISOString()
+      mediaType: item.mediaType, mediaKind: item.mediaKind,
+      summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
+      createdAt: new Date().toISOString()
     });
   });
   return checks;
@@ -954,7 +956,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Running repository checks" });
-          checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, stepId });
+          checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
         }
         signal?.throwIfAborted();
         if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
@@ -1218,7 +1220,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
-  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence) });
+  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((item) => item.requiresVideoEvidence) });
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
   const afterTree = await snapshotTree(current.workspace.cwd);
   const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
@@ -1266,7 +1268,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     let change = resumedChange;
     if (!change) {
       await rebase();
-      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
       if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
       await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
       await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
@@ -1406,7 +1408,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
           setStage(run, "handoff", "active", "Verifying merged result");
         });
         activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
-        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
         if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
         await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
       }
@@ -1470,7 +1472,7 @@ async function finalReviewLoop(ticketId, signal) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
     activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence) });
+    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
     const reviewImages = await harness.evidenceImages(checks.evidence);
     signal?.throwIfAborted();
     const afterTree = await snapshotTree(current.workspace.cwd);
@@ -1502,47 +1504,69 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
-    const findings = actionableFindings(reviews);
+    const humanEvidenceFinding = current.pendingEvidenceFeedback ? [{
+      severity: "blocking", category: "human-proof-review", claim: current.pendingEvidenceFeedback,
+      evidence: [], suggestedFix: current.pendingEvidenceFeedback, confidence: "high"
+    }] : [];
+    const findings = [...actionableFindings(reviews), ...humanEvidenceFinding];
     await update((state) => {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
+      delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });
     if (!findings.length) {
       await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
+      let contextArtifact = null;
+      let contextContent = null;
+      let handoffActivity = null;
+      if (current.ticket.source !== "local") {
+        const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
+        handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
+        contextContent = await harness.updateProductContext({
+          cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
+          artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
+          diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
+        });
+        signal?.throwIfAborted();
+        if (!contextContent.trim()) throw new Error("Product context update was empty");
+        contextArtifact = await persistArtifact(dataDir, current.ticket, {
+          runId: current.runId, name: "product-context-update.md", content: contextContent,
+          stageId: "handoff", kind: "product-context-update"
+        });
+      }
+      const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
+      const media = (ticketRun(store.read(), ticketId).artifacts || [])
+        .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
+        .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }) => ({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }));
+      const finalChecks = {
+        status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
+        evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
+      };
+      const videoRequired = flattenSteps(current.plan).some((step) => step.requiresVideoEvidence);
       if (current.ticket.source === "local") {
         await update((state) => {
           const run = ticketRun(state, ticketId);
           setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-          setStage(run, "handoff", "active", "Waiting for merge queue");
+          setStage(run, "handoff", "blocked", "Review final proof before integration");
+          run.status = "awaiting_evidence_review";
+          run.checkpoint = {
+            id: randomUUID(), kind: "evidence_review", title: "Review final proof before integration",
+            prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, createdAt: new Date().toISOString()
+          };
         });
-        const queued = await scheduleTicketIntegration(ticketId, { diff, signal });
-        await queued.promise;
         return;
       }
-      const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
-      const handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
-      const contextContent = await harness.updateProductContext({
-        cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
-        artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
-        diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
-      });
-      signal?.throwIfAborted();
-      if (!contextContent.trim()) throw new Error("Product context update was empty");
-      const contextArtifact = await persistArtifact(dataDir, current.ticket, {
-        runId: current.runId, name: "product-context-update.md", content: contextContent,
-        stageId: "handoff", kind: "product-context-update"
-      });
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.artifacts.push(contextArtifact);
         setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-        setStage(run, "handoff", "blocked", "Approve the living product-context update").activity = handoffActivity.snapshot();
-        run.status = "awaiting_product_context";
+        setStage(run, "handoff", "blocked", "Review final proof before remote merge").activity = handoffActivity.snapshot();
+        run.status = "awaiting_evidence_review";
         run.checkpoint = {
-          id: randomUUID(), kind: "product_context_review", title: "Approve living product context",
-          prompt: contextContent, createdAt: new Date().toISOString()
+          id: randomUUID(), kind: "evidence_review", title: "Review final proof before remote merge",
+          prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, productContext: contextContent, createdAt: new Date().toISOString()
         };
       });
       return;
@@ -1608,10 +1632,11 @@ async function finalReviewLoop(ticketId, signal) {
 
 async function finishHandoff(ticketId) {
   const current = ticketRun(store.read(), ticketId);
-  if (current.checkpoint?.kind !== "product_context_review") throw new Error("No product-context update is awaiting approval");
+  if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
-  if (!proposal) throw new Error("Product-context proposal not found");
-  const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent: proposal.content });
+  const contextContent = current.ticket.source === "local" ? null : proposal?.content;
+  if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
+  const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent });
   queued.promise.catch(() => {});
 }
 
@@ -1951,6 +1976,18 @@ async function api(request, response, url) {
     }
     return json(response, 200, { cleaned, inventory: await retentionInventory(store.read(), dataDir), state: store.read() });
   }
+  const artifactMedia = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/media$/);
+  if (request.method === "GET" && artifactMedia) {
+    const run = ticketRun(store.read(), decodeURIComponent(artifactMedia[1]));
+    const artifactId = decodeURIComponent(artifactMedia[2]);
+    const artifact = (run.artifacts || []).find((item) => item.id === artifactId);
+    const path = artifactPathForOpen(run.artifacts, artifactId, dataDir);
+    const media = artifact?.kind === "visual-evidence" && visualEvidenceMedia(artifact.name || path);
+    if (!path || !media) throw new Error("Visual evidence not found");
+    response.writeHead(200, { "content-type": media.mediaType, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    response.end(await readFile(path));
+    return;
+  }
   const artifactGet = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)$/);
   if (request.method === "GET" && artifactGet) {
     const run = ticketRun(store.read(), decodeURIComponent(artifactGet[1]));
@@ -2198,6 +2235,34 @@ async function api(request, response, url) {
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
+  const approveEvidence = url.pathname.match(/^\/api\/tickets\/([^/]+)\/evidence\/approve$/);
+  if (request.method === "POST" && approveEvidence) {
+    const id = decodeURIComponent(approveEvidence[1]);
+    await finishHandoff(id);
+    return json(response, 200, { accepted: true, ticketId: id });
+  }
+
+  const changeEvidence = url.pathname.match(/^\/api\/tickets\/([^/]+)\/evidence\/changes$/);
+  if (request.method === "POST" && changeEvidence) {
+    const id = decodeURIComponent(changeEvidence[1]);
+    const input = await body(request);
+    const feedback = String(input.feedback || "").trim();
+    if (!feedback) throw new Error("Describe the final-proof changes required before continuing");
+    const run = ticketRun(store.read(), id);
+    if (run.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting changes");
+    await update((state) => {
+      const current = ticketRun(state, id);
+      current.pendingEvidenceFeedback = feedback;
+      current.checkpoint = null;
+      current.status = "reviewing";
+      setStage(current, "verify", "active", "Addressing final proof review feedback");
+    });
+    await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)));
+    return json(response, 202, { accepted: true, ticketId: id });
+  }
+
+  // Keep the former context-only action working for saved dashboard clients; it now
+  // resolves the same final proof gate rather than skipping any evidence review.
   const approveContext = url.pathname.match(/^\/api\/tickets\/([^/]+)\/context\/approve$/);
   if (request.method === "POST" && approveContext) {
     const id = decodeURIComponent(approveContext[1]);

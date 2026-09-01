@@ -12,6 +12,7 @@ import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations 
 import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
+import { visualEvidenceMedia } from "./artifacts.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
@@ -71,6 +72,7 @@ STEP:
   "expectedArtifacts": ["named outputs"],
   "acceptanceCriteria": ["observable criterion"],
   "requiresVisualEvidence": false,
+  "requiresVideoEvidence": false,
   "dependsOn": ["step-or-group-id"],
   "required": true
 }
@@ -89,7 +91,7 @@ Rules:
 - Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes only ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
 - The verification bootstrap also creates or updates .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands. Do not combine this bootstrap with product code, docs/architecture.md, AGENTS.md, or other documentation. Add documentation in a separate ticket-specific step only when the approved requirements directly justify it.
 - Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
-- Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling.
+- Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP screenshot into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling. Set requiresVideoEvidence to true only when acceptance specifically needs interaction proof; that requires both a screenshot and at least one real WebM or MP4. Never turn screenshots into a video.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
 - Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
 - Use only skill names from the supplied available-skill catalog. Use an empty array when none applies.
@@ -267,7 +269,7 @@ export function stepContext({ plan, step, artifacts }) {
 Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
 
 ${!outsideContractScope(step.writeScope) ? `
-Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. Do not add a dependency only for this wrapper.
+Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. For interaction-recording acceptance, make it write a real WebM or MP4 there; never make a video from screenshots. Do not add a dependency only for this wrapper.
 Also own ${projectConfigPath}, keeping commands, allowed environment names/files, and port variables machine-readable. Do not modify architecture or agent-guidance documents unless the approved ticket has a separate, explicit documentation step.
 ` : ""}
 
@@ -317,7 +319,7 @@ ${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise ru
 ## Acceptance criteria
 ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 
-Visual evidence: ${step.requiresVisualEvidence ? `required; make ${verificationEntry} write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
+Visual evidence: ${step.requiresVideoEvidence ? `required; make ${verificationEntry} write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; make ${verificationEntry} write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
 Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact.`;
 }
@@ -334,7 +336,7 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
     role: "architecture",
     title: "Establish repository verification contract",
     description: `Record machine-executable commands, the environment allow-list, and the repository's deterministic verification entry point.`,
-    prompt: `Inspect the repository and create or update ${projectConfigPath} and ${verificationEntry}. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. Do not modify product code, architecture documentation, or agent guidance. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there." : "Do not add browser tooling unless a later step requires visual evidence."}`,
+    prompt: `Inspect the repository and create or update ${projectConfigPath} and ${verificationEntry}. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. Do not modify product code, architecture documentation, or agent guidance. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there. When a later step requires video evidence, write a real WebM or MP4 interaction recording; never make a video from screenshots." : "Do not add browser tooling unless a later step requires visual evidence."}`,
     permission: "write",
     writeScope: ".agent-plan",
     expectedFiles: [projectConfigPath, verificationEntry],
@@ -589,7 +591,8 @@ export class PiHarness {
       .sort((left, right) => left.id.localeCompare(right.id) || String(left.provider || "").localeCompare(String(right.provider || "")));
   }
 
-  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false }) {
+  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false }) {
+    requireVisualEvidence ||= requireVideoEvidence;
     let command = `node ${verificationEntry}`;
     let args = [join(cwd, verificationEntry)];
     try { await access(args[0]); }
@@ -621,10 +624,13 @@ export class PiHarness {
       const executable = command === "npm test" ? "npm" : process.execPath;
       const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
       const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
-        .filter((entry) => entry.isFile() && /\.(?:png|jpe?g|webp)$/i.test(entry.name))
-        .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }));
+        .filter((entry) => entry.isFile())
+        .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
+        .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
+        .filter((item) => item.mediaType);
       const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-      if (requireVisualEvidence && !evidence.length) return { status: "failed", command, summary: `${command} passed but produced no visual evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+      if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+      if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
       return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -633,11 +639,11 @@ export class PiHarness {
   }
 
   async evidenceImages(evidence = []) {
-    return Promise.all(evidence.map(async ({ path }) => ({
+    return Promise.all(evidence.filter((item) => item.mediaKind === "image").map(async ({ path, mediaType }) => ({
       type: "image",
       source: {
         type: "base64",
-        mediaType: path.toLowerCase().endsWith(".png") ? "image/png" : path.toLowerCase().endsWith(".webp") ? "image/webp" : "image/jpeg",
+        mediaType,
         data: (await readFile(path)).toString("base64")
       }
     })));
@@ -948,7 +954,7 @@ Write scope: ${step.writeScope || "none"}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
-Visual evidence required: ${step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
+Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 
 Worker artifact:
 ${output}

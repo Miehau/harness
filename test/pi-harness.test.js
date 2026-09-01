@@ -132,7 +132,7 @@ test("runs the repository's root npm test script as a deterministic gate", async
   }
 });
 
-test("prefers the repository verification contract and requires visual evidence when declared", async () => {
+test("prefers the repository verification contract and discovers image and video evidence when declared", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-contract-"));
   const dataDir = await mkdtemp(join(tmpdir(), "pi-contract-state-"));
   try {
@@ -142,13 +142,37 @@ test("prefers the repository verification contract and requires visual evidence 
       import { join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
+      writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "interaction.webm"), Buffer.from("webm"));
+      writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "ignored.txt"), "not evidence");
     `);
     const harness = new PiHarness({ dataDir });
     const result = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
     assert.equal(result.status, "passed");
     assert.equal(result.command, "node .agent-plan/verify.mjs");
-    assert.equal(result.evidence.length, 1);
-    assert.equal((await harness.evidenceImages(result.evidence))[0].source.mediaType, "image/png");
+    assert.deepEqual(result.evidence.map(({ name, mediaType, mediaKind }) => ({ name, mediaType, mediaKind })), [
+      { name: "interaction.webm", mediaType: "video/webm", mediaKind: "video" },
+      { name: "page.png", mediaType: "image/png", mediaKind: "image" }
+    ]);
+    const images = await harness.evidenceImages(result.evidence);
+    assert.equal(images.length, 1);
+    assert.equal(images[0].source.mediaType, "image/png");
+    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "passed");
+
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
+      writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
+    `);
+    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
+
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
+      writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "interaction.webm"), Buffer.from("webm"));
+    `);
+    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), "// no screenshot\n");
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true })).status, "failed");

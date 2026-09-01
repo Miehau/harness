@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { loadProjectConfig, projectEnvironment } from "./project-config.js";
+import { visualEvidenceMedia } from "./artifacts.js";
 
 const exec = promisify(execFile);
 
@@ -100,7 +101,7 @@ export class PreviewManager {
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
       await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
-      evidence.push({ name: `${name}.png`, path, viewport: { width, height }, url: preview.public.url });
+      evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
     return evidence;
   }
