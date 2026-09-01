@@ -277,3 +277,108 @@ test("recovers a chronological, detailed trace from a persisted Pi session", asy
     await rm(root, { recursive: true });
   }
 });
+
+test("resumed worker sessions send a continuation prompt instead of the full step context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-resume-prompt-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompt;
+    const session = {
+      state: { messages: [] },
+      resourceLoader: { getSkills: () => ({ skills: [] }) },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) { prompt = value; },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}), open: () => ({}), forkFrom: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read", skills: [] }] });
+    await assert.rejects(harness.runStep({
+      cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [],
+      feedback: "Use the existing queue model", resumeSessionFile: join(root, "worker.jsonl")
+    }), /required worker_report tool/);
+    assert.match(prompt, /The user responded to this worker session/);
+    assert.match(prompt, /Use the existing queue model/);
+    assert.doesNotMatch(prompt, /Skills requested/);
+
+    await assert.rejects(harness.runStep({
+      cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], feedback: "Fix the tests"
+    }), /required worker_report tool/);
+    assert.match(prompt, /# Review feedback/);
+    assert.match(prompt, /Skills requested/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor worker review uses the named session and acceptance criteria", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let opened;
+  let prompt;
+  harness.planningSession = async (...args) => {
+    opened = args;
+    return { sessionFile: "/tmp/supervisor.jsonl" };
+  };
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return "Looks good";
+  };
+  const result = await harness.reviewWorkerReport({
+    cwd: "/repo", sessionFile: "/tmp/supervisor.jsonl", sessionKey: "ticket-run",
+    step: { id: "slice", title: "Slice", agentId: "worker:impl", acceptanceCriteria: ["Board renders"] },
+    report: { status: "completed", summary: "Done" }, diff: { files: ["src/a.js"] }
+  });
+  assert.equal(opened[1], "/tmp/supervisor.jsonl");
+  assert.equal(opened[2], "ticket-run");
+  assert.match(prompt, /Board renders/);
+  assert.match(prompt, /src\/a\.js/);
+  assert.equal(result.reply, "Looks good");
+});
+
+test("binding a discovered skill loads it as the supervisor workflow", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let opened;
+  let prompt;
+  const session = {
+    sessionFile: "/tmp/supervisor.jsonl",
+    resourceLoader: { getSkills: () => ({ skills: [{ name: "shape-feature", description: "Shape the brief" }] }) }
+  };
+  harness.planningSession = async (...args) => {
+    opened = args;
+    return session;
+  };
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return "Workflow loaded";
+  };
+  const result = await harness.activateWorkflow({
+    cwd: "/repo", sessionFile: null, sessionKey: "ticket-run", skillName: "shape-feature"
+  });
+  assert.equal(opened[2], "ticket-run");
+  assert.match(prompt, /\/skill:shape-feature/);
+  assert.match(prompt, /binding workflow/);
+  assert.equal(result.reply, "Workflow loaded");
+  await assert.rejects(harness.activateWorkflow({
+    cwd: "/repo", sessionFile: null, skillName: "missing"
+  }), /Pi skill not found: missing/);
+});
+
+test("continuing a supervisor checkpoint sends the user response", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let prompt;
+  harness.planningSession = async () => ({ sessionFile: "/tmp/supervisor.jsonl" });
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return "Continuing";
+  };
+  const result = await harness.continueWorkflow({
+    cwd: "/repo", sessionFile: "/tmp/supervisor.jsonl", sessionKey: "ticket-run",
+    checkpoint: { title: "Approve the brief" }, response: "Ship it"
+  });
+  assert.match(prompt, /Approve the brief/);
+  assert.match(prompt, /Ship it/);
+  assert.equal(result.reply, "Continuing");
+});

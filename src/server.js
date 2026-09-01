@@ -198,7 +198,11 @@ function ticketRun(state, ticketId) {
 }
 
 function skillSession(state, run) {
-  return { cwd: run?.workspace?.cwd || state.workspace.cwd, sessionFile: run?.sessionFile || null };
+  return {
+    cwd: run?.workspace?.cwd || state.workspace.cwd,
+    sessionFile: run?.sessionFile || null,
+    sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined
+  };
 }
 
 function persistWorkflowActivation(run, skillName, activation) {
@@ -341,34 +345,73 @@ async function acceptCheckpointAnswer(ticketId, answers, source) {
 async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
   const feedback = String(answers || "").trim() || "Approved";
   if (checkpoint.source === "supervisor") {
-    const run = ticketRun(store.read(), ticketId);
-    const step = findNode(run.plan, checkpoint.stepId);
-    if (!step) throw new Error("Checkpoint step not found");
-    const cwd = step.workspace?.cwd || run.workspace.cwd;
-    let commitMessage = step.commitMessage || null;
-    if (!commitMessage) {
-      commitMessage = await harness.generateCommitMessage({
-        cwd, ticket: run.ticket, step, diff: step.diff || { files: [], patch: "", stat: "" }, runId: run.runId,
-        profile: run.stageProfiles.commit
-      });
-    }
-    await update((state) => {
-      const current = ticketRun(state, ticketId);
-      const target = findNode(current.plan, checkpoint.stepId);
-      target.status = "review_ready";
-      target.commitMessage = commitMessage;
-      if (target.reviewBudgetResult?.exceeded) current.auto = false;
-      current.status = "awaiting_step_review";
-      current.checkpoint = { id: randomUUID(), kind: "step_review", stepId: checkpoint.stepId, title: `Review: ${target.title}`, createdAt: new Date().toISOString() };
-      setStage(current, "implement", "blocked", `${target.title} is verified and awaiting your review`);
+    return startTicketWork(ticketId, async (signal) => {
+      try {
+        const run = ticketRun(store.read(), ticketId);
+        const step = findNode(run.plan, checkpoint.stepId);
+        if (!step) throw new Error("Checkpoint step not found");
+        await update((state) => {
+          const current = ticketRun(state, ticketId);
+          current.checkpoint = null;
+          current.status = "reviewing";
+          setStage(current, "implement", "active", `Supervisor continuing review of ${step.title}`);
+        });
+        const continued = await harness.continueWorkflow({
+          ...skillSession(store.read(), run),
+          checkpoint,
+          response: feedback,
+          profile: run.stageProfiles.architecture,
+          signal
+        });
+        await update((state) => {
+          const current = ticketRun(state, ticketId);
+          current.workflow = initialWorkflow(current.workflow);
+          if (continued.sessionFile) current.sessionFile = continued.sessionFile;
+          const target = findNode(current.plan, checkpoint.stepId);
+          if (target) target.supervisorReview = { reply: continued.reply, error: null, at: new Date().toISOString() };
+        });
+        const latest = ticketRun(store.read(), ticketId);
+        const currentStep = findNode(latest.plan, checkpoint.stepId);
+        const nextGate = supervisorReviewCheckpoint(currentStep, continued);
+        if (nextGate) {
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            const target = findNode(current.plan, checkpoint.stepId);
+            target.status = nextGate.kind;
+            current.status = nextGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
+            current.checkpoint = { id: randomUUID(), ...nextGate, createdAt: new Date().toISOString() };
+            setStage(current, "implement", "blocked", nextGate.title);
+          });
+          await mirrorCheckpoint(ticketId);
+          return;
+        }
+        const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
+        const commitMessage = currentStep.commitMessage || await harness.generateCommitMessage({
+          cwd, ticket: latest.ticket, step: currentStep, diff: currentStep.diff || { files: [], patch: "", stat: "" },
+          runId: latest.runId, profile: latest.stageProfiles.commit, signal
+        });
+        await update((state) => {
+          const current = ticketRun(state, ticketId);
+          const target = findNode(current.plan, checkpoint.stepId);
+          target.status = "review_ready";
+          target.commitMessage = commitMessage;
+          if (target.reviewBudgetResult?.exceeded) current.auto = false;
+          current.status = "awaiting_step_review";
+          current.checkpoint = { id: randomUUID(), kind: "step_review", stepId: checkpoint.stepId, title: `${target.reviewBudgetResult?.exceeded ? "Oversized review required" : "Review"}: ${target.title}`, createdAt: new Date().toISOString() };
+          setStage(current, "implement", "blocked", target.reviewBudgetResult?.exceeded ? target.reviewBudgetResult.reasons.join("; ") : `${target.title} is verified and awaiting your review`);
+        });
+        if (ticketRun(store.read(), ticketId).auto) await advanceTicket(ticketId, signal);
+      } catch (error) {
+        if (signal.aborted) return;
+        await update((state) => {
+          const current = state.ticketRuns[ticketId];
+          if (!current) return;
+          current.status = "needs_attention";
+          current.lastError = error.message;
+          setStage(current, "implement", "blocked", error.message);
+        });
+      }
     });
-    if (ticketRun(store.read(), ticketId).auto) {
-      startTicketWork(ticketId, async (signal) => {
-        await acceptStep(ticketId, checkpoint.stepId);
-        await advanceTicket(ticketId, signal);
-      }).catch(() => {});
-    }
-    return;
   }
   await update((state) => {
     const current = ticketRun(state, ticketId);
@@ -380,7 +423,6 @@ async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
     if (ticketRun(store.read(), ticketId).auto) await advanceTicket(ticketId, signal);
   });
 }
-
 async function syncTrackerAnswers() {
   const unanswered = Object.values(store.read().ticketRuns).filter((run) =>
     trackerBacked(run.ticket) && run.checkpoint && !run.checkpoint.trackerQuestion && ["requirements_review", "technical_input", "needs_input"].includes(run.checkpoint.kind)
@@ -631,9 +673,10 @@ async function continueAfterRequirements(ticketId, answers) {
       current.status = "exploring";
       setStage(current, "explore", "active", "Pi is mapping code, tests, and nearby tickets");
     });
+    const latestRun = ticketRun(store.read(), ticketId);
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
-        cwd: workspace.cwd, ticket: run.ticket, sessionFile: null, runId: run.runId,
+        cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
         productContext: productContext.content, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"), signal
       }),
@@ -1934,7 +1977,7 @@ async function api(request, response, url) {
       if (!answers.trim() && run.checkpoint.questions?.length) throw new Error("Answer the open requirements questions before approval");
       await acceptCheckpointAnswer(id, answers, "dashboard");
     }
-    else if (["technical_input", "needs_input"].includes(run.checkpoint?.kind) || (run.checkpoint?.kind === "awaiting_approval" && run.checkpoint.stepId)) {
+    else if (["technical_input", "needs_input"].includes(run.checkpoint?.kind) || (run.checkpoint?.kind === "awaiting_approval" && (run.checkpoint.stepId || run.checkpoint.source === "supervisor"))) {
       if (run.checkpoint.kind !== "awaiting_approval" && !answers.trim()) throw new Error("Answer the open question before continuing");
       await acceptCheckpointAnswer(id, answers, "dashboard");
     }
