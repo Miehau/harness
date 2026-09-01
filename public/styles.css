@@ -1181,3 +1181,88 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .inspector-tabs { padding-inline: 16px; }
   .worker-inspector > .tab-panel { padding: 16px; }
 }
+
+/* Attention-stack rail (tickets primary, needs-you first). */
+.layout.ticket-layout { --queue-width: 320px; }
+.ticket-pane { background: #101317; }
+.ticket-header { min-height: 0; }
+.ticket-header h1 { font-size: 15px; letter-spacing: -.02em; }
+.ticket-header .plan-actions { gap: 6px; padding-right: 34px; }
+.ticket-header .plan-actions .button { min-height: 28px; padding: 0 9px; font-size: 11px; }
+.ticket-filter { padding: 4px 8px 2px; }
+.ticket-filter input { padding: 7px 8px; font-size: 12px; }
+.ticket-list { padding: 4px 8px 10px; }
+.ticket-group { margin-bottom: 8px; }
+.ticket-group > header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 4px 5px; color: #7d8590; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.ticket-group > header b { border-radius: 3px; padding: 1px 6px; background: #1b2026; font-size: 10px; letter-spacing: 0; }
+.ticket-card {
+  display: grid; gap: 0; margin: 0 0 5px; padding: 0;
+  border: 1px solid transparent; border-radius: 4px; background: #161a1f;
+  transform: none; box-shadow: none;
+}
+.ticket-card:hover { border-color: #3a424c; background: #161a1f; transform: none; }
+.ticket-card.selected { border-color: #6e3a3e; background: #1b1416; box-shadow: none; }
+.ticket-card.tone-gate.selected { border-color: #6a5530; background: #1b1812; }
+.ticket-card.tone-rev.selected { border-color: #4d3f65; background: #17141e; }
+.ticket-card.tone-run.selected { border-color: #2d4a6e; background: #121820; }
+.ticket-main {
+  display: grid; gap: 5px; width: 100%; padding: 8px; border: 0; background: transparent;
+  color: inherit; cursor: pointer; text-align: left; font: inherit;
+}
+.ticket-card > strong, .ticket-main > strong {
+  overflow: hidden; color: #c9d0d7; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap;
+}
+.ticket-row { color: #e6eaee; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: none; }
+.ticket-row b { color: #e6eaee; font-size: 12px; }
+.ticket-row .st {
+  margin-left: auto; font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+}
+.ticket-row .st.you, .dot.you { color: #e07070; }
+.ticket-row .st.gate, .dot.gate { color: #d4b06a; }
+.ticket-row .st.rev, .dot.rev { color: #c49be8; }
+.ticket-row .st.run, .dot.run { color: #6ea3e8; }
+.ticket-row .st.idle { color: #808893; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #6ea3e8; }
+.dot.you { background: #e07070; box-shadow: 0 0 8px #e07070; }
+.dot.gate { background: #d4b06a; }
+.dot.rev { background: #c49be8; }
+.dot.idle { background: #4b5560; box-shadow: none; }
+.stage-cells { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; height: 4px; }
+.stage-cells i { display: block; height: 100%; background: #2b323b; }
+.stage-cells i.done { background: #3f8f66; }
+.stage-cells i.now.you { background: #e07070; }
+.stage-cells i.now.gate { background: #d4b06a; }
+.stage-cells i.now.rev { background: #c49be8; }
+.stage-cells i.now.run { background: #6ea3e8; }
+.ticket-meta { display: flex; justify-content: space-between; gap: 8px; color: #808893; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rail-agents { display: grid; gap: 3px; padding: 0 8px 8px; border-top: 1px dashed #323842; }
+.rail-agent {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 6px; align-items: center;
+  width: 100%; padding: 4px 2px 0; border: 0; background: transparent; color: #c5ccd3;
+  cursor: pointer; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: left;
+}
+.rail-agent.on { background: #24181a; }
+.rail-agent .bar { display: block; height: 4px; margin-top: 3px; background: #262c34; }
+.rail-agent .bar i { display: block; height: 100%; background: #6ea3e8; }
+.rail-agent .bar.you i { background: #e07070; }
+.rail-agent .bar.gate i { background: #d4b06a; }
+.rail-agent .bar.rev i { background: #c49be8; }
+.rail-agent .bar.idle i { background: #3a414a; }
+.ticket-pane-footer { padding: 7px 10px; }
+.ticket-empty.large { margin: 8px 0; padding: 18px 10px; }
+.ticket-empty kbd {
+  border: 1px solid #3a414a; border-radius: 3px; padding: 0 5px; background: #1a1f25; color: #c5ccd4; font: inherit;
+}
+.text-button {
+  border: 0; padding: 0; background: transparent; color: #7d8590; cursor: pointer;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-transform: uppercase;
+}
+.text-button:hover { color: #d5d9e1; }
+
+@media (max-width: 1000px) {
+  .layout.ticket-layout { --queue-width: 300px; }
+}

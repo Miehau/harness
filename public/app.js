@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -23,7 +23,6 @@ let retention = { items: [], totalBytes: 0 };
 let trackerSettings = null;
 let piSkills = [];
 let piSkillsFor = null;
-const selectedTicketIds = new Set();
 const liveRuns = new Map();
 const liveStages = new Map();
 const sessionTraces = new Map();
@@ -123,59 +122,59 @@ async function openTrackerSettings() {
 }
 
 function renderTrackerStatus() {
-  const target = $("#tracker-status");
+  const button = $("#tracker-settings");
+  if (!button) return;
   if (!ticketSources.configured) {
-    target.innerHTML = `<button id="tracker-settings" class="source-button" type="button"><span><strong>Ticket trackers</strong><small>Add Linear or Jira credentials</small></span><b>Configure</b></button>`;
+    button.textContent = "Trackers";
     return;
   }
   const errors = ticketSources.sources.filter((source) => source.error).map((source) => `${source.provider}: ${source.error}`);
-  target.innerHTML = `<button id="tracker-settings" class="source-button connected" type="button"><span class="connection-dot"></span><span>${escapeHtml(ticketSources.viewer?.name || "Trackers configured")}</span><small>${errors.length ? escapeHtml(errors.join(" · ")) : `${ticketSources.tickets.length} active ticket${ticketSources.tickets.length === 1 ? "" : "s"}`}</small></button>`;
+  button.textContent = errors.length ? "Trackers · error" : `${ticketSources.tickets.length} tracker${ticketSources.tickets.length === 1 ? "" : "s"}`;
 }
 
 function ticketCard(ticket) {
   const run = runFor(ticket.id);
-  const selected = ticket.id === state.selectedTicketId ? "selected" : "";
-  const priority = ticket.priority ? `<span>P${ticket.priority}</span>` : "";
-  const selectable = !run && ["linear", "jira"].includes(ticket.provider);
-  return `<div class="ticket-entry">${selectable ? `<input class="ticket-check" type="checkbox" data-check-ticket="${escapeHtml(ticket.id)}" aria-label="Select ${escapeHtml(ticket.identifier)}" ${selectedTicketIds.has(ticket.id) ? "checked" : ""}>` : ""}<button class="ticket-card ${selected}" type="button" data-ticket="${escapeHtml(ticket.id)}">
-    <span class="ticket-row"><b>${escapeHtml(ticket.identifier)}</b>${priority}<i class="tracker-state-dot" style="--state-color:${escapeHtml(ticket.state.color || "#777")}"></i></span>
-    <strong>${escapeHtml(ticket.title)}</strong>
-    <span class="ticket-meta">${escapeHtml(ticket.state.name)} · ${escapeHtml(ticket.team?.name || ticket.provider || "Tracker")} · ${escapeHtml(statusLabel(run))}</span>
-    ${run ? `<span class="ticket-progress"><i style="width:${runProgress(run)}%"></i></span>` : ""}
-  </button></div>`;
+  const view = fleetTicketView(ticket, run, { selected: ticket.id === state.selectedTicketId });
+  const stages = view.stages.map((stage) => `<i class="${stage.kind}${stage.kind === "now" ? ` ${view.tone}` : ""}"></i>`).join("");
+  const agents = view.agents.map((agent) => `<button class="rail-agent ${agent.id === selectedStepId ? "on" : ""}" type="button" data-rail-step="${escapeHtml(agent.id)}" data-ticket="${escapeHtml(ticket.id)}"><span class="dot ${agent.tone}"></span><span>${escapeHtml(agent.name)}<span class="bar ${agent.tone}"><i style="width:${agent.progress}%"></i></span></span><span>${escapeHtml(agent.meta)}</span></button>`).join("");
+  return `<article class="ticket-card tone-${view.tone} ${view.selected ? "selected" : ""}">
+    <button class="ticket-main" type="button" data-ticket="${escapeHtml(ticket.id)}">
+      <span class="ticket-row"><span class="dot ${view.tone}"></span><b>${escapeHtml(ticket.identifier)}</b><span class="st ${view.tone}">${escapeHtml(view.stateLabel)}</span></span>
+      <strong>${escapeHtml(ticket.title)}</strong>
+      ${view.stages.length ? `<span class="stage-cells">${stages}</span>` : ""}
+      <span class="ticket-meta"><span>${escapeHtml(view.stageLabel)}${view.agentCount ? ` · ${view.agentCount} agent${view.agentCount === 1 ? "" : "s"}` : ""}</span><span>${escapeHtml(view.idle)}</span></span>
+    </button>
+    ${agents ? `<div class="rail-agents">${agents}</div>` : ""}
+  </article>`;
 }
 
-function runProgress(run) {
-  if (run.status === "completed") return 100;
-  const stages = run.stages || [];
-  return stages.length ? Math.round(stages.filter((stage) => stage.status === "completed").length / stages.length * 100) : 0;
+function queueTickets() {
+  const byId = new Map();
+  for (const ticket of ticketSources.tickets) byId.set(ticket.id, ticket);
+  for (const run of Object.values(state.ticketRuns || {})) if (run.ticket) byId.set(run.ticket.id, run.ticket);
+  return [...byId.values()];
 }
 
 function renderTickets() {
   renderTrackerStatus();
   const query = $("#ticket-search").value.trim().toLowerCase();
-  const tickets = ticketSources.tickets.filter((ticket) => `${ticket.identifier} ${ticket.title}`.toLowerCase().includes(query));
-  const local = Object.values(state.ticketRuns || {})
-    .filter((run) => run.ticket?.source === "local")
-    .map((run) => run.ticket)
-    .filter((ticket) => `${ticket.identifier} ${ticket.title}`.toLowerCase().includes(query));
+  const tickets = queueTickets().filter((ticket) => `${ticket.identifier} ${ticket.title}`.toLowerCase().includes(query));
   const groups = [
-    ["started", "In progress"],
-    ["unstarted", "Todo"],
-    ["backlog", "Backlog"]
-  ];
-  const trackerHtml = groups.map(([type, label]) => {
-    const items = tickets.filter((ticket) => ticket.state.type === type);
-    return `<section class="ticket-group"><header><span>${label}</span><b>${items.length}</b></header>${items.map(ticketCard).join("") || `<div class="ticket-empty">No ${label.toLowerCase()} tickets</div>`}</section>`;
-  }).join("");
-  const localHtml = `<section class="ticket-group"><header><span>Local runs</span><b>${local.length}</b></header>${local.map(ticketCard).join("") || `<div class="ticket-empty">Load feature.md and plan.json to start.</div>`}</section>`;
-  $("#ticket-list").innerHTML = localHtml + (ticketSources.configured ? trackerHtml : `<div class="ticket-empty large">Add Linear or Jira credentials to load active tickets.</div>`);
-  for (const id of [...selectedTicketIds]) if (!ticketSources.tickets.some((ticket) => ticket.id === id && !runFor(id))) selectedTicketIds.delete(id);
-  const selectedStart = $("#start-selected");
-  selectedStart.disabled = selectedTicketIds.size === 0;
-  selectedStart.textContent = selectedTicketIds.size ? `Start ${selectedTicketIds.size} selected` : "Start selected";
+    ["you", "Needs you"],
+    ["running", "Running"],
+    ["idle", "Idle / queued"]
+  ].map(([lane, label]) => {
+    const items = tickets.filter((ticket) => fleetTicketView(ticket, runFor(ticket.id)).lane === lane);
+    return { lane, label, items };
+  }).filter((group) => group.items.length);
+  const empty = ticketSources.configured
+    ? `<div class="ticket-empty large">No tickets match. <kbd>n</kbd> new task.</div>`
+    : `<div class="ticket-empty large">No tickets — <kbd>n</kbd> new task · configure trackers.</div>`;
+  $("#ticket-list").innerHTML = groups.length
+    ? groups.map((group) => `<section class="ticket-group"><header><span>${group.label}</span><b>${group.items.length}</b></header>${group.items.map(ticketCard).join("")}</section>`).join("")
+    : empty;
   const occupied = Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)).length;
-  $("#run-capacity").textContent = `${occupied} / ${state.settings?.maxConcurrentTickets || 2} occupied · ${state.settings?.projectMode || "manual"}`;
+  $("#run-capacity").textContent = `${occupied} / ${state.settings?.maxConcurrentTickets || 2} slots`;
 }
 
 function stagesHtml(run) {
@@ -820,9 +819,9 @@ document.addEventListener("click", async (event) => {
   if (clearButton) {
     if (!clearArmed) {
       clearArmed = true;
-      clearButton.textContent = "Confirm clear";
+      clearButton.textContent = "Confirm";
       clearTimeout(clearTimer);
-      clearTimer = setTimeout(() => { clearArmed = false; clearButton.textContent = "Clear queue"; }, 4000);
+      clearTimer = setTimeout(() => { clearArmed = false; clearButton.textContent = "Clear"; }, 4000);
       return;
     }
     clearTimeout(clearTimer);
@@ -837,25 +836,19 @@ document.addEventListener("click", async (event) => {
       const cleared = before.size - new Set([...Object.keys(state.ticketRuns), ...ticketSources.tickets.map((ticket) => ticket.id)]).size;
       selectedStepId = null; selectedStageId = null; rememberView(); render(); notify(`${cleared} queue item${cleared === 1 ? "" : "s"} removed`);
     } catch (error) { notify(error.message); }
-    finally { clearButton.disabled = false; clearButton.textContent = "Clear queue"; }
+    finally { clearButton.disabled = false; clearButton.textContent = "Clear"; }
     return;
   }
-  const ticketCheck = event.target.closest("[data-check-ticket]");
-  if (ticketCheck) {
-    if (ticketCheck.checked) selectedTicketIds.add(ticketCheck.dataset.checkTicket);
-    else selectedTicketIds.delete(ticketCheck.dataset.checkTicket);
-    renderTickets();
-    return;
-  }
-  const startSelected = event.target.closest("#start-selected");
-  if (startSelected) {
-    const ticketIds = [...selectedTicketIds];
-    try {
-      await api("/api/tickets/start", { method: "POST", body: JSON.stringify({ ticketIds }) });
-      selectedTicketIds.clear();
-      renderTickets();
-      notify(`${ticketIds.length} ticket workflow${ticketIds.length === 1 ? "" : "s"} started`);
-    } catch (error) { notify(error.message); }
+  const railStep = event.target.closest("[data-rail-step]");
+  if (railStep) {
+    if (railStep.dataset.ticket !== state.selectedTicketId) {
+      state = await api(`/api/tickets/${encodeURIComponent(railStep.dataset.ticket)}/select`, { method: "POST", body: "{}" });
+    }
+    selectedStepId = railStep.dataset.railStep;
+    selectedStageId = null;
+    activeTab = "overview";
+    rememberView();
+    render();
     return;
   }
   const ticketButton = event.target.closest("[data-ticket]");
@@ -937,6 +930,10 @@ document.addEventListener("click", async (event) => {
     catch (error) { if (!/cancelled/i.test(error.message)) notify(error.message); }
   }
   if (event.target.closest("#free-text-open")) $("#free-text-dialog").showModal();
+  if (event.target.closest("#local-load-open")) {
+    $("#free-text-dialog").close();
+    $("#local-load-dialog").showModal();
+  }
   if (event.target.closest("#profile-settings")) { renderProfiles(); $("#profiles-dialog").showModal(); }
   if (event.target.closest("#close-profiles")) $("#profiles-dialog").close();
   if (event.target.closest("[data-close-plan]")) $("#plan-dialog").close();
@@ -944,8 +941,8 @@ document.addEventListener("click", async (event) => {
   if (queueToggle) {
     const collapsed = $(".ticket-layout").classList.toggle("sidebar-collapsed");
     queueToggle.setAttribute("aria-expanded", String(!collapsed));
-    queueToggle.setAttribute("aria-label", collapsed ? "Show work queue" : "Hide work queue");
-    queueToggle.title = collapsed ? "Show work queue" : "Hide work queue";
+    queueToggle.setAttribute("aria-label", collapsed ? "Show tickets" : "Hide tickets");
+    queueToggle.title = collapsed ? "Show tickets" : "Hide tickets";
     queueToggle.textContent = collapsed ? "›" : "‹";
     requestAnimationFrame(() => runFor()?.plan && renderPlanTree());
   }
@@ -1061,7 +1058,9 @@ document.addEventListener("submit", async (event) => {
     const path = new FormData(event.target).get("path");
     try {
       const result = await api("/api/local/load", { method: "POST", body: JSON.stringify({ path }) });
-      state = result.state; selectedStepId = null; selectedStageId = null; activeTab = "overview"; rememberView(); render(); notify("Local zero-state fixture loaded");
+      state = result.state; selectedStepId = null; selectedStageId = null; activeTab = "overview"; rememberView();
+      $("#local-load-dialog").close();
+      render(); notify("Local zero-state fixture loaded");
     } catch (error) { notify(error.message); }
     return;
   }
@@ -1096,6 +1095,14 @@ document.addEventListener("submit", async (event) => {
 $("#refresh-tickets").addEventListener("click", refreshTickets);
 $("#ticket-search").addEventListener("input", renderTickets);
 $("#restart-target").addEventListener("change", renderRestartImpact);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "n" || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  $("#free-text-dialog").showModal();
+});
 
 const events = new EventSource("/api/events");
 events.onmessage = ({ data }) => {

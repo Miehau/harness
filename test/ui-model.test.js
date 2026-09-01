@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -217,6 +217,58 @@ test("step inspector surfaces real attention findings without inventing criterio
     attemptCount: 1
   });
   assert.equal(stepInspectorSummary({ status: "accepted", lastError: "stale", attempts: [] }).needsAttention, false);
+});
+
+test("fleet rail groups tickets by operator urgency, not tracker buckets", () => {
+  assert.equal(fleetLane(null), "idle");
+  assert.equal(fleetLane({ status: "completed" }), "idle");
+  assert.equal(fleetLane({ status: "running" }), "running");
+  assert.equal(fleetLane({ status: "awaiting_approval", checkpoint: { kind: "awaiting_approval" } }), "you");
+  assert.equal(fleetLane({ status: "running", plan: { nodes: [{ id: "build", status: "review_ready" }] } }), "you");
+  assert.equal(fleetLane({ status: "needs_attention" }), "you");
+  assert.equal(fleetLane({ status: "interrupted" }), "you");
+});
+
+test("fleet ticket view omits findings and exposes stages plus selected agents", () => {
+  const view = fleetTicketView(
+    { id: "t", identifier: "TEXT-7F2", title: "Merge-queue rebase" },
+    {
+      status: "needs_attention",
+      lastError: "duplicate preview-port bind in src/previews.js",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      stages: [
+        { id: "requirements", status: "completed" },
+        { id: "explore", status: "completed" },
+        { id: "design", status: "completed" },
+        { id: "implement", status: "completed" },
+        { id: "verify", status: "blocked" },
+        { id: "handoff", status: "pending" }
+      ],
+      plan: { nodes: [
+        { id: "rebase", title: "Rebase", agentId: "worker:rebase", status: "needs_attention", attempts: [{}, {}, {}] },
+        { id: "tests", title: "Tests", agentId: "worker:tests", status: "ready" }
+      ] }
+    },
+    { selected: true, now: Date.parse("2026-09-01T00:00:09.000Z") }
+  );
+  assert.equal(view.lane, "you");
+  assert.equal(view.stateLabel, "needs you");
+  assert.equal(view.stageLabel, "verify");
+  assert.equal(view.agentCount, 2);
+  assert.equal(view.idle, "9s idle");
+  assert.equal(view.finding, undefined);
+  assert.equal(JSON.stringify(view).includes("duplicate"), false);
+  assert.deepEqual(view.stages.map((stage) => stage.kind), ["done", "done", "done", "done", "now", "pending"]);
+  assert.deepEqual(view.agents.map((agent) => [agent.id, agent.name, agent.meta]), [["rebase", "rebase", "3 att"], ["tests", "tests", "queued"]]);
+  assert.equal(fleetTicketView({ id: "t" }, { status: "needs_attention", plan: { nodes: [{ id: "rebase", status: "needs_attention" }] } }, { selected: false }).agents.length, 0);
+  const planGate = fleetTicketView(
+    { id: "p", identifier: "APP-1842", title: "Board" },
+    { status: "awaiting_approval", checkpoint: { kind: "awaiting_approval" }, plan: { nodes: [{ id: "a", status: "ready" }, { id: "b", status: "ready" }] } },
+    { selected: true }
+  );
+  assert.equal(planGate.stateLabel, "plan gate");
+  assert.equal(planGate.agentCount, 2);
+  assert.equal(planGate.agents.length, 0);
 });
 
 test("offers only restart points backed by durable checkpoints", () => {

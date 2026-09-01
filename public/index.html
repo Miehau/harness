@@ -18,24 +18,19 @@
   </header>
 
   <div class="layout ticket-layout">
-    <button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide work queue" title="Hide work queue">‹</button>
+    <button id="toggle-ticket-pane" class="icon-button queue-toggle" type="button" aria-controls="ticket-pane" aria-expanded="true" aria-label="Hide tickets" title="Hide tickets">‹</button>
     <aside id="ticket-pane" class="ticket-pane">
       <header class="pane-header ticket-header">
-        <div><span class="eyebrow">Local or tracker</span><h1>Work queue</h1></div>
-        <div class="plan-actions"><button id="clear-queue" class="button danger" type="button" title="Remove non-running items; files are preserved">Clear queue</button><button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh tickets" title="Refresh tickets">↻</button></div>
+        <div><span class="eyebrow">Tickets</span><h1>Needs you first</h1></div>
+        <div class="plan-actions">
+          <button id="free-text-open" class="button" type="button" title="New task (n)">New</button>
+          <button id="clear-queue" class="button" type="button" title="Remove non-running items; files are preserved">Clear</button>
+          <button id="refresh-tickets" class="icon-button" type="button" aria-label="Refresh tickets" title="Refresh tickets">↻</button>
+        </div>
       </header>
-      <div class="ticket-batch-actions"><button id="start-selected" class="button primary" type="button" disabled>Start selected</button></div>
-      <form id="local-load" class="source-connect local-load">
-        <strong>Load local fixture</strong>
-        <p>Read feature.md and plan.json from the open repository.</p>
-        <input name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required>
-        <button class="button primary" type="submit">Load</button>
-      </form>
-      <button id="free-text-open" class="source-button" type="button"><span><strong>Free text</strong><small>Describe a new task</small></span><b>New task</b></button>
-      <div id="tracker-status" class="tracker-status"></div>
       <div class="ticket-filter"><input id="ticket-search" type="search" placeholder="Filter tickets…" aria-label="Filter tickets"></div>
       <div id="ticket-list" class="ticket-list" aria-live="polite"></div>
-      <footer class="ticket-pane-footer"><span id="run-capacity">0 / 2 active</span><span>isolated worktrees · merge queue</span></footer>
+      <footer class="ticket-pane-footer"><span id="run-capacity">0 / 2 slots</span><button id="tracker-settings" class="text-button" type="button">Trackers</button></footer>
     </aside>
 
     <main class="plan-pane">
@@ -83,7 +78,18 @@
     <header><div><span class="eyebrow">Local task</span><h2>Start from free text</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
     <p class="profiles-note">The first line becomes the ticket title. The full text goes through the normal requirements and planning workflow.</p>
     <label class="dialog-field">Task description<textarea name="description" rows="8" placeholder="Describe what you want built or changed…" required></textarea></label>
-    <footer><span></span><button class="button primary" type="submit">Start workflow</button></footer>
+    <footer>
+      <button id="local-load-open" class="button" type="button">Load fixture…</button>
+      <button class="button primary" type="submit">Start workflow</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="local-load-dialog">
+  <form id="local-load" class="dialog-shell">
+    <header><div><span class="eyebrow">Local fixture</span><h2>Load feature.md and plan.json</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <label class="dialog-field" for="local-load-path">Fixture path<input id="local-load-path" name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required></label>
+    <footer><span>Reads from the open repository.</span><button class="button primary" type="submit">Load</button></footer>
   </form>
 </dialog>
 

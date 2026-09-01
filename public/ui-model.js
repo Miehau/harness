@@ -327,3 +327,120 @@ export function reviewNotesForRows(notes = [], path, rows = []) {
     return Number.isInteger(line) && line >= note.startLine && line <= note.endLine;
   }));
 }
+
+const youRunStatuses = new Set(["needs_attention", "failed", "interrupted", "awaiting_approval", "awaiting_input", "awaiting_requirements"]);
+const youStepStatuses = new Set(["needs_attention", "failed", "interrupted", "review_ready", "needs_input", "awaiting_approval"]);
+const youCheckpointKinds = new Set(["requirements_review", "awaiting_approval", "needs_input", "technical_input", "step_review", "needs_attention", "product_context_review", "review_blocked"]);
+const liveStepStatuses = new Set(["running", "fixing"]);
+const railStepStatuses = new Set(["running", "fixing", "needs_attention", "failed", "interrupted", "review_ready", "needs_input", "awaiting_approval", "ready"]);
+
+export function flattenPlanSteps(plan) {
+  return (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children || [] : [node]);
+}
+
+export function fleetLane(run) {
+  if (!run || ["completed", "cancelled"].includes(run.status)) return "idle";
+  const steps = flattenPlanSteps(run.plan);
+  if (youRunStatuses.has(run.status) || youCheckpointKinds.has(run.checkpoint?.kind) || steps.some((step) => youStepStatuses.has(step.status))) return "you";
+  return "running";
+}
+
+function fleetState(run) {
+  if (!run) return { tone: "idle", label: "queued" };
+  const steps = flattenPlanSteps(run.plan);
+  if (steps.some((step) => step.status === "review_ready") || run.checkpoint?.kind === "step_review") return { tone: "rev", label: "review" };
+  if (run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId) return { tone: "gate", label: "plan gate" };
+  if (run.status === "awaiting_approval" && !run.checkpoint?.stepId) return { tone: "gate", label: "plan gate" };
+  const lane = fleetLane(run);
+  if (lane === "you") return { tone: "you", label: run.status === "interrupted" ? "interrupted" : "needs you" };
+  if (lane === "running") return { tone: "run", label: "running" };
+  return { tone: "idle", label: run.status === "completed" ? "done" : "queued" };
+}
+
+function currentStage(run) {
+  const stages = run?.stages || [];
+  return stages.find((stage) => stage.status === "active" || stage.status === "blocked") || stages.filter((stage) => stage.status === "completed").at(-1) || null;
+}
+
+function lastActivityAt(run) {
+  const times = [];
+  for (const value of [run?.updatedAt, run?.checkpoint?.createdAt, run?.createdAt]) if (value) times.push(value);
+  for (const stage of run?.stages || []) if (stage.updatedAt) times.push(stage.updatedAt);
+  for (const step of flattenPlanSteps(run?.plan)) {
+    const attempt = step.attempts?.at(-1);
+    if (attempt?.completedAt) times.push(attempt.completedAt);
+    if (attempt?.startedAt) times.push(attempt.startedAt);
+    for (const event of attempt?.events || []) if (event.at) times.push(event.at);
+  }
+  return times.sort().at(-1) || null;
+}
+
+export function formatIdle(iso, now = Date.now(), live = false) {
+  if (!iso) return "";
+  const seconds = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000));
+  if (!Number.isFinite(seconds)) return "";
+  const label = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+  return live ? `live ${label}` : `${label} idle`;
+}
+
+function agentProgress(status) {
+  if (status === "accepted") return 100;
+  if (status === "review_ready") return 84;
+  if (["needs_attention", "failed", "interrupted"].includes(status)) return 70;
+  if (liveStepStatuses.has(status)) return 60;
+  if (status === "awaiting_approval" || status === "needs_input") return 50;
+  return 16;
+}
+
+function agentTone(status) {
+  if (["needs_attention", "failed", "interrupted"].includes(status)) return "you";
+  if (status === "review_ready") return "rev";
+  if (status === "awaiting_approval" || status === "needs_input") return "gate";
+  if (liveStepStatuses.has(status)) return "run";
+  return "idle";
+}
+
+function agentName(step) {
+  return String(step.agentId || "").replace(/^worker:/, "") || String(step.title || step.id || "agent").split(/\s+/).at(-1).toLowerCase();
+}
+
+function agentMeta(step) {
+  const attempts = step.attempts?.length || 0;
+  if (["needs_attention", "failed", "fixing"].includes(step.status) && attempts) return `${attempts} att`;
+  if (liveStepStatuses.has(step.status)) return "live";
+  if (step.status === "review_ready") return "ready";
+  if (step.status === "awaiting_approval") return "gate";
+  if (step.status === "ready") return "queued";
+  return step.status.replaceAll("_", " ");
+}
+
+export function fleetTicketView(ticket, run, { selected = false, now = Date.now() } = {}) {
+  const state = fleetState(run);
+  const lane = fleetLane(run);
+  const stage = currentStage(run);
+  const steps = flattenPlanSteps(run?.plan).filter((step) => railStepStatuses.has(step.status));
+  const focus = steps.filter((step) => step.status !== "ready");
+  const live = lane === "running" || steps.some((step) => liveStepStatuses.has(step.status));
+  const nested = selected && focus.length ? steps : [];
+  return {
+    id: ticket.id,
+    lane,
+    tone: state.tone,
+    stateLabel: state.label,
+    selected,
+    stageLabel: stage?.id || (run ? "queued" : "idle"),
+    agentCount: steps.length,
+    idle: formatIdle(lastActivityAt(run), now, live && lane === "running"),
+    stages: (run?.stages || []).map((item) => ({
+      id: item.id,
+      kind: item.status === "completed" ? "done" : item.status === "active" || item.status === "blocked" ? "now" : "pending"
+    })),
+    agents: nested.map((step) => ({
+      id: step.id,
+      name: agentName(step),
+      tone: agentTone(step.status),
+      progress: agentProgress(step.status),
+      meta: agentMeta(step)
+    }))
+  };
+}
