@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addCheckpoint, applyWorkflowContinuation, bindWorkflowSkill, initialWorkflow, resolveCheckpoint, upsertWorkflowStage, workflowBlockers } from "../src/workflow.js";
+import { addCheckpoint, applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, resolveCheckpoint, upsertWorkflowStage, workflowBlockers } from "../src/workflow.js";
 
 test("a pending supervisor checkpoint is a hard execution gate", () => {
   const workflow = initialWorkflow({ skillName: "shape-feature", status: "active" });
@@ -76,4 +76,17 @@ test("continuing a bound workflow resolves the gate and records the next stage",
   assert.equal(workflow.checkpoints[0].response, "Internal operators");
   assert.equal(workflow.stages[0].id, "brief");
   assert.equal(workflow.status, "active");
+});
+
+test("applyPendingWorkflowGate copies a blocking checkpoint onto run.checkpoint", () => {
+  const run = { workflow: initialWorkflow(), status: "exploring", stages: [{ id: "explore", status: "active", summary: "" }] };
+  run.workflow = bindWorkflowSkill(run.workflow, "shape-feature", {
+    checkpoints: [{ kind: "awaiting_approval", title: "Approve the brief", prompt: "Continue?" }]
+  });
+  const gate = applyPendingWorkflowGate(run);
+  assert.equal(gate.title, "Approve the brief");
+  assert.equal(run.checkpoint.id, run.workflow.checkpoints[0].id);
+  assert.equal(run.status, "awaiting_approval");
+  assert.equal(executionBlockedByWorkflow(run), true);
+  assert.equal(run.stages[0].status, "blocked");
 });

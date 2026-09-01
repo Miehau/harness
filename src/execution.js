@@ -1,4 +1,5 @@
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
+import { workflowBlockers } from "./workflow.js";
 
 export function appendBounded(value, addition, limit) {
   const chunk = String(addition || "");
@@ -185,7 +186,7 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
 }
 
 export function planApprovalPending(run) {
-  return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId);
+  return Boolean(run?.plan && run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId && run.checkpoint.source !== "supervisor");
 }
 
 export function selectWorkerSession(step, { forkSessionFile = null, feedback = "" } = {}) {
@@ -278,4 +279,76 @@ export function actionableFindings(reviews) {
       seen.add(key);
       return true;
     });
+}
+
+export const MAX_CORRECTION_ROUNDS = 8;
+
+export function findingsFingerprint(findings = []) {
+  return actionableFindings([{ findings }])
+    .map((finding) => {
+      const evidence = finding.evidence?.[0] || {};
+      return `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
+    })
+    .sort()
+    .join("|");
+}
+
+export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
+  const fingerprint = findingsFingerprint(findings);
+  if (Number(round) >= maxRounds) {
+    return { pause: true, reason: `Paused after ${maxRounds} correction rounds without a passing verification.`, fingerprint };
+  }
+  if (previousFingerprint && fingerprint && fingerprint === previousFingerprint) {
+    return { pause: true, reason: "The same verification findings repeated without meaningful progress.", fingerprint };
+  }
+  return { pause: false, fingerprint };
+}
+
+export function workflowResumeStage(run) {
+  if (workflowBlockers(run?.workflow).length) return "blocked";
+  const has = (kind) => (run?.artifacts || []).some((artifact) => artifact.kind === kind);
+  const stage = (id) => run?.stages?.find((item) => item.id === id);
+  if (!has("requirements-draft") && !has("requirements")) return "requirements";
+  if (stage("requirements")?.status !== "completed") return "requirements_review";
+  if (!has("implementation-delta")) return "explore";
+  if (!run.plan) return "design";
+  if (!run.planApprovedAt) return "plan_approval";
+  return "run";
+}
+
+export function artifactMetadata(artifact) {
+  if (!artifact || typeof artifact !== "object") return artifact;
+  const { content, ...rest } = artifact;
+  return rest;
+}
+
+export function publicRun(run) {
+  if (!run) return run;
+  const clone = structuredClone(run);
+  if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
+  for (const step of flattenSteps(clone.plan)) {
+    if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
+  }
+  return clone;
+}
+
+export function publicState(state) {
+  if (!state) return state;
+  const clone = structuredClone(state);
+  for (const bucket of ["ticketRuns", "retainedRuns"]) {
+    for (const [id, run] of Object.entries(clone[bucket] || {})) clone[bucket][id] = publicRun(run);
+  }
+  return clone;
+}
+
+export function compactRun(run, revision = null) {
+  return {
+    id: run?.id || null,
+    runId: run?.runId || null,
+    status: run?.status || null,
+    checkpoint: run?.checkpoint || null,
+    lastError: run?.lastError || null,
+    workflow: run?.workflow || null,
+    revision
+  };
 }

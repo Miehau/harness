@@ -63,6 +63,9 @@ function renderProfiles() {
   $("#max-concurrent-tickets").value = state.settings?.maxConcurrentTickets || 2;
   $("#project-mode").value = state.settings?.projectMode || "manual";
   $("#poll-interval-seconds").value = state.settings?.pollIntervalSeconds || 60;
+  const providers = [...new Set(codexModels.map((model) => model.provider).filter(Boolean))];
+  const providerLabel = document.querySelector(".profiles-provider");
+  if (providerLabel) providerLabel.textContent = providers.length ? `Provider: ${providers.join(", ")}` : "Pi models";
 }
 
 function runFor(id = state?.selectedTicketId) { return id ? state?.ticketRuns?.[id] || null : null; }
@@ -219,7 +222,7 @@ function supervisorControlHtml(run) {
 }
 
 function workflowCheckpointsHtml(run) {
-  const pending = (run?.workflow?.checkpoints || []).filter((checkpoint) => checkpoint.status === "pending");
+  const pending = (run?.workflow?.checkpoints || []).filter((checkpoint) => checkpoint.status === "pending" && checkpoint.blocking === false && checkpoint.id !== run?.checkpoint?.id);
   if (!pending.length) return "";
   return `<div class="checkpoint-list">${pending.map((checkpoint) => {
     const needsInput = checkpoint.kind === "needs_input";
@@ -545,8 +548,23 @@ function stepDiffPanel(step) {
   return `${diffPanel(step.diff, { id: `step-${step.id}`, budget: step.reviewBudgetResult, reviewMap: step.reviewMap, reviewNotes: step.reviewNotes, mapStepId: step.id, feedbackStepId: step.status === "review_ready" ? step.id : null, artifactId: patchArtifact?.id })}${attempts.length ? `<details class="attempt-diffs"><summary>Attempt deltas <span>${attempts.length}</span></summary>${attempts.map((attempt, index) => `<details><summary>${escapeHtml(attempt.attemptId || `Attempt ${index + 1}`)} · ${escapeHtml(compactDiffLabel(attempt.diff))}</summary>${diffPanel(attempt.diff, { id: `step-${step.id}-attempt-${index}`, actions: false })}</details>`).join("")}</details>` : ""}`;
 }
 
+const artifactBodies = new Map();
+const pendingArtifactBodies = new Set();
+function hydrateArtifact(ticketId, artifact) {
+  if (!ticketId || !artifact?.id || artifact.content != null || artifactBodies.has(artifact.id) || pendingArtifactBodies.has(artifact.id)) return;
+  pendingArtifactBodies.add(artifact.id);
+  api(`/api/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(artifact.id)}`).then((result) => {
+    artifactBodies.set(artifact.id, result.content);
+    render();
+  }).catch(() => {}).finally(() => pendingArtifactBodies.delete(artifact.id));
+}
+function artifactBody(artifact) {
+  return artifact.content != null ? artifact.content : artifactBodies.get(artifact.id);
+}
 function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
-  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in Zed">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifact.content))}</code></pre>` : renderMarkdown(artifact.content)}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
+  const ticketId = runFor()?.id;
+  for (const artifact of artifacts) if (artifactBody(artifact) == null) hydrateArtifact(ticketId, artifact);
+  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in Zed">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifactBody(artifact) == null ? `<div class="run-empty">Loading artifact…</div>` : artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifactBody(artifact)))}</code></pre>` : renderMarkdown(artifactBody(artifact))}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
 function renderInspector() {
@@ -572,7 +590,9 @@ function renderInspector() {
     return;
   }
   loadSessionTrace(run, step);
-  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt")?.content || "Prompt has not been rendered yet.";
+  const promptArtifact = [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt");
+  if (promptArtifact) hydrateArtifact(run.id, promptArtifact);
+  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || artifactBody(promptArtifact || {}) || "Prompt has not been rendered yet.";
   const panels = { overview: overviewPanel(step), run: runPanel(step), diff: stepDiffPanel(step), artifacts: artifactsPanel(step), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
   const isolated = Boolean(step.workspace?.isolated);
   const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
