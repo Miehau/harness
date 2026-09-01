@@ -21,6 +21,8 @@ let clearArmed = false;
 let cleanupArmed = false;
 let retention = { items: [], totalBytes: 0 };
 let trackerSettings = null;
+let piSkills = [];
+let piSkillsFor = null;
 const selectedTicketIds = new Set();
 const liveRuns = new Map();
 const liveStages = new Map();
@@ -200,6 +202,39 @@ function checkpointHtml(run) {
   return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" data-approve-ticket="${escapeHtml(run.id)}">Run manually</button><button class="button success" type="button" data-auto-ticket="${escapeHtml(run.id)}">Auto run graph</button></div></div>`;
 }
 
+function supervisorControlHtml(run) {
+  if (!run) return "";
+  const bound = run.workflow?.skillName || "";
+  const options = piSkills.length
+    ? `<option value="">${bound ? "Change Pi skill…" : "Bind Pi skill…"}</option>${piSkills.map((skill) => `<option value="${escapeHtml(skill.name)}" ${skill.name === bound ? "selected" : ""}>${escapeHtml(skill.name)}</option>`).join("")}`
+    : `<option value="">No Pi skills discovered</option>`;
+  return `<form class="supervisor-control" data-bind-workflow="${escapeHtml(run.id)}"><span class="agent-badge supervisor"><span class="agent-dot"></span>${bound ? escapeHtml(bound) : "Supervisor"}</span><select name="skillName" aria-label="Pi skill">${options}</select><button class="button" type="submit" ${piSkills.length ? "" : "disabled"}>${bound ? "Bind" : "Bind skill"}</button></form>`;
+}
+
+function workflowCheckpointsHtml(run) {
+  const pending = (run?.workflow?.checkpoints || []).filter((checkpoint) => checkpoint.status === "pending");
+  if (!pending.length) return "";
+  return `<div class="checkpoint-list">${pending.map((checkpoint) => {
+    const needsInput = checkpoint.kind === "needs_input";
+    return `<form class="checkpoint clarification" data-continue-workflow="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">${needsInput ? "?" : "✓"}</div><div class="checkpoint-copy"><span class="eyebrow">Supervisor workflow gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>${escapeHtml(checkpoint.prompt || "")}</p>${needsInput ? `<label>Response<textarea name="response" rows="2" required></textarea></label>` : ""}</div><button class="button ${needsInput ? "primary" : "success"}" type="submit">${needsInput ? "Continue" : "Approve"}</button></form>`;
+  }).join("")}</div>`;
+}
+
+async function refreshSkills(run) {
+  const key = run?.id || null;
+  if (piSkillsFor === key) return;
+  piSkillsFor = key;
+  if (!key) { piSkills = []; return; }
+  try {
+    const result = await api(`/api/tickets/${encodeURIComponent(key)}/skills`);
+    if (piSkillsFor !== key) return;
+    piSkills = result.skills || [];
+    render();
+  } catch (error) {
+    if (piSkillsFor === key) { piSkills = []; notify(error.message); }
+  }
+}
+
 function checkpointUsesWorkspace(run) {
   return run?.checkpoint?.kind === "requirements_review";
 }
@@ -227,7 +262,7 @@ function renderHeader() {
   const restartBanner = restartAudit
     ? `<div class="recovery-banner"><strong>Restarted from ${escapeHtml(restartAudit.target.replace(":", " · "))}</strong><span>${escapeHtml(new Date(restartAudit.at).toLocaleString())} · audit ${escapeHtml(restartAudit.id)}</span></div>`
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${stagesHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${supervisorControlHtml(run)}${action}${reviewAction}</div></div>${stagesHtml(run)}${workflowCheckpointsHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -648,6 +683,7 @@ function render() {
   renderPlanTree();
   renderInspector();
   restoreClarificationDraft(draft);
+  if (run?.id !== piSkillsFor) refreshSkills(run);
 }
 
 async function refreshTickets() {
@@ -927,7 +963,7 @@ document.addEventListener("submit", async (event) => {
   }
   if (event.target.id === "workspace-form") {
     event.preventDefault();
-    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); await refreshTickets(); }
+    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); piSkillsFor = null; await refreshTickets(); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -966,6 +1002,31 @@ document.addEventListener("submit", async (event) => {
       render();
       notify("Execution graph saved and validated");
     } catch (error) { $("#plan-json-error").textContent = error.message; }
+    return;
+  }
+  const bindWorkflow = event.target.closest("[data-bind-workflow]");
+  if (bindWorkflow) {
+    event.preventDefault();
+    const skillName = new FormData(bindWorkflow).get("skillName");
+    if (!skillName) { notify("Choose a Pi skill to bind"); return; }
+    try {
+      const result = await api(`/api/tickets/${encodeURIComponent(bindWorkflow.dataset.bindWorkflow)}/workflow`, { method: "POST", body: JSON.stringify({ skillName }) });
+      state = result.state;
+      render();
+      notify(`Bound ${skillName} as the supervisor workflow`);
+    } catch (error) { notify(error.message); }
+    return;
+  }
+  const continueWorkflow = event.target.dataset.continueWorkflow;
+  if (continueWorkflow) {
+    event.preventDefault();
+    const responseText = String(new FormData(event.target).get("response") || "Approved");
+    try {
+      const result = await api(`/api/tickets/${encodeURIComponent(continueWorkflow)}/workflow/continue`, { method: "POST", body: JSON.stringify({ checkpointId: event.target.dataset.checkpointId, response: responseText }) });
+      state = result.state;
+      render();
+      notify("Supervisor workflow continued");
+    } catch (error) { notify(error.message); }
     return;
   }
   if (event.target.id === "local-load") {

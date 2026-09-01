@@ -63,3 +63,24 @@ export function resolveCheckpoint(workflow, id, response) {
   workflow.status = pending.length ? pending[0].kind : (workflow.skillName ? "active" : "idle");
   return checkpoint;
 }
+
+export function bindWorkflowSkill(workflow, skillName, activation = {}) {
+  const name = String(skillName || "").trim();
+  if (!name) throw new Error("Choose a Pi skill to bind");
+  workflow.skillName = name;
+  workflow.status = "active";
+  workflow.stages = [];
+  workflow.checkpoints = [];
+  workflow.lastReview = activation.reply || null;
+  for (const stage of activation.stages || []) upsertWorkflowStage(workflow, stage);
+  for (const checkpoint of activation.checkpoints || []) addCheckpoint(workflow, checkpoint);
+  return workflow;
+}
+
+export function applyWorkflowContinuation(workflow, checkpointId, response, activation = {}) {
+  resolveCheckpoint(workflow, checkpointId, response);
+  if (activation.reply) workflow.lastReview = activation.reply;
+  for (const stage of activation.stages || []) upsertWorkflowStage(workflow, stage);
+  for (const checkpoint of activation.checkpoints || []) addCheckpoint(workflow, checkpoint);
+  return workflow;
+}

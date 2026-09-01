@@ -218,8 +218,9 @@ export function groupStatus(group) {
   const required = group.children.filter((step) => step.required);
   if (required.every((step) => step.status === "accepted")) return "accepted";
   if (required.some((step) => ["failed", "needs_attention", "interrupted", "cancelled"].includes(step.status))) return "needs_attention";
-  if (required.some((step) => step.status === "running")) return "running";
-  if (required.some((step) => step.status === "completed")) return "review";
+  if (required.some((step) => ["needs_input", "awaiting_approval"].includes(step.status))) return "needs_input";
+  if (required.some((step) => ["running", "fixing"].includes(step.status))) return "running";
+  if (required.some((step) => step.status === "review_ready")) return "review";
   return "blocked";
 }
 

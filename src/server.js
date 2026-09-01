@@ -22,12 +22,13 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, resumeStage, rewindRun } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, createActivityCapture, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, resumeStage, rewindRun, selectWorkerSession, supervisorReviewCheckpoint, workerReportCheckpoint } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
 import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } from "./credentials.js";
+import { applyWorkflowContinuation, bindWorkflowSkill, initialWorkflow } from "./workflow.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -196,6 +197,16 @@ function ticketRun(state, ticketId) {
   return run;
 }
 
+function skillSession(state, run) {
+  return { cwd: run?.workspace?.cwd || state.workspace.cwd, sessionFile: run?.sessionFile || null };
+}
+
+function persistWorkflowActivation(run, skillName, activation) {
+  run.workflow = bindWorkflowSkill(initialWorkflow(run.workflow), skillName, activation);
+  if (activation.sessionFile) run.sessionFile = activation.sessionFile;
+  return run.workflow;
+}
+
 function setStage(run, id, status, summary = "") {
   const stage = run.stages.find((item) => item.id === id);
   if (!stage) return;
@@ -302,7 +313,7 @@ function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId
     id: ticket.id, runId, ticket, automaticAdmission, status: "preparing", workspace: null,
     stageProfiles: structuredClone(stageProfiles), stages: initialStages(), checkpoint: null, plan: null,
     artifacts: [], activeRuns: {}, trackerEvents: {}, sessionFile: null, auto: false, lastError: null,
-    createdAt: new Date().toISOString()
+    workflow: initialWorkflow(), createdAt: new Date().toISOString()
   };
 }
 
@@ -322,8 +333,52 @@ async function acceptCheckpointAnswer(ticketId, answers, source) {
     });
   }
   if (checkpoint.kind === "requirements_review") continueAfterRequirements(ticketId, answers).catch(() => {});
+  else if (checkpoint.stepId) resumeStepCheckpoint(ticketId, checkpoint, answers).catch(() => {});
   else startTicketWork(ticketId, (signal) => designTicket(ticketId, answers, signal)).catch(() => {});
   return true;
+}
+
+async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
+  const feedback = String(answers || "").trim() || "Approved";
+  if (checkpoint.source === "supervisor") {
+    const run = ticketRun(store.read(), ticketId);
+    const step = findNode(run.plan, checkpoint.stepId);
+    if (!step) throw new Error("Checkpoint step not found");
+    const cwd = step.workspace?.cwd || run.workspace.cwd;
+    let commitMessage = step.commitMessage || null;
+    if (!commitMessage) {
+      commitMessage = await harness.generateCommitMessage({
+        cwd, ticket: run.ticket, step, diff: step.diff || { files: [], patch: "", stat: "" }, runId: run.runId,
+        profile: run.stageProfiles.commit
+      });
+    }
+    await update((state) => {
+      const current = ticketRun(state, ticketId);
+      const target = findNode(current.plan, checkpoint.stepId);
+      target.status = "review_ready";
+      target.commitMessage = commitMessage;
+      if (target.reviewBudgetResult?.exceeded) current.auto = false;
+      current.status = "awaiting_step_review";
+      current.checkpoint = { id: randomUUID(), kind: "step_review", stepId: checkpoint.stepId, title: `Review: ${target.title}`, createdAt: new Date().toISOString() };
+      setStage(current, "implement", "blocked", `${target.title} is verified and awaiting your review`);
+    });
+    if (ticketRun(store.read(), ticketId).auto) {
+      startTicketWork(ticketId, async (signal) => {
+        await acceptStep(ticketId, checkpoint.stepId);
+        await advanceTicket(ticketId, signal);
+      }).catch(() => {});
+    }
+    return;
+  }
+  await update((state) => {
+    const current = ticketRun(state, ticketId);
+    current.checkpoint = null;
+    current.status = "running";
+  });
+  return startTicketWork(ticketId, async (signal) => {
+    await executeStep(ticketId, checkpoint.stepId, { feedback, signal });
+    if (ticketRun(store.read(), ticketId).auto) await advanceTicket(ticketId, signal);
+  });
 }
 
 async function syncTrackerAnswers() {
@@ -442,7 +497,7 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), createdAt: new Date().toISOString()
     };
   });
   return { ticketId: id, state };
@@ -687,7 +742,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const run = ticketRun(beforeState, ticketId);
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
-    if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted"].includes(step.status))) return;
+    if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
       let vcsChange = null;
@@ -728,9 +783,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         });
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
         const attemptBaseTree = await snapshotTree(cwd);
+        const sessionChoice = selectWorkerSession(currentStep, {
+          forkSessionFile: findForkSession(latest.plan, currentStep),
+          feedback: nextFeedback
+        });
         const result = await harness.runStep({
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, images: [],
-          forkSessionFile: nextFeedback ? null : findForkSession(latest.plan, currentStep), resumeSessionFile: null,
+          ...sessionChoice,
           feedback: nextFeedback, ticketId, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
@@ -759,7 +818,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
-        if (violations.length || result.report.status !== "completed") {
+        const workerGate = workerReportCheckpoint(currentStep, result.report);
+        if (violations.length || (result.report.status !== "completed" && !workerGate)) {
           const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -773,12 +833,35 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
             setStage(current, "implement", "blocked", error);
           });
+          return;
+        }
+        if (workerGate) {
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            const target = findNode(current.plan, stepId);
+            target.status = workerGate.kind;
+            target.diff = diff;
+            target.reviewNotes = reviewNotes;
+            target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
+            target.reviewBudgetResult = reviewBudget;
+            if (vcsChange) target.vcsChange = vcsChange;
+            target.sessionFile = result.sessionFile;
+            target.artifacts = [artifacts[0]];
+            target.lastError = null;
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            current.artifacts.push(...artifacts);
+            delete current.activeRuns[stepId];
+            current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
+            current.checkpoint = { id: randomUUID(), ...workerGate, createdAt: new Date().toISOString() };
+            setStage(current, "implement", "blocked", workerGate.title);
+          });
+          await mirrorCheckpoint(ticketId);
           return;
         }
         await update((state) => {
@@ -816,7 +899,24 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         });
         const findings = actionableFindings([verification]);
         let commitMessage = null;
-        if (!findings.length) {
+        let supervisorReview = null;
+        if (!findings.length && latest.sessionFile) {
+          try {
+            publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Supervisor reviewing worker report" });
+            supervisorReview = await harness.reviewWorkerReport({
+              cwd: latest.workspace.cwd, sessionFile: latest.sessionFile, sessionKey: `${latest.ticket.id}-${latest.runId}`,
+              step: currentStep, report: result.report, diff,
+              profile: latest.stageProfiles.architecture,
+              onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
+              signal
+            });
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            supervisorReview = { reply: error.message, checkpoints: [], error: error.message };
+          }
+        }
+        const supervisorGate = supervisorReviewCheckpoint(currentStep, supervisorReview);
+        if (!findings.length && !supervisorGate) {
           publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Drafting the requirement-linked commit" });
           commitMessage = await harness.generateCommitMessage({
             cwd, ticket: latest.ticket, step: currentStep, diff, runId: latest.runId,
@@ -832,11 +932,24 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.reviewBudgetResult = reviewBudget;
           if (vcsChange) target.vcsChange = vcsChange;
           target.sessionFile = result.sessionFile;
+          if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });
+        if (supervisorGate && !findings.length) {
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            const target = findNode(current.plan, stepId);
+            target.status = supervisorGate.kind;
+            current.status = supervisorGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
+            current.checkpoint = { id: randomUUID(), ...supervisorGate, createdAt: new Date().toISOString() };
+            setStage(current, "implement", "blocked", supervisorGate.title);
+          });
+          await mirrorCheckpoint(ticketId);
+          return;
+        }
         if (!findings.length) {
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -1570,6 +1683,11 @@ async function restartFrom(ticketId, target) {
 async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/state") return json(response, 200, store.read());
   if (request.method === "GET" && url.pathname === "/api/models") return json(response, 200, { provider: "openai-codex", models: await harness.models() });
+  if (request.method === "GET" && url.pathname === "/api/skills") {
+    const state = store.read();
+    const run = state.selectedTicketId ? state.ticketRuns[state.selectedTicketId] : null;
+    return json(response, 200, { skills: await harness.listSkills(skillSession(state, run)), skillName: run?.workflow?.skillName || null });
+  }
   if (request.method === "GET" && url.pathname === "/api/tracker-settings") return json(response, 200, publicTrackerSettings(savedCredentials));
   if (request.method === "POST" && url.pathname === "/api/tracker-settings") {
     if (trackerRefresh) await trackerRefresh.catch(() => {});
@@ -1719,6 +1837,51 @@ async function api(request, response, url) {
     return json(response, 200, state);
   }
 
+  const listSkills = url.pathname.match(/^\/api\/tickets\/([^/]+)\/skills$/);
+  if (request.method === "GET" && listSkills) {
+    const id = decodeURIComponent(listSkills[1]);
+    const state = store.read();
+    const run = ticketRun(state, id);
+    return json(response, 200, { skills: await harness.listSkills(skillSession(state, run)), skillName: run.workflow?.skillName || null });
+  }
+
+  const bindWorkflow = url.pathname.match(/^\/api\/tickets\/([^/]+)\/workflow$/);
+  if (request.method === "POST" && bindWorkflow) {
+    const id = decodeURIComponent(bindWorkflow[1]);
+    const skillName = String((await body(request)).skillName || "").trim();
+    if (!skillName) throw new Error("Choose a Pi skill to bind");
+    const before = store.read();
+    const run = ticketRun(before, id);
+    const activation = await harness.activateWorkflow({ ...skillSession(before, run), skillName });
+    const state = await update((draft) => {
+      persistWorkflowActivation(ticketRun(draft, id), skillName, activation);
+    });
+    return json(response, 200, { skillName, state });
+  }
+
+  const continueWorkflow = url.pathname.match(/^\/api\/tickets\/([^/]+)\/workflow\/continue$/);
+  if (request.method === "POST" && continueWorkflow) {
+    const id = decodeURIComponent(continueWorkflow[1]);
+    const input = await body(request);
+    const before = store.read();
+    const run = ticketRun(before, id);
+    const workflow = initialWorkflow(run.workflow);
+    const checkpoint = workflow.checkpoints.find((item) => item.id === input.checkpointId);
+    if (!checkpoint || checkpoint.status !== "pending") throw new Error("Workflow checkpoint not found");
+    const activation = await harness.continueWorkflow({
+      ...skillSession(before, run),
+      checkpoint,
+      response: String(input.response || "Approved")
+    });
+    const state = await update((draft) => {
+      const current = ticketRun(draft, id);
+      current.workflow = initialWorkflow(current.workflow);
+      applyWorkflowContinuation(current.workflow, checkpoint.id, input.response, activation);
+      if (activation.sessionFile) current.sessionFile = activation.sessionFile;
+    });
+    return json(response, 200, { accepted: true, state });
+  }
+
   const resume = url.pathname.match(/^\/api\/tickets\/([^/]+)\/resume$/);
   if (request.method === "POST" && resume) {
     const id = decodeURIComponent(resume[1]);
@@ -1771,8 +1934,8 @@ async function api(request, response, url) {
       if (!answers.trim() && run.checkpoint.questions?.length) throw new Error("Answer the open requirements questions before approval");
       await acceptCheckpointAnswer(id, answers, "dashboard");
     }
-    else if (["technical_input", "needs_input"].includes(run.checkpoint?.kind)) {
-      if (!answers.trim()) throw new Error("Answer the open technical questions before continuing");
+    else if (["technical_input", "needs_input"].includes(run.checkpoint?.kind) || (run.checkpoint?.kind === "awaiting_approval" && run.checkpoint.stepId)) {
+      if (run.checkpoint.kind !== "awaiting_approval" && !answers.trim()) throw new Error("Answer the open question before continuing");
       await acceptCheckpointAnswer(id, answers, "dashboard");
     }
     else throw new Error("This ticket has no open question");
