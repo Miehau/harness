@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
+import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
 
 function initialState(cwd) {
   return {
@@ -56,15 +57,15 @@ export class JsonStore {
         run.activeRuns = {};
         for (const node of run.plan?.nodes || []) {
           for (const step of node.type === "group" ? node.children : [node]) {
-            if (["running", "fixing"].includes(step.status)) step.status = "interrupted";
+            if (inFlightStepStatusSet.has(step.status)) step.status = "interrupted";
           }
         }
         for (const preview of Object.values(run.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: "daemon_restart" });
-        if (["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge"].includes(run.status)) {
+        if (inFlightRunStatusSet.has(run.status)) {
           const previousStatus = run.status;
           const previousMergeStatus = run.merge?.status;
           run.status = "interrupted";
-          if (["queued", "merging", "resolving_conflicts", "verifying", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge"].includes(run.merge?.status)) run.merge.status = "interrupted";
+          if (inFlightMergeStatusSet.has(run.merge?.status)) run.merge.status = "interrupted";
           run.recovery = {
             kind: previousMergeStatus ? "delivery" : "execution",
             previousStatus,

@@ -20,6 +20,8 @@ node scripts/seed.mjs              # clarifying ticket in a temp data dir
 node scripts/seed.mjs plan-approval --json
 node scripts/seed.mjs review-ready --data-dir /tmp/ap-data --cwd /tmp/ap-cwd
 # then: AGENT_PLAN_DATA_DIR=/tmp/ap-data npm start -- --cwd /tmp/ap-cwd
+
+node scripts/capture-evidence.mjs  # Chromium screenshots into docs/evidence
 ```
 
 Tests import `test/helpers.js` (`withDaemon`, `invoke`, `seedRun`, `runAgainstDaemon`). Seed writes `state-v3.json` through `JsonStore`, so restart/recovery behavior matches production.

@@ -1,13 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, isAbsolute, join, normalize } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName } from "./artifacts.js";
+import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection } from "./artifacts.js";
 import { admissionCandidates, occupiedTicketIds } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
@@ -29,6 +28,8 @@ import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
 import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } from "./credentials.js";
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
+import { body, createHandleRequest, json } from "./http.js";
+import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -243,7 +244,7 @@ async function surfaceImmediateFailure(ticketId, work) {
     await update((state) => {
       const run = state.ticketRuns[ticketId];
       if (!run || run.lastError) return;
-      run.status = ["preparing", "clarifying"].includes(run.status) ? "failed" : "needs_attention";
+      run.status = earlyFailureStatusSet.has(run.status) ? "failed" : "needs_attention";
       run.lastError = error.message;
     });
   });
@@ -261,23 +262,6 @@ function setStage(run, id, status, summary = "") {
   }
   Object.assign(stage, { status, summary, updatedAt: new Date().toISOString() });
   return stage;
-}
-
-function json(response, status, payload) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-  response.end(JSON.stringify(payload));
-}
-
-async function body(request) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > 8 * 1024 * 1024) throw new Error("Request exceeds the 8 MB local limit");
-    chunks.push(buffer);
-  }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
 function trackerBacked(ticket) { return ["linear", "jira"].includes(ticket?.provider); }
@@ -332,7 +316,7 @@ async function beginTicket(ticket, { automaticAdmission = false } = {}) {
   ensureTicketCapacity(ticket.id);
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
-    if (!state.ticketRuns[ticket.id] || ["completed", "failed", "needs_attention"].includes(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
+    if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
   });
   await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id));
   return ticket.id;
@@ -1342,11 +1326,12 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     const sync = await safeSyncLocal(sourceCwd, base);
     const integratedAt = new Date().toISOString();
     const productContext = contextContent == null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
+    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
     const handoff = await persistArtifact(dataDir, current.ticket, {
       runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nRemote review: ${change.url}\n\nSquash commit: \`${mergeResult.commit}\`\n\nLocal sync: ${sync.status}${sync.reason ? ` — ${sync.reason}` : ""}.`
+      content: `# ${current.ticket.identifier} handoff\n\nRemote review: ${change.url}\n\nSquash commit: \`${mergeResult.commit}\`\n\nLocal sync: ${sync.status}${sync.reason ? ` — ${sync.reason}` : ""}.${visualEvidenceHandoffSection(evidenceArtifacts)}`
     });
-    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, `Merged after remote checks and review: ${change.url}\n\nSquash commit: ${mergeResult.commit}`));
+    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, `Merged after remote checks and review: ${change.url}\n\nSquash commit: ${mergeResult.commit}${visualEvidenceComment(evidenceArtifacts)}`));
     await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
     await update((state) => {
       const run = ticketRun(state, ticketId);
@@ -1428,9 +1413,10 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
     });
     const integratedAt = new Date().toISOString();
     const productContext = contextContent === null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
+    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
     const handoff = await persistArtifact(dataDir, current.ticket, {
       runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nIntegrated into: \`${sourceCwd}\`\n\nSource branch: \`${current.workspace.branch}\`\n\nCommit: \`${integration.commit}\`${productContext ? `\n\nLiving product context: \`${productContext.path}\`.` : ""}\n\n${diff?.stat || "No changed files."}`
+      content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nIntegrated into: \`${sourceCwd}\`\n\nSource branch: \`${current.workspace.branch}\`\n\nCommit: \`${integration.commit}\`${productContext ? `\n\nLiving product context: \`${productContext.path}\`.` : ""}\n\n${diff?.stat || "No changed files."}${visualEvidenceHandoffSection(evidenceArtifacts)}`
     });
     await update((state) => {
       const run = ticketRun(state, ticketId);
@@ -1955,7 +1941,7 @@ async function api(request, response, url) {
       const run = snapshot.ticketRuns[id] || snapshot.retainedRuns?.[id];
       if (!run) throw new Error(`Retained run not found: ${id}`);
       if (activeTickets.has(run.id) || activeMerges.has(run.id)) throw new Error(`Cannot clean active run ${run.id}`);
-      if (!["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)) throw new Error(`Run ${id} is not safe to clean`);
+      if (!terminalRunStatusSet.has(run.status)) throw new Error(`Run ${id} is not safe to clean`);
       cleaned.push(await cleanupRetainedRun({ run, dataDir, previewManager: snapshot.ticketRuns[run.id] && id !== run.id ? null : previews }));
       await update((draft) => {
         delete draft.ticketRuns[id];
@@ -2263,42 +2249,7 @@ async function api(request, response, url) {
   json(response, 404, { error: "Not found" });
 }
 
-const contentTypes = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml" };
-async function staticFile(response, pathname) {
-  const relative = pathname === "/" ? "index.html" : pathname.slice(1);
-  const file = normalize(join(publicDir, relative));
-  if (!file.startsWith(publicDir)) return json(response, 403, { error: "Forbidden" });
-  try { if (!(await stat(file)).isFile()) return json(response, 404, { error: "Not found" }); }
-  catch { return json(response, 404, { error: "Not found" }); }
-  response.writeHead(200, {
-    "content-type": contentTypes[extname(file)] || "application/octet-stream",
-    "content-security-policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'",
-    "x-content-type-options": "nosniff"
-  });
-  createReadStream(file).on("error", () => response.destroy()).pipe(response);
-}
-
-function authorizeApi(request, response, url) {
-  if (!apiToken || !url.pathname.startsWith("/api/")) return true;
-  const header = request.headers.authorization || request.headers["x-agent-plan-token"] || "";
-  const presented = String(header).startsWith("Bearer ") ? String(header).slice(7) : String(header);
-  if (presented && presented === String(apiToken)) return true;
-  json(response, 401, { error: "Unauthorized" });
-  return false;
-}
-
-async function handleRequest(request, response) {
-  const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
-  try {
-    if (url.pathname.startsWith("/api/") && !authorizeApi(request, response, url)) return;
-    if (url.pathname.startsWith("/api/")) await api(request, response, url);
-    else await staticFile(response, url.pathname);
-  } catch (error) {
-    if (!response.headersSent) json(response, 400, { error: error.message });
-    else response.end();
-  }
-}
-
+const handleRequest = createHandleRequest({ publicDir, apiToken, host, port, api });
 const server = createServer(handleRequest);
 const sseHeartbeat = setInterval(() => {
   for (const client of clients) writeSse(client, ":\n\n");

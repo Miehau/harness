@@ -12,6 +12,8 @@ Use `node scripts/nav.mjs`, `node scripts/test.mjs`, and `node scripts/seed.mjs`
 - Direct deploy
 - `src/camera-control.js` (unrelated NVR helper)
 
+Done in-tree: PR1 (named statuses in `src/run-status.js`), PR2 (`src/http.js`), PR4 (`test/e2e-daemon.test.js`), PR5 (Pi labels). Screenshots: [evidence/](evidence/). PR3 (pipeline extract) and PR6 (jj parallel) remain.
+
 ## PR 1 — Named run vocabulary
 
 **Why:** Run, merge, checkpoint, and recovery statuses are raw strings copied across [src/store.js](../src/store.js), [src/execution.js](../src/execution.js), and [src/server.js](../src/server.js). Splitting the daemon later without a single list will drop a transition.

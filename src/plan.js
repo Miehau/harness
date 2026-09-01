@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-
-const stepStatuses = new Set(["draft", "ready", "running", "review_ready", "fixing", "needs_attention", "needs_input", "awaiting_approval", "accepted", "failed", "interrupted", "cancelled"]);
+import { stepStatuses } from "./run-status.js";
 export const defaultReviewBudget = Object.freeze({ maxFiles: 8, maxChangedLines: 400 });
 
 function positiveInteger(value, fallback) {

@@ -8,7 +8,7 @@ const escapeHtml = (value = "") => String(value)
 
 let state = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
-let codexModels = [];
+let piModels = [];
 let savedView = {};
 try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); } catch {}
 let selectedStepId = savedView.selectedStepId || null;
@@ -56,14 +56,14 @@ function renderProfiles() {
   const cards = profileIds.map((id) => {
     const profile = state.stageProfiles[id];
     const label = escapeHtml(profile.label);
-    const models = codexModels.some((model) => model.id === profile.model) ? codexModels : [{ id: profile.model, name: profile.model }, ...codexModels];
+    const models = piModels.some((model) => model.id === profile.model) ? piModels : [{ id: profile.model, name: profile.model }, ...piModels];
     return `<fieldset class="profile-card" data-profile="${id}"><legend>${label}</legend><label for="${id}-model">Model<select id="${id}-model" name="${id}-model" required>${models.map((model) => `<option value="${escapeHtml(model.id)}" ${profile.model === model.id ? "selected" : ""}>${escapeHtml(model.name || model.id)}</option>`).join("")}</select></label><label for="${id}-thinking">Reasoning<select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></label><label class="profile-prompt" for="${id}-prompt">Agent instructions<textarea id="${id}-prompt" name="${id}-prompt" rows="5">${escapeHtml(profile.prompt)}</textarea></label></fieldset>`;
   }).join("");
   $("#profile-fields").innerHTML = cards;
   $("#max-concurrent-tickets").value = state.settings?.maxConcurrentTickets || 2;
   $("#project-mode").value = state.settings?.projectMode || "manual";
   $("#poll-interval-seconds").value = state.settings?.pollIntervalSeconds || 60;
-  const providers = [...new Set(codexModels.map((model) => model.provider).filter(Boolean))];
+  const providers = [...new Set(piModels.map((model) => model.provider).filter(Boolean))];
   const providerLabel = document.querySelector(".profiles-provider");
   if (providerLabel) providerLabel.textContent = providers.length ? `Provider: ${providers.join(", ")}` : "Pi models";
 }
@@ -563,8 +563,8 @@ function artifactBody(artifact) {
 }
 function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
   const ticketId = runFor()?.id;
-  for (const artifact of artifacts) if (artifactBody(artifact) == null) hydrateArtifact(ticketId, artifact);
-  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in Zed">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifactBody(artifact) == null ? `<div class="run-empty">Loading artifact…</div>` : artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifactBody(artifact)))}</code></pre>` : renderMarkdown(artifactBody(artifact))}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
+  for (const artifact of artifacts) if (artifact.kind !== "visual-evidence" && artifactBody(artifact) == null) hydrateArtifact(ticketId, artifact);
+  return `<div class="artifact-list">${artifacts.map((artifact) => `<article class="artifact"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(artifact.id)}" title="Open in Zed">${escapeHtml(artifact.name)} ↗</button><span class="artifact-source">${escapeHtml(artifact.kind)}</span></header><code class="artifact-path">${escapeHtml(artifact.path || "")}</code><div class="artifact-body">${artifact.kind === "visual-evidence" ? (artifact.summary ? `<p>${escapeHtml(artifact.summary)}</p>` : "") : artifactBody(artifact) == null ? `<div class="run-empty">Loading artifact…</div>` : artifact.name.endsWith(".json") ? `<pre><code data-language="json">${escapeHtml(formatOutput(artifactBody(artifact)))}</code></pre>` : renderMarkdown(artifactBody(artifact))}</div></article>`).join("") || `<div class="run-empty">No persisted artifacts yet.</div>`}</div>`;
 }
 
 function renderInspector() {
@@ -1142,7 +1142,7 @@ events.onmessage = ({ data }) => {
 events.onerror = () => notify("Live connection lost; reconnecting…");
 
 state = await api("/api/state");
-try { codexModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }
+try { piModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }
 await refreshTickets();
 render();
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());

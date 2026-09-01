@@ -1,4 +1,6 @@
-const terminalStatuses = new Set(["completed", "failed", "needs_attention", "cancelled", "interrupted"]);
+import { terminalRunStatusSet } from "./run-status.js";
+
+const terminalStatuses = terminalRunStatusSet;
 
 export function ticketReady(ticket) {
   if (ticket?.state?.type !== "unstarted") return false;

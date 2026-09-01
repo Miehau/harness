@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inspectApp } from "../scripts/inspect.js";
+import { inspectApp, repoRoot } from "../scripts/inspect.js";
 import { runNav } from "../scripts/nav.mjs";
 import { runSeed } from "../scripts/seed.mjs";
 import { runTests } from "../scripts/test.mjs";
@@ -22,7 +22,10 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/tickets/:id/steps/:id/:decision"));
   assert.ok(app.ui.dialogs.includes("workspace-dialog"));
   assert.ok(app.cli.includes("wait"));
+  assert.ok(app.cli.includes("select"));
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
+  const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
+  assert.equal(html.includes("Provider: openai-codex"), false);
 });
 
 test("nav CLI prints a map and json", async () => {

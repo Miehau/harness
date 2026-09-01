@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
+import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 
 export const runStageDefs = [
@@ -138,17 +139,16 @@ export function markRunCancelled(run, at = new Date().toISOString()) {
   run.cancelledAt = at;
   run.checkpoint = null;
   run.activeRuns = {};
-  for (const step of flattenSteps(run.plan)) if (["running", "fixing"].includes(step.status)) step.status = "cancelled";
+  for (const step of flattenSteps(run.plan)) if (inFlightStepStatusSet.has(step.status)) step.status = "cancelled";
   const stage = run.stages.find((item) => item.status === "active");
   if (stage) Object.assign(stage, { status: "blocked", summary: "Run cancelled" });
 }
 
 export function clearInactiveRuns(state, activeTicketIds) {
-  const running = new Set(["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge"]);
   let cleared = 0;
   for (const id of Object.keys(state.ticketRuns)) {
     const run = state.ticketRuns[id];
-    if (activeTicketIds.has(id) && running.has(run.status)) continue;
+    if (activeTicketIds.has(id) && inFlightRunStatusSet.has(run.status)) continue;
     state.retainedRuns ||= {};
     state.retainedRuns[`${id}:${run.runId || "legacy"}`] = run;
     delete state.ticketRuns[id];
@@ -302,7 +302,7 @@ export function stepCheckpointResumeKind(checkpoint) {
 }
 
 export function resumeStage(run) {
-  if (!["interrupted", "cancelled", "needs_attention"].includes(run?.status)) return null;
+  if (!resumeRunStatusSet.has(run?.status)) return null;
   return run.plan ? "run" : run.stages?.find((stage) => stage.status === "active")?.id || null;
 }
 
@@ -310,24 +310,24 @@ export function prepareRunResume(run) {
   if (!["cancelled", "needs_attention"].includes(run?.status)) return false;
   run.status = "interrupted";
   for (const step of flattenSteps(run.plan)) {
-    if (["cancelled", "needs_attention", "failed"].includes(step.status)) step.status = "interrupted";
+    if (restartableStepStatusSet.has(step.status)) step.status = "interrupted";
   }
   return true;
 }
 
 export function nextRunnableStep(plan) {
   return flattenSteps(plan).find((step) =>
-    ["ready", "interrupted"].includes(step.status) && blockingReasons(plan, step).length === 0
+    runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
   ) || null;
 }
 
 export function nextRunnableBatch(plan) {
-  if (flattenSteps(plan).some((step) => ["review_ready", "needs_input", "awaiting_approval"].includes(step.status))) return [];
+  if (flattenSteps(plan).some((step) => gateStepStatusSet.has(step.status))) return [];
   const first = nextRunnableStep(plan);
   if (!first) return [];
   const group = parentGroup(plan, first.id);
   return group ? group.children.filter((step) =>
-    ["ready", "interrupted"].includes(step.status) && blockingReasons(plan, step).length === 0
+    runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
   ) : [first];
 }
 
