@@ -22,7 +22,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, findingsFingerprint, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -263,23 +263,6 @@ function setStage(run, id, status, summary = "") {
   return stage;
 }
 
-function initialStages() {
-  return [
-    ["requirements", "Clarify requirements"],
-    ["explore", "Explore code & ticket horizon"],
-    ["design", "Design & plan"],
-    ["implement", "Implement"],
-    ["verify", "Review & verify"],
-    ["handoff", "Handoff"]
-  ].map(([id, title], index) => ({ id, title, status: index ? "pending" : "active", summary: "" }));
-}
-
-function localStages() {
-  const stages = initialStages();
-  for (const stage of stages.slice(0, 3)) Object.assign(stage, { status: "completed", summary: "Loaded from the local fixture" });
-  return stages;
-}
-
 function json(response, status, payload) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
@@ -356,12 +339,7 @@ async function beginTicket(ticket, { automaticAdmission = false } = {}) {
 }
 
 function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
-  return {
-    id: ticket.id, runId, ticket, automaticAdmission, status: "preparing", workspace: null,
-    stageProfiles: structuredClone(stageProfiles), stages: initialStages(), checkpoint: null, plan: null,
-    artifacts: [], activeRuns: {}, trackerEvents: {}, sessionFile: null, auto: false, lastError: null,
-    workflow: initialWorkflow(), createdAt: new Date().toISOString()
-  };
+  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId });
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {

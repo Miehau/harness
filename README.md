@@ -108,8 +108,12 @@ When `project.json` declares a `preview` or `dev` command, visual tickets receiv
 
 ```bash
 npm test
-node --check src/server.js
-node --check public/app.js
+node scripts/test.mjs plan          # one file
+node scripts/test.mjs --map         # src → test
+node scripts/nav.mjs                # live API / UI / module map
+node scripts/seed.mjs --list        # daemon state fixtures
 ```
+
+See [scripts/README.md](scripts/README.md).
 
 Jujutsu is the default history layer: each serial implementation step is an editable change whose stable change ID survives evolving revisions. Accepted changes are exported as ordinary Git commits before the existing review and delivery flow. Dependency-ready siblings run serially in this mode for now. Use `--vcs git` (or `AGENT_PLAN_VCS=git`) only when a repository needs the compatibility path.

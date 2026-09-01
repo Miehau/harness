@@ -1,5 +1,67 @@
+import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
-import { workflowBlockers } from "./workflow.js";
+import { initialWorkflow, workflowBlockers } from "./workflow.js";
+
+export const runStageDefs = [
+  ["requirements", "Clarify requirements"],
+  ["explore", "Explore code & ticket horizon"],
+  ["design", "Design & plan"],
+  ["implement", "Implement"],
+  ["verify", "Review & verify"],
+  ["handoff", "Handoff"]
+];
+
+export function initialStages() {
+  return runStageDefs.map(([id, title], index) => ({ id, title, status: index ? "pending" : "active", summary: "" }));
+}
+
+export function localStages() {
+  const stages = initialStages();
+  for (const stage of stages.slice(0, 3)) Object.assign(stage, { status: "completed", summary: "Loaded from the local fixture" });
+  return stages;
+}
+
+export function createTicketRun(ticket, stageProfiles, extras = {}) {
+  const {
+    runId = randomUUID(),
+    automaticAdmission = false,
+    status = "preparing",
+    workspace = null,
+    stages,
+    checkpoint = null,
+    plan = null,
+    artifacts = [],
+    activeRuns = {},
+    trackerEvents = {},
+    sessionFile = null,
+    auto = false,
+    lastError = null,
+    workflow,
+    createdAt = new Date().toISOString(),
+    ...rest
+  } = extras;
+  return {
+    id: ticket.id,
+    runId,
+    ticket,
+    automaticAdmission,
+    status,
+    workspace,
+    stageProfiles: structuredClone(stageProfiles),
+    stages: stages || initialStages(),
+    checkpoint,
+    plan,
+    artifacts,
+    activeRuns,
+    trackerEvents,
+    sessionFile,
+    auto,
+    lastError,
+    workflow: workflow || initialWorkflow(),
+    createdAt,
+    ...rest
+  };
+}
 
 export function appendBounded(value, addition, limit) {
   const chunk = String(addition || "");
