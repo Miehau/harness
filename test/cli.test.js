@@ -94,6 +94,21 @@ test("answer --approve submits an empty requirements response", async () => {
   assert.equal(JSON.parse(output.join("")).accepted, true);
 });
 
+test("restart exposes the dashboard restart route", async () => {
+  let called;
+  await runCli(["restart", "ticket-1", "stage:design"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/restart");
+  assert.deepEqual(called.body, { target: "stage:design" });
+});
+
 test("accept --auto enables automatic continuation at a review checkpoint", async () => {
   let called;
   await runCli(["accept", "build", "ticket-1", "--auto"], {

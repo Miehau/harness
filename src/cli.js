@@ -11,6 +11,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   list timeline [ticketId]          Inspector output for the active step
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
+  restart <ticketId> [target]       Restart fresh or from stage:<id>/step:<id>
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
@@ -79,6 +80,13 @@ async function handleCommand(command, rest, ctx) {
   if (command === "resume") {
     const id = await resolveTicketId(rest[0], ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/resume", { body: {}, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "restart") {
+    const [id, target = "fresh"] = rest;
+    if (!id) throw new Error("Usage: agent-plan restart <ticketId> [fresh|stage:<id>|step:<id>]");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/restart", { body: { target }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
