@@ -1999,7 +1999,7 @@ async function startFreshRun(ticketId) {
     previousStages: previous.stages.map(({ id, status }) => ({ id, status })),
     previousSteps: flattenSteps(previous.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }))
   };
-  const fixture = previous.ticket.source === "local" ? await freshLocalRun(previous, audit.nextRunId) : null;
+  const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId) : null;
   if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
   const artifact = await restartAuditArtifact(previous, audit);
   previews.stopMatching(`${ticketId}:`);
