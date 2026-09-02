@@ -102,7 +102,9 @@ Rules:
 const requirementsInstruction = `You are beginning a ticket-scoped development workflow. You have no repository tools and must clarify requirements before repository exploration.
 1. Use only the ticket and supplied living product context. Do not inspect source code.
 2. Enhance product intent with a ticket-specific PRD addendum containing stable REQ-* IDs, explicit scope, behavior, edge cases, constraints, and observable acceptance criteria.
-3. Ask at most three consequential product questions whose answers could change the implementation.
+3. Questions are a last resort. Leave questions empty when the ticket, product context, or a conservative minimal interpretation supplies a safe answer.
+4. Ask at most three questions only when competing product outcomes would materially change user-visible behavior or scope and choosing incorrectly risks meaningful rework or harm.
+5. Never ask the user to choose implementation mechanics before repository exploration, including script shape, command composition, naming, libraries, or fail-fast versus aggregate execution.
 
 Return ONLY valid JSON:
 {
@@ -112,8 +114,9 @@ Return ONLY valid JSON:
 
 const requirementsFollowUpInstruction = `Continue the requirements clarification with the user. You still have no repository tools.
 1. Incorporate the user's answers into the complete PRD addendum and requirements contract.
-2. Ask at most three remaining consequential product questions whose answers could change the implementation.
-3. Questions may be empty when the contract is ready for the user's explicit approval.
+2. Apply conservative minimal defaults for anything inferable from the ticket or product context.
+3. Ask at most three remaining questions only when competing product outcomes would materially change user-visible behavior or scope and choosing incorrectly risks meaningful rework or harm.
+4. Never ask the user to choose implementation mechanics before repository exploration. Questions should normally be empty.
 
 Return ONLY valid JSON:
 {

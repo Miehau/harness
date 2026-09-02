@@ -50,6 +50,26 @@ test("requirements clarification reuses the private session for follow-up questi
   assert.deepEqual(result.questions, ["Should archived tasks remain searchable?"]);
 });
 
+test("requirements clarification reserves questions for unresolved product outcomes", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  let prompt;
+  harness.planningSession = async () => ({ sessionFile: "/tmp/requirements.jsonl" });
+  harness.visibleSupervisorPrompt = async (_session, value) => {
+    prompt = value;
+    return JSON.stringify({ artifact: "# Requirements", questions: [] });
+  };
+
+  await harness.clarifyRequirements({
+    cwd: "/repo", runId: "run-1", productContext: "No extra context.",
+    ticket: { id: "ticket-1", identifier: "T-1", title: "Add verification", description: "Reuse existing checks." }
+  });
+
+  assert.match(prompt, /Questions are a last resort/);
+  assert.match(prompt, /conservative minimal interpretation/);
+  assert.match(prompt, /Never ask the user to choose implementation mechanics/);
+  assert.match(prompt, /fail-fast versus aggregate execution/);
+});
+
 test("planning exposes exact skills and rejects unavailable names", async () => {
   const harness = new PiHarness({ dataDir: tmpdir() });
   const session = {
