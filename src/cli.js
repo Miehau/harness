@@ -13,6 +13,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   resume [ticketId]                 Resume paused, interrupted, or failed work
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
+  revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -107,6 +108,14 @@ async function handleCommand(command, rest, ctx) {
     const auto = rest.includes("--auto");
     const id = await resolveTicketId(rest.slice(1).find((arg) => arg !== "--auto"), ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/accept", { body: { auto }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "revise") {
+    const [stepId, id, ...words] = rest;
+    const feedback = words.join(" ").trim();
+    if (!stepId || !id || !feedback) throw new Error("Usage: agent-plan revise <stepId> <ticketId> <feedback>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/changes", { body: { feedback }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
