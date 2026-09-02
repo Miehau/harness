@@ -187,7 +187,7 @@ export function normalizeReviewNotes(raw = [], diff = {}, existing = []) {
 
 export function reviewNoteFeedback(notes = [], requests = [], feedback = "") {
   const requested = new Map((Array.isArray(requests) ? requests : [requests]).map((request) => {
-    const id = String(request?.id ?? request ?? "").trim();
+    const id = String(request && typeof request === "object" ? request.id ?? "" : request ?? "").trim();
     return [id, String(request?.feedback || "").trim()];
   }).filter(([id]) => id));
   const selected = [...requested].map(([id, request]) => ({ note: notes.find((note) => note.id === id && note.status === "current"), request })).filter(({ note }) => note);

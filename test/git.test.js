@@ -85,6 +85,7 @@ test("selected review notes become one focused rewrite request", () => {
   assert.match(prompt, /Make the locking easier to scan/);
   assert.match(prompt, /Explain why the fallback can go/);
   assert.match(prompt, /call review_note for each selected ID \(rn-one, rn-two\)/);
+  assert.equal(reviewNoteFeedback(notes, [{ id: undefined, feedback: "ignored" }], "Apply the general fix"), "Apply the general fix");
   assert.throws(() => reviewNoteFeedback(notes, ["rn-missing"], "Fix it"), /stale or no longer exists/);
   assert.throws(() => reviewNoteFeedback(notes, ["rn-one"]), /Describe the requested rewrite/);
 });
