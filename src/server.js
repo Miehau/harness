@@ -1027,8 +1027,9 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const findings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
         if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
       }
-      let previousFingerprint = findingsFingerprint(step.attempts?.at(-1)?.verification?.findings || []);
-      for (let round = 1; ; round++) {
+      let previousFindings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
+      let previousFingerprint = findingsFingerprint(previousFindings);
+      for (let round = (step.attempts?.length || 0) + 1; ; round++) {
         signal?.throwIfAborted();
         const latest = ticketRun(store.read(), ticketId);
         const currentStep = findNode(latest.plan, stepId);
@@ -1156,6 +1157,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
             design, diff, output: result.output, checks, runId: latest.runId, round,
+            focusFindings: round > 1 ? previousFindings : [],
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
             onEvent: activity.onEvent,
@@ -1253,6 +1255,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           return;
         }
         previousFingerprint = decision.fingerprint;
+        previousFindings = findings;
         nextFeedback = `Fresh verification found these actionable issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
       }
     } catch (error) {

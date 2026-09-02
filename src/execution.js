@@ -439,10 +439,14 @@ export function nextRunnableBatch(plan) {
   ) : [first];
 }
 
+const actionableSeverities = new Set(["critical", "high", "medium", "blocking", "warning"]);
+
 export function actionableFindings(reviews) {
   const seen = new Set();
   return reviews.flatMap((review) => review.findings || [])
     .filter((finding) => {
+      const severity = String(finding.severity || "").toLowerCase();
+      if (!actionableSeverities.has(severity)) return false;
       const evidence = finding.evidence?.[0] || {};
       const key = `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
       if (seen.has(key)) return false;
@@ -451,7 +455,7 @@ export function actionableFindings(reviews) {
     });
 }
 
-export const MAX_CORRECTION_ROUNDS = 8;
+export const MAX_CORRECTION_ROUNDS = 3;
 
 export function findingsFingerprint(findings = []) {
   return actionableFindings([{ findings }])
@@ -466,7 +470,7 @@ export function findingsFingerprint(findings = []) {
 export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
   const fingerprint = findingsFingerprint(findings);
   if (Number(round) >= maxRounds) {
-    return { pause: true, reason: `Paused after ${maxRounds} correction rounds without a passing verification.`, fingerprint };
+    return { pause: true, reason: `Paused after ${maxRounds} verification attempts without a passing result.`, fingerprint };
   }
   if (previousFingerprint && fingerprint && fingerprint === previousFingerprint) {
     return { pause: true, reason: "The same verification findings repeated without meaningful progress.", fingerprint };

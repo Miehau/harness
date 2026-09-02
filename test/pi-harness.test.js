@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, PiHarness, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 
@@ -253,17 +253,59 @@ test("fresh verification receives the completed deterministic gate", async () =>
     });
     const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
 
-    const result = await harness.verifyStep({
+    const input = {
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
       design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done", checks: {
         status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
       }, runId: "run", round: 1
-    });
+    };
+    const result = await harness.verifyStep(input);
 
     assert.equal(result.summary, "Verified");
     assert.match(prompt, /The deterministic gate has already run/);
     assert.match(prompt, /10 tests passed/);
+    assert.match(prompt, /Report only critical, high, or medium findings/);
+    assert.match(prompt, /Keep inspection inside the current working directory/);
     assert.doesNotMatch(prompt, /run focused deterministic checks when useful/);
+
+    await harness.verifyStep({ ...input, round: 2, focusFindings: [{ severity: "high", claim: "Write guard is bypassed" }] });
+    assert.match(prompt, /This is a correction verification/);
+    assert.match(prompt, /Write guard is bypassed/);
+    assert.match(prompt, /Do not start a new broad audit/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh verification stops after its repository inspection budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-budget-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    const subscribers = [];
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe(fn) { subscribers.push(fn); return () => {}; },
+      async prompt() {
+        for (let index = 0; index <= MAX_VERIFICATION_ACTIONS; index++) {
+          for (const fn of subscribers) fn({ type: "tool_execution_start", toolName: "read", toolCallId: `read-${index}`, args: { path: "src/a.js" } });
+        }
+      },
+      async abort() {},
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    await assert.rejects(harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done", checks: {
+        status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
+      }, runId: "run", round: 1
+    }), /20-action inspection budget/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -16,6 +16,8 @@ import { visualEvidenceMedia } from "./artifacts.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
+export const MAX_VERIFICATION_ACTIONS = 20;
+export const MAX_VERIFICATION_MS = 3 * 60 * 1000;
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -158,6 +160,14 @@ const reviewerCharters = {
   integration: "Inspect correctness and integration boundaries: state, API contracts, persistence, concurrency, error handling, migrations, and maintainability. Follow changed code into its callers and consumers.",
   verification: "Inspect tests and regression risk. Check relevant security, accessibility, performance, configuration, and deployment behavior. Identify claims that are not proven by deterministic checks."
 };
+
+const findingRubric = `Severity rubric:
+- critical: credible credential exposure, destructive access, data loss, or a failure that makes the core ticket unsafe to ship
+- high: an acceptance criterion or security boundary is broken, or likely user behavior is materially incorrect with no practical workaround
+- medium: a bounded correctness, regression, test, accessibility, performance, or maintainability defect with concrete user or operator impact
+- low: polish, optional hardening, speculative risk, or preference
+
+Report only critical, high, or medium findings. Omit low-severity observations.`;
 
 function textFromContent(content) {
   if (typeof content === "string") return content;
@@ -921,7 +931,7 @@ If user input or approval is required, call workflow_checkpoint and include step
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, images = [], runId, round, profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
@@ -934,9 +944,19 @@ If user input or approval is required, call workflow_checkpoint and include step
     session.setSessionName(`verify:${step.id}:round-${round}`);
     const unbindAbort = bindAbort(session, signal);
     let lastThinkingAt = 0;
+    let actionCount = 0;
+    let budgetError = null;
+    let budgetAbort;
+    const stopForBudget = (message) => {
+      if (budgetError) return;
+      budgetError = new Error(message);
+      budgetAbort = session.abort();
+    };
+    const budgetTimer = setTimeout(() => stopForBudget(`Verification exceeded its ${MAX_VERIFICATION_MS / 60000}-minute time budget.`), MAX_VERIFICATION_MS);
     const unsubscribe = session.subscribe((event) => {
       const safe = safeEvent(event);
       if (!safe) return;
+      if (safe.type === "tool_start" && ++actionCount > MAX_VERIFICATION_ACTIONS) stopForBudget(`Verification exceeded its ${MAX_VERIFICATION_ACTIONS}-action inspection budget.`);
       if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
       if (safe.type === "thinking") lastThinkingAt = Date.now();
       onEvent?.(safe);
@@ -946,6 +966,10 @@ If user input or approval is required, call workflow_checkpoint and include step
       await session.prompt(this.configuredPrompt(session, profile, `# Fresh implementation-slice verification
 
 Review this slice without relying on the implementation conversation. Inspect repository evidence. The deterministic gate has already run; use its result below rather than attempting to rerun it.
+
+${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}` : "This is the initial verification pass for this slice."}
+
+Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than 20 repository read, search, find, or list actions.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
@@ -979,7 +1003,7 @@ Return ONLY JSON:
 {
   "summary": "concise verification result",
   "findings": [{
-    "severity": "blocking | warning",
+    "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
     "evidence": [{"file": "path", "line": 1}],
@@ -988,13 +1012,18 @@ Return ONLY JSON:
   }]
 }
 
+${findingRubric}
+
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
+      if (budgetError) throw budgetError;
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
       const parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
       return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
     } finally {
+      clearTimeout(budgetTimer);
       unsubscribe();
+      await budgetAbort?.catch(() => {});
       await unbindAbort();
       session.dispose();
     }
@@ -1109,7 +1138,7 @@ Return ONLY JSON:
 {
   "summary": "concise independent assessment",
   "findings": [{
-    "severity": "blocking | warning",
+    "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
     "evidence": [{"file": "path", "line": 1}],
@@ -1118,6 +1147,8 @@ Return ONLY JSON:
     "confidence": "high | medium | low"
   }]
 }
+
+${findingRubric}
 
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`);
     const unbindAbort = bindAbort(session, signal);

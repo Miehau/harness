@@ -45,10 +45,20 @@ test("resuming a run makes attention-blocked workers runnable again", () => {
 test("final review keeps every unique actionable finding", () => {
   const duplicate = { severity: "blocking", claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] };
   const findings = actionableFindings([
-    { findings: [duplicate, { severity: "warning", claim: "Missing browser coverage", evidence: [{ file: "test/app.test.ts", line: 2 }] }] },
+    { findings: [duplicate, { severity: "medium", claim: "Missing browser coverage", evidence: [{ file: "test/app.test.ts", line: 2 }] }] },
     { findings: [duplicate, { severity: "blocking", claim: "No regression test", evidence: [{ file: "test/a.test.ts", line: 1 }] }] }
   ]);
   assert.equal(findings.length, 3);
+});
+
+test("automatic corrections ignore findings below medium severity", () => {
+  const findings = actionableFindings([{ findings: [
+    { severity: "low", claim: "Could rename this helper" },
+    { severity: "medium", claim: "Cancellation leaves the request running" },
+    { severity: "high", claim: "Write access bypasses the guard" },
+    { severity: "critical", claim: "Credentials are exposed" }
+  ] }]);
+  assert.deepEqual(findings.map((finding) => finding.severity), ["medium", "high", "critical"]);
 });
 
 test("cancelling a run stops every active step and preserves it for resume", () => {
@@ -223,15 +233,15 @@ test("plan approval ignores supervisor workflow gates", () => {
 });
 
 test("correction pauses at the round cap or when findings repeat", () => {
-  const findings = [{ claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] }];
+  const findings = [{ severity: "high", claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] }];
   const first = shouldPauseCorrection({ round: 1, findings, previousFingerprint: "" });
   assert.equal(first.pause, false);
   const repeat = shouldPauseCorrection({ round: 2, findings, previousFingerprint: first.fingerprint });
   assert.equal(repeat.pause, true);
   assert.match(repeat.reason, /repeated/);
-  const capped = shouldPauseCorrection({ round: 8, findings, previousFingerprint: "other" });
+  const capped = shouldPauseCorrection({ round: 3, findings, previousFingerprint: "other" });
   assert.equal(capped.pause, true);
-  assert.match(capped.reason, /8 correction rounds/);
+  assert.match(capped.reason, /3 verification attempts/);
 });
 
 test("compact run and public state omit artifact bodies", () => {
