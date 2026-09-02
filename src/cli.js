@@ -9,11 +9,12 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
   list timeline [ticketId]          Inspector output for the active step
-  select <ticketId> [action]        Select; action: resume|approve|cancel
-  resume [ticketId]                 Resume interrupted work
+  select <ticketId> [action]        Select; action: resume|approve|pause|cancel
+  resume [ticketId]                 Resume paused, interrupted, or failed work
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   accept <stepId> [ticketId]        Accept a review-ready step
   cancel [ticketId]
+  pause [ticketId]                  Pause and persist the active checkpoint
   answer <ticketId> <text>
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
@@ -64,7 +65,7 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "select") {
     const id = rest[0];
-    if (!id) throw new Error("Usage: agent-plan select <ticketId> [resume|approve|cancel]");
+    if (!id) throw new Error("Usage: agent-plan select <ticketId> [resume|approve|pause|cancel]");
     await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/select", { body: {}, env, fetchImpl });
     const action = aliasAction(rest[1]);
     if (!action) {
@@ -82,6 +83,12 @@ async function handleCommand(command, rest, ctx) {
   if (command === "cancel") {
     const id = await resolveTicketId(rest[0], ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/cancel", { body: {}, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "pause") {
+    const id = await resolveTicketId(rest[0], ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/pause", { body: {}, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -220,8 +227,8 @@ async function timeline(explicitId, ctx) {
 function aliasAction(value) {
   if (!value) return null;
   if (value === "resume-run") return "resume";
-  if (["resume", "approve", "cancel", "start"].includes(value)) return value;
-  throw new Error("Unknown action: " + value + " (resume|approve|cancel)");
+  if (["resume", "approve", "pause", "cancel", "start"].includes(value)) return value;
+  throw new Error("Unknown action: " + value + " (resume|approve|pause|cancel)");
 }
 
 async function resolveTicketId(explicit, ctx) {

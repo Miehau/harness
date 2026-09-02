@@ -66,7 +66,7 @@ export function preferredStepId(plan, currentId) {
 
 export function preferredStageId(stages = [], currentId) {
   if (stages.some((stage) => stage.id === currentId)) return currentId;
-  return stages.find((stage) => ["blocked", "failed", "needs_attention"].includes(stage.status))?.id || stages.find((stage) => stage.status === "active")?.id || stages.find((stage) => stage.status !== "completed")?.id || stages.at(-1)?.id || null;
+  return stages.find((stage) => ["blocked", "failed", "needs_attention", "paused"].includes(stage.status))?.id || stages.find((stage) => stage.status === "active")?.id || stages.find((stage) => stage.status !== "completed")?.id || stages.at(-1)?.id || null;
 }
 
 export function stageDetailModel(run, stageId) {
@@ -397,7 +397,7 @@ export function reviewNotesForRows(notes = [], path, rows = []) {
   }));
 }
 
-const youRunStatuses = new Set(["needs_attention", "failed", "interrupted", "awaiting_approval", "awaiting_evidence_review", "awaiting_input", "awaiting_requirements"]);
+const youRunStatuses = new Set(["needs_attention", "failed", "interrupted", "paused", "awaiting_approval", "awaiting_evidence_review", "awaiting_input", "awaiting_requirements"]);
 const youStepStatuses = new Set(["needs_attention", "failed", "interrupted", "review_ready", "needs_input", "awaiting_approval"]);
 const youCheckpointKinds = new Set(["requirements_review", "evidence_review", "awaiting_approval", "needs_input", "technical_input", "step_review", "needs_attention", "product_context_review", "review_blocked"]);
 const liveStepStatuses = new Set(["running", "fixing"]);
@@ -422,14 +422,14 @@ function fleetState(run) {
   if (run.checkpoint?.kind === "awaiting_approval" && !run.checkpoint.stepId) return { tone: "gate", label: "plan gate" };
   if (run.status === "awaiting_approval" && !run.checkpoint?.stepId) return { tone: "gate", label: "plan gate" };
   const lane = fleetLane(run);
-  if (lane === "you") return { tone: "you", label: run.status === "interrupted" ? "interrupted" : "needs you" };
+  if (lane === "you") return { tone: "you", label: ["interrupted", "paused"].includes(run.status) ? run.status : "needs you" };
   if (lane === "running") return { tone: "run", label: "running" };
   return { tone: "idle", label: run.status === "completed" ? "done" : "queued" };
 }
 
 function currentStage(run) {
   const stages = run?.stages || [];
-  return stages.find((stage) => stage.status === "active" || stage.status === "blocked") || stages.filter((stage) => stage.status === "completed").at(-1) || null;
+  return stages.find((stage) => ["active", "blocked", "paused"].includes(stage.status)) || stages.filter((stage) => stage.status === "completed").at(-1) || null;
 }
 
 function lastActivityAt(run) {

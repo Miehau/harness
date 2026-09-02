@@ -275,6 +275,7 @@ test("fleet rail groups tickets by operator urgency, not tracker buckets", () =>
   assert.equal(fleetLane({ status: "running", plan: { nodes: [{ id: "build", status: "review_ready" }] } }), "you");
   assert.equal(fleetLane({ status: "needs_attention" }), "you");
   assert.equal(fleetLane({ status: "interrupted" }), "you");
+  assert.equal(fleetLane({ status: "paused" }), "you");
 });
 
 test("fleet ticket view omits findings and exposes stages plus selected agents", () => {

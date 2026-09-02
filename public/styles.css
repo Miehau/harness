@@ -140,6 +140,7 @@ h3 { font-size: 14px; }
 .status-resolving_conflicts { border-color: #8b6c36; color: #f0ca83; }
 .status-completed, .status-accepted { border-color: #24563e; color: #8de1ad; }
 .status-failed, .status-needs_attention, .status-cancelled { border-color: #633b40; color: #f0a0a0; }
+.status-paused { border-color: #66552e; color: #e4c16f; }
 .supervisor-control { display: flex; align-items: center; gap: 7px; }
 .supervisor-control select { max-width: 220px; min-height: 34px; padding: 0 8px; font-size: 12px; }
 .agent-badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #39404a; border-radius: 99px; padding: 5px 8px; color: #aeb6bf; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
@@ -174,6 +175,8 @@ h3 { font-size: 14px; }
 .stage-completed .stage-marker { background: #173829; color: #8de1ad; }
 .stage-blocked { border-color: #633b40 !important; }
 .stage-blocked .stage-marker { background: #3d2022; color: #f0a0a0; }
+.stage-paused { border-color: #66552e !important; background: #211d15 !important; }
+.stage-paused .stage-marker { background: #3d341f; color: #e4c16f; }
 .progress { height: 4px; margin-top: 14px; overflow: hidden; border-radius: 99px; background: #292d31; }
 .progress span { display: block; height: 100%; border-radius: inherit; background: #79a8f5; }
 .workspace-content { display: grid; min-height: 0; flex: 1; overflow: hidden; grid-template-columns: minmax(300px, 38%) minmax(0, 62%); }
@@ -197,6 +200,7 @@ h3 { font-size: 14px; }
 .status-accepted .state-icon { background: #173829; color: #8de1ad; }
 .status-running .state-icon { background: #1d304d; color: #90b7f7; }
 .status-failed .state-icon, .status-needs_attention .state-icon, .status-cancelled .state-icon { background: #3d2022; color: #f0a0a0; }
+.status-paused .state-icon { background: #3d341f; color: #e4c16f; }
 .status-needs_input .state-icon, .status-awaiting_approval .state-icon { background: #30243f; color: #d3b8f7; }
 .status-review_ready .state-icon { background: #30243f; color: #d3b8f7; box-shadow: 0 0 9px rgb(180 128 240 / .25); }
 .status-fixing .state-icon { background: #493517; color: #f0ca83; }
@@ -832,7 +836,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .checkpoint-icon { width: 26px; height: 26px; }
 .checkpoint-copy { gap: 2px; }
 .checkpoint.clarification { align-items: start; }
-.checkpoint.clarification > .button { position: sticky; top: 0; align-self: start; }
+.checkpoint.clarification > .button { position: static; grid-column: 2; justify-self: end; }
 .checkpoint-copy .eyebrow { display: none; }
 .checkpoint-copy p {
   overflow: hidden;
@@ -849,7 +853,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr);
   gap: 14px;
   border: 0;
   padding: 0;
@@ -873,7 +877,14 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .stage-checkpoint-workspace .requirements-contract code { white-space: pre-wrap; }
 .stage-checkpoint-workspace .checkpoint-copy label { font-size: 12px; }
 .stage-checkpoint-workspace .checkpoint-copy textarea { width: 100%; max-width: 100%; min-height: 76px; }
-.stage-checkpoint-workspace .checkpoint.clarification > .button { top: 8px; }
+.clarification-thread { display: grid; gap: 9px; margin-bottom: 18px; }
+.chat-message { width: min(78%, 680px); border: 1px solid var(--stroke); border-radius: 12px; padding: 11px 13px; background: rgb(255 255 255 / .025); }
+.chat-message.user { justify-self: end; border-color: rgb(139 124 246 / .3); background: rgb(139 124 246 / .1); }
+.chat-message strong { display: block; margin-bottom: 5px; color: #8d96a7; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.chat-message p, .chat-message ol { margin: 0; color: #c8ced8; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.chat-message ol { padding-left: 18px; }
+.clarification-replying { display: flex; gap: 8px; align-items: center; color: #9ca5b5; font-size: 12px; }
+.clarification-replying span { width: 7px; height: 7px; border-radius: 50%; background: #8b7cf6; animation: rail-agent-pulse 1.35s ease-in-out infinite; }
 
 .final-review { display: grid; gap: 18px; border: 1px solid rgb(139 124 246 / .32); border-radius: 14px; padding: 20px; background: linear-gradient(145deg, rgb(139 124 246 / .12), rgb(255 255 255 / .02)); }
 .final-review header { display: grid; gap: 7px; }
@@ -1513,4 +1524,41 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .plan-tree > .workflow-stages li { min-height: 44px; }
   .stage-context h1, .stage-context h2, .stage-context h3, .stage-context strong { font-size: 21px; }
   .stage-step-index button small { white-space: normal; }
+}
+
+/* Keep ticket controls compact when the title and controls stack. */
+@media (max-width: 1200px) {
+  .ticket-heading > div:first-child,
+  .ticket-heading .plan-actions { flex: 0 1 auto; }
+}
+
+/* The map is the persistent navigation for the work surface. */
+.plan-tree { --plan-tree-gutter: 20px; }
+.plan-tree > .workflow-stages {
+  position: sticky;
+  top: calc(-1 * var(--plan-tree-gutter));
+  z-index: 4;
+  margin: calc(-1 * var(--plan-tree-gutter)) calc(-1 * var(--plan-tree-gutter)) 18px;
+  padding: var(--plan-tree-gutter) var(--plan-tree-gutter) 15px;
+  background: rgb(12 15 23 / .98);
+}
+.plan-tree > .workflow-stages ol { gap: 6px; }
+.plan-tree > .workflow-stages li {
+  border: 1px solid var(--stroke);
+  border-radius: 9px;
+  padding: 5px 6px;
+  background: rgb(255 255 255 / .025);
+}
+.plan-tree > .workflow-stages li:hover,
+.plan-tree > .workflow-stages li.selected {
+  border-color: rgb(139 124 246 / .55);
+  background: rgb(139 124 246 / .1);
+}
+.plan-tree > .workflow-stages .stage-active {
+  border-color: rgb(139 124 246 / .55) !important;
+  background: rgb(139 124 246 / .1) !important;
+}
+
+@media (max-width: 800px) {
+  .plan-tree { --plan-tree-gutter: 16px; }
 }

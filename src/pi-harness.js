@@ -704,9 +704,10 @@ export class PiHarness {
     return session;
   }
 
-  async clarifyRequirements({ cwd, ticket, runId, productContext, profile, onEvent, signal }) {
+  async clarifyRequirements({ cwd, ticket, runId, sessionFile, productContext, profile, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
+      await onSessionFile?.(session.sessionFile);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, requirementsInstruction)}\n\n# Living product context\n${productContext}\n\n# Tracker ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
@@ -717,9 +718,10 @@ export class PiHarness {
     }, `${ticket.id}:${runId}:requirements`);
   }
 
-  async refineRequirements({ cwd, ticket, runId, sessionFile, answers, profile, onEvent, signal }) {
+  async refineRequirements({ cwd, ticket, runId, sessionFile, answers, profile, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}-requirements`, { repositoryAccess: false, profile });
+      await onSessionFile?.(session.sessionFile);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, requirementsFollowUpInstruction)}\n\n# User response\n${answers}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
@@ -730,9 +732,10 @@ export class PiHarness {
     }, `${ticket.id}:${runId}:requirements`);
   }
 
-  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, signal }) {
+  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
+      await onSessionFile?.(session.sessionFile);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Exploration output");
       return {
@@ -751,9 +754,10 @@ export class PiHarness {
     }, `${ticket.id}:ticket-lookahead`);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, onEvent, signal }) {
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
+      await onSessionFile?.(session.sessionFile);
       const skillNames = availableSkillNames(session);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketDesignInstruction)}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Design output");
@@ -1134,7 +1138,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, ticketId = "shared", runId = "legacy", profile, signal }) {
+  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
     await mkdir(sessionDir, { recursive: true });
@@ -1164,6 +1168,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
       sessionManager: manager
     });
     session.setSessionName(step.agentId);
+    await onSessionFile?.(session.sessionFile);
     const unbindAbort = bindAbort(session, signal);
     const availableSkills = session.resourceLoader.getSkills().skills;
     const skillBlocks = [];

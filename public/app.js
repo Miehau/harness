@@ -24,8 +24,9 @@ let clearArmed = false;
 let cleanupArmed = false;
 let retention = { items: [], totalBytes: 0 };
 let trackerSettings = null;
-let piSkills = [];
-let piSkillsFor = null;
+let pendingTicketSelections = 0;
+let latestTicketSelection = 0;
+let lastClarificationKey = null;
 const liveRuns = new Map();
 const liveStages = new Map();
 const sessionTraces = new Map();
@@ -83,7 +84,7 @@ function nodeById(id, plan = runFor()?.plan) {
 }
 
 function statusIcon(status) {
-  return ({ completed: "✓", accepted: "✓", active: "↻", running: "↻", fixing: "↻", pending: "○", blocked: "?", review_ready: "◉", awaiting_approval: "◉", needs_input: "?", failed: "×", needs_attention: "!", interrupted: "!", cancelled: "×", ready: "•" })[status] || "·";
+  return ({ completed: "✓", accepted: "✓", active: "↻", running: "↻", fixing: "↻", pending: "○", blocked: "?", review_ready: "◉", awaiting_approval: "◉", needs_input: "?", failed: "×", needs_attention: "!", interrupted: "!", paused: "Ⅱ", cancelled: "×", ready: "•" })[status] || "·";
 }
 
 function statusLabel(run) {
@@ -176,7 +177,7 @@ function renderTickets() {
   $("#ticket-list").innerHTML = groups.length
     ? groups.map((group) => `<section class="ticket-group"><header><span>${group.label}</span><b>${group.items.length}</b></header>${group.items.map(ticketCard).join("")}</section>`).join("")
     : empty;
-  const occupied = Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted"].includes(run.status)).length;
+  const occupied = Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted", "paused"].includes(run.status)).length;
   $("#run-capacity").textContent = `${occupied} / ${state.settings?.maxConcurrentTickets || 2} slots`;
 }
 
@@ -193,12 +194,22 @@ function stagesHtml(run) {
   return `<section class="workflow-stages"><header><span class="eyebrow">Workflow map</span><span class="stage-count">${run.stages.filter((stage) => stage.status === "completed").length}/${run.stages.length} complete</span></header><ol>${run.stages.map((stage, index) => `<li class="stage-${escapeHtml(stage.status)} ${stage.id === selectedStageId ? "selected" : ""}"><button class="workflow-stage" type="button" data-stage="${escapeHtml(stage.id)}" aria-pressed="${stage.id === selectedStageId}" title="${escapeHtml(stage.title)}"><span class="stage-marker" aria-hidden="true">${statusIcon(stage.status)}</span><span class="stage-copy"><strong><em>${index + 1}.</em>${escapeHtml(workflowStageName(stage))}</strong><small>${escapeHtml(workflowStateLabel(stage.status))}</small></span></button></li>`).join("")}</ol></section>`;
 }
 
+function clarificationHistoryHtml(run) {
+  const history = run?.clarificationHistory || [];
+  if (!history.length) return "";
+  return `<section class="clarification-thread" aria-label="Chat history"><span class="eyebrow">Chat history</span>${history.map((item) => {
+    const questions = item.questions?.length ? `<ol>${item.questions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}</ol>` : `<p>${escapeHtml(item.title || "Approval requested")}</p>`;
+    return `<div class="chat-message agent"><strong>Agent</strong>${questions}</div><div class="chat-message user"><strong>You</strong><p>${escapeHtml(item.answer || "Approved without changes.")}</p></div>`;
+  }).join("")}</section>`;
+}
+
 function checkpointHtml(run) {
   const checkpoint = run?.checkpoint;
-  if (!checkpoint) return "";
+  const history = clarificationHistoryHtml(run);
+  if (!checkpoint) return history ? `${history}<div class="clarification-replying" role="status"><span></span>Agent is replying…</div>` : "";
   if (checkpoint.kind === "requirements_review") {
     const questions = checkpoint.questions || [];
-    return `<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Requirements gate · repository not accessed</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract" open><summary>Review requirements contract</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional correction<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a correction…"></textarea></label>`}</div><button class="button success" type="submit">${questions.length ? "Send answers" : "Approve requirements"}</button></form>`;
+    return `${history}<form class="checkpoint clarification" data-clarify="${escapeHtml(run.id)}" data-checkpoint-id="${escapeHtml(checkpoint.id)}"><div class="checkpoint-icon">?</div><div class="checkpoint-copy"><span class="eyebrow">Requirements gate · repository not accessed</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract" open><summary>Review requirements contract</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details>${questions.map((question, index) => `<label>${index + 1}. ${escapeHtml(question)}<textarea name="answer-${index}" rows="2" required></textarea></label>`).join("")}${questions.length ? "" : `<label>Optional correction<textarea name="answer-0" rows="2" placeholder="Approve as written, or add a correction…"></textarea></label>`}</div><button class="button success" type="submit">${questions.length ? "Send answers" : "Approve requirements"}</button></form>`;
   }
   if (["needs_input", "technical_input"].includes(checkpoint.kind)) {
     const questions = checkpoint.questions?.length ? checkpoint.questions : [checkpoint.prompt || "How should this continue?"];
@@ -233,15 +244,6 @@ function checkpointHtml(run) {
   return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" data-approve-ticket="${escapeHtml(run.id)}">Run manually</button><button class="button success" type="button" data-auto-ticket="${escapeHtml(run.id)}">Auto run graph</button></div></div>`;
 }
 
-function supervisorControlHtml(run) {
-  if (!run) return "";
-  const bound = run.workflow?.skillName || "";
-  const options = piSkills.length
-    ? `<option value="">${bound ? "Change Pi skill…" : "Bind Pi skill…"}</option>${piSkills.map((skill) => `<option value="${escapeHtml(skill.name)}" ${skill.name === bound ? "selected" : ""}>${escapeHtml(skill.name)}</option>`).join("")}`
-    : `<option value="">No Pi skills discovered</option>`;
-  return `<form class="supervisor-control" data-bind-workflow="${escapeHtml(run.id)}"><span class="agent-badge supervisor"><span class="agent-dot"></span>${bound ? escapeHtml(bound) : "Supervisor"}</span><select name="skillName" aria-label="Pi skill">${options}</select><button class="button" type="submit" ${piSkills.length ? "" : "disabled"}>${bound ? "Bind" : "Bind skill"}</button></form>`;
-}
-
 function workflowCheckpointsHtml(run) {
   const pending = (run?.workflow?.checkpoints || []).filter((checkpoint) => checkpoint.status === "pending" && checkpoint.blocking === false && checkpoint.id !== run?.checkpoint?.id);
   if (!pending.length) return "";
@@ -251,23 +253,9 @@ function workflowCheckpointsHtml(run) {
   }).join("")}</div>`;
 }
 
-async function refreshSkills(run) {
-  const key = run?.id || null;
-  if (piSkillsFor === key) return;
-  piSkillsFor = key;
-  if (!key) { piSkills = []; return; }
-  try {
-    const result = await api(`/api/tickets/${encodeURIComponent(key)}/skills`);
-    if (piSkillsFor !== key) return;
-    piSkills = result.skills || [];
-    render();
-  } catch (error) {
-    if (piSkillsFor === key) { piSkills = []; notify(error.message); }
-  }
-}
-
 function checkpointUsesWorkspace(run) {
-  return ["requirements_review", "evidence_review"].includes(run?.checkpoint?.kind);
+  return ["requirements_review", "evidence_review"].includes(run?.checkpoint?.kind)
+    || Boolean(run?.clarificationHistory?.length && run.status === "clarifying");
 }
 
 function renderHeader() {
@@ -285,7 +273,7 @@ function renderHeader() {
   const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => stage.status === "active" && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
@@ -293,7 +281,9 @@ function renderHeader() {
   const restartBanner = restartAudit
     ? `<div class="recovery-banner"><strong>Restarted from ${escapeHtml(restartAudit.target.replace(":", " · "))}</strong><span>${escapeHtml(new Date(restartAudit.at).toLocaleString())} · audit ${escapeHtml(restartAudit.id)}</span></div>`
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${supervisorControlHtml(run)}${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  const pauseAudit = run?.pauseHistory?.at(-1);
+  const pauseBanner = pauseAudit ? `<div class="recovery-banner"><strong>${run.status === "paused" ? "Run paused" : "Resumed from pause"}</strong><span>${escapeHtml(new Date(pauseAudit.at).toLocaleString())} · ${escapeHtml(pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`)} · audit ${escapeHtml(pauseAudit.id)}</span></div>` : "";
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -395,7 +385,12 @@ function renderPlanTree() {
   const stage = run?.stages?.find((item) => item.id === selectedStageId);
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => stage.status === "blocked" || stage.status === "active")?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
+    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
+    const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
+    if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
+      lastClarificationKey = clarificationKey;
+      requestAnimationFrame(() => target.scrollTo({ top: target.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }));
+    }
     return;
   }
   if (!run?.plan) {
@@ -459,12 +454,13 @@ function stageActivityPanel(run, stage) {
   const live = liveStages.get(`${run.id}:${stage.id}`);
   const activity = live || stage.activity || {};
   const milestones = stageMilestones(run, stage);
-  if (!live && !stage.activity && !milestones.length) return `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
+  const history = stage.id === "requirements" && !checkpointUsesWorkspace(run) ? clarificationHistoryHtml(run) : "";
+  if (!live && !stage.activity && !milestones.length) return history || `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
   const active = stage.status === "active";
   const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: activity.lastEventAt || stage.updatedAt, lastEvent: activity.lastEvent || stage.summary, warning: activity.warning }, live)) : "";
   const activityTimeline = timelineHtml(activity.events || [], active, activity.groups);
   const milestoneTimeline = milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : "";
-  return `<div class="stage-activity">${pulse}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
+  return `<div class="stage-activity">${history}${pulse}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
 }
 
 function rawOutputFor(run, step) {
@@ -488,7 +484,8 @@ function runPanel(step) {
   const active = run.activeRuns?.[step.id];
   const heartbeat = heartbeatHtml(runHeartbeat(active, liveRuns.get(`${run.id}:${step.id}`)));
   const events = stepEvents(run, step);
-  const raw = `<details class="raw-output"><summary>Raw assistant output</summary><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutputFor(run, step) || "No assistant text yet. Open event details below to inspect tool calls and their output."))}</pre></details>`;
+  const rawOutput = rawOutputFor(run, step);
+  const raw = `<details class="raw-output" data-load-session-trace="${escapeHtml(step.id)}"><summary>Raw assistant output</summary><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutput || (step.sessionFile ? "Open to load the full session transcript." : "No assistant text yet. Open event details below to inspect tool calls and their output.")))}</pre></details>`;
   return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
 }
 
@@ -644,8 +641,8 @@ function renderInspector() {
     const artifacts = artifactsForStage(run.artifacts, stage.id);
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
     const stageTab = ["activity", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
-    const panels = { activity: stageActivityPanel(run, stage), artifacts: artifactsPanel(null, artifacts), details: stageDetailsPanel(run, stage, profile, artifacts) };
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panels[stageTab]}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
@@ -654,12 +651,20 @@ function renderInspector() {
     target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
-  loadSessionTrace(run, step);
-  const promptArtifact = [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt");
-  if (promptArtifact) hydrateArtifact(run.id, promptArtifact);
+  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
+  const promptArtifact = workerTab === "prompt" ? [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt") : null;
+  if (workerTab === "prompt") {
+    loadSessionTrace(run, step);
+    if (promptArtifact) hydrateArtifact(run.id, promptArtifact);
+  }
   const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || artifactBody(promptArtifact || {}) || "Prompt has not been rendered yet.";
   const stepArtifacts = run.artifacts.filter((artifact) => artifact.stepId === step.id);
-  const panels = { overview: overviewPanel(step), run: runPanel(step), diff: stepDiffPanel(step), artifacts: artifactsPanel(null, stepArtifacts), ticket: artifactsPanel(null), prompt: `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>` };
+  const panel = workerTab === "overview" ? overviewPanel(step)
+    : workerTab === "diff" ? stepDiffPanel(step)
+      : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
+        : workerTab === "ticket" ? artifactsPanel(null)
+          : workerTab === "prompt" ? `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>`
+            : runPanel(step);
   const isolated = Boolean(step.workspace?.isolated);
   const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
@@ -668,8 +673,8 @@ function renderInspector() {
     : `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button></section>` : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
   const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
-  const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[activeTab];
-  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(activeTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panels[activeTab]}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
+  const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
+  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${workerTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(workerTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panel}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
@@ -727,6 +732,13 @@ function setDiffExpanded(expanded) {
 }
 
 document.addEventListener("toggle", (event) => {
+  const rawOutput = event.target.closest?.("details[data-load-session-trace]");
+  if (rawOutput?.open) {
+    const run = runFor();
+    const step = nodeById(rawOutput.dataset.loadSessionTrace);
+    if (run && step) loadSessionTrace(run, step);
+    return;
+  }
   const hunk = event.target.closest?.("details.diff-hunk");
   if (hunk?.open) { hydrateDiffHunk(hunk); return; }
   const file = event.target.closest?.("details.diff-file");
@@ -773,7 +785,7 @@ function render() {
   }
   if (checkpointUsesWorkspace(run) && !selectedStageId) {
     selectedStepId = null;
-    selectedStageId = run.stages?.find((stage) => stage.status === "blocked" || stage.status === "active")?.id || run.stages?.[0]?.id || null;
+    selectedStageId = run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.id || run.stages?.[0]?.id || null;
     rememberView();
   }
   if (!selectedStageId && !selectedStepId) selectedStageId = preferredStageId(run?.stages);
@@ -783,7 +795,34 @@ function render() {
   renderPlanTree();
   renderInspector();
   restoreClarificationDraft(draft);
-  if (run?.id !== piSkillsFor) refreshSkills(run);
+}
+
+function renderSelection() {
+  for (const agent of document.querySelectorAll(".rail-agent")) {
+    agent.classList.toggle("on", agent.dataset.ticket === state.selectedTicketId && agent.dataset.railStep === selectedStepId);
+  }
+  renderPlanTree();
+  renderInspector();
+}
+
+function selectTicket(ticketId, stepId = null, persist = true) {
+  state.selectedTicketId = ticketId;
+  selectedStepId = stepId;
+  selectedStageId = null;
+  selectedArtifactId = null;
+  activeTab = stepId ? "run" : "activity";
+  rememberView();
+  render();
+  if (!persist) return;
+  const selection = ++latestTicketSelection;
+  pendingTicketSelections++;
+  api(`/api/tickets/${encodeURIComponent(ticketId)}/select`, { method: "POST", body: "{}" })
+    .catch(async (error) => {
+      try { if (selection === latestTicketSelection) { state = await api("/api/state"); render(); } }
+      catch {}
+      notify(error.message);
+    })
+    .finally(() => { pendingTicketSelections--; });
 }
 
 async function refreshTickets() {
@@ -916,20 +955,21 @@ document.addEventListener("click", async (event) => {
   const railStep = event.target.closest("[data-rail-step]");
   if (railStep) {
     if (railStep.dataset.ticket !== state.selectedTicketId) {
-      state = await api(`/api/tickets/${encodeURIComponent(railStep.dataset.ticket)}/select`, { method: "POST", body: "{}" });
+      selectTicket(railStep.dataset.ticket, railStep.dataset.railStep);
+      return;
     }
     selectedStepId = railStep.dataset.railStep;
     selectedStageId = null;
     selectedArtifactId = null;
     activeTab = "run";
     rememberView();
-    render();
+    renderSelection();
     return;
   }
   const ticketButton = event.target.closest("[data-ticket]");
   if (ticketButton) {
-    state = await api(`/api/tickets/${encodeURIComponent(ticketButton.dataset.ticket)}/select`, { method: "POST", body: "{}" });
-    selectedStepId = null; selectedStageId = null; activeTab = "activity"; rememberView(); render(); return;
+    selectTicket(ticketButton.dataset.ticket);
+    return;
   }
   const start = event.target.closest("[data-start-ticket]");
   if (start) {
@@ -952,9 +992,9 @@ document.addEventListener("click", async (event) => {
   if (restart) { openRestartDialog(); return; }
   const fresh = event.target.closest("[data-start-fresh]");
   if (fresh) { openRestartDialog("fresh"); return; }
-  const cancel = event.target.closest("[data-cancel-ticket]");
-  if (cancel) {
-    try { await api(`/api/tickets/${encodeURIComponent(cancel.dataset.cancelTicket)}/cancel`, { method: "POST", body: "{}" }); notify("Run cancelled"); }
+  const pause = event.target.closest("[data-pause-ticket]");
+  if (pause) {
+    try { await api(`/api/tickets/${encodeURIComponent(pause.dataset.pauseTicket)}/pause`, { method: "POST", body: "{}" }); notify("Run paused; session and activity saved"); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -1002,9 +1042,9 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const stage = event.target.closest("[data-stage]");
-  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; selectedArtifactId = null; activeTab = "activity"; rememberView(); render(); return; }
+  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; selectedArtifactId = null; activeTab = "activity"; rememberView(); renderSelection(); return; }
   const step = event.target.closest("[data-step]");
-  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; selectedArtifactId = null; activeTab = "run"; rememberView(); render(); return; }
+  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; selectedArtifactId = null; activeTab = "run"; rememberView(); renderSelection(); return; }
   const artifact = event.target.closest("[data-select-artifact]");
   if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; renderInspector(); return; }
   const tab = event.target.closest("[data-tab]");
@@ -1041,9 +1081,9 @@ document.addEventListener("submit", async (event) => {
     const target = data.get("target");
     const submit = event.target.querySelector("button[type=submit]");
     submit.disabled = true;
+    $("#restart-dialog").close();
     try {
       await api(`/api/tickets/${encodeURIComponent(ticketId)}/restart`, { method: "POST", body: JSON.stringify({ target, confirmed: data.get("confirmed") === "on" }) });
-      $("#restart-dialog").close();
       selectedStepId = null; selectedStageId = null; activeTab = "activity"; rememberView();
       notify(target === "fresh" ? "Fresh run started; the previous run was archived" : "Checkpoint restored; restart launched");
     } catch (error) { notify(error.message); }
@@ -1072,7 +1112,7 @@ document.addEventListener("submit", async (event) => {
   }
   if (event.target.id === "workspace-form") {
     event.preventDefault();
-    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); piSkillsFor = null; await refreshTickets(); }
+    try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); await refreshTickets(); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -1111,19 +1151,6 @@ document.addEventListener("submit", async (event) => {
       render();
       notify("Execution graph saved and validated");
     } catch (error) { $("#plan-json-error").textContent = error.message; }
-    return;
-  }
-  const bindWorkflow = event.target.closest("[data-bind-workflow]");
-  if (bindWorkflow) {
-    event.preventDefault();
-    const skillName = new FormData(bindWorkflow).get("skillName");
-    if (!skillName) { notify("Choose a Pi skill to bind"); return; }
-    try {
-      const result = await api(`/api/tickets/${encodeURIComponent(bindWorkflow.dataset.bindWorkflow)}/workflow`, { method: "POST", body: JSON.stringify({ skillName }) });
-      state = result.state;
-      render();
-      notify(`Bound ${skillName} as the supervisor workflow`);
-    } catch (error) { notify(error.message); }
     return;
   }
   const continueWorkflow = event.target.dataset.continueWorkflow;
@@ -1200,6 +1227,11 @@ const events = new EventSource("/api/events");
 events.onmessage = ({ data }) => {
   const event = JSON.parse(data);
   if (event.type === "state") { state = event.state; render(); return; }
+  if (event.type === "selection") {
+    state.revision = event.revision;
+    if (!pendingTicketSelections && event.selectedTicketId !== state.selectedTicketId) selectTicket(event.selectedTicketId, null, false);
+    return;
+  }
   if (event.type === "tickets") { ticketSources = event.ticketSources; render(); return; }
   if (event.channel === "run" && event.ticketId && event.stepId) {
     const key = `${event.ticketId}:${event.stepId}`;

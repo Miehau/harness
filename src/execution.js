@@ -187,6 +187,55 @@ export function markRunCancelled(run, at = new Date().toISOString()) {
   if (stage) Object.assign(stage, { status: "blocked", summary: "Run cancelled" });
 }
 
+export function markRunPaused(run, at = new Date().toISOString()) {
+  const stage = run.stages?.find((item) => item.status === "active") || null;
+  const activeRuns = structuredClone(run.activeRuns || {});
+  const steps = flattenSteps(run.plan);
+  const audit = {
+    id: `pause-${(run.pauseHistory?.length || 0) + 1}`,
+    at,
+    fromStatus: run.status,
+    stageId: stage?.id || null,
+    sessionFile: stage?.id === "requirements" ? run.requirementsSessionFile || null : run.sessionFile || null,
+    steps: Object.entries(activeRuns).map(([stepId, active]) => ({
+      stepId,
+      runId: active.runId || null,
+      sessionFile: active.sessionFile || steps.find((step) => step.id === stepId)?.sessionFile || null,
+      startedAt: active.startedAt || null,
+      lastEventAt: active.activity?.lastEventAt || active.lastEventAt || null,
+      lastEvent: active.activity?.lastEvent || active.lastEvent || ""
+    }))
+  };
+  for (const step of steps) {
+    if (!inFlightStepStatusSet.has(step.status)) continue;
+    const active = activeRuns[step.id] || {};
+    const activity = active.activity || {};
+    step.attempts ||= [];
+    step.attempts.push({
+      runId: active.runId || null,
+      attemptId: `attempt-${step.attempts.length + 1}`,
+      startedAt: active.startedAt || at,
+      completedAt: at,
+      status: "paused",
+      events: activity.events || [],
+      activityGroups: activity.groups || [],
+      rawOutput: activity.rawOutput || "",
+      sessionFile: active.sessionFile || step.sessionFile || null
+    });
+    if (active.sessionFile) step.sessionFile = active.sessionFile;
+    step.status = "interrupted";
+  }
+  run.status = "paused";
+  run.pausedAt = at;
+  run.checkpoint = null;
+  run.activeRuns = {};
+  run.lastError = null;
+  run.pauseHistory ||= [];
+  run.pauseHistory.push(audit);
+  if (stage) Object.assign(stage, { status: "paused", summary: "Paused with the current session and activity saved" });
+  return audit;
+}
+
 export function clearInactiveRuns(state, activeTicketIds) {
   let cleared = 0;
   for (const id of Object.keys(state.ticketRuns)) {
@@ -346,12 +395,21 @@ export function stepCheckpointResumeKind(checkpoint) {
 
 export function resumeStage(run) {
   if (!resumeRunStatusSet.has(run?.status)) return null;
-  return run.plan ? "run" : run.stages?.find((stage) => stage.status === "active")?.id || null;
+  if (run.plan) return "run";
+  const active = run.stages?.find((stage) => stage.status === "active")?.id;
+  if (active) return active;
+  const inferred = workflowResumeStage(run);
+  return ["requirements", "explore", "design"].includes(inferred) ? inferred : null;
 }
 
 export function prepareRunResume(run) {
-  if (!["cancelled", "needs_attention"].includes(run?.status)) return false;
+  if (!["cancelled", "needs_attention", "failed", "paused"].includes(run?.status)) return false;
+  if (run.status === "paused") {
+    const pause = run.pauseHistory?.at(-1);
+    if (pause && !pause.resumedAt) pause.resumedAt = new Date().toISOString();
+  }
   run.status = "interrupted";
+  run.lastError = null;
   for (const step of flattenSteps(run.plan)) {
     if (restartableStepStatusSet.has(step.status)) step.status = "interrupted";
   }

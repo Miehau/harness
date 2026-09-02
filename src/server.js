@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -218,6 +218,53 @@ async function cancelTicket(ticketId) {
   await stopTicketPreviews(ticketId, "run_cancelled");
 }
 
+async function pauseTicket(ticketId) {
+  const active = activeTickets.get(ticketId);
+  if (!active) throw new Error("This run is not active");
+  active.controller.abort(new Error("Run paused"));
+  await active.promise.catch(() => {});
+  let audit;
+  const state = await update((draft) => {
+    audit = markRunPaused(ticketRun(draft, ticketId));
+  });
+  const run = ticketRun(state, ticketId);
+  const artifact = await persistArtifact(dataDir, run.ticket, {
+    runId: run.runId,
+    stageId: audit.stageId,
+    name: `${audit.id}-checkpoint.json`,
+    kind: "pause-checkpoint",
+    content: JSON.stringify(audit, null, 2)
+  });
+  await update((draft) => {
+    const current = ticketRun(draft, ticketId);
+    current.artifacts.push(artifact);
+    const saved = current.pauseHistory?.find((item) => item.id === audit.id);
+    if (saved) saved.artifactId = artifact.id;
+  });
+  await stopTicketPreviews(ticketId, "run_paused");
+  return { auditId: audit.id, artifactId: artifact.id };
+}
+
+function saveRunSession(ticketId, field = "sessionFile") {
+  return async (sessionFile) => {
+    if (!sessionFile) return;
+    await update((state) => { ticketRun(state, ticketId)[field] = sessionFile; }, { publish: false });
+  };
+}
+
+function saveStepSession(ticketId, stepId, runId) {
+  return async (sessionFile) => {
+    if (!sessionFile) return;
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      const step = findNode(run.plan, stepId);
+      if (step) step.sessionFile = sessionFile;
+      const active = run.activeRuns?.[stepId];
+      if (active?.runId === runId) active.sessionFile = sessionFile;
+    }, { publish: false });
+  };
+}
+
 async function stopTicketPreviews(ticketId, reason) {
   previews.stopMatching(`${ticketId}:`);
   await update((state) => {
@@ -348,10 +395,22 @@ async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId 
     if (workflowCheckpoint) checkpoint = runCheckpointFromWorkflow(workflowCheckpoint);
   }
   if (!checkpoint || checkpoint.answerAcceptedAt) return false;
+  const answeredAt = new Date().toISOString();
   await update((state) => {
     const current = ticketRun(state, ticketId);
     if (current.checkpoint?.id === checkpoint.id) Object.assign(current.checkpoint, {
-      answerAcceptedAt: new Date().toISOString(), answerSource: source
+      answerAcceptedAt: answeredAt, answerSource: source
+    });
+    current.clarificationHistory ||= [];
+    current.clarificationHistory.push({
+      checkpointId: checkpoint.id,
+      kind: checkpoint.kind,
+      title: checkpoint.title,
+      questions: checkpoint.questions || [],
+      answer: answers || "Approved without changes.",
+      askedAt: checkpoint.createdAt || null,
+      answeredAt,
+      answerSource: source
     });
   });
   if (source === "dashboard" && trackerBacked(before.ticket)) {
@@ -660,7 +719,12 @@ async function prepareTicket(ticketId) {
       current.status = "clarifying";
       setStage(current, "requirements", "active", "Pi is shaping requirements without repository access");
     });
-    const clarified = await harness.clarifyRequirements({ cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId, productContext: productContext.content, profile: run.stageProfiles.requirements, onEvent: activity.onEvent, signal });
+    const clarified = await harness.clarifyRequirements({
+      cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId, sessionFile: run.requirementsSessionFile,
+      productContext: productContext.content,
+      profile: run.stageProfiles.requirements, onEvent: activity.onEvent,
+      onSessionFile: saveRunSession(ticketId, "requirementsSessionFile"), signal
+    });
     signal.throwIfAborted();
     const contextSnapshot = await persistArtifact(dataDir, run.ticket, {
       runId: run.runId, name: "product-context-snapshot.md", content: productContext.content,
@@ -725,7 +789,8 @@ async function continueAfterRequirements(ticketId, answers) {
       const clarified = await harness.refineRequirements({
         cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
         sessionFile: run.requirementsSessionFile, answers,
-        profile: run.stageProfiles.requirements, onEvent: activity.onEvent, signal
+        profile: run.stageProfiles.requirements, onEvent: activity.onEvent,
+        onSessionFile: saveRunSession(ticketId, "requirementsSessionFile"), signal
       });
       signal.throwIfAborted();
       const artifact = await persistArtifact(dataDir, run.ticket, {
@@ -788,7 +853,8 @@ async function continueAfterRequirements(ticketId, answers) {
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
         productContext: productContext.content, requirements, profile: run.stageProfiles.exploration,
-        onEvent: (event) => activity.onEvent(event, "code explorer"), signal
+        onEvent: (event) => activity.onEvent(event, "code explorer"),
+        onSessionFile: saveRunSession(ticketId), signal
       }),
       harness.lookAheadTickets({
         cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
@@ -875,7 +941,8 @@ async function designTicket(ticketId, answers, signal) {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
       productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, ticketLookAhead, answers,
-      profile: run.stageProfiles.architecture, onEvent: activity.onEvent, signal
+      profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
+      onSessionFile: saveRunSession(ticketId), signal
     });
     signal?.throwIfAborted();
     const artifact = await persistArtifact(dataDir, run.ticket, {
@@ -963,6 +1030,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           feedback: nextFeedback, ticketId, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
+          onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
           signal
         });
         signal?.throwIfAborted();
@@ -1161,6 +1229,21 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
       await update((state) => {
         const current = ticketRun(state, ticketId);
         const failed = findNode(current.plan, stepId);
+        const active = current.activeRuns[stepId] || {};
+        const activity = active.activity || {};
+        failed.attempts ||= [];
+        failed.attempts.push({
+          runId: active.runId || null,
+          attemptId: `attempt-${failed.attempts.length + 1}`,
+          startedAt: active.startedAt || new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          status: "failed",
+          events: activity.events || [],
+          activityGroups: activity.groups || [],
+          rawOutput: activity.rawOutput || "",
+          sessionFile: active.sessionFile || failed.sessionFile || null,
+          error: error.message
+        });
         failed.status = "failed";
         failed.lastError = error.message;
         delete current.activeRuns[stepId];
@@ -2113,8 +2196,10 @@ async function api(request, response, url) {
   const select = url.pathname.match(/^\/api\/tickets\/([^/]+)\/select$/);
   if (request.method === "POST" && select) {
     const id = decodeURIComponent(select[1]);
-    const state = await update((draft) => { draft.selectedTicketId = id; });
-    return json(response, 200, state);
+    const state = await update((draft) => { draft.selectedTicketId = id; }, { publish: false });
+    const selection = { selectedTicketId: id, revision: state.revision };
+    publish({ type: "selection", ...selection });
+    return json(response, 200, selection);
   }
 
   const listSkills = url.pathname.match(/^\/api\/tickets\/([^/]+)\/skills$/);
@@ -2167,7 +2252,7 @@ async function api(request, response, url) {
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
     ensureTicketCapacity(id);
-    if (["cancelled", "needs_attention"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
+    if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
     if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
     else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
     else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
@@ -2192,6 +2277,13 @@ async function api(request, response, url) {
     const id = decodeURIComponent(cancel[1]);
     await cancelTicket(id);
     return json(response, 200, { cancelled: true, ticketId: id });
+  }
+
+  const pause = url.pathname.match(/^\/api\/tickets\/([^/]+)\/pause$/);
+  if (request.method === "POST" && pause) {
+    const id = decodeURIComponent(pause[1]);
+    const checkpoint = await pauseTicket(id);
+    return json(response, 200, { paused: true, ticketId: id, ...checkpoint });
   }
 
   const clarify = url.pathname.match(/^\/api\/tickets\/([^/]+)\/clarify$/);

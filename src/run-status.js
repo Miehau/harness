@@ -5,7 +5,7 @@ export const inFlightRunStatuses = Object.freeze([
 ]);
 
 export const terminalRunStatuses = Object.freeze([
-  "completed", "failed", "needs_attention", "cancelled", "interrupted"
+  "completed", "failed", "needs_attention", "cancelled", "interrupted", "paused"
 ]);
 
 export const inFlightMergeStatuses = Object.freeze([
@@ -16,7 +16,7 @@ export const inFlightMergeStatuses = Object.freeze([
 export const inFlightStepStatuses = Object.freeze(["running", "fixing"]);
 export const runnableStepStatuses = Object.freeze(["ready", "interrupted"]);
 export const gateStepStatuses = Object.freeze(["review_ready", "needs_input", "awaiting_approval"]);
-export const resumeRunStatuses = Object.freeze(["interrupted", "cancelled", "needs_attention"]);
+export const resumeRunStatuses = Object.freeze(["interrupted", "cancelled", "needs_attention", "failed", "paused"]);
 export const replaceableRunStatuses = Object.freeze(["completed", "failed", "needs_attention"]);
 export const earlyFailureStatuses = Object.freeze(["preparing", "clarifying"]);
 export const restartableStepStatuses = Object.freeze(["cancelled", "needs_attention", "failed"]);

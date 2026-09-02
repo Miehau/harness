@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runAgainstDaemon, invoke, seedRun, withDaemon } from "./helpers.js";
+import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
   await withDaemon(async (daemon) => {
@@ -21,6 +21,92 @@ test("GET /api/health and compact run omit artifact content", async () => {
     assert.equal(state.json.ticketRuns[id].artifacts[0].name, "design.md");
     assert.equal(state.json.ticketRuns[id].artifacts[0].content, undefined);
   });
+});
+
+test("ticket selection returns a compact acknowledgment", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon);
+    const selected = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/select`, { body: {} });
+    assert.deepEqual(Object.keys(selected.json).sort(), ["revision", "selectedTicketId"]);
+    assert.equal(selected.json.selectedTicketId, id);
+    assert.equal(selected.json.revision > 0, true);
+  });
+});
+
+test("pausing persists a checkpoint artifact and resumes the saved requirements session", async () => {
+  let releaseStarted;
+  const started = new Promise((resolve) => { releaseStarted = resolve; });
+  let calls = 0;
+  const harness = {
+    ...mockHarness(),
+    async clarifyRequirements({ signal, onEvent, onSessionFile }) {
+      calls++;
+      await onSessionFile?.("/tmp/requirements-session.jsonl");
+      onEvent?.({ type: "phase", label: calls === 1 ? "Shaping requirements" : "Continuing requirements" });
+      if (calls === 1) {
+        releaseStarted();
+        await new Promise((resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      return { artifact: "# Requirements", questions: [], sessionFile: "/tmp/requirements-session.jsonl" };
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const ticket = {
+      id: "pause-ticket", identifier: "PAUSE-1", title: "Pause this run", description: "Keep its work",
+      source: "local", state: { name: "Local", type: "local" }, team: { name: "Local" }
+    };
+    const starting = invoke(daemon, "POST", `/api/tickets/${ticket.id}/start`, { body: { ticket } });
+    await started;
+    const paused = await invoke(daemon, "POST", `/api/tickets/${ticket.id}/pause`, { body: {} });
+    assert.equal(paused.status, 200);
+    assert.equal(paused.json.paused, true);
+    assert.match(paused.json.auditId, /^pause-/);
+    await starting;
+
+    const saved = daemon.store.read().ticketRuns[ticket.id];
+    assert.equal(saved.status, "paused");
+    assert.equal(saved.requirementsSessionFile, "/tmp/requirements-session.jsonl");
+    assert.equal(saved.pauseHistory[0].stageId, "requirements");
+    assert.equal(saved.pauseHistory[0].sessionFile, "/tmp/requirements-session.jsonl");
+    assert.equal(saved.artifacts.find((artifact) => artifact.kind === "pause-checkpoint").id, paused.json.artifactId);
+
+    const resumed = await invoke(daemon, "POST", `/api/tickets/${ticket.id}/resume`, { body: {} });
+    assert.equal(resumed.status, 202);
+    const after = daemon.store.read().ticketRuns[ticket.id];
+    assert.equal(after.status, "awaiting_requirements");
+    assert.equal(calls, 2);
+    assert.ok(after.pauseHistory[0].resumedAt);
+  }, { harness });
+});
+
+test("requirements answers remain in chat history when the agent replies", async () => {
+  const harness = {
+    ...mockHarness(),
+    refineRequirements: async () => ({ artifact: "# Revised requirements", questions: ["Should completed tickets stay visible?"], sessionFile: null })
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      status: "awaiting_requirements",
+      checkpoint: { id: "requirements-1", kind: "requirements_review", title: "Approve ticket requirements", questions: ["Who uses this view?"], createdAt: "2026-09-02T10:00:00.000Z" }
+    });
+    const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/clarify`, { body: { answers: "1. Operators" } });
+    assert.equal(response.status, 202);
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.deepEqual(state.json.ticketRuns[id].clarificationHistory, [{
+      checkpointId: "requirements-1",
+      kind: "requirements_review",
+      title: "Approve ticket requirements",
+      questions: ["Who uses this view?"],
+      answer: "1. Operators",
+      askedAt: "2026-09-02T10:00:00.000Z",
+      answeredAt: state.json.ticketRuns[id].clarificationHistory[0].answeredAt,
+      answerSource: "dashboard"
+    }]);
+    assert.deepEqual(state.json.ticketRuns[id].checkpoint.questions, ["Should completed tickets stay visible?"]);
+  }, { harness });
 });
 
 test("API token rejects unauthenticated /api calls", async () => {

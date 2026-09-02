@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, groupActivityEvents, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -62,6 +62,49 @@ test("cancelling a run stops every active step and preserves it for resume", () 
   assert.equal(run.status, "cancelled");
   assert.deepEqual(run.activeRuns, {});
   assert.equal(run.stages[0].summary, "Run cancelled");
+});
+
+test("pausing a run preserves the live attempt and session as an audit checkpoint", () => {
+  const plan = normalizePlan({ nodes: [{ id: "one", title: "One", status: "running", attempts: [] }] });
+  const run = {
+    status: "running", checkpoint: null, sessionFile: "/tmp/supervisor.jsonl",
+    stages: [{ id: "implement", status: "active", summary: "Working" }], plan,
+    activeRuns: { one: {
+      runId: "worker-1", sessionFile: "/tmp/worker.jsonl", startedAt: "2026-09-02T10:00:00.000Z",
+      activity: { lastEventAt: "2026-09-02T10:01:00.000Z", lastEvent: "Editing", rawOutput: "partial", events: [{ type: "phase", label: "Editing" }], groups: [{ title: "Change implementation" }] }
+    } }
+  };
+  const audit = markRunPaused(run, "2026-09-02T10:02:00.000Z");
+  assert.equal(run.status, "paused");
+  assert.equal(run.stages[0].status, "paused");
+  assert.equal(run.plan.nodes[0].status, "interrupted");
+  assert.equal(run.plan.nodes[0].sessionFile, "/tmp/worker.jsonl");
+  assert.equal(run.plan.nodes[0].attempts[0].sessionFile, "/tmp/worker.jsonl");
+  assert.equal(run.plan.nodes[0].attempts[0].rawOutput, "partial");
+  assert.deepEqual(run.activeRuns, {});
+  assert.equal(audit.steps[0].lastEvent, "Editing");
+  assert.equal(run.pauseHistory[0].id, "pause-1");
+});
+
+test("failed and paused workflows can resume from their persisted stage", () => {
+  const failed = {
+    status: "failed", plan: null, lastError: "planner stopped",
+    artifacts: [{ kind: "requirements" }, { kind: "implementation-delta" }],
+    stages: [
+      { id: "requirements", status: "completed" },
+      { id: "explore", status: "completed" },
+      { id: "design", status: "blocked" }
+    ]
+  };
+  assert.equal(resumeStage(failed), "design");
+  assert.equal(prepareRunResume(failed), true);
+  assert.equal(failed.status, "interrupted");
+  assert.equal(failed.lastError, null);
+
+  const paused = { status: "paused", plan: normalizePlan({ nodes: [{ id: "one", title: "One", status: "interrupted" }] }), pauseHistory: [{ id: "pause-1" }] };
+  assert.equal(resumeStage(paused), "run");
+  assert.equal(prepareRunResume(paused), true);
+  assert.ok(paused.pauseHistory[0].resumedAt);
 });
 
 test("clearing the queue preserves active runs", () => {
