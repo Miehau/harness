@@ -1023,11 +1023,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         target.baseTree ||= stepBaseTree;
       });
       let nextFeedback = feedback;
+      const priorVerification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification || {};
       if (!nextFeedback && step.status === "interrupted") {
-        const findings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
+        const findings = actionableFindings([priorVerification]);
         if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
       }
-      let previousFindings = actionableFindings([step.attempts?.at(-1)?.verification || {}]);
+      let previousFindings = actionableFindings([priorVerification]);
       let previousFingerprint = findingsFingerprint(previousFindings);
       for (let round = (step.attempts?.length || 0) + 1; ; round++) {
         signal?.throwIfAborted();
