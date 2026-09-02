@@ -292,6 +292,7 @@ test("recovers a chronological, detailed trace from a persisted Pi session", asy
     ].map(JSON.stringify).join("\n"));
     const trace = await new PiHarness({ dataDir: root }).sessionTrace(file);
     assert.equal(trace.prompt, "Rendered prompt");
+    assert.deepEqual(trace.prompts, [{ prompt: "Rendered prompt", at: "1970-01-01T00:00:00.001Z" }]);
     assert.deepEqual(trace.events.map((event) => event.type), ["reasoning_summary", "reasoning_summary", "tool_start", "tool_start", "tool_end", "tool_end"]);
     assert.match(trace.events[2].args, /npm test/);
     assert.match(trace.events[3].args, /Derived the architecture/);

@@ -514,19 +514,23 @@ export class PiHarness {
     this.sessionGuidance = new WeakMap();
   }
 
-  async sessionTrace(sessionFile) {
-    if (!sessionFile) return { prompt: "", rawOutput: "", events: [] };
+  async sessionTrace(sessionFile, { after, before } = {}) {
+    if (!sessionFile) return { prompt: "", prompts: [], rawOutput: "", events: [] };
     const file = resolve(sessionFile);
     const root = `${resolve(this.dataDir, "pi-sessions")}${sep}`;
     if (!file.startsWith(root)) throw new Error("Session file is outside Pi session storage");
-    const trace = { prompt: "", rawOutput: "", events: [] };
+    const trace = { prompt: "", prompts: [], rawOutput: "", events: [] };
     for (const line of (await readFile(file, "utf8")).split("\n").filter(Boolean)) {
       let entry;
       try { entry = JSON.parse(line); } catch { continue; }
       const message = entry.type === "message" ? entry.message : null;
       if (!message) continue;
       const at = new Date(message.timestamp || entry.timestamp || Date.now()).toISOString();
-      if (message.role === "user") trace.prompt = textFromContent(message.content);
+      if ((after && at < after) || (before && at > before)) continue;
+      if (message.role === "user") {
+        trace.prompt = textFromContent(message.content);
+        trace.prompts.push({ prompt: trace.prompt, at });
+      }
       if (message.role === "assistant") for (const part of message.content || []) {
         if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, part.text, 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
@@ -807,6 +811,7 @@ export class PiHarness {
     const unbindAbort = bindAbort(session, signal);
     try {
       signal?.throwIfAborted();
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();
       return reply || lastAssistantText(session);
@@ -1052,9 +1057,7 @@ Return ONLY JSON:
     session.setSessionName("product-context-update");
     const unbindAbort = bindAbort(session, signal);
     const unsubscribe = session.subscribe((event) => { const safe = safeEvent(event); if (safe) onEvent?.(safe); });
-    try {
-      signal?.throwIfAborted();
-      await session.prompt(`${this.configuredPrompt(session, profile, productContextUpdateInstruction)}
+    const prompt = `${this.configuredPrompt(session, profile, productContextUpdateInstruction)}
 
 # Current living product context
 ${currentContext}
@@ -1069,7 +1072,11 @@ ${artifacts.map((artifact) => `## ${artifact.name}\n${artifact.content || ""}`).
 ${diff.files.join(", ") || "none"}
 
 # Final diff
-${diff.patch || "No textual diff"}`);
+${diff.patch || "No textual diff"}`;
+    try {
+      signal?.throwIfAborted();
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
+      await session.prompt(prompt);
       signal?.throwIfAborted();
       return parseModelOutput(lastAssistantText(session), { content: "nonEmptyString" }, "Product-context output").content;
     } finally {
@@ -1091,17 +1098,7 @@ ${diff.patch || "No textual diff"}`);
     });
     session.setSessionName(`review:${role}:round-${round}`);
     const packet = compactReviewPacket({ ticket, plan, artifacts, diff, checks });
-    const unbindAbort = bindAbort(session, signal);
-    let lastThinkingAt = 0;
-    const unsubscribe = session.subscribe((event) => {
-      const safe = safeEvent(event);
-      if (!safe || (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000)) return;
-      if (safe.type === "thinking") lastThinkingAt = Date.now();
-      onEvent?.(safe);
-    });
-    try {
-      signal?.throwIfAborted();
-      await session.prompt(this.configuredPrompt(session, profile, `# Independent ${role} review
+    const prompt = this.configuredPrompt(session, profile, `# Independent ${role} review
 
 ${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
 
@@ -1122,7 +1119,19 @@ Return ONLY JSON:
   }]
 }
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`), { images });
+Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`);
+    const unbindAbort = bindAbort(session, signal);
+    let lastThinkingAt = 0;
+    const unsubscribe = session.subscribe((event) => {
+      const safe = safeEvent(event);
+      if (!safe || (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000)) return;
+      if (safe.type === "thinking") lastThinkingAt = Date.now();
+      onEvent?.(safe);
+    });
+    try {
+      signal?.throwIfAborted();
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
+      await session.prompt(prompt, { images });
       signal?.throwIfAborted();
       const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
       return {

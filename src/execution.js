@@ -122,6 +122,7 @@ export function groupActivityEvents(events = []) {
 export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
   const startedAt = existing.startedAt || new Date(now()).toISOString();
   const events = (existing.events || []).slice(-eventLimit);
+  const prompts = (existing.prompts || []).slice(-20);
   let rawOutput = appendBounded("", existing.rawOutput, outputLimit);
   let lastEventAt = existing.lastEventAt || startedAt;
   let lastEvent = existing.lastEvent || "";
@@ -131,7 +132,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   let dirty = false;
   const lastThinkingAt = new Map();
   const current = () => ({
-    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(), groups: groupActivityEvents(events),
+    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(), prompts: prompts.slice(), groups: groupActivityEvents(events),
     ...(completedAt ? { completedAt } : {})
   });
   const save = () => {
@@ -154,7 +155,12 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
       if (event.type === "thinking" && timestamp - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
       if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
       const item = { ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() };
-      if (item.type === "text_delta") rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
+      if (item.type === "prompt") {
+        pushBounded(prompts, item, 20);
+        lastEventAt = item.at;
+        lastEvent = item.label || lastEvent;
+        save();
+      } else if (item.type === "text_delta") rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
       else {
         pushBounded(events, item, eventLimit);
         lastEventAt = item.at;
@@ -489,6 +495,7 @@ export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
+  for (const stage of clone.stages || []) if (stage.activity) delete stage.activity.prompts;
   for (const step of flattenSteps(clone.plan)) {
     if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
   }

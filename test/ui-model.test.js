@@ -104,6 +104,15 @@ test("activity gives persisted reasoning and worker reports meaningful titles an
   assert.equal(timeline[2].hasDetails, true);
 });
 
+test("workflow stage activity uses its recorded title and status", () => {
+  const [item] = eventTimeline([
+    { type: "tool_start", callId: "stage", tool: "workflow_stage", args: '{"id":"shape","title":"Execution plan shaping","status":"active"}', at: "1" },
+    { type: "tool_end", callId: "stage", tool: "workflow_stage", result: "Workflow stage shape is active", at: "2" }
+  ]);
+  assert.equal(item.title, "Execution plan shaping");
+  assert.equal(item.status, "active");
+});
+
 test("activity groups tool calls under the latest reasoning focus", () => {
   const groups = eventGroups([
     { type: "reasoning_summary", detail: "Inspect the current UI", at: "2026-08-25T10:00:00.000Z" },

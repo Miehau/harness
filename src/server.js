@@ -279,6 +279,37 @@ function ticketRun(state, ticketId) {
   return run;
 }
 
+async function promptsForStage(run, stage) {
+  const prompts = [];
+  const seen = new Set();
+  const add = ({ prompt, content, at, actor, title, status }) => {
+    const value = String(prompt || content || "").trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    prompts.push({ prompt: value, at: at || null, title: title || actor || stage.title, status: status || stage.status });
+  };
+  for (const prompt of stage.activity?.prompts || []) add(prompt);
+  const trace = async (sessionFile, meta = {}, bounds = {}) => {
+    if (!sessionFile) return;
+    const saved = await harness.sessionTrace(sessionFile, bounds);
+    for (const prompt of saved.prompts || (saved.prompt ? [{ prompt: saved.prompt }] : [])) add({ ...prompt, ...meta });
+  };
+  const bounds = { after: stage.activity?.startedAt, before: stage.activity?.completedAt };
+  if (stage.id === "requirements") await trace(run.requirementsSessionFile, {}, bounds);
+  if (["explore", "design"].includes(stage.id)) await trace(run.sessionFile, {}, bounds);
+  if (stage.id === "implement") {
+    for (const step of flattenSteps(run.plan).filter((item) => (item.stageId || "implement") === stage.id)) {
+      await trace(step.sessionFile, { title: step.title, status: step.status });
+    }
+  }
+  if (stage.id === "verify") {
+    for (const review of run.reviews || []) for (const item of review.reviews || []) {
+      await trace(item.sessionFile, { title: `${item.role} review · round ${review.round}`, status: "completed" });
+    }
+  }
+  return prompts.sort((left, right) => String(left.at || "").localeCompare(String(right.at || "")));
+}
+
 function skillSession(state, run) {
   return {
     cwd: run?.workspace?.cwd || state.workspace.cwd,
@@ -2100,6 +2131,13 @@ async function api(request, response, url) {
     const step = findNode(run.plan, decodeURIComponent(sessionTrace[2]));
     if (!step) throw new Error("Step not found");
     return json(response, 200, await harness.sessionTrace(step.sessionFile));
+  }
+  const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)\/stages\/([^/]+)\/prompts$/);
+  if (request.method === "GET" && stagePrompts) {
+    const run = ticketRun(store.read(), decodeURIComponent(stagePrompts[1]));
+    const stage = run.stages.find((item) => item.id === decodeURIComponent(stagePrompts[2]));
+    if (!stage) throw new Error("Stage not found");
+    return json(response, 200, { prompts: await promptsForStage(run, stage) });
   }
   const reviewMapRoute = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/review-map$/);
   if (request.method === "POST" && reviewMapRoute) {

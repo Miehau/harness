@@ -185,6 +185,7 @@ test("activity capture bounds memory and coalesces pending persistence", async (
   });
 
   capture.onEvent({ type: "tool_start", label: "Started" });
+  capture.onEvent({ type: "prompt", label: "Prompt rendered", content: "Keep this exact prompt" });
   for (let index = 0; index < 1000; index++) {
     capture.onEvent({ type: "tool_update", detail: "x".repeat(1000) });
     capture.onEvent({ type: "text_delta", delta: "output" });
@@ -192,6 +193,7 @@ test("activity capture bounds memory and coalesces pending persistence", async (
 
   assert.equal(writes, 1);
   assert.equal(capture.snapshot().events.length, 5);
+  assert.equal(capture.snapshot().prompts[0].content, "Keep this exact prompt");
   assert.equal(capture.snapshot().rawOutput.length, 100);
   releaseFirstWrite();
   await capture.flush();
@@ -235,6 +237,7 @@ test("compact run and public state omit artifact bodies", () => {
     id: "t1", runId: "r1", status: "awaiting_approval", lastError: null,
     checkpoint: { kind: "awaiting_approval", title: "Approve" },
     workflow: { skillName: "shape-feature", checkpoints: [] },
+    stages: [{ id: "design", activity: { prompts: [{ content: "# private prompt" }] } }],
     artifacts: [{ id: "a", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret body" }],
     plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }] }] }
   };
@@ -248,4 +251,5 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(published.ticketRuns.t1.artifacts[0].name, "design.md");
   assert.equal(published.ticketRuns.t1.artifacts[0].content, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].artifacts[0].content, undefined);
+  assert.equal(published.ticketRuns.t1.stages[0].activity.prompts, undefined);
 });

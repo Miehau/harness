@@ -1320,6 +1320,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 }
 
 .artifact-browser { display: grid; gap: 12px; }
+.stage-prompts { display: grid; gap: 12px; }
 .artifact-index { display: grid; gap: 1px; max-height: 220px; overflow: auto; }
 .artifact-index button { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; border: 0; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 8px 2px; background: transparent; color: #aab3c1; cursor: pointer; text-align: left; }
 .artifact-index button:hover, .artifact-index button[aria-pressed="true"] { color: #d1c9ff; }

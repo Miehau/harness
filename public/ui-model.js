@@ -181,6 +181,7 @@ export function freeTextTicket(value, id) {
 function toolTitle(tool, args) {
   let values = {};
   try { values = JSON.parse(args || "{}"); } catch {}
+  if (tool === "workflow_stage") return firstLine(values.title, "Workflow stage");
   if (tool === "worker_report") {
     const status = values.status ? ` · ${values.status}` : "";
     const summary = firstLine(values.summary);
@@ -189,6 +190,11 @@ function toolTitle(tool, args) {
   const label = ({ bash: "Command", read: "Read", grep: "Search", find: "Find", ls: "List", edit: "Edit", write: "Write" })[tool] || tool.replaceAll("_", " ");
   const subject = firstLine(values.command || values.cmd || values.path || values.pattern || values.query);
   return subject ? `${label} · ${subject}` : label;
+}
+
+function toolStatus(tool, args) {
+  if (tool !== "workflow_stage") return null;
+  try { return JSON.parse(args || "{}").status || null; } catch { return null; }
 }
 
 function expandJson(value) {
@@ -210,7 +216,7 @@ export function eventTimeline(events = []) {
   const pendingByTool = new Map();
   for (const event of events) {
     if (event.type === "tool_start") {
-      const item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: `${event.actor ? `${event.actor} · ` : ""}${toolTitle(event.tool, event.args)}`, at: event.at, args: event.args || "", output: "", result: "", status: "running", isError: false };
+      const item = { key: event.callId || `${event.tool}:${items.length}`, tool: event.tool, title: `${event.actor ? `${event.actor} · ` : ""}${toolTitle(event.tool, event.args)}`, at: event.at, args: event.args || "", output: "", result: "", status: toolStatus(event.tool, event.args) || "running", isError: false };
       items.push(item);
       if (event.callId) byCallId.set(event.callId, item);
       else pendingByTool.set(event.tool, [...(pendingByTool.get(event.tool) || []), item]);
@@ -223,7 +229,7 @@ export function eventTimeline(events = []) {
         items.push(item);
       }
       if (event.type === "tool_update") item.output = event.replace ? event.detail || "" : item.output + (event.detail || "");
-      else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : "finished", isError: Boolean(event.isError) });
+      else Object.assign(item, { result: event.result || "", status: event.isError ? "failed" : toolStatus(item.tool, item.args) || "finished", isError: Boolean(event.isError) });
       continue;
     }
     if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: `${event.actor ? `${event.actor} · ` : ""}Model request failed`, at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });

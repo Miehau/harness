@@ -34,6 +34,34 @@ test("ticket selection returns a compact acknowledgment", async () => {
   });
 });
 
+test("workflow stage prompts expose persisted agent input with its stage context", async () => {
+  const harness = {
+    ...mockHarness(),
+    sessionTrace: async (sessionFile, bounds) => ({
+      prompt: `Prompt from ${sessionFile}`,
+      prompts: [{ prompt: `Prompt from ${sessionFile}`, at: "2026-09-02T10:00:01.000Z" }],
+      bounds
+    })
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      sessionFile: "/tmp/planning.jsonl",
+      stages: [{
+        id: "design", title: "Design & plan", status: "completed",
+        activity: { startedAt: "2026-09-02T10:00:00.000Z", completedAt: "2026-09-02T10:00:02.000Z" }
+      }]
+    });
+    const result = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/stages/design/prompts`);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.prompts, [{
+      prompt: "Prompt from /tmp/planning.jsonl",
+      at: "2026-09-02T10:00:01.000Z",
+      title: "Design & plan",
+      status: "completed"
+    }]);
+  }, { harness });
+});
+
 test("accepting a step can enable auto mode at an existing review checkpoint", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", acceptanceCriteria: ["Works"] }] });

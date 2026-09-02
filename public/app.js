@@ -30,8 +30,10 @@ let lastClarificationKey = null;
 const liveRuns = new Map();
 const liveStages = new Map();
 const sessionTraces = new Map();
+const stagePromptTraces = new Map();
 const appendLiveOutput = (value, delta) => `${value || ""}${delta || ""}`.slice(-100000);
 const pendingSessionTraces = new Set();
+const pendingStagePromptTraces = new Set();
 const diffModels = new Map();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -406,6 +408,26 @@ function cachedTrace(run, step) {
   return cached && cached.sessionFile === step.sessionFile ? cached.trace : null;
 }
 
+function stagePromptSignature(run, stage) {
+  const stepSessions = stage.id === "implement" ? (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]).map((step) => [step.id, step.status, step.sessionFile]) : [];
+  const reviewSessions = stage.id === "verify" ? (run.reviews || []).flatMap((review) => (review.reviews || []).map((item) => [review.round, item.role, item.sessionFile])) : [];
+  return JSON.stringify([stage.status, stage.updatedAt, run.requirementsSessionFile, run.sessionFile, stepSessions, reviewSessions]);
+}
+
+function cachedStagePrompts(run, stage) {
+  const cached = stagePromptTraces.get(`${run.id}:${stage.id}`);
+  return cached?.signature === stagePromptSignature(run, stage) ? cached.prompts : null;
+}
+
+function stagePromptPanel(run, stage) {
+  const saved = cachedStagePrompts(run, stage);
+  const live = liveStages.get(`${run.id}:${stage.id}`)?.prompts || [];
+  const prompts = [...(saved || []), ...live.map((item) => ({ prompt: item.content, at: item.at, title: item.actor || stage.title, status: stage.status }))]
+    .filter((item, index, all) => item.prompt && all.findIndex((candidate) => candidate.prompt === item.prompt) === index);
+  if (!prompts.length) return saved ? `<div class="run-empty">No agent prompt has been recorded for this stage yet.</div>` : `<div class="run-empty">Loading recorded stage prompts…</div>`;
+  return `<div class="stage-prompts">${prompts.map((item, index) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(item.title || `Prompt ${index + 1}`)}</span><span class="artifact-source status-${escapeHtml(item.status || stage.status)}">${escapeHtml((item.status || stage.status).replaceAll("_", " "))}</span></header>${item.at ? `<code class="artifact-path">${escapeHtml(new Date(item.at).toLocaleString())}</code>` : ""}<div class="artifact-body">${renderMarkdown(item.prompt)}</div></article>`).join("")}</div>`;
+}
+
 function currentLiveRun(run, step) {
   const live = liveRuns.get(`${run.id}:${step.id}`);
   return live?.runId === step.attempts?.at(-1)?.runId ? null : live;
@@ -640,9 +662,10 @@ function renderInspector() {
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
-    const stageTab = ["activity", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
-    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
+    if (stageTab === "prompt") loadStagePrompts(run, stage);
+    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
@@ -698,6 +721,22 @@ async function loadSessionTrace(run, step) {
     notify(error.message);
   }
   finally { pendingSessionTraces.delete(requestKey); }
+}
+
+async function loadStagePrompts(run, stage) {
+  const key = `${run.id}:${stage.id}`;
+  const signature = stagePromptSignature(run, stage);
+  const requestKey = `${key}:${signature}`;
+  if (cachedStagePrompts(run, stage) || pendingStagePromptTraces.has(requestKey)) return;
+  pendingStagePromptTraces.add(requestKey);
+  try {
+    const result = await api(`/api/tickets/${encodeURIComponent(run.id)}/stages/${encodeURIComponent(stage.id)}/prompts`);
+    stagePromptTraces.set(key, { signature, prompts: result.prompts || [] });
+    if (run.id === runFor()?.id && stage.id === selectedStageId && activeTab === "prompt") renderInspector();
+  } catch (error) {
+    stagePromptTraces.set(key, { signature, prompts: [] });
+    notify(error.message);
+  } finally { pendingStagePromptTraces.delete(requestKey); }
 }
 
 function hydrateDiffHunk(target) {
@@ -1265,7 +1304,8 @@ events.onmessage = ({ data }) => {
     let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "", startedAt: new Date().toISOString() };
     live.runId = event.runId;
-    if (event.type === "text_delta") live.output = appendLiveOutput(live.output, event.delta);
+    if (event.type === "prompt") live.prompts = [...(live.prompts || []), { ...event, at: new Date().toISOString() }].slice(-20);
+    else if (event.type === "text_delta") live.output = appendLiveOutput(live.output, event.delta);
     else live.events.push(event);
     live.events = live.events.slice(-200);
     live.lastAt = new Date().toISOString();
