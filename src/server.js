@@ -2387,7 +2387,10 @@ async function api(request, response, url) {
     const current = ticketRun(store.read(), ticketId);
     const step = findNode(current.plan, stepId);
     if (!step) throw new Error("This step is not ready for review");
-    if (decision === "accept" && step.status === "accepted") return json(response, 200, { accepted: true, alreadyAccepted: true, ticketId, stepId });
+    if (decision === "accept" && input.auto === true) {
+      await update((state) => { ticketRun(state, ticketId).auto = true; });
+    }
+    if (decision === "accept" && step.status === "accepted") return json(response, 200, { accepted: true, alreadyAccepted: true, ticketId, stepId, auto: input.auto === true });
     if (step.status !== "review_ready") throw new Error("This step is not ready for review");
     if (decision === "changes") {
       const noteRequests = Array.isArray(input.noteRequests)
@@ -2416,7 +2419,7 @@ async function api(request, response, url) {
         });
       }
     }));
-    return json(response, 202, { accepted: true, ticketId, stepId });
+    return json(response, 202, { accepted: true, ticketId, stepId, auto: input.auto === true });
   }
 
   json(response, 404, { error: "Not found" });

@@ -12,10 +12,10 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
-  accept <stepId> [ticketId]        Accept a review-ready step
+  accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
-  answer <ticketId> <text>
+  answer <ticketId> <text|--approve> Approve or answer an open question
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
   status [ticketId]
@@ -94,9 +94,10 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "accept") {
     const stepId = rest[0];
-    if (!stepId) throw new Error("Usage: agent-plan accept <stepId> [ticketId]");
-    const id = await resolveTicketId(rest[1], ctx);
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/accept", { body: {}, env, fetchImpl });
+    if (!stepId) throw new Error("Usage: agent-plan accept <stepId> [ticketId] [--auto]");
+    const auto = rest.includes("--auto");
+    const id = await resolveTicketId(rest.slice(1).find((arg) => arg !== "--auto"), ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/accept", { body: { auto }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -123,8 +124,9 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "answer") {
     const id = rest[0];
-    const answers = rest.slice(1).join(" ").trim();
-    if (!id || !answers) throw new Error("Usage: agent-plan answer <ticketId> <text>");
+    const approve = rest.length === 2 && rest[1] === "--approve";
+    const answers = approve ? "" : rest.slice(1).join(" ").trim();
+    if (!id || (!approve && !answers)) throw new Error("Usage: agent-plan answer <ticketId> <text|--approve>");
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/clarify", { body: { answers }, env, fetchImpl });
     print(stdout, result);
     return 0;

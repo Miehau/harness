@@ -1355,22 +1355,15 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .workflow-stage .stage-marker { width: 20px; height: 20px; font-size: 9px; }
 }
 
-/* Keep ticket identity legible when the control strip becomes crowded. */
-.ticket-heading > div:first-child { flex: 1 1 440px; min-width: 0; }
-.ticket-heading .plan-actions { flex: 0 1 850px; flex-wrap: wrap; justify-content: flex-end; max-width: min(100%, 850px); }
-@media (max-width: 1200px) {
-  .ticket-heading { align-items: stretch; flex-direction: column; }
-  .ticket-heading .plan-actions { max-width: none; justify-content: flex-start; }
-}
-
 /* Stage-first workspace: ticket chrome stays compact; investigation leads. */
 .plan-header { padding: 12px 20px; }
-.ticket-heading { align-items: center; gap: 16px; }
-.ticket-heading h2 { max-width: 36ch; font-size: clamp(19px, 1.8vw, 23px); }
+.ticket-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
+.ticket-heading > div:first-child { width: 100%; min-width: 0; flex: 0 1 auto; }
+.ticket-heading h2 { max-width: none; font-size: clamp(19px, 1.8vw, 23px); }
 .ticket-heading p { max-width: 72ch; font-size: 12px; }
 .ticket-heading .usage-strip { gap: 4px; margin-top: 7px; }
 .ticket-heading .usage-strip span { padding: 3px 6px; font-size: 9px; }
-.ticket-heading .plan-actions { align-items: center; gap: 6px; }
+.ticket-heading .plan-actions { max-width: none; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 6px; }
 .ticket-heading .supervisor-control { gap: 6px; }
 .ticket-heading .supervisor-control select { min-height: 30px; }
 .ticket-heading .plan-actions .button { min-height: 30px; padding-inline: 9px; font-size: 11px; }

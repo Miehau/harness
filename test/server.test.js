@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { normalizePlan } from "../src/plan.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
@@ -30,6 +31,20 @@ test("ticket selection returns a compact acknowledgment", async () => {
     assert.deepEqual(Object.keys(selected.json).sort(), ["revision", "selectedTicketId"]);
     assert.equal(selected.json.selectedTicketId, id);
     assert.equal(selected.json.revision > 0, true);
+  });
+});
+
+test("accepting a step can enable auto mode at an existing review checkpoint", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", acceptanceCriteria: ["Works"] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", auto: false, plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const result = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/accept`, { body: { auto: true } });
+    assert.equal(result.status, 200);
+    assert.equal(result.json.auto, true);
+    assert.equal(daemon.store.read().ticketRuns[id].auto, true);
   });
 });
 

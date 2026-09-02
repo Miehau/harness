@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizePlan } from "../src/plan.js";
+import { runCli } from "../src/cli.js";
 import { runAgainstDaemon, seedRun, withDaemon } from "./helpers.js";
 
 test("new text creates a queue item the UI would start", async () => {
@@ -72,4 +73,38 @@ test("approve without an id uses the selected ticket (run manually)", async () =
     assert.equal(approved.json.accepted, true);
     assert.equal(approved.json.ticketId, id);
   });
+});
+
+test("answer --approve submits an empty requirements response", async () => {
+  let called;
+  const output = [];
+  const code = await runCli(["answer", "ticket-1", "--approve"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, method: options.method, body: JSON.parse(options.body) };
+      return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true, ticketId: "ticket-1" }); } };
+    },
+    stdout: { write(value) { output.push(value); } },
+    stderr: { write() {} }
+  });
+  assert.equal(code, 0);
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/clarify");
+  assert.equal(called.method, "POST");
+  assert.deepEqual(called.body, { answers: "" });
+  assert.equal(JSON.parse(output.join("")).accepted, true);
+});
+
+test("accept --auto enables automatic continuation at a review checkpoint", async () => {
+  let called;
+  await runCli(["accept", "build", "ticket-1", "--auto"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/accept");
+  assert.deepEqual(called.body, { auto: true });
 });
