@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, groupActivityEvents, markRunCancelled, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -154,6 +154,21 @@ test("activity capture bounds memory and coalesces pending persistence", async (
   await capture.flush();
   assert.equal(writes, 2);
   assert.equal(maxActiveWrites, 1);
+});
+
+test("groups persisted activity into named repository, change, and verification steps", () => {
+  const groups = groupActivityEvents([
+    { type: "tool_start", tool: "read", callId: "read", at: "2026-09-02T10:00:00.000Z" },
+    { type: "tool_end", tool: "read", callId: "read", at: "2026-09-02T10:00:01.000Z" },
+    { type: "tool_start", tool: "edit", callId: "edit", at: "2026-09-02T10:00:02.000Z" },
+    { type: "tool_end", tool: "edit", callId: "edit", at: "2026-09-02T10:00:03.000Z" },
+    { type: "tool_start", tool: "bash", callId: "test", args: '{"command":"npm test"}', at: "2026-09-02T10:00:04.000Z" }
+  ]);
+  assert.deepEqual(groups.map((group) => [group.title, group.status, group.events.length]), [
+    ["Explore repository", "complete", 2],
+    ["Change implementation", "complete", 2],
+    ["Run verification", "running", 1]
+  ]);
 });
 
 test("plan approval ignores supervisor workflow gates", () => {

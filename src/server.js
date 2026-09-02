@@ -136,6 +136,18 @@ function captureStageActivity(ticketId, stageId, runId) {
   });
 }
 
+function captureStepActivity(ticketId, stepId, runId) {
+  const existing = store.read().ticketRuns[ticketId]?.activeRuns?.[stepId]?.activity;
+  return createActivityCapture({
+    existing,
+    persist: (activity) => update((state) => {
+      const active = state.ticketRuns[ticketId]?.activeRuns?.[stepId];
+      if (active?.runId === runId) active.activity = activity;
+    }, { publish: false }),
+    emit: (event) => publishStepEvent(ticketId, stepId, runId, event)
+  });
+}
+
 function repositoryCheckReview(checks) {
   return {
     role: "deterministic",
@@ -938,6 +950,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           current.activeRuns[stepId] = { runId: workerRunId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
+        const activity = captureStepActivity(ticketId, stepId, workerRunId);
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
         const attemptBaseTree = await snapshotTree(cwd);
         const sessionChoice = selectWorkerSession(currentStep, {
@@ -949,13 +962,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           ...sessionChoice,
           feedback: nextFeedback, ticketId, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
-          onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
+          onEvent: activity.onEvent,
           signal
         });
         signal?.throwIfAborted();
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
-          publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Running repository checks" });
+          activity.onEvent({ type: "phase", label: "Running repository checks" });
           checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
         }
         signal?.throwIfAborted();
@@ -978,6 +991,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const workerGate = workerReportCheckpoint(currentStep, result.report);
         if (violations.length || (result.report.status !== "completed" && !workerGate)) {
           const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
+          const attemptActivity = activity.snapshot();
           await update((state) => {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
@@ -990,7 +1004,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
@@ -999,6 +1013,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           return;
         }
         if (workerGate) {
+          const attemptActivity = activity.snapshot();
           await update((state) => {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
@@ -1011,7 +1026,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
@@ -1030,7 +1045,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           setStage(current, "implement", "active", `Fresh verification: ${currentStep.title}`);
         });
         const design = [...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture")?.content || "";
-        publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: `Verifying ${currentStep.title}` });
+        activity.onEvent({ type: "phase", label: `Verifying ${currentStep.title}` });
         const deterministicReview = repositoryCheckReview(checks);
         const verification = deterministicReview.findings.length ? {
           summary: deterministicReview.summary,
@@ -1044,7 +1059,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             design, diff, output: result.output, checks, runId: latest.runId, round,
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
-            onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
+            onEvent: activity.onEvent,
             signal
           })),
           checks
@@ -1059,12 +1074,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         let supervisorReview = null;
         if (!findings.length && latest.sessionFile) {
           try {
-            publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Supervisor reviewing worker report" });
+            activity.onEvent({ type: "phase", label: "Supervisor reviewing worker report" });
             supervisorReview = await harness.reviewWorkerReport({
               cwd: latest.workspace.cwd, sessionFile: latest.sessionFile, sessionKey: `${latest.ticket.id}-${latest.runId}`,
               step: currentStep, report: result.report, diff,
               profile: latest.stageProfiles.architecture,
-              onEvent: (event) => publishStepEvent(ticketId, stepId, workerRunId, event),
+              onEvent: activity.onEvent,
               signal
             });
           } catch (error) {
@@ -1074,12 +1089,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         }
         const supervisorGate = supervisorReviewCheckpoint(currentStep, supervisorReview);
         if (!findings.length && !supervisorGate) {
-          publishStepEvent(ticketId, stepId, workerRunId, { type: "phase", label: "Drafting the requirement-linked commit" });
+          activity.onEvent({ type: "phase", label: "Drafting the requirement-linked commit" });
           commitMessage = await harness.generateCommitMessage({
             cwd, ticket: latest.ticket, step: currentStep, diff, runId: latest.runId,
             profile: latest.stageProfiles.commit, signal
           });
         }
+        const attemptActivity = activity.snapshot();
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
@@ -1091,7 +1107,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: result.events, rawOutput: result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });

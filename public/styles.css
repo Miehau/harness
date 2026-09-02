@@ -1284,3 +1284,70 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 @media (max-width: 1000px) {
   .layout.ticket-layout { --queue-width: 300px; }
 }
+
+/* Compact workflow map and dependency-safe execution graph. */
+.workflow-stages ol { gap: 3px; }
+.workflow-stages li { min-height: 46px; padding: 5px 4px; }
+.workflow-stages li:not(:last-child)::after { display: none; }
+.workflow-stage { grid-template-columns: 24px minmax(0, 1fr); gap: 6px; }
+.workflow-stage .stage-marker { width: 24px; height: 24px; }
+.stage-copy strong { display: block; font-size: 11px; line-height: 1.2; white-space: nowrap; }
+.stage-copy strong em { margin-right: 3px; color: #778195; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; font-style: normal; font-weight: 500; }
+.stage-copy small, .stage-active .stage-copy small { display: block; margin-top: 2px; color: #828c9e; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.stage-active .stage-copy small { color: #b7adff; }
+
+.graph-group-children { border-left: 0; padding-left: 0; }
+.step-dependency { display: block; overflow: hidden; margin-top: 4px; color: #9099a9; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.step-dependency::before { color: #7164c9; content: "↳ "; }
+
+.rail-agent .dot.run.pulse { animation: rail-agent-pulse 1.35s ease-in-out infinite; }
+@keyframes rail-agent-pulse {
+  50% { box-shadow: 0 0 0 4px rgb(110 163 232 / 0), 0 0 12px #6ea3e8; transform: scale(.78); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-agent .dot.run.pulse { animation: none; }
+}
+
+.artifact-browser { display: grid; gap: 12px; }
+.artifact-index { display: grid; gap: 1px; max-height: 220px; overflow: auto; }
+.artifact-index button { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; border: 0; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 8px 2px; background: transparent; color: #aab3c1; cursor: pointer; text-align: left; }
+.artifact-index button:hover, .artifact-index button[aria-pressed="true"] { color: #d1c9ff; }
+.artifact-index strong, .artifact-index small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-index strong { font-size: 11px; }
+.artifact-index small { margin-top: 2px; color: #7f899b; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.artifact-index i { align-self: center; color: #a99dff; font-size: 9px; font-style: normal; }
+.artifact-preview { margin: 0; background: rgb(6 8 13 / .42); }
+
+.raw-output { overflow: hidden; border: 1px solid var(--stroke); border-radius: 9px; background: rgb(255 255 255 / .018); }
+.raw-output summary { padding: 9px 10px; color: #aeb7c5; cursor: pointer; font-size: 11px; list-style: none; }
+.raw-output summary::-webkit-details-marker { display: none; }
+.raw-output summary::after { float: right; color: #778195; content: "⌄"; }
+.raw-output[open] summary::after { content: "⌃"; }
+.raw-output pre { border: 0; border-top: 1px solid var(--stroke); border-radius: 0; }
+
+.stage-details { display: grid; gap: 13px; }
+.stage-details > p { margin: 0; color: #b5bdca; font-size: 12px; line-height: 1.5; }
+.stage-details dl { margin: 0; }
+.stage-details dl > div { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 34px; border-bottom: 1px solid rgb(255 255 255 / .065); }
+.stage-details dt { color: #7f899a; font-size: 11px; }
+.stage-details dd { margin: 0; color: #d1d7df; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+.stage-milestones { margin-top: 10px; border: 1px solid var(--stroke); border-radius: 9px; padding: 0 10px; background: rgb(255 255 255 / .018); }
+.stage-milestones > summary { display: flex; align-items: center; justify-content: space-between; min-height: 38px; cursor: pointer; font-size: 11px; list-style: none; }
+.stage-milestones > summary::-webkit-details-marker { display: none; }
+.stage-milestones > summary span { color: #7f899a; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stage-milestones .stage-timeline { border-top: 1px solid var(--stroke); padding-top: 7px; }
+
+@media (max-width: 720px) {
+  .workflow-stages ol { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .workflow-stages li { min-height: 43px; }
+  .workflow-stage { grid-template-columns: 20px minmax(0, 1fr); gap: 4px; }
+  .workflow-stage .stage-marker { width: 20px; height: 20px; font-size: 9px; }
+}
+
+/* Keep ticket identity legible when the control strip becomes crowded. */
+.ticket-heading > div:first-child { flex: 1 1 440px; min-width: 0; }
+.ticket-heading .plan-actions { flex: 0 1 850px; flex-wrap: wrap; justify-content: flex-end; max-width: min(100%, 850px); }
+@media (max-width: 1200px) {
+  .ticket-heading { align-items: stretch; flex-direction: column; }
+  .ticket-heading .plan-actions { max-width: none; justify-content: flex-start; }
+}

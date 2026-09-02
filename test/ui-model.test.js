@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -119,6 +119,18 @@ test("activity groups tool calls under the latest reasoning focus", () => {
   assert.equal(groups[1].items[0].status, "running");
 });
 
+test("activity uses persisted group labels when an agent run is saved", () => {
+  const groups = eventGroups([], [{
+    key: "group:explore", title: "Explore repository", note: "Find the smallest relevant slice.",
+    at: "2026-09-02T10:00:00.000Z", endedAt: "2026-09-02T10:00:02.000Z", status: "complete",
+    events: [
+      { type: "tool_start", tool: "read", callId: "read", args: '{"path":"src/app.js"}', at: "2026-09-02T10:00:00.000Z" },
+      { type: "tool_end", tool: "read", callId: "read", result: "source", at: "2026-09-02T10:00:02.000Z" }
+    ]
+  }]);
+  assert.deepEqual(groups.map((group) => [group.title, group.status, group.items[0].title]), [["Explore repository", "complete", "Read · src/app.js"]]);
+});
+
 test("stage activity identifies concurrent reviewers", () => {
   const timeline = eventTimeline([
     { type: "thinking", actor: "requirements", label: "Model is reasoning", at: "1" },
@@ -212,6 +224,12 @@ test("keeps an explicit step selection when another step awaits review", () => {
   const plan = { nodes: [{ id: "review", status: "review_ready" }, { id: "other", status: "ready" }] };
   assert.equal(preferredStepId(plan, "other"), "other");
   assert.equal(preferredStepId(plan, null), "review");
+});
+
+test("defaults the inspector to the blocked or active workflow stage", () => {
+  const stages = [{ id: "clarify", status: "completed" }, { id: "implement", status: "blocked" }, { id: "verify", status: "pending" }];
+  assert.equal(preferredStageId(stages), "implement");
+  assert.equal(preferredStageId(stages, "verify"), "verify");
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {

@@ -76,6 +76,49 @@ export function pushBounded(items, item, limit) {
   if (items.length > limit) items.splice(0, items.length - limit);
 }
 
+function activityGroupMeta(event = {}) {
+  if (event.type === "phase") return { title: event.label || "Workflow step", note: "", focus: true };
+  if (event.type === "reasoning_summary") return { title: String(event.detail || "Plan next action").split(/\r?\n/).find((line) => line.trim())?.replace(/[*`]/g, "").slice(0, 120) || "Plan next action", note: event.detail || "", focus: true };
+  if (event.type === "thinking") return { title: "Plan next action", note: "", focus: true };
+  if (event.type === "agent_error") return { title: "Investigate failure", note: event.label || "", focus: false };
+  const tool = event.tool || "";
+  if (["read", "grep", "find", "ls"].includes(tool)) return { title: "Explore repository", note: "", focus: false };
+  if (["edit", "write"].includes(tool)) return { title: "Change implementation", note: "", focus: false };
+  if (tool === "worker_report") return { title: "Record worker outcome", note: "", focus: false };
+  if (tool === "bash") return { title: /\b(test|check|verify)\b/i.test(event.args || "") ? "Run verification" : "Run command", note: "", focus: false };
+  return { title: "Agent activity", note: "", focus: false };
+}
+
+export function groupActivityEvents(events = []) {
+  const groups = [];
+  const openTools = new Map();
+  let current = null;
+  for (const event of events) {
+    let group = event.callId ? openTools.get(event.callId) : null;
+    if (!group) {
+      const meta = activityGroupMeta(event);
+      const keepFocus = current?.focus && !["phase", "reasoning_summary", "agent_error"].includes(event.type);
+      if (keepFocus) group = current;
+      else if (current?.title === meta.title && current.note === meta.note) group = current;
+      else {
+        group = { key: `group:${groups.length}:${event.at || ""}`, title: meta.title, note: meta.note, at: event.at, endedAt: event.at, focus: meta.focus, events: [], isError: false };
+        groups.push(group);
+      }
+    }
+    group.events.push(event);
+    group.endedAt = event.at || group.endedAt;
+    group.isError ||= event.type === "agent_error" || (event.type === "tool_end" && event.isError);
+    current = group;
+    if (event.type === "tool_start" && event.callId) openTools.set(event.callId, group);
+    if (event.type === "tool_end" && event.callId) openTools.delete(event.callId);
+  }
+  const activeGroups = new Set(openTools.values());
+  return groups.map((group) => {
+    const { focus, ...saved } = group;
+    return { ...saved, status: group.isError ? "failed" : activeGroups.has(group) ? "running" : "complete" };
+  });
+}
+
 export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
   const startedAt = existing.startedAt || new Date(now()).toISOString();
   const events = (existing.events || []).slice(-eventLimit);
@@ -88,7 +131,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   let dirty = false;
   const lastThinkingAt = new Map();
   const current = () => ({
-    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(),
+    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(), groups: groupActivityEvents(events),
     ...(completedAt ? { completedAt } : {})
   });
   const save = () => {

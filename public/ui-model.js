@@ -64,6 +64,11 @@ export function preferredStepId(plan, currentId) {
   return steps.find((step) => ["needs_input", "awaiting_approval"].includes(step.status))?.id || steps.find((step) => step.status === "review_ready")?.id || steps[0]?.id || null;
 }
 
+export function preferredStageId(stages = [], currentId) {
+  if (stages.some((stage) => stage.id === currentId)) return currentId;
+  return stages.find((stage) => ["blocked", "failed", "needs_attention"].includes(stage.status))?.id || stages.find((stage) => stage.status === "active")?.id || stages.find((stage) => stage.status !== "completed")?.id || stages.at(-1)?.id || null;
+}
+
 export function stepInspectorSummary(step) {
   const attempts = step?.attempts || [];
   const latest = attempts.at(-1);
@@ -198,7 +203,22 @@ export function eventTimeline(events = []) {
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
 }
 
-export function eventGroups(events = []) {
+export function eventGroups(events = [], persistedGroups = []) {
+  if (persistedGroups.some((group) => Array.isArray(group.events))) {
+    return persistedGroups.map((group, index) => {
+      const items = eventTimeline((group.events || []).filter((event) => !["phase", "reasoning_summary", "thinking"].includes(event.type)));
+      return {
+        key: group.key || `saved:${index}`,
+        title: group.title || "Agent activity",
+        note: group.note || "",
+        at: group.at || items[0]?.at || "",
+        endedAt: group.endedAt || items.at(-1)?.at || group.at || "",
+        items,
+        isError: Boolean(group.isError) || group.status === "failed",
+        status: group.status || (group.isError ? "failed" : "complete")
+      };
+    });
+  }
   const groups = [];
   let current;
   for (const item of eventTimeline(events)) {
