@@ -94,6 +94,7 @@ export function groupActivityEvents(events = []) {
   const openTools = new Map();
   let current = null;
   for (const event of events) {
+    if (["agent_start", "turn_start", "turn_end", "agent_settled", "usage"].includes(event.type)) continue;
     let group = event.callId ? openTools.get(event.callId) : null;
     if (!group) {
       const meta = activityGroupMeta(event);

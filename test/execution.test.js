@@ -203,6 +203,8 @@ test("activity capture bounds memory and coalesces pending persistence", async (
 
 test("groups persisted activity into named repository, change, and verification steps", () => {
   const groups = groupActivityEvents([
+    { type: "agent_start", at: "2026-09-02T09:59:59.000Z" },
+    { type: "usage", input: 20, output: 4, at: "2026-09-02T10:00:00.000Z" },
     { type: "tool_start", tool: "read", callId: "read", at: "2026-09-02T10:00:00.000Z" },
     { type: "tool_end", tool: "read", callId: "read", at: "2026-09-02T10:00:01.000Z" },
     { type: "tool_start", tool: "edit", callId: "edit", at: "2026-09-02T10:00:02.000Z" },

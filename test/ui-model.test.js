@@ -56,6 +56,7 @@ test("live run heartbeat distinguishes active, stale, and permission-risk states
   assert.equal(runHeartbeat({ startedAt, lastEventAt: "2026-08-24T18:00:55.000Z", lastEvent: "Using bash" }, {}, now).state, "active");
   assert.equal(runHeartbeat({ startedAt, lastEvent: "Using bash" }, {}, now).state, "stale");
   assert.match(runHeartbeat({ startedAt, warning: true }, {}, now).note, /permission/);
+  assert.equal(runHeartbeat({ startedAt, lastEvent: "Starting", activity: { lastEventAt: "2026-08-24T18:00:55.000Z", lastEvent: "Running repository checks" } }, {}, now).label, "Running repository checks");
 });
 
 test("tool activity preserves event order and pairs details", () => {
@@ -138,6 +139,21 @@ test("activity uses persisted group labels when an agent run is saved", () => {
     ]
   }]);
   assert.deepEqual(groups.map((group) => [group.title, group.status, group.items[0].title]), [["Explore repository", "complete", "Read · src/app.js"]]);
+});
+
+test("activity hides empty generic lifecycle groups but keeps named phases", () => {
+  const groups = eventGroups([], [{
+    key: "lifecycle", title: "Agent activity", status: "complete", events: [
+      { type: "agent_start", at: "2026-09-02T10:00:00.000Z" },
+      { type: "usage", input: 20, output: 4, at: "2026-09-02T10:00:01.000Z" }
+    ]
+  }, {
+    key: "checks", title: "Running repository checks", status: "running", events: [
+      { type: "phase", label: "Running repository checks", at: "2026-09-02T10:00:02.000Z" }
+    ]
+  }]);
+  assert.deepEqual(groups.map((group) => [group.title, group.status, group.items.length]), [["Running repository checks", "running", 0]]);
+  assert.match(groups[0].note, /configured checks before review/);
 });
 
 test("stage activity identifies concurrent reviewers", () => {

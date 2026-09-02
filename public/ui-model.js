@@ -197,6 +197,17 @@ function toolStatus(tool, args) {
   try { return JSON.parse(args || "{}").status || null; } catch { return null; }
 }
 
+function phaseNote(title) {
+  if (/post-merge repository checks/i.test(title)) return "Proving the integrated result still passes the repository's configured checks before delivery completes.";
+  if (/repository checks/i.test(title)) return "Proving this worker's changes pass the repository's configured checks before review.";
+  if (/^Verifying /i.test(title)) return "Checking the worker output, diff, and test results against this step's acceptance criteria.";
+  if (/supervisor reviewing worker report/i.test(title)) return "Checking the worker's report and diff against the active workflow before accepting the result.";
+  if (/drafting the requirement-linked commit/i.test(title)) return "Recording the verified outcome and the requirement it satisfies in the commit history.";
+  if (/merge conflicts detected/i.test(title)) return "Reconciling the verified ticket changes with the target branch before integration can continue.";
+  if (/automated merge started/i.test(title)) return "Integrating the verified ticket branch into the selected repository.";
+  return "";
+}
+
 function expandJson(value) {
   if (Array.isArray(value)) return value.map(expandJson);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandJson(item)]));
@@ -233,7 +244,7 @@ export function eventTimeline(events = []) {
       continue;
     }
     if (event.type === "agent_error") items.push({ key: `error:${items.length}`, title: `${event.actor ? `${event.actor} · ` : ""}Model request failed`, at: event.at, result: event.label || "Unknown model error", status: "failed", isError: true });
-    if (["thinking", "phase"].includes(event.type)) items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${event.actor ? `${event.actor} · ` : ""}${event.label || "working"}`, at: event.at, result: "", status: "summary", isError: false });
+    if (["thinking", "phase"].includes(event.type)) items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${event.actor ? `${event.actor} · ` : ""}${event.label || "working"}`, at: event.at, result: event.type === "phase" ? event.detail || phaseNote(event.label || "") : "", status: "summary", isError: false });
     if (event.type === "reasoning_summary") items.push({ key: `reasoning:${items.length}`, title: `Reasoning · ${event.actor ? `${event.actor} · ` : ""}${firstLine(event.detail, "summary")}`, at: event.at, result: event.detail || "", status: "summary", isError: false });
   }
   return items.map((item) => ({ ...item, hasDetails: Boolean(item.args || item.output || item.result) }));
@@ -246,14 +257,14 @@ export function eventGroups(events = [], persistedGroups = []) {
       return {
         key: group.key || `saved:${index}`,
         title: group.title || "Agent activity",
-        note: group.note || "",
+        note: group.note || phaseNote(group.title || ""),
         at: group.at || items[0]?.at || "",
         endedAt: group.endedAt || items.at(-1)?.at || group.at || "",
         items,
         isError: Boolean(group.isError) || group.status === "failed",
         status: group.status || (group.isError ? "failed" : "complete")
       };
-    });
+    }).filter((group) => group.items.length || group.note || group.title !== "Agent activity");
   }
   const groups = [];
   let current;
@@ -337,11 +348,12 @@ export function stageMilestones(run, stage) {
 
 export function runHeartbeat(active, live = {}, now = Date.now()) {
   if (!active) return null;
-  const elapsed = Math.max(0, Math.floor((now - Date.parse(active.startedAt)) / 1000));
-  const idle = Math.max(0, Math.floor((now - Date.parse(live.lastAt || active.lastEventAt || active.startedAt)) / 1000));
-  const warning = Boolean(live.warning || active.warning);
+  const saved = active.activity || active;
+  const elapsed = Math.max(0, Math.floor((now - Date.parse(active.startedAt || saved.startedAt)) / 1000));
+  const idle = Math.max(0, Math.floor((now - Date.parse(live.lastAt || saved.lastEventAt || active.lastEventAt || active.startedAt || saved.startedAt)) / 1000));
+  const warning = Boolean(live.warning || saved.warning || active.warning);
   return {
-    label: live.label || active.lastEvent || "Agent is running",
+    label: live.label || saved.lastEvent || active.lastEvent || "Agent is running",
     elapsed,
     idle,
     state: warning ? "warning" : idle >= 30 ? "stale" : "active",

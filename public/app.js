@@ -459,7 +459,7 @@ function timelineHtml(events, active = false, persistedGroups = []) {
   return groups.map((group, index) => {
     const current = active && index === 0;
     const duration = groupDuration(group);
-    const meta = [`${group.items.length} action${group.items.length === 1 ? "" : "s"}`, duration, current ? "active" : group.status || (group.isError ? "failed" : "complete")].filter(Boolean).join(" · ");
+    const meta = [group.items.length ? `${group.items.length} action${group.items.length === 1 ? "" : "s"}` : "", duration, current ? "active" : group.status || (group.isError ? "failed" : "complete")].filter(Boolean).join(" · ");
     const note = group.note ? `<div class="activity-group-note">${renderMarkdown(group.note)}</div>` : "";
     return `<details class="activity-group ${current ? "current" : ""} ${group.isError ? "warning" : ""}" data-group-key="${escapeHtml(group.key)}" ${current ? "open" : ""}><summary><span><b>${escapeHtml(group.title)}</b><small>${meta}</small></span><time>${escapeHtml((group.at || "").slice(11, 19))}</time></summary><div class="activity-group-body">${note}${group.items.map(eventHtml).join("")}</div></details>`;
   }).join("") || `<div class="run-empty">The agent has not started a focused activity yet.</div>`;
@@ -508,7 +508,8 @@ function runPanel(step) {
   const events = stepEvents(run, step);
   const rawOutput = rawOutputFor(run, step);
   const raw = `<details class="raw-output" data-load-session-trace="${escapeHtml(step.id)}"><summary>Raw assistant output</summary><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutput || (step.sessionFile ? "Open to load the full session transcript." : "No assistant text yet. Open event details below to inspect tool calls and their output.")))}</pre></details>`;
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting"}</span></div>${heartbeat}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
+  const progress = active?.activity?.lastEvent || active?.lastEvent || (attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting");
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
 }
 
 function overviewPanel(step) {
