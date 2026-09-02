@@ -69,6 +69,36 @@ export function preferredStageId(stages = [], currentId) {
   return stages.find((stage) => ["blocked", "failed", "needs_attention"].includes(stage.status))?.id || stages.find((stage) => stage.status === "active")?.id || stages.find((stage) => stage.status !== "completed")?.id || stages.at(-1)?.id || null;
 }
 
+export function stageDetailModel(run, stageId) {
+  const stages = run?.stages || [];
+  const stageIndex = stages.findIndex((stage) => stage.id === stageId);
+  if (stageIndex < 0) return null;
+  const stage = stages[stageIndex];
+  const allSteps = flattenPlanSteps(run?.plan);
+  const steps = allSteps.filter((step) => (step.stageId || "implement") === stage.id);
+  const stepIds = new Set(steps.map((step) => step.id));
+  const stepById = new Map(allSteps.map((step) => [step.id, step]));
+  const groupChildren = new Map((run?.plan?.nodes || [])
+    .filter((node) => node.type === "group")
+    .map((group) => [group.id, (group.children || []).filter((step) => step.required !== false).map((step) => step.id)]));
+  const dependencies = { internal: [], external: [] };
+  const seen = new Set();
+  for (const step of steps) for (const dependencyId of step.dependsOn || []) {
+    for (const from of groupChildren.get(dependencyId) || [dependencyId]) {
+      const key = `${from}:${step.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const source = stepById.get(from);
+      dependencies[stepIds.has(from) ? "internal" : "external"].push({ from, to: step.id, title: source?.title || from, status: source?.status || null });
+    }
+  }
+  return {
+    stage: { id: stage.id, title: stage.title, status: stage.status, position: stageIndex + 1, total: stages.length },
+    stepIndex: steps.map((step, index) => ({ id: step.id, title: step.title, status: step.status, position: index + 1 })),
+    dependencies
+  };
+}
+
 export function stepInspectorSummary(step) {
   const attempts = step?.attempts || [];
   const latest = attempts.at(-1);

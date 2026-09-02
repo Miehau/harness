@@ -1351,3 +1351,166 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .ticket-heading { align-items: stretch; flex-direction: column; }
   .ticket-heading .plan-actions { max-width: none; justify-content: flex-start; }
 }
+
+/* Stage-first workspace: ticket chrome stays compact; investigation leads. */
+.plan-header { padding: 12px 20px; }
+.ticket-heading { align-items: center; gap: 16px; }
+.ticket-heading h2 { max-width: 36ch; font-size: clamp(19px, 1.8vw, 23px); }
+.ticket-heading p { max-width: 72ch; font-size: 12px; }
+.ticket-heading .usage-strip { gap: 4px; margin-top: 7px; }
+.ticket-heading .usage-strip span { padding: 3px 6px; font-size: 9px; }
+.ticket-heading .plan-actions { align-items: center; gap: 6px; }
+.ticket-heading .supervisor-control { gap: 6px; }
+.ticket-heading .supervisor-control select { min-height: 30px; }
+.ticket-heading .plan-actions .button { min-height: 30px; padding-inline: 9px; font-size: 11px; }
+
+/* The workflow map belongs to the work surface, above its selected stage. */
+.plan-tree > .workflow-stages { margin: 0 0 18px; padding: 0 0 17px; border-bottom: 1px solid var(--stroke); }
+.plan-tree > .workflow-stages > header { margin-bottom: 9px; }
+.plan-tree > .workflow-stages ol { gap: 3px; }
+.plan-tree > .workflow-stages li { min-height: 48px; padding: 5px 4px; }
+.plan-tree > .workflow-stages li::after { display: none; }
+.plan-tree > .workflow-stages .workflow-stage { min-height: 38px; }
+.plan-tree > .workflow-stages .stage-marker { width: 24px; height: 24px; }
+.plan-tree > .workflow-stages .stage-copy strong { font-size: 11px; }
+
+.stage-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  align-items: end;
+  margin-bottom: 18px;
+  padding: 2px 2px 17px;
+  border-bottom: 1px solid var(--stroke);
+}
+.stage-context > div { min-width: 0; }
+.stage-context h1, .stage-context h2, .stage-context h3, .stage-context strong {
+  display: block;
+  max-width: 650px;
+  margin-top: 4px;
+  font-size: clamp(20px, 2vw, 28px);
+  line-height: 1.15;
+  letter-spacing: -.035em;
+}
+.stage-context p { margin-top: 5px; color: #858ea0; font-size: 12px; line-height: 1.45; }
+.stage-context-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  align-self: center;
+  color: #9aa4b5;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+  white-space: nowrap;
+}
+.stage-work-surface { display: grid; gap: 15px; min-width: 0; }
+.stage-work-surface > header, .stage-step-index > header, .stage-dependency-map > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.stage-work-surface > header > :last-child, .stage-step-index > header > :last-child, .stage-dependency-map > header > :last-child {
+  color: #8993a4;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.stage-work-surface > .tree-heading { margin-bottom: 0; }
+
+/* A selected stage is a clean, vertical worker stack—no crossing connectors. */
+.stage-worker-map {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.stage-worker-map::before, .stage-worker-map .graph-edges { display: none; }
+.stage-worker-map .graph-columns, .stage-worker-map .graph-column { gap: 8px; }
+.stage-worker-map .graph-stage-label { margin: 3px 0 1px; }
+.stage-worker-map .graph-group { padding: 9px; }
+.stage-worker-map .step { min-height: 58px; grid-template-columns: 28px minmax(0, 1fr) auto; }
+.stage-worker-map .status-label { grid-column: auto; justify-self: end; padding-left: 8px; white-space: nowrap; }
+.stage-worker-map .step-dependency { max-width: 100%; }
+
+/* Keep investigation details scannable in the inspector. */
+.stage-step-index { display: grid; gap: 8px; }
+.stage-step-index ol, .stage-dependency-map ol { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.stage-step-index button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / .07);
+  padding: 9px 1px;
+  background: transparent;
+  color: #c6ceda;
+  cursor: pointer;
+  text-align: left;
+}
+.stage-step-index button:hover, .stage-step-index button[aria-current="true"] { color: #d4cbff; }
+.stage-step-index button strong, .stage-step-index button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-step-index button strong { font-size: 11px; }
+.stage-step-index button small { margin-top: 3px; color: #818b9c; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stage-step-index button .state-icon { width: 24px; height: 24px; border-radius: 7px; }
+.stage-step-index button em { align-self: center; color: #a99dff; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; font-style: normal; text-transform: uppercase; white-space: nowrap; }
+.stage-dependency-map {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.stage-dependency-map > header, .stage-dependency-map > ol {
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.stage-dependency-map li { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); gap: 5px; align-items: center; }
+.stage-dependency-map li button {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: rgb(255 255 255 / .025);
+  color: #c1c8d3;
+  cursor: pointer;
+  font-size: 10px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage-dependency-map li button:hover { border-color: rgb(139 124 246 / .42); color: #d4cbff; }
+.stage-dependency-map li > span { color: #777f91; text-align: center; }
+.stage-dependency-map > p { margin: 0; color: #8d96a5; font-size: 11px; line-height: 1.45; }
+.execution-graph-secondary { overflow: hidden; border: 1px solid var(--stroke); border-radius: 9px; background: rgb(255 255 255 / .018); }
+.execution-graph-secondary > summary { display: flex; align-items: center; justify-content: space-between; min-height: 38px; padding: 0 10px; color: #adb6c5; cursor: pointer; font-size: 11px; list-style: none; }
+.execution-graph-secondary > summary::-webkit-details-marker { display: none; }
+.execution-graph-secondary > summary span { color: #7f899a; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.execution-graph-secondary[open] > .execution-graph-scroll { border-top: 1px solid var(--stroke); padding: 10px; }
+
+@media (max-width: 1100px) {
+  .ticket-heading { align-items: flex-start; flex-direction: column; }
+  .ticket-heading .plan-actions { max-width: none; justify-content: flex-start; }
+  .plan-tree > .workflow-stages ol { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 800px) {
+  .plan-header, .plan-tree { padding-inline: 16px; }
+  .stage-context { align-items: start; grid-template-columns: 1fr; }
+  .stage-context-meta { justify-content: flex-start; text-align: left; }
+  .stage-worker-map .step { grid-template-columns: 28px minmax(0, 1fr); }
+  .stage-worker-map .status-label { grid-column: 2; justify-self: start; padding-left: 0; }
+}
+
+@media (max-width: 560px) {
+  .ticket-heading .plan-actions, .ticket-heading .supervisor-control { align-items: stretch; width: 100%; flex-direction: column; }
+  .ticket-heading .supervisor-control select, .ticket-heading .plan-actions .button { width: 100%; }
+  .plan-tree > .workflow-stages ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plan-tree > .workflow-stages li { min-height: 44px; }
+  .stage-context h1, .stage-context h2, .stage-context h3, .stage-context strong { font-size: 21px; }
+  .stage-step-index button small { white-space: normal; }
+}

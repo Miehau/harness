@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -230,6 +230,23 @@ test("defaults the inspector to the blocked or active workflow stage", () => {
   const stages = [{ id: "clarify", status: "completed" }, { id: "implement", status: "blocked" }, { id: "verify", status: "pending" }];
   assert.equal(preferredStageId(stages), "implement");
   assert.equal(preferredStageId(stages, "verify"), "verify");
+});
+
+test("stage details keep the implementation index ordered and split its dependency edges", () => {
+  const run = {
+    stages: [{ id: "implement", title: "Implement", status: "active" }, { id: "verify", title: "Verify", status: "pending" }],
+    plan: { nodes: [
+      { id: "foundation", type: "step", title: "Foundation", status: "accepted", dependsOn: [] },
+      { id: "build", type: "step", title: "Build UI", status: "running", dependsOn: ["foundation"] },
+      { id: "verify-ui", type: "step", stageId: "verify", title: "Verify UI", status: "ready", dependsOn: ["build"] }
+    ] }
+  };
+  assert.deepEqual(stageDetailModel(run, "implement"), {
+    stage: { id: "implement", title: "Implement", status: "active", position: 1, total: 2 },
+    stepIndex: [{ id: "foundation", title: "Foundation", status: "accepted", position: 1 }, { id: "build", title: "Build UI", status: "running", position: 2 }],
+    dependencies: { internal: [{ from: "foundation", to: "build", title: "Foundation", status: "accepted" }], external: [] }
+  });
+  assert.deepEqual(stageDetailModel(run, "verify").dependencies.external, [{ from: "build", to: "verify-ui", title: "Build UI", status: "running" }]);
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {

@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -293,7 +293,7 @@ function renderHeader() {
   const restartBanner = restartAudit
     ? `<div class="recovery-banner"><strong>Restarted from ${escapeHtml(restartAudit.target.replace(":", " · "))}</strong><span>${escapeHtml(new Date(restartAudit.at).toLocaleString())} · audit ${escapeHtml(restartAudit.id)}</span></div>`
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${supervisorControlHtml(run)}${action}${reviewAction}</div></div>${stagesHtml(run)}${workflowCheckpointsHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${supervisorControlHtml(run)}${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${checkpointUsesWorkspace(run) ? "" : checkpointHtml(run)}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -335,27 +335,75 @@ function graphUnitHtml(unit) {
   return `<section class="graph-node graph-group" data-graph-node="${escapeHtml(node.id)}"><header><div><span class="graph-group-kicker">${parallel ? "parallel" : "sequence"}</span><strong>${escapeHtml(node.title)}</strong></div><span class="stage-count">${node.children.length} agents</span></header><div class="graph-group-children">${node.children.map(stepHtml).join("")}</div></section>`;
 }
 
-function renderPlanTree() {
-  const target = $("#plan-tree");
-  const run = runFor();
-  if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => stage.status === "blocked" || stage.status === "active")?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
-    return;
+function stageSteps(run, stage) {
+  const detail = stage && stageDetailModel(run, stage.id);
+  const byId = new Map(flattenSteps(run?.plan).map((step) => [step.id, step]));
+  return (detail?.stepIndex || []).map((step) => byId.get(step.id)).filter(Boolean);
+}
+
+function stageDependencies(run, stage) {
+  const dependencies = stage && stageDetailModel(run, stage.id)?.dependencies;
+  return [...(dependencies?.internal || []), ...(dependencies?.external || [])];
+}
+
+function stageContextHtml(run, stage) {
+  const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
+  const steps = stageSteps(run, stage);
+  const dependencies = stageDependencies(run, stage);
+  const artifacts = artifactsForStage(run.artifacts, stage.id);
+  return `<section class="stage-context"><div><span class="eyebrow">Stage ${index} of ${run.stages.length}</span><h1>${escapeHtml(stage.title)}</h1><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><div class="stage-context-meta"><span>${steps.length} worker${steps.length === 1 ? "" : "s"}</span><span>${dependencies.length} dependenc${dependencies.length === 1 ? "y" : "ies"}</span><span>${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}</span></div></section>`;
+}
+
+function stageWorkerMapHtml(run, stage) {
+  const steps = stageSteps(run, stage);
+  if (!steps.length) {
+    const message = stage.id === "implement"
+      ? "The implementation plan has not created workers yet."
+      : "This stage is investigated through its activity and saved artifacts.";
+    return `<section class="stage-work-surface"><header><span class="eyebrow">Stage work</span><span class="stage-count">${escapeHtml(workflowStateLabel(stage.status))}</span></header><div class="run-empty">${message}</div></section>`;
   }
-  if (!run?.plan) {
-    const copy = run ? (run.status === "awaiting_requirements" ? "Approve the requirements above before repository exploration." : run.status === "awaiting_input" ? "Answer the technical question above." : "Exploration and design will produce the graph here.") : "Start the selected ticket to clarify requirements.";
-    target.innerHTML = `<div class="empty"><div><strong>No execution graph yet</strong>${copy}</div></div>`;
-    return;
-  }
-  const graph = executionGraph(run.plan);
-  const steps = flattenSteps(run.plan);
+  const graph = executionGraph({ nodes: steps });
   const attention = steps.filter((step) => ["needs_attention", "failed", "interrupted", "cancelled"].includes(step.status));
   const reviews = steps.filter((step) => step.status === "review_ready");
   const focus = attention.length
     ? `<section class="execution-focus attention"><span class="eyebrow">Current focus</span><strong>Resolve ${attention.length === 1 ? "the worker" : `${attention.length} workers`} that need${attention.length === 1 ? "s" : ""} attention</strong><small>Select a highlighted worker to review the blocker and evidence.</small></section>`
     : reviews.length ? `<section class="execution-focus"><span class="eyebrow">Current focus</span><strong>Review ${reviews.length === 1 ? "the verified worker" : `${reviews.length} verified workers`}</strong><small>Accept or request a focused correction before the next batch starts.</small></section>` : "";
   const columns = graph.columns.map((column, index) => `<section class="graph-column"><span class="graph-stage-label">Batch ${index + 1}</span>${column.map(graphUnitHtml).join("")}</section>`).join("");
-  target.innerHTML = `${focus}<div class="tree-heading"><span class="eyebrow">Implementation graph</span><span class="eyebrow">${attention.length ? `${attention.length} need attention` : reviews.length ? `${reviews.length} awaiting review` : "dependencies shown on each step"}</span></div><div class="execution-graph-scroll"><div id="execution-graph" class="execution-graph"><div class="graph-columns">${columns}</div></div></div>`;
+  return `<section class="stage-work-surface">${focus}<header><span class="eyebrow">Steps in this stage</span><span class="stage-count">${steps.length} workers</span></header><div class="stage-worker-map">${steps.map(stepHtml).join("")}</div><details class="execution-graph-secondary"><summary>View dependency batches <span>${graph.columns.length} batches</span></summary><div class="execution-graph-scroll"><div id="execution-graph" class="execution-graph"><div class="graph-columns">${columns}</div></div></div></details></section>`;
+}
+
+function stageStepIndexHtml(run, stage) {
+  const steps = stageSteps(run, stage);
+  if (!steps.length) return "";
+  return `<section class="stage-step-index"><header><span class="eyebrow">Step index</span><span>${steps.length} workers</span></header><ol>${steps.map((step) => `<li><button class="status-${escapeHtml(step.status)}" type="button" data-step="${escapeHtml(step.id)}"><span class="state-icon" aria-hidden="true">${statusIcon(step.status)}</span><span><strong>${escapeHtml(step.title)}</strong><small>${escapeHtml(step.agentId)}</small></span><em>${escapeHtml(step.status.replaceAll("_", " "))}</em></button></li>`).join("")}</ol></section>`;
+}
+
+function stageDependencyMapHtml(run, stage) {
+  const steps = stageSteps(run, stage);
+  if (!steps.length) return "";
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const dependencies = stageDependencies(run, stage);
+  const map = dependencies.length
+    ? `<ol>${dependencies.map(({ from, to, title }) => `<li><button type="button" data-step="${escapeHtml(from)}">${escapeHtml(title || byId.get(from)?.title || from)}</button><span aria-hidden="true">→</span><button type="button" data-step="${escapeHtml(to)}">${escapeHtml(byId.get(to)?.title || to)}</button></li>`).join("")}</ol>`
+    : `<p>All workers in this stage can run independently.</p>`;
+  return `<section class="stage-dependency-map"><header><span class="eyebrow">Dependency map</span><span>${dependencies.length} link${dependencies.length === 1 ? "" : "s"}</span></header>${map}</section>`;
+}
+
+function renderPlanTree() {
+  const target = $("#plan-tree");
+  const run = runFor();
+  const stage = run?.stages?.find((item) => item.id === selectedStageId);
+  const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
+  if (checkpointUsesWorkspace(run)) {
+    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => stage.status === "blocked" || stage.status === "active")?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
+    return;
+  }
+  if (!run?.plan) {
+    const copy = run ? (run.status === "awaiting_requirements" ? "Approve the requirements above before repository exploration." : run.status === "awaiting_input" ? "Answer the technical question above." : "Exploration and design will produce the graph here.") : "Start the selected ticket to clarify requirements.";
+    target.innerHTML = `${stageSurface}<div class="empty"><div><strong>No execution graph yet</strong>${copy}</div></div>`;
+    return;
+  }
+  target.innerHTML = `${stageSurface}${stage ? stageWorkerMapHtml(run, stage) : ""}`;
 }
 
 function cachedTrace(run, step) {
@@ -578,7 +626,7 @@ function stageDetailsPanel(run, stage, profile, artifacts) {
   const index = run.stages.findIndex((item) => item.id === stage.id);
   const next = run.stages[index + 1];
   const milestones = stageMilestones(run, stage);
-  return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
+  return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stageStepIndexHtml(run, stage)}${stageDependencyMapHtml(run, stage)}${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
 }
 
 function renderInspector() {
