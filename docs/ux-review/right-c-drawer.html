@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Right C · Graph + drawer</title>
+<style>
+  :root { --bg:#0b0d10; --line:#2a3038; --text:#e6eaee; --muted:#808893; --you:#e07070; --ok:#6fca94; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { font:inherit; color:inherit; }
+  .app { display:grid; height:100vh; grid-template-rows:36px 1fr 22px; }
+  .top,.status { display:flex; align-items:center; gap:12px; padding:0 12px; background:#0e1115; color:var(--muted); border-bottom:1px solid var(--line); }
+  .status { border-bottom:0; border-top:1px solid var(--line); font-size:11px; }
+  .brand { color:var(--text); font-weight:700; }
+  .layout { display:grid; min-height:0; grid-template-columns:280px 1fr; }
+  .rail { border-right:1px solid var(--line); padding:8px; }
+  .card { padding:8px; border:1px solid #6e3a3e; background:#1b1416; }
+  .main { display:grid; min-height:0; grid-template-rows:auto 1fr 210px; }
+  .head { padding:10px 16px; border-bottom:1px solid var(--line); }
+  .wf { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin-top:8px; }
+  .wf div { padding:6px; border:1px solid var(--line); color:var(--muted); font-size:10px; }
+  .wf .on { border-color:#5b4b74; color:#d0b7ef; }
+  .graph { min-height:0; overflow:auto; padding:14px 16px; }
+  .focus { margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+  .eyebrow { color:#e6a45d; font-size:10px; letter-spacing:.12em; text-transform:uppercase; }
+  .focus strong { display:block; margin:4px 0 4px; font:700 18px/1.2 ui-sans-serif, system-ui, sans-serif; }
+  .cols { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+  .node { padding:8px; border:1px solid var(--line); }
+  .node.on { border-color:#6e3a3e; background:#1b1416; }
+  .node small { display:block; color:var(--muted); }
+  .drawer { border-top:1px solid var(--line); display:grid; grid-template-rows:auto 1fr; background:#0f1318; }
+  .dtabs { display:flex; align-items:center; gap:12px; padding:0 12px; border-bottom:1px solid var(--line); color:var(--muted); }
+  .dtabs b { color:var(--text); border-bottom:2px solid var(--you); padding:8px 0 6px; }
+  .dtabs .grow { margin-left:auto; }
+  .btn { min-height:24px; padding:0 8px; border:1px solid #3a424c; background:#1a1f25; cursor:pointer; }
+  .btn.pri { border-color:#6e3a3e; background:#2a1618; color:#f0c2c2; }
+  .dbody { display:grid; grid-template-columns:1.1fr .9fr; min-height:0; }
+  .col { min-height:0; overflow:auto; padding:10px 12px; }
+  .col + .col { border-left:1px solid var(--line); }
+  .fail { color:#f0c2c2; margin-bottom:8px; }
+  .d { color:var(--you); } .a { color:var(--ok); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top"><span class="brand">TICKET AGENT</span><span>right-c · no right window · drawer</span></header>
+  <div class="layout">
+    <aside class="rail"><div class="card"><b>TEXT-7F2</b><div>Merge-queue rebase</div></div></aside>
+    <main class="main">
+      <section class="head">
+        <div>TEXT-7F2 · Merge-queue rebase</div>
+        <div class="wf"><div>✓ req</div><div>✓ exp</div><div>✓ des</div><div>✓ impl</div><div class="on">5 verify</div><div>6 handoff</div></div>
+      </section>
+      <section class="graph">
+        <div class="focus">
+          <span class="eyebrow">Current focus</span>
+          <strong>Resolve the worker that needs attention</strong>
+        </div>
+        <div class="cols">
+          <div class="node"><strong>architecture</strong><small>accepted</small></div>
+          <div class="node on"><strong>rebase</strong><small>needs attention · 3 att</small></div>
+          <div class="node"><strong>tests</strong><small>queued</small></div>
+        </div>
+      </section>
+      <section class="drawer">
+        <div class="dtabs">
+          <b>rebase · evidence</b><span>activity</span><span>prompt</span><span>artifacts</span>
+          <span class="grow"></span>
+          <button class="btn pri">Retry</button>
+          <button class="btn">Steer</button>
+        </div>
+        <div class="dbody">
+          <div class="col">
+            <div class="fail">duplicate preview-port bind in src/previews.js</div>
+            <div>14:21:18 decision · reuse availablePort()</div>
+            <div>14:21:58 named command verify</div>
+            <div class="fail">14:22:01 FAIL preview still bound on 4318</div>
+          </div>
+          <div class="col">
+            <pre><span class="d">- const port = Number(process.env.PORT || 4318);</span>
+<span class="a">+ const port = await availablePort(host);</span></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <footer class="status">kill the right window · graph gets the width · selected node fills a VS Code-style drawer</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Side A · Attention stack</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #101317;
+    --raised: #161a1f;
+    --line: #2a3038;
+    --text: #e6eaee;
+    --muted: #808893;
+    --you: #e07070;
+    --gate: #d4b06a;
+    --run: #6ea3e8;
+    --ok: #6fca94;
+    --rev: #c49be8;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { font: inherit; color: inherit; }
+  .app { display: grid; height: 100vh; grid-template-rows: 36px 1fr 24px; }
+  .top, .status {
+    display: flex; align-items: center; gap: 14px; padding: 0 12px;
+    border-bottom: 1px solid var(--line); background: #0e1115; color: var(--muted);
+  }
+  .status { border-bottom: 0; border-top: 1px solid var(--line); font-size: 11px; }
+  .brand { color: var(--text); font-weight: 700; letter-spacing: .04em; }
+  .pill { border: 1px solid #5a2f34; border-radius: 3px; padding: 1px 6px; color: var(--you); background: #2a1618; }
+  .pill.run { border-color: #2d4a6e; color: var(--run); background: #132033; }
+  .spacer { flex: 1; }
+  .cmd { color: #9aa3ad; }
+  .k { border: 1px solid #3a414a; border-radius: 3px; padding: 0 5px; background: #1a1f25; color: #c5ccd4; }
+  .layout { display: grid; min-height: 0; grid-template-columns: 340px 1fr; }
+  .rail {
+    display: flex; min-height: 0; flex-direction: column;
+    border-right: 1px solid var(--line); background: var(--panel);
+  }
+  .rail-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 10px 6px; color: var(--muted); font-size: 11px; letter-spacing: .08em;
+  }
+  .rail-head b { color: var(--text); letter-spacing: 0; }
+  .list { min-height: 0; flex: 1; overflow: auto; padding: 0 6px 8px; }
+  .g { margin: 10px 4px 4px; color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+  .g em { float: right; font-style: normal; color: #aeb6c0; }
+  .ticket {
+    display: grid; gap: 5px; width: 100%; margin: 0 0 5px; padding: 8px 8px 7px;
+    border: 1px solid transparent; border-radius: 4px; background: var(--raised);
+    text-align: left; cursor: pointer;
+  }
+  .ticket:hover { border-color: #3a424c; }
+  .ticket.on { border-color: #6e3a3e; background: #1b1416; }
+  .row { display: flex; align-items: center; gap: 7px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--run); }
+  .dot.you { background: var(--you); box-shadow: 0 0 8px var(--you); }
+  .dot.gate { background: var(--gate); }
+  .dot.rev { background: var(--rev); }
+  .id { color: var(--text); font-weight: 700; }
+  .st { margin-left: auto; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+  .st.you { color: var(--you); }
+  .st.gate { color: var(--gate); }
+  .st.rev { color: var(--rev); }
+  .st.run { color: var(--run); }
+  .title { overflow: hidden; color: #c9d0d7; text-overflow: ellipsis; white-space: nowrap; }
+  .why { color: #f0c2c2; }
+  .why.gate { color: #ead7a6; }
+  .why.ok { color: #b7e0c8; }
+  .why.run { color: #b7cce8; }
+  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; height: 4px; }
+  .stages i { display: block; height: 100%; background: #2b323b; }
+  .stages i.done { background: #3f8f66; }
+  .stages i.now { background: var(--you); }
+  .stages i.now.gate { background: var(--gate); }
+  .stages i.now.run { background: var(--run); }
+  .stages i.now.rev { background: var(--rev); }
+  .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
+  .agents { display: grid; gap: 3px; margin-top: 4px; padding-top: 5px; border-top: 1px dashed #323842; }
+  .agent {
+    display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 6px; align-items: center;
+    padding: 3px 2px; color: #c5ccd3; font-size: 11px;
+  }
+  .agent.on { background: #24181a; }
+  .bar { display: block; height: 4px; margin-top: 3px; background: #262c34; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #4d6f9a, #7eafef); }
+  .bar.fail i { background: linear-gradient(90deg, #8a3a40, #e07070); }
+  .bar.wait i { width: 18% !important; background: #3a414a; }
+  .main { display: grid; min-width: 0; grid-template-rows: auto 1fr auto; background: #0d1014; }
+  .head { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); }
+  .head h1 { margin: 2px 0 6px; font: 700 16px/1.2 ui-sans-serif, system-ui, sans-serif; }
+  .actions { display: flex; gap: 6px; margin: 8px 0 0; }
+  .btn { min-height: 26px; padding: 0 9px; border: 1px solid #3a424c; border-radius: 3px; background: #1a1f25; cursor: pointer; }
+  .btn.pri { border-color: #6e3a3e; background: #2a1618; color: #f0c2c2; }
+  .split { display: grid; min-height: 0; grid-template-columns: 1.1fr .9fr; }
+  .col { min-height: 0; overflow: auto; padding: 12px 14px; }
+  .col + .col { border-left: 1px solid var(--line); }
+  .h { margin-bottom: 8px; color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+  .fail { border: 1px solid #5a2f34; padding: 8px; background: #1b1214; color: #f0c2c2; }
+  .log { display: grid; gap: 4px; color: #c5ccd3; }
+  .log b { color: var(--gate); font-weight: 700; }
+  .log .bad { color: var(--you); }
+  .diff { background: #0a0c10; border: 1px solid var(--line); padding: 10px; }
+  .diff .d { color: #e07070; }
+  .diff .a { color: #6fca94; }
+  .ticket-agents { padding: 8px 16px 12px; border-top: 1px solid var(--line); background: #0f1318; }
+  .ta { display: grid; grid-template-columns: 90px minmax(0,1fr) 90px 110px; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1e242c; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <span class="brand">TICKET AGENT</span>
+    <span>side-a · attention stack</span>
+    <span class="pill">3 NEED YOU</span>
+    <span class="pill run">1 / 4 SLOTS</span>
+    <span class="spacer"></span>
+    <span class="cmd"><span class="k">n</span> new task · <span class="k">⌘K</span> jump</span>
+    <span>~/work/app</span>
+  </header>
+  <div class="layout">
+    <aside class="rail">
+      <div class="rail-head">TICKETS <b>needs you first</b></div>
+      <div class="list">
+        <div class="g">NEEDS YOU <em>3</em></div>
+        <button class="ticket on" type="button">
+          <div class="row"><span class="dot you"></span><span class="id">TEXT-7F2</span><span class="st you">needs you</span></div>
+          <div class="title">Merge-queue rebase</div>
+          <div class="why">duplicate preview-port bind in src/previews.js</div>
+          <div class="stages"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i></i></div>
+          <div class="meta"><span>verify · 2 agents</span><span>9s idle</span></div>
+          <div class="agents">
+            <div class="agent on">
+              <span class="dot you"></span>
+              <span>rebase <div class="bar fail"><i style="width:72%"></i></div></span>
+              <span>3/8 att</span>
+            </div>
+            <div class="agent">
+              <span class="dot"></span>
+              <span>tests <div class="bar wait"><i></i></div></span>
+              <span>queued</span>
+            </div>
+          </div>
+        </button>
+        <button class="ticket" type="button">
+          <div class="row"><span class="dot gate"></span><span class="id">APP-1842</span><span class="st gate">plan gate</span></div>
+          <div class="title">Zero-state task board</div>
+          <div class="why gate">approve plan · 2 implement workers ready</div>
+          <div class="stages"><i class="done"></i><i class="done"></i><i class="now gate"></i><i></i><i></i><i></i></div>
+          <div class="meta"><span>design · 2 agents</span><span>2m idle</span></div>
+        </button>
+        <button class="ticket" type="button">
+          <div class="row"><span class="dot rev"></span><span class="id">LIN-88</span><span class="st rev">review</span></div>
+          <div class="title">Preview ports</div>
+          <div class="why ok">verification passed · +12 −4</div>
+          <div class="stages"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="now rev"></i><i></i></div>
+          <div class="meta"><span>verify · 1 agent</span><span>26s idle</span></div>
+        </button>
+        <div class="g">RUNNING <em>1</em></div>
+        <button class="ticket" type="button">
+          <div class="row"><span class="dot"></span><span class="id">APP-1901</span><span class="st run">running</span></div>
+          <div class="title">Auth session expiry</div>
+          <div class="why run">edit src/session.ts · tests waiting on session</div>
+          <div class="stages"><i class="done"></i><i class="done"></i><i class="done"></i><i class="now run"></i><i></i><i></i></div>
+          <div class="meta"><span>implement · 2 agents</span><span>live 48s</span></div>
+        </button>
+        <div class="g">IDLE / QUEUED <em>0</em></div>
+      </div>
+    </aside>
+    <main class="main">
+      <section class="head">
+        <div class="row"><span class="id">TEXT-7F2</span><span class="st you">needs you · verify · worker:rebase</span></div>
+        <h1>Merge-queue rebase</h1>
+        <div class="fail">duplicate preview-port bind in src/previews.js · worktree paused · retry stays in the same tree</div>
+        <div class="actions">
+          <button class="btn pri" type="button">Retry worker</button>
+          <button class="btn" type="button">Steer</button>
+          <button class="btn" type="button">Open worktree</button>
+          <button class="btn" type="button">Restart from verify</button>
+          <button class="btn" type="button">Cancel</button>
+        </div>
+      </section>
+      <div class="split">
+        <section class="col">
+          <div class="h">LAST ACTIVITY</div>
+          <div class="log">
+            <div>14:21:18  <b>decision</b>  reuse availablePort()</div>
+            <div>14:21:33  edit src/previews.js</div>
+            <div>14:21:58  named command verify</div>
+            <div class="bad">14:22:01  FAIL  preview still bound on 4318</div>
+          </div>
+        </section>
+        <section class="col">
+          <div class="h">CANONICAL DIFF</div>
+          <pre class="diff"><span class="d">- const port = Number(process.env.PORT || 4318);</span>
+<span class="a">+ const port = await availablePort(host);</span>
+  server.listen(port, host);</pre>
+        </section>
+      </div>
+      <section class="ticket-agents">
+        <div class="h">AGENTS ON THIS TICKET</div>
+        <div class="ta"><span>rebase</span><span>needs attention · duplicate bind</span><span>3/8 att</span><span class="st you">verify fail</span></div>
+        <div class="ta"><span>tests</span><span>waiting on rebase in the same worktree</span><span>—</span><span class="st">queued</span></div>
+      </section>
+    </main>
+  </div>
+  <footer class="status">watch · tickets primary · nested agents only on the selected/needs-you ticket · intake is <span class="k">n</span> · j/k move · enter drill · s steer</footer>
+</div>
+</body>
+</html>

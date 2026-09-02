@@ -24,7 +24,7 @@ test("adapter lifecycle admits a dependency-ready Jira ticket and closes it afte
   });
   const hub = new TrackerHub([jira]);
   const source = await hub.tickets();
-  const [ticket] = admissionCandidates(source.tickets, { ticketRuns: {} }, 2);
+  const [ticket] = admissionCandidates(source.tickets, { ticketRuns: {} });
   assert.equal(ticket.identifier, "APP-2");
 
   const forgeWrites = [];

@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v4 · State groups + full inspector</title>
+<style>
+  :root {
+    --bg: #0c0e12; --surface: #14171c; --lift: #1a1e25; --stroke: #2a3038;
+    --text: #e7ebf0; --dim: #8b939e; --you: #e6b84d; --run: #5eb0ff; --ok: #6ecf9a; --err: #f07178;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { background: none; border: 0; cursor: pointer; }
+  button:focus-visible, textarea:focus-visible { outline: 2px solid rgb(94 176 255 / .45); outline-offset: 1px; }
+  .app { display: grid; height: 100vh; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; }
+  .top { display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--stroke); background: var(--surface); }
+  .brand { display: flex; flex-direction: column; }
+  .brand strong { font-size: 13px; }
+  .brand small { color: var(--dim); font: 11px var(--mono); }
+  .repo { color: var(--dim); font: 11px var(--mono); }
+  .grow { flex: 1; }
+  .icon { width: 32px; height: 32px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--lift); color: var(--dim); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 10px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--lift); font-size: 12px; }
+  .btn:hover { border-color: #3d4652; }
+  .btn.primary { border-color: #3d7ab8; background: #2a6fad; color: #fff; font-weight: 600; }
+  .btn.good { border-color: #2e7a52; color: var(--ok); }
+  .btn.danger { color: var(--err); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .body { display: grid; min-height: 0; grid-template-columns: 360px minmax(0, 1fr); }
+  .fleet { min-height: 0; overflow: auto; border-right: 1px solid var(--stroke); }
+  .section { padding: 12px 10px 6px; }
+  .section h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; }
+  .section h2 b { color: var(--dim); font: 11px var(--mono); }
+  .attention h2 { color: var(--you); } .running h2 { color: var(--run); } .queued h2 { color: var(--dim); }
+  .card { display: grid; width: 100%; gap: 3px; margin-bottom: 7px; padding: 9px 10px; border: 1px solid var(--stroke); border-radius: 9px; background: var(--surface); text-align: left; }
+  .card:hover { background: var(--lift); }
+  .card.on { border-color: #4a5d78; background: #182230; box-shadow: inset 3px 0 0 var(--run); }
+  .card.you.on { border-color: #6a5a22; background: #221c12; box-shadow: inset 3px 0 0 var(--you); }
+  .card.err.on { box-shadow: inset 3px 0 0 var(--err); }
+  .head { display: flex; align-items: center; gap: 7px; }
+  .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: currentColor; }
+  .pulse { animation: pulse 1.6s infinite; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 7px transparent; } }
+  .id { color: #9ec0ee; font: 11px var(--mono); }
+  .name { font-weight: 650; font-size: 12px; }
+  .sp { margin-left: auto; color: var(--dim); font: 11px var(--mono); }
+  .finding { font-size: 12px; }
+  .wt, .now { overflow: hidden; color: var(--dim); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .now { color: var(--run); }
+  .files { display: flex; flex-wrap: wrap; gap: 4px; }
+  .files span { border: 1px solid var(--stroke); border-radius: 4px; padding: 1px 5px; font: 10px var(--mono); }
+  .tag { border-radius: 99px; padding: 1px 7px; font: 10px var(--mono); }
+  .tag.you { background: #2a2414; color: var(--you); }
+  .tag.run { background: #132233; color: var(--run); }
+  .tag.err { background: #2a1719; color: var(--err); }
+  .tag.wait { background: #1a1522; color: #c7a4ea; }
+  .tag.ok { background: #13261c; color: var(--ok); }
+  .main { display: flex; min-width: 0; min-height: 0; flex-direction: column; background: #0e1116; }
+  .ticket { padding: 12px 16px 10px; border-bottom: 1px solid var(--stroke); }
+  .ticket .kicker { display: flex; gap: 8px; align-items: center; color: var(--dim); font: 11px var(--mono); }
+  .ticket h1 { margin: 4px 0 0; font-size: 18px; letter-spacing: -.02em; }
+  .ticket .desc { display: -webkit-box; margin: 4px 0 0; overflow: hidden; color: var(--dim); font-size: 12px; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .usage { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .usage span, .pill { border: 1px solid var(--stroke); border-radius: 99px; padding: 2px 8px; color: var(--dim); font: 10px var(--mono); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .stages { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
+  .stage { display: grid; gap: 2px; padding: 6px 7px; border: 1px solid var(--stroke); border-radius: 7px; background: var(--surface); font-size: 11px; text-align: left; }
+  .stage small { color: var(--dim); font: 10px var(--mono); }
+  .stage.done { border-color: #24563e; }
+  .stage.active { border-color: #5b4b74; background: #191522; }
+  .stage.block { border-color: #633b40; }
+  .path { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: 8px; border: 1px solid var(--stroke); border-radius: 8px; padding: 6px 9px; background: var(--surface); font: 11px var(--mono); }
+  .path code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .banner { margin-top: 10px; padding: 9px 11px; border-radius: 8px; }
+  .banner.err { border: 1px solid #5a3236; background: #2a1719; }
+  .banner.you { border: 1px solid #6a5a22; background: #241e10; }
+  .banner.run { border: 1px solid #2d4d6e; background: #14202c; }
+  .banner strong { display: block; }
+  .banner span { color: var(--dim); font-size: 12px; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--stroke); padding: 0 10px; background: #101318; }
+  .tab { height: 32px; padding: 0 11px; color: var(--dim); font-size: 12px; }
+  .tab.on { color: #fff; box-shadow: inset 0 -2px 0 #fff; }
+  .panel { min-height: 0; flex: 1; overflow: auto; }
+  .graph { display: grid; gap: 8px; padding: 12px; }
+  .ggroup { border: 1px solid var(--stroke); border-radius: 9px; padding: 8px; background: var(--surface); }
+  .ggroup header { display: flex; justify-content: space-between; margin-bottom: 6px; color: var(--dim); font: 10px var(--mono); text-transform: uppercase; }
+  .step { display: grid; width: 100%; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 6px; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; background: #15181b; text-align: left; }
+  .step.on { border-color: #6e9fee; background: #151f2e; }
+  .step .ico { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 6px; background: #23272b; font: 11px var(--mono); }
+  .step b { display: block; font-size: 12px; }
+  .step small { color: var(--dim); font: 11px var(--mono); }
+  pre { margin: 0; padding: 12px 16px; font: 12px/1.5 var(--mono); white-space: pre-wrap; }
+  .add { color: var(--ok); } .del { color: var(--err); }
+  .log { padding: 7px 16px; border-bottom: 1px solid #222830; font: 12px var(--mono); }
+  .log time { color: #66707c; margin-right: 8px; }
+  .art { margin: 10px 12px; padding: 10px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--surface); }
+  .art header { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; }
+  .steer { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: end; padding: 8px 12px; border-top: 1px solid var(--stroke); }
+  textarea { width: 100%; min-height: 56px; border: 1px solid var(--stroke); border-radius: 8px; padding: 8px; background: var(--bg); font: 12px var(--mono); resize: vertical; }
+  .foot { display: flex; justify-content: space-between; gap: 8px; padding: 7px 14px; border-top: 1px solid var(--stroke); color: var(--dim); font: 10px var(--mono); }
+  dialog { width: min(640px, calc(100vw - 32px)); border: 1px solid var(--stroke); border-radius: 12px; padding: 0; background: var(--surface); color: var(--text); }
+  dialog::backdrop { background: rgb(0 0 0 / .6); }
+  .dlg { padding: 16px; }
+  .dlg h2 { margin: 0 0 8px; }
+  .dlg p { margin: 0 0 12px; color: var(--dim); font-size: 12px; }
+  .dlg footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .toast { position: fixed; right: 16px; bottom: 16px; border: 1px solid var(--stroke); border-radius: 8px; padding: 9px 12px; background: var(--lift); opacity: 0; transform: translateY(8px); transition: 140ms; pointer-events: none; }
+  .toast.show { opacity: 1; transform: none; }
+  .you { color: var(--you); } .run { color: var(--run); } .ok { color: var(--ok); } .err { color: var(--err); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><strong>Ticket Agent</strong><small>v4 · state groups, full tools</small></div>
+    <span class="grow"></span>
+    <span class="repo">/Users/michal/work/app · 1/4 slots</span>
+    <button class="icon" type="button" data-act="retention" title="Retained run storage">▣</button>
+    <button class="icon" type="button" data-act="profiles" title="Stage profiles">⚙</button>
+    <button class="btn primary" id="new-task" type="button">New task</button>
+  </header>
+  <div class="body">
+    <aside class="fleet" id="fleet"></aside>
+    <main class="main" id="main"></main>
+  </div>
+</div>
+<dialog id="new-dialog">
+  <form class="dlg" id="new-form">
+    <h2>New task</h2>
+    <p>First line is the title. Starts the normal requirements → plan workflow in an isolated worktree.</p>
+    <textarea name="description" required placeholder="Describe what you want built or changed…"></textarea>
+    <p style="margin-top:10px">Or load a local fixture from the open repo.</p>
+    <div class="actions">
+      <input name="fixture" value="fixtures/zero-state-task-board" style="flex:1;min-width:0;border:1px solid var(--stroke);border-radius:8px;padding:7px 9px;background:var(--bg);font:12px var(--mono)">
+      <button class="btn" type="button" id="load-fixture">Load fixture</button>
+    </div>
+    <footer>
+      <button class="btn" type="button" id="new-cancel">Cancel</button>
+      <button class="btn primary" type="submit">Start workflow</button>
+    </footer>
+  </form>
+</dialog>
+<dialog id="plan-dialog">
+  <form class="dlg" id="plan-form">
+    <h2>Edit graph JSON</h2>
+    <textarea id="plan-json" style="min-height:280px"></textarea>
+    <footer>
+      <button class="btn" type="button" id="plan-cancel">Cancel</button>
+      <button class="btn primary" type="submit">Save plan</button>
+    </footer>
+  </form>
+</dialog>
+<div class="toast" id="toast"></div>
+<script>
+const WT = (s) => `/Users/michal/.agent-plan-workspace/ticket-runs/${s}/worktree`;
+const STAGES = ["Req", "Explore", "Design", "Implement", "Verify", "Handoff"];
+
+const seed = () => ({
+  selected: "TEXT-7F2:rebase",
+  tab: "evidence",
+  steer: "",
+  clock: 0,
+  tickets: {
+    "TEXT-7F2": {
+      title: "Merge-queue rebase", desc: "Keep preview binds unique after rebase onto origin/main.",
+      source: "local", branch: "ticket/text-7f2", skill: "Supervisor",
+      metrics: { time: "3m", calls: 28, inn: "42k", out: "9k", corr: 3 },
+      stages: ["done","done","done","done","block","idle"],
+      preview: null
+    },
+    "APP-1842": {
+      title: "Zero-state board", desc: "Create, automate, and extend a small task-board from an empty repository.",
+      source: "local fixture", branch: "ticket/app-1842", skill: "Supervisor",
+      metrics: { time: "6m", calls: 14, inn: "80k", out: "12k", corr: 0 },
+      stages: ["done","done","active","idle","idle","idle"],
+      preview: null
+    },
+    "LIN-88": {
+      title: "Preview ports", desc: "Ticket-isolated preview ports that cannot collide.",
+      source: "linear", branch: "ticket/lin-88", skill: "Supervisor",
+      metrics: { time: "3m", calls: 11, inn: "20k", out: "4k", corr: 0 },
+      stages: ["done","done","done","done","active","idle"],
+      preview: ":4179"
+    },
+    "APP-1901": {
+      title: "Auth session expiry", desc: "Expire idle sessions without invalidating in-flight requests.",
+      source: "linear", branch: "ticket/app-1901", skill: "Supervisor",
+      metrics: { time: "47s", calls: 9, inn: "18k", out: "3k", corr: 0 },
+      stages: ["done","done","done","active","idle","idle"],
+      preview: null
+    },
+    "ENG-441": {
+      title: "Empty-state heading", desc: "Tracker ticket, not started.",
+      source: "linear", branch: null, skill: "",
+      metrics: null, stages: ["idle","idle","idle","idle","idle","idle"], preview: null, queued: true
+    }
+  },
+  agents: [
+    agent("TEXT-7F2", "rebase", "verify", "attention", "needs attention", "err", {
+      finding: "duplicate preview-port bind in src/previews.js",
+      now: "paused after verify", worktree: WT("text-7f2"), live: false, idle: 8, elapsed: 221,
+      model: "gpt-5.6-terra/high", perm: "write · seeded", budget: "5/8 files · 96/400",
+      files: ["src/previews.js", "test/e2e-daemon.test.js"],
+      events: [["14:21:44","decision · reuse availablePort()"],["14:21:58","named command verify"],["14:22:01","FAIL · preview still bound on 4318"]],
+      diff: `<span class="del">- const port = Number(process.env.PORT || 4318);</span>\n<span class="add">+ const port = await availablePort(host);</span>`,
+      artifacts: [["git.diff","canonical +18 −11"],["verify.log","named command output"],["agent-prompt.md","attempt 3"]],
+      prompt: "# verify · rebase\nRestore unique preview binds. Do not change merge-queue scheduling.",
+      graph: [["sequence","Foundation",[["architecture","accepted"],["skeleton","accepted"]]],["sequence","Rebase",[["rebase","needs attention"]]]]
+    }),
+    agent("APP-1842", "supervisor", "design", "attention", "plan gate", "you", {
+      finding: "Approve local execution plan · 2 implement workers ready",
+      now: "waiting for you", worktree: WT("app-1842"), live: false, idle: 120, elapsed: 390,
+      model: "gpt-5.6-sol/high", perm: "none", budget: "plan only", plan: true,
+      files: ["plan.json", "exploration.md"],
+      events: [["14:18:40","decision · keep fixture prompt-free"],["14:19:12","decision · split skeleton vs domain"]],
+      diff: "", artifacts: [["plan.json","execution graph"],["exploration.md","horizon"],["requirements.md","contract"]],
+      prompt: "# design\nTwo-worker implement graph: architecture, then skeleton. Manual pauses at every verified batch.",
+      graph: [["sequence","Foundation",[["architecture","ready"],["skeleton","ready"]]],["parallel","First feature",[["tasks","queued"],["automation","queued"]]]]
+    }),
+    agent("LIN-88", "preview", "verify", "attention", "review ready", "you", {
+      finding: "Verification passed · +12 −4",
+      now: "ready to accept", worktree: WT("lin-88"), live: false, idle: 25, elapsed: 180,
+      model: "gpt-5.6-terra/high", perm: "write · seeded", budget: "2/8 files · 16/400",
+      files: ["src/previews.js"],
+      events: [["14:20:00","decision · unique bind per worktree"],["14:20:11","verify · pass"]],
+      diff: `<span class="add">+ const port = await availablePort("127.0.0.1");</span>\n<span class="del">- preview.listen(4173);</span>`,
+      artifacts: [["git.diff","+12 −4"],["screenshot: desktop","visual evidence"],["screenshot: mobile","visual evidence"]],
+      prompt: "# verify · preview\nTicket-isolated preview ports. Accepting cherry-picks into the ticket worktree.",
+      graph: [["sequence","Ports",[["preview","review ready"]]]]
+    }),
+    agent("APP-1901", "session", "implement", "running", "running", "run", {
+      finding: "Sliding clock, not login time",
+      now: "edit src/session.ts", worktree: WT("app-1901"), live: true, idle: 0, elapsed: 47,
+      model: "gpt-5.6-terra/high", perm: "write · seeded", budget: "3/8 files · 84/400",
+      files: ["src/session.ts", "src/auth.ts"],
+      events: [["14:21:40","read src/auth.ts"],["14:21:52","edit src/session.ts"],["14:22:06","decision · expiry uses last touch"]],
+      diff: `<span class="add">+ export function expired(session, now = Date.now()) {</span>\n<span class="add">+   return now - session.touchedAt > session.ttlMs;</span>\n<span class="add">+ }</span>`,
+      artifacts: [["agent-prompt.md","rendered"],["implementation-delta.json","handoff"]],
+      prompt: "# implement · session\nExpire idle sessions. Tests are a sibling worker.",
+      graph: [["parallel","Implement",[["session","running"],["tests","waiting"]]]]
+    }),
+    agent("APP-1901", "tests", "implement", "running", "waiting", "wait", {
+      finding: "blocked on session",
+      now: "waiting on sibling in the same worktree", worktree: WT("app-1901"), live: false, idle: 47, elapsed: 47,
+      model: "gpt-5.6-sol/high", perm: "write · waits session", budget: "0/8 · 0/400",
+      files: [], events: [["14:21:12","queued until session commits"]], diff: "",
+      artifacts: [], prompt: "# implement · tests\nBlocked until session commits.",
+      graph: [["parallel","Implement",[["session","running"],["tests","waiting"]]]]
+    }),
+    agent("ENG-441", "ticket", "requirements", "queued", "not started", "ok", {
+      finding: "Linear · Todo", now: "", worktree: "worktree pending", live: false, idle: 0, elapsed: 0,
+      model: "", perm: "", budget: "", files: [], events: [], diff: "", artifacts: [], prompt: "", graph: [], queued: true
+    })
+  ]
+});
+
+function agent(ticket, name, stage, group, status, tag, extra) {
+  return { key: `${ticket}:${name}`, ticket, name, stage, group, status, tag, ...extra };
+}
+
+let state = seed();
+let toastTimer;
+const $ = (id) => document.getElementById(id);
+const ag = (key = state.selected) => state.agents.find((a) => a.key === key);
+const tk = (id) => state.tickets[id];
+
+function notify(msg) {
+  $("toast").textContent = msg;
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2600);
+}
+function fmt(s) { return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; }
+
+function defaultTab(a) {
+  if (a.plan) return "graph";
+  if (a.status === "running") return "output";
+  if (a.queued) return "prompt";
+  return "evidence";
+}
+
+function card(a) {
+  const on = a.key === state.selected ? "on" : "";
+  const tone = a.tag === "err" ? "err you" : a.tag === "you" ? "you" : "";
+  return `<button class="card ${tone} ${on}" data-sel="${a.key}">
+    <div class="head">
+      <span class="dot ${a.live ? "pulse run" : a.tag}"></span>
+      <span class="id">${a.ticket}</span>
+      <span class="name">${a.name}</span>
+      <span class="tag ${a.tag}">${a.status}</span>
+      <span class="sp">${a.live ? fmt(a.elapsed) : a.idle ? `${fmt(a.idle)} idle` : ""}</span>
+    </div>
+    <div class="finding">${a.finding}</div>
+    ${a.group !== "queued" ? `<div class="wt">${a.worktree}</div>` : ""}
+    ${a.group === "running" ? `<div class="now">${a.now}</div>` : ""}
+    ${a.group === "running" && a.files.length ? `<div class="files">${a.files.map((f) => `<span>${f}</span>`).join("")}</div>` : ""}
+  </button>`;
+}
+
+function renderFleet() {
+  const g = (name) => state.agents.filter((a) => a.group === name);
+  $("fleet").innerHTML = `
+    <section class="section attention"><h2>Needs attention <b>${g("attention").length}</b></h2>${g("attention").map(card).join("")}</section>
+    <section class="section running"><h2>Running in worktrees <b>${g("running").length}</b></h2>${g("running").map(card).join("")}</section>
+    <section class="section queued"><h2>Queued <b>${g("queued").length}</b></h2>${g("queued").map(card).join("")}</section>`;
+}
+
+function ticketActions(a, t) {
+  if (a.queued) return `<button class="btn primary" data-act="start">Start workflow</button>`;
+  if (a.status === "needs attention") return `<button class="btn primary" data-act="retry">Retry worker</button><button class="btn" data-act="restart">Restart from…</button><button class="btn" data-act="fresh">Start fresh</button><button class="btn danger" data-act="cancel">Cancel run</button>`;
+  if (a.plan) return `<button class="btn" data-act="edit">Edit graph JSON</button><button class="btn" data-act="manual">Run manually</button><button class="btn good" data-act="auto">Auto run graph</button>`;
+  if (a.status === "review ready") return `<button class="btn good" data-act="accept">Accept commit</button><button class="btn" data-act="changes">Request changes</button>`;
+  if (a.live) return `<button class="btn" data-act="steer">Interrupt + redirect</button><button class="btn danger" data-act="cancel">Cancel run</button>`;
+  return `<button class="btn" disabled>Waiting on sibling</button>`;
+}
+
+function banner(a) {
+  if (a.status === "needs attention") return `<div class="banner err"><strong>${a.finding}</strong><span>Worktree paused. Retry continues in the same tree. Auto-accept is disabled.</span></div>`;
+  if (a.plan) return `<div class="banner you"><strong>Approve local execution plan</strong><span>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</span></div>`;
+  if (a.status === "review ready") return `<div class="banner you"><strong>${a.finding}</strong><span>Accepting commits this step. The next batch starts after every verified item at this barrier is accepted.</span></div>`;
+  if (a.live) return `<div class="banner run"><strong>Live in worktree · ${a.now}</strong><span>Isolated ticket worktree. The opened repository is untouched.</span></div>`;
+  if (a.queued) return `<div class="banner you"><strong>Not started</strong><span>Start workflow to clarify requirements, then explore and plan.</span></div>`;
+  return `<div class="banner run"><strong>${a.finding}</strong><span>${a.now}</span></div>`;
+}
+
+function panel(a) {
+  if (state.tab === "graph") {
+    if (!a.graph?.length) return `<div class="log">No execution graph yet. Exploration and design will produce it.</div>`;
+    return `<div class="graph">${a.graph.map((g) => `<section class="ggroup"><header><span>${g[0]} · ${g[1]}</span><span>${g[2].length} agents</span></header>${g[2].map(([id, st]) => {
+      const kid = state.agents.find((x) => x.ticket === a.ticket && x.name === id);
+      const on = kid?.key === a.key || id === a.name;
+      return `<button class="step ${on ? "on" : ""}" data-sel="${a.ticket}:${id}" ${kid ? "" : "disabled"}><span class="ico">${st[0]}</span><span><b>${id}</b><small>${kid ? `${kid.model} · ${kid.perm}` : st}</small></span><span class="tag ${kid?.tag || ""}">${st}</span></button>`;
+    }).join("")}</section>`).join("")}</div>`;
+  }
+  if (state.tab === "evidence") return a.diff ? `<pre>${a.diff}</pre>` : `<div class="log">No repository changes in this worker.</div>`;
+  if (state.tab === "output") return a.events.map((e, i) => `<div class="log"><time>${e[0]}</time>${e[1]}</div>`).join("") || `<div class="log">No activity yet.</div>`;
+  if (state.tab === "artifacts") return a.artifacts.map((x) => `<article class="art"><header><strong>${x[0]}</strong><span>${x[1]}</span></header></article>`).join("") || `<div class="log">No persisted artifacts yet.</div>`;
+  if (state.tab === "prompt") return `<pre>${a.prompt || "Prompt has not been rendered yet."}</pre>`;
+  return "";
+}
+
+function renderMain() {
+  const a = ag();
+  if (!a) { $("main").innerHTML = ""; return; }
+  const t = tk(a.ticket);
+  const tabs = a.queued ? ["prompt"] : ["graph", "evidence", "output", "artifacts", "prompt"];
+  const showSteer = ["needs attention", "review ready", "running"].includes(a.status);
+  $("main").innerHTML = `
+    <div class="ticket">
+      <div class="kicker"><span>${a.ticket} · ${t.source}</span><span class="tag ${a.tag}">${a.status}</span>${t.skill ? `<span class="pill">${t.skill}</span>` : ""}${t.preview ? `<span class="pill">preview ${t.preview}</span>` : ""}${t.branch ? `<span class="pill">${t.branch}</span>` : ""}</div>
+      <h1>${t.title}</h1>
+      <p class="desc">${t.desc}</p>
+      ${t.metrics ? `<div class="usage"><span>${t.metrics.time}</span><span>${t.metrics.calls} calls</span><span>${t.metrics.inn} in</span><span>${t.metrics.out} out</span><span>${t.metrics.corr} corrections</span><span>${a.model}</span><span>${a.budget}</span></div>` : ""}
+      <div class="stages">${STAGES.map((name, i) => {
+        const st = t.stages[i];
+        return `<div class="stage ${st === "done" ? "done" : st === "active" ? "active" : st === "block" ? "block" : ""}"><strong>${name}</strong><small>${st === "done" ? "complete" : st === "active" ? a.stage : st === "block" ? "blocked" : "waiting"}</small></div>`;
+      }).join("")}</div>
+      ${a.group !== "queued" ? `<div class="path"><span>worktree</span><code>${a.worktree}</code><button class="btn" data-act="open">Open</button></div>` : ""}
+      ${banner(a)}
+      <div class="actions">${ticketActions(a, t)}</div>
+    </div>
+    <nav class="tabs">${tabs.map((id) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${id}">${id}</button>`).join("")}</nav>
+    <div class="panel">${panel(a)}</div>
+    ${showSteer ? `<form class="steer" data-act="steer"><textarea id="steer" placeholder="${a.status === "review ready" ? "Describe a focused correction…" : "Redirect this worker…"}">${state.steer}</textarea><button class="btn primary" type="submit">${a.status === "review ready" ? "Send changes" : "Redirect"}</button></form>` : ""}
+    <footer class="foot"><span>${a.perm || "not started"} · ${a.worktree}</span><span>${a.stage} · ${a.status}</span></footer>`;
+}
+
+function render() {
+  const steer = $("steer");
+  if (steer) state.steer = steer.value;
+  renderFleet();
+  renderMain();
+}
+
+function select(key) {
+  const a = ag(key);
+  if (!a) return notify(`Worker ${key.split(":")[1]} is in the graph but not running yet.`);
+  state.selected = key;
+  state.tab = defaultTab(a);
+  render();
+}
+
+function act(name) {
+  const a = ag();
+  const t = tk(a.ticket);
+  if (name === "open") return notify(`Would open ${a.worktree} in Zed.`);
+  if (name === "retention") return notify("Retained run storage (existing dialog).");
+  if (name === "profiles") return notify("Stage profiles: models, reasoning, capacity (existing dialog).");
+  if (name === "edit") {
+    $("plan-json").value = JSON.stringify({ ticket: a.ticket, graph: a.graph }, null, 2);
+    $("plan-dialog").showModal();
+    return;
+  }
+  if (name === "start") {
+    a.group = "running"; a.status = "running"; a.tag = "run"; a.live = true; a.queued = false;
+    a.finding = "Clarifying requirements"; a.now = "writing requirements contract"; a.worktree = WT(a.ticket.toLowerCase());
+    a.events = [["now", "started from tracker"]]; t.stages[0] = "active"; t.branch = `ticket/${a.ticket.toLowerCase()}`;
+    t.metrics = { time: "0s", calls: 0, inn: "0", out: "0", corr: 0 };
+    notify(`${a.ticket} started in a new worktree.`);
+    state.tab = "output"; render(); return;
+  }
+  if (name === "retry") {
+    a.group = "running"; a.status = "running"; a.tag = "run"; a.live = true; a.idle = 0; a.now = "retry · verify"; t.stages[4] = "active";
+    notify("Retrying in the same worktree."); render();
+    setTimeout(() => {
+      a.group = "attention"; a.status = "needs attention"; a.tag = "err"; a.live = false;
+      a.finding = "duplicate preview-port bind still present"; a.now = "paused after verify";
+      a.events.push(["14:22:40", "FAIL · same invariant"]); t.stages[4] = "block";
+      notify("Still failing."); render();
+    }, 1500);
+    return;
+  }
+  if (name === "accept") {
+    a.group = "queued"; a.status = "accepted"; a.tag = "ok"; a.finding = "committed to worktree"; t.stages[4] = "done"; t.stages[5] = "active";
+    notify("Accepted. Next batch can start.");
+    state.selected = state.agents.find((x) => x.group === "attention")?.key || a.key;
+    render(); return;
+  }
+  if (name === "manual" || name === "auto") {
+    a.group = "queued"; a.status = "approved"; a.tag = "ok";
+    t.stages[2] = "done"; t.stages[3] = "active";
+    const arch = agent("APP-1842", "architecture", "implement", "running", "running", "run", {
+      finding: "Derive domain from exploration", now: "write src/domain.ts", worktree: WT("app-1842"), live: true, idle: 0, elapsed: 1,
+      model: "gpt-5.6-sol/high", perm: "write · seeded", budget: "≤8/400", files: ["src/domain.ts"],
+      events: [["14:23:01", "write src/domain.ts"]], diff: `<span class="add">+ export const Task = { id, title, status }</span>`,
+      artifacts: [["agent-prompt.md","rendered"]], prompt: "# implement · architecture", graph: a.graph
+    });
+    const skel = agent("APP-1842", "skeleton", "implement", "running", "waiting", "wait", {
+      finding: "blocked on architecture", now: "waiting in the same worktree", worktree: WT("app-1842"), live: false, idle: 0, elapsed: 1,
+      model: "gpt-5.6-terra/high", perm: "write · waits", budget: "≤8/400", files: [], events: [["14:23:01","queued"]], diff: "",
+      artifacts: [], prompt: "# implement · skeleton", graph: a.graph
+    });
+    state.agents = state.agents.filter((x) => x.key !== a.key).concat([arch, skel]);
+    state.selected = arch.key; state.tab = "output";
+    notify(name === "auto" ? "Auto graph started." : "Running manually. Gates still stop you.");
+    render(); return;
+  }
+  if (name === "cancel") {
+    a.group = "queued"; a.live = false; a.status = "cancelled"; a.tag = "err";
+    notify("Run cancelled. Worktree retained."); render(); return;
+  }
+  if (name === "restart" || name === "fresh") return notify(name === "fresh" ? "Would archive this run and start a new worktree." : "Would restore a recorded checkpoint (existing dialog).");
+  if (name === "changes" || name === "steer") {
+    const text = ($("steer")?.value || state.steer).trim();
+    if (!text) return notify("Write the correction or redirect first.");
+    a.events.push(["now", `steer · ${text.slice(0, 80)}`]);
+    if (a.status !== "review ready") { a.group = "running"; a.status = "running"; a.tag = "run"; a.live = true; a.now = "redirect applied"; }
+    else { a.status = "running"; a.group = "running"; a.tag = "run"; a.live = true; a.now = "applying requested changes"; }
+    notify("Sent into the worker session."); render();
+  }
+}
+
+$("new-task").onclick = () => $("new-dialog").showModal();
+$("new-cancel").onclick = () => $("new-dialog").close();
+$("plan-cancel").onclick = () => $("plan-dialog").close();
+$("plan-form").onsubmit = (e) => { e.preventDefault(); $("plan-dialog").close(); notify("Plan saved. Graph would re-render."); };
+$("load-fixture").onclick = () => {
+  $("new-dialog").close();
+  notify("Loaded fixtures/zero-state-task-board · APP-1842 is already in Needs attention.");
+  select("APP-1842:supervisor");
+};
+$("new-form").onsubmit = (e) => {
+  e.preventDefault();
+  const text = new FormData(e.target).get("description").trim();
+  const title = text.split("\n")[0].replace(/^#+\s*/, "").slice(0, 72);
+  const id = `TEXT-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  state.tickets[id] = { title, desc: text, source: "free text", branch: `ticket/${id.toLowerCase()}`, skill: "Supervisor", metrics: { time: "0s", calls: 0, inn: "0", out: "0", corr: 0 }, stages: ["active","idle","idle","idle","idle","idle"], preview: null };
+  const item = agent(id, "requirements", "requirements", "running", "running", "run", {
+    finding: "Clarifying requirements · repository not accessed", now: "writing requirements contract",
+    worktree: WT(id.toLowerCase()), live: true, idle: 0, elapsed: 0, model: "gpt-5.6-sol/high", perm: "none", budget: "plan only",
+    files: ["requirements.md"], events: [["now", "started from free text"]], diff: "", artifacts: [], prompt: text, graph: []
+  });
+  state.agents.unshift(item);
+  state.selected = item.key; state.tab = "output";
+  e.target.reset(); $("new-dialog").close();
+  notify(`${id} started in a new worktree.`); render();
+};
+
+document.addEventListener("click", (e) => {
+  const sel = e.target.closest("[data-sel]");
+  if (sel && !sel.disabled) return select(sel.dataset.sel);
+  const tab = e.target.closest("[data-tab]");
+  if (tab) { state.tab = tab.dataset.tab; return render(); }
+  const action = e.target.closest("[data-act]");
+  if (action) { e.preventDefault(); act(action.dataset.act); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("textarea, input")) return;
+  if (e.key === "n") { e.preventDefault(); $("new-dialog").showModal(); }
+  const vis = state.agents.filter((a) => a.group !== "done");
+  const i = vis.findIndex((a) => a.key === state.selected);
+  if (e.key === "j") select(vis[Math.min(vis.length - 1, i + 1)].key);
+  if (e.key === "k") select(vis[Math.max(0, i - 1)].key);
+});
+setInterval(() => {
+  if ($("new-dialog").open || $("plan-dialog").open) return;
+  const steerFocus = document.activeElement?.id === "steer";
+  if (steerFocus) return;
+  state.clock += 1;
+  for (const a of state.agents) {
+    if (a.live) {
+      a.elapsed += 1;
+      if (state.clock % 6 === 0 && a.name === "session") {
+        a.now = "edit src/session.ts";
+        a.events.push([`14:22:${String(10 + (state.clock % 50)).padStart(2, "0")}`, "edit src/session.ts · ttlMs"]);
+        a.files = ["src/session.ts", "src/auth.ts", "src/config.ts"];
+      }
+    } else if (a.group === "attention") a.idle += 1;
+  }
+  const t = tk("APP-1901");
+  if (t?.metrics) t.metrics.time = fmt(ag("APP-1901:session")?.elapsed || 0);
+  render();
+}, 1000);
+render();
+</script>
+</body>
+</html>

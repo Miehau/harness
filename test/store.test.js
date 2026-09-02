@@ -19,7 +19,7 @@ test("server restart marks active work as interrupted and clears dead runs", asy
     }));
     const state = await new JsonStore(file, root).init();
     assert.equal(state.version, 6);
-    assert.deepEqual(state.settings, { maxConcurrentTickets: 2, projectMode: "manual", pollIntervalSeconds: 60 });
+    assert.deepEqual(state.settings, { projectMode: "manual", pollIntervalSeconds: 60 });
     assert.equal(state.ticketRuns["run-1"].status, "interrupted");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].status, "interrupted");
     assert.deepEqual(state.ticketRuns["run-1"].activeRuns, {});
@@ -34,14 +34,14 @@ test("server restart marks active work as interrupted and clears dead runs", asy
   }
 });
 
-test("preserves valid daemon capacity and repairs invalid values", async () => {
+test("preserves daemon settings and ignores retired ticket capacity", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-plan-settings-"));
   try {
     const file = join(root, "state.json");
     await writeFile(file, JSON.stringify({ version: 4, workspace: { cwd: root }, settings: { maxConcurrentTickets: 6, projectMode: "automatic", pollIntervalSeconds: 30 }, ticketRuns: {} }));
-    assert.deepEqual((await new JsonStore(file, root).init()).settings, { maxConcurrentTickets: 6, projectMode: "automatic", pollIntervalSeconds: 30 });
+    assert.deepEqual((await new JsonStore(file, root).init()).settings, { projectMode: "automatic", pollIntervalSeconds: 30 });
     await writeFile(file, JSON.stringify({ version: 4, workspace: { cwd: root }, settings: { maxConcurrentTickets: 0 }, ticketRuns: {} }));
-    assert.equal((await new JsonStore(file, root).init()).settings.maxConcurrentTickets, 2);
+    assert.deepEqual((await new JsonStore(file, root).init()).settings, { projectMode: "manual", pollIntervalSeconds: 60 });
   } finally {
     await rm(root, { recursive: true });
   }

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock C · Mission Control</title>
+<style>
+  :root {
+    --bg: #111318; --panel: #161a20; --stroke: #2c333c; --text: #d7dde5; --dim: #8b95a2;
+    --you: #e0c36a; --run: #6cb6ff; --ok: #7dcea0; --err: #f07a7a; --wait: #c7a4ea;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 12px/1.35 var(--sans); }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .app { display: grid; height: 100vh; grid-template-rows: 28px 210px minmax(0,1fr) 22px; }
+  .top { display: flex; align-items: center; gap: 10px; padding: 0 10px; border-bottom: 1px solid var(--stroke); background: #0e1116; font: 11px var(--mono); }
+  .top b { font: 12px var(--sans); }
+  .search { min-width: 280px; border: 1px solid var(--stroke); background: #0b0d11; color: var(--text); padding: 4px 8px; font: 11px var(--mono); }
+  .chip { border: 1px solid var(--stroke); padding: 2px 7px; color: var(--dim); }
+  .chip.hot { border-color: #6a5a22; color: var(--you); background: #241e10; }
+  .matrix { display: grid; grid-template-columns: 168px repeat(6, minmax(0,1fr)); gap: 1px; padding: 8px 10px; background: #0e1116; border-bottom: 1px solid var(--stroke); }
+  .mh { color: var(--dim); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; padding: 0 4px 4px; }
+  .ticket { display: flex; flex-direction: column; justify-content: center; padding: 4px 6px; }
+  .ticket code { color: #9ec0ee; font: 10px var(--mono); }
+  .ticket strong { font-size: 11px; }
+  .cell { min-height: 38px; border: 1px solid var(--stroke); background: var(--panel); padding: 4px 6px; text-align: left; }
+  .cell:hover { border-color: #5b6b80; }
+  .cell.on { border-color: var(--you); background: #241e10; box-shadow: inset 3px 0 0 var(--you); }
+  .cell.run { border-color: #2d4d6e; background: #14202c; }
+  .cell.ok { color: var(--ok); }
+  .cell .w { display: block; overflow: hidden; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .cell small { color: var(--dim); }
+  .work { display: grid; min-height: 0; grid-template-columns: 280px minmax(0,1fr) 300px; }
+  .pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--stroke); }
+  .pane:last-child { border-right: 0; }
+  .ph { display: flex; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid var(--stroke); color: var(--dim); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .dec { display: grid; grid-template-columns: 10px minmax(0,1fr); gap: 8px; padding: 8px 10px; border-bottom: 1px solid #222830; }
+  .dec .dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: currentColor; }
+  .you { color: var(--you); } .run { color: var(--run); } .ok { color: var(--ok); } .err { color: var(--err); }
+  .dec b { display: block; font-size: 12px; }
+  .dec span { color: var(--dim); font: 10px var(--mono); }
+  .evhead { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px 8px; }
+  .evhead h1 { margin: 0; font-size: 16px; }
+  .evhead p { margin: 3px 0 0; color: var(--dim); }
+  .actions { display: flex; gap: 6px; }
+  .btn { border: 1px solid #3b4552; background: #1c232c; padding: 5px 9px; font-size: 11px; }
+  .btn.primary { background: #2a6fad; border-color: #2a6fad; color: #fff; }
+  .btn.good { background: #21543a; border-color: #2e7a52; color: var(--ok); }
+  .btn.danger { color: var(--err); }
+  .split { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; border-top: 1px solid var(--stroke); }
+  pre { margin: 0; padding: 10px 12px; overflow: auto; font: 11px/1.45 var(--mono); }
+  .add { color: var(--ok); } .del { color: var(--err); }
+  .log { padding: 8px 12px; font: 11px var(--mono); border-bottom: 1px solid #222830; }
+  .log time { color: #66707c; margin-right: 8px; }
+  textarea { width: 100%; height: 72px; border: 1px solid var(--stroke); background: #0b0d11; color: var(--text); padding: 7px; font: 11px var(--mono); resize: none; }
+  .box { padding: 10px; }
+  .kv { display: grid; grid-template-columns: 86px 1fr; gap: 4px 8px; padding: 3px 10px; font: 11px var(--mono); }
+  .kv dt { color: var(--dim); }
+  .status { display: flex; align-items: center; gap: 14px; padding: 0 10px; background: #17324d; color: #d7e7f7; font: 11px var(--mono); }
+  .badge { background: var(--you); color: #1a1408; padding: 0 6px; font-weight: 700; }
+  .mocktag { position: fixed; top: 34px; right: 10px; z-index: 5; background: #000c; border: 1px solid var(--wait); color: var(--wait); padding: 3px 7px; font: 10px var(--mono); letter-spacing: .08em; }
+  .k { border: 1px solid #445; padding: 0 5px; }
+</style>
+</head>
+<body>
+<div class="mocktag">MOCK C · MISSION CONTROL</div>
+<div class="app">
+  <header class="top">
+    <b>Ticket Agent</b>
+    <input class="search" value="" placeholder="⌘K  jump to ticket, worker, file, gate…">
+    <span class="chip hot">Watch mode</span>
+    <span class="chip">3/4 slots</span>
+    <span class="chip hot">3 need you</span>
+    <span class="chip">1 running</span>
+    <span style="margin-left:auto">/Users/michal/work/app</span>
+  </header>
+  <section class="matrix" aria-label="Fleet matrix">
+    <div class="mh">Ticket</div>
+    <div class="mh">Req</div><div class="mh">Explore</div><div class="mh">Design</div>
+    <div class="mh">Implement</div><div class="mh">Verify</div><div class="mh">Handoff</div>
+
+    <div class="ticket"><code>TEXT-7F2</code><strong>Merge-queue rebase</strong></div>
+    <button class="cell ok"><span class="w">✓ contract</span></button>
+    <button class="cell ok"><span class="w">✓ horizon</span></button>
+    <button class="cell ok"><span class="w">✓ plan</span></button>
+    <button class="cell ok"><span class="w">✓ rebase impl</span></button>
+    <button class="cell on"><span class="w err">! worker:rebase</span><small>verify fail · 3 att</small></button>
+    <button class="cell"><span class="w">·</span></button>
+
+    <div class="ticket"><code>APP-1901</code><strong>Auth session expiry</strong></div>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell run"><span class="w run">↻ session</span><small>write session.ts</small></button>
+    <button class="cell"><span class="w">tests wait</span></button>
+    <button class="cell"><span class="w">·</span></button>
+
+    <div class="ticket"><code>APP-1842</code><strong>Zero-state board</strong></div>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell" style="border-color:#6a5a22;background:#241e10"><span class="w you">◉ plan gate</span><small>2 workers ready</small></button>
+    <button class="cell"><span class="w">2 queued</span></button>
+    <button class="cell"><span class="w">·</span></button>
+    <button class="cell"><span class="w">·</span></button>
+
+    <div class="ticket"><code>LIN-88</code><strong>Preview ports</strong></div>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓</span></button>
+    <button class="cell ok"><span class="w">✓ collide fix</span></button>
+    <button class="cell" style="border-color:#5b4b74;background:#1a1522"><span class="w wait">◉ review</span><small>+12 −4</small></button>
+    <button class="cell"><span class="w">·</span></button>
+  </section>
+  <section class="work">
+    <aside class="pane">
+      <div class="ph">Agentic decisions <span>selected cell</span></div>
+      <div class="dec err"><span class="dot"></span><div><b>Fail closed on duplicate bind</b><span>14:22:01 · verification · rejected</span></div></div>
+      <div class="dec"><span class="dot"></span><div><b>Do not touch merge algorithm</b><span>14:21:18 · scoped the fix to previews.js</span></div></div>
+      <div class="dec run"><span class="dot"></span><div><b>Reuse availablePort()</b><span>14:21:44 · drop hardcoded 4318</span></div></div>
+      <div class="dec"><span class="dot"></span><div><b>Budget still inside 8/400</b><span>5 files / 96 lines · auto-accept still legal</span></div></div>
+      <div class="ph">Fleet decision stream</div>
+      <div class="dec run"><span class="dot"></span><div><b>APP-1901 session expiry uses sliding clock</b><span>14:22:06 · worker:session</span></div></div>
+      <div class="dec you"><span class="dot"></span><div><b>APP-1842 split skeleton vs domain</b><span>14:19:12 · supervisor · awaiting you</span></div></div>
+    </aside>
+    <section class="pane">
+      <div class="evhead">
+        <div>
+          <h1>TEXT-7F2 · verify · worker:rebase</h1>
+          <p>Needs you · 3 corrections · last tool verify · idle 8s · evidence is canonical Git</p>
+        </div>
+        <div class="actions">
+          <button class="btn primary">Steer</button>
+          <button class="btn">Retry</button>
+          <button class="btn good">Accept anyway</button>
+          <button class="btn danger">Cancel</button>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <div class="ph">Evidence</div>
+          <pre><span class="del">- const port = Number(process.env.PORT || 4318);</span>
+<span class="add">+ const port = await availablePort(host);</span>
+<span class="del">- server.listen(port);</span>
+<span class="add">+ server.listen(port, host);</span></pre>
+        </div>
+        <div>
+          <div class="ph">Live / last output</div>
+          <div class="log"><time>14:21:58</time>named command verify</div>
+          <div class="log"><time>14:22:01</time>FAIL e2e-daemon · preview still bound on 4318</div>
+          <div class="log"><time>14:22:01</time>needs_attention · breakpoint in Watch mode</div>
+        </div>
+      </div>
+    </section>
+    <aside class="pane">
+      <div class="ph">Inspect + steer</div>
+      <dl>
+        <div class="kv"><dt>mode</dt><dd>Watch · stop only on you</dd></div>
+        <div class="kv"><dt>model</dt><dd>gpt-5.6-terra / high</dd></div>
+        <div class="kv"><dt>workspace</dt><dd>worktree TEXT-7F2</dd></div>
+        <div class="kv"><dt>budget</dt><dd>5 / 8 files · 96 / 400</dd></div>
+      </dl>
+      <div class="box">
+        <div class="ph" style="border:0;padding:0 0 6px">Redirect</div>
+        <textarea>Reuse availablePort(); do not add another listener. If the worktree preview is still bound, fail closed and stop.</textarea>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn primary">Interrupt + redirect</button>
+          <button class="btn">Edit prompt</button>
+        </div>
+      </div>
+      <div class="ph">Artifacts</div>
+      <div class="log">verify.log</div>
+      <div class="log">git.diff  +18 −11</div>
+      <div class="log">agent-prompt.md</div>
+      <div class="log">screenshot: e2e-recovery</div>
+      <div class="ph">Keys</div>
+      <div class="log"><span class="k">j</span> <span class="k">k</span> cells · <span class="k">enter</span> inspect · <span class="k">a</span> accept · <span class="k">s</span> steer · <span class="k">g</span> graph json</div>
+    </aside>
+  </section>
+  <footer class="status">
+    <span>WATCH</span>
+    <span class="badge">3 NEED YOU</span>
+    <span style="flex:1">j/k across matrix · current cell is the debugger · Auto would keep APP-1901 running and only surface TEXT-7F2</span>
+    <span>42k in · 9k out · 28 calls</span>
+  </footer>
+</div>
+</body>
+</html>

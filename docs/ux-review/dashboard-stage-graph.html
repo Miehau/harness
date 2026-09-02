@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket Agent · Stage graph experiment</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --canvas: #0b0d0f;
+    --surface: #111315;
+    --surface-raised: #171a1d;
+    --surface-focus: #151a25;
+    --stroke: #292d31;
+    --stroke-strong: #3b424a;
+    --text: #e9ebee;
+    --muted: #8f97a2;
+    --accent: #8b7cf6;
+    --accent-soft: rgb(139 124 246 / .1);
+    --success: #79d39d;
+    --warning: #efb161;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body { margin: 0; background: var(--canvas); color: var(--text); font: 13px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
+  button { color: inherit; font: inherit; }
+  button:focus-visible { outline: 2px solid #a99fff; outline-offset: 2px; }
+  h1, h2, h3, p { margin: 0; }
+
+  .topbar {
+    display: flex;
+    min-height: 58px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--stroke);
+    padding: 9px 18px;
+    background: var(--surface);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; }
+  .brand-mark { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 8px; background: #f0f2f4; color: #17191b; }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .icon-button, .button {
+    min-height: 30px;
+    border: 1px solid var(--stroke-strong);
+    border-radius: 7px;
+    padding: 0 10px;
+    background: var(--surface-raised);
+    color: inherit;
+    cursor: pointer;
+  }
+  .icon-button { display: grid; width: 30px; place-items: center; padding: 0; }
+  .button.primary { border-color: #7466df; background: #7164db; color: white; font-weight: 600; }
+
+  .ticket-layout { display: grid; height: calc(100vh - 58px); grid-template-columns: 270px minmax(0, 1fr); }
+  .ticket-pane { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--stroke); background: #101317; }
+  .pane-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px; }
+  .pane-header h1 { margin-top: 3px; font-size: 15px; }
+  .pane-actions { display: flex; gap: 5px; }
+  .pane-actions .button { min-height: 27px; padding: 0 8px; font-size: 11px; }
+  .eyebrow { color: #7e8797; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; text-transform: uppercase; }
+  .ticket-filter { padding: 0 10px 7px; }
+  .ticket-filter input { width: 100%; border: 1px solid var(--stroke-strong); border-radius: 7px; padding: 7px 8px; background: var(--surface-raised); color: var(--text); }
+  .ticket-list { min-height: 0; flex: 1; overflow: auto; padding: 2px 8px 10px; }
+  .ticket-group { margin-bottom: 14px; }
+  .ticket-group header { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px 6px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .ticket-group header b { border-radius: 99px; padding: 2px 6px; background: #272c32; font-size: 9px; }
+  .ticket-card { display: grid; width: 100%; gap: 6px; margin-bottom: 5px; border: 1px solid #30363d; border-radius: 9px; padding: 9px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+  .ticket-card.selected { border-color: rgb(139 124 246 / .6); background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+  .ticket-card strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .ticket-row, .ticket-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .ticket-meta { justify-content: space-between; text-transform: none; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .dot.warning { background: var(--warning); }
+  .dot.success { background: var(--success); }
+  .stage-cells { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+  .stage-cells i { height: 3px; background: #333941; }
+  .stage-cells i.done { background: #4fb477; }
+  .stage-cells i.now { background: var(--accent); }
+  .ticket-pane-footer { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--stroke); padding: 8px 10px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+
+  .plan-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; background: #0d0f11; }
+  .plan-header { flex: none; border-bottom: 1px solid var(--stroke); padding: 15px 20px 13px; background: #0e1118; }
+  .plan-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+  .plan-heading h2 { margin-top: 4px; font-size: 21px; letter-spacing: -.025em; }
+  .plan-heading p { margin-top: 5px; color: var(--muted); }
+  .plan-actions { display: flex; flex: none; align-items: center; gap: 7px; }
+  .run-pill { display: inline-flex; min-height: 27px; align-items: center; border: 1px solid var(--stroke-strong); border-radius: 99px; padding: 0 9px; color: #aeb6bf; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; white-space: nowrap; }
+  .run-pill.running { border-color: rgb(139 124 246 / .56); color: #c6bdff; }
+  .workspace-content { display: grid; min-height: 0; flex: 1; grid-template-columns: minmax(480px, 60%) minmax(340px, 40%); }
+  .plan-tree { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--stroke); padding: 20px; }
+  .inspector { min-width: 0; min-height: 0; overflow: auto; background: rgb(9 12 18 / .32); }
+
+  .map-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .map-heading small { color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stage-map { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; margin: 0 0 18px; padding: 0; list-style: none; }
+  .stage-map::before { position: absolute; top: 16px; right: 7%; left: 7%; height: 1px; background: #373d48; content: ""; }
+  .stage-map li { position: relative; z-index: 1; min-width: 0; }
+  .stage-node { display: grid; width: 100%; min-height: 51px; grid-template-columns: 27px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 7px; align-content: center; border: 0; border-radius: 8px; padding: 5px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+  .stage-node:hover { background: rgb(255 255 255 / .045); }
+  .stage-node[aria-pressed="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+  .stage-node .marker { display: grid; width: 27px; height: 27px; grid-row: 1 / 3; place-items: center; border: 1px solid #3c4350; border-radius: 50%; background: #1f242c; color: #aeb6bf; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stage-node.completed .marker { border-color: #285d43; background: #153525; color: #87dba8; }
+  .stage-node.active .marker { border-color: #786be0; background: #5e4aaa; color: #fff; }
+  .stage-node strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .stage-node strong em { margin-right: 4px; color: #8f98a8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; font-style: normal; font-weight: 500; }
+  .stage-node small { overflow: hidden; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; }
+
+  .selection-context { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 13px; border-bottom: 1px solid var(--stroke); padding-bottom: 13px; }
+  .selection-context h3 { margin: 5px 0 3px; font-size: 20px; letter-spacing: -.025em; }
+  .selection-context p { max-width: 580px; color: var(--muted); }
+  .selection-count { color: #8f98a8; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+  .worker-map { position: relative; display: grid; gap: 8px; }
+  .worker-map::before { position: absolute; top: 26px; bottom: 26px; left: 13px; width: 1px; background: #3b414d; content: ""; }
+  .worker-node { position: relative; display: grid; width: 100%; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--stroke); border-radius: 10px; padding: 10px; background: rgb(255 255 255 / .018); color: inherit; cursor: pointer; text-align: left; }
+  .worker-node:hover { border-color: #596271; background: rgb(255 255 255 / .045); }
+  .worker-node[aria-pressed="true"] { border-color: rgb(139 124 246 / .66); background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+  .worker-node .state-icon { display: grid; width: 27px; height: 27px; place-items: center; border: 1px solid #39404c; border-radius: 8px; background: #1b2028; color: #9ca5b4; }
+  .worker-node.accepted .state-icon { border-color: #285d43; color: #8cdcaa; }
+  .worker-node.running .state-icon { border-color: #6e5fde; color: #c3bbff; }
+  .worker-node strong, .worker-node small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .worker-node strong { font-size: 12px; }
+  .worker-node small { margin-top: 3px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .worker-status { color: #9ca4b1; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .worker-status.running { color: #c8c1ff; }
+  .stage-log { display: grid; gap: 0; border-top: 1px solid var(--stroke); }
+  .stage-log div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; border-bottom: 1px solid var(--stroke); padding: 10px 2px; }
+  .stage-log time { color: #7d8797; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .inspector-shell { display: flex; min-height: 100%; flex-direction: column; }
+  .inspector-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 21px 20px 16px; }
+  .inspector-header h2 { margin-top: 5px; font-size: 18px; letter-spacing: -.02em; }
+  .inspector-header p { margin-top: 6px; color: var(--muted); }
+  .tabs { display: flex; gap: 20px; overflow-x: auto; border-bottom: 1px solid var(--stroke); padding: 0 20px; }
+  .tab { min-height: 42px; flex: none; border: 0; border-bottom: 2px solid transparent; padding: 0; background: transparent; color: #858e9e; cursor: pointer; }
+  .tab[aria-selected="true"] { border-bottom-color: var(--accent); color: #fff; }
+  .tab-panel { min-height: 0; flex: 1; padding: 18px 20px; }
+  .overview-copy { margin: 0 0 16px; color: #aeb6c4; line-height: 1.55; }
+  .fact-list { margin: 0; }
+  .fact-list div { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 39px; border-bottom: 1px solid rgb(255 255 255 / .07); }
+  .fact-list dt { color: #8790a1; }
+  .fact-list dd { margin: 0; color: #dce1e9; text-align: right; }
+  .activity-list { display: grid; gap: 0; }
+  .activity-list article { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 10px 0; }
+  .activity-list time { color: #818b9b; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .activity-list strong, .activity-list span { display: block; }
+  .activity-list strong { font-size: 12px; }
+  .activity-list span { margin-top: 3px; color: #9da5b3; }
+  .artifact { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; border: 1px solid var(--stroke); border-radius: 9px; padding: 10px; background: rgb(255 255 255 / .025); }
+  .artifact strong, .artifact small { display: block; }
+  .artifact strong { font-size: 12px; }
+  .artifact small { margin-top: 3px; color: var(--muted); }
+  .artifact button { border: 0; padding: 0; background: transparent; color: #b9adff; cursor: pointer; }
+  .empty { color: #7e8796; }
+  .inspector-footer { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--stroke); padding: 9px 20px; color: #737c8b; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .investigation { display: grid; gap: 18px; }
+  .investigation-action { border: 1px solid rgb(139 124 246 / .26); border-radius: 10px; padding: 11px; background: rgb(139 124 246 / .07); }
+  .investigation-action .eyebrow { color: #afa5ff; }
+  .investigation-action strong { display: block; margin-top: 5px; font-size: 13px; }
+  .investigation-action p { margin-top: 4px; color: #adb5c2; }
+  .inspector-section { border-top: 1px solid var(--stroke); padding-top: 12px; }
+  .inspector-section > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+  .inspector-section > header strong { font-size: 12px; }
+  .inspector-section > header span { color: #838c9d; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .investigation-steps { display: grid; gap: 1px; }
+  .investigation-step { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; border: 0; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 9px 1px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+  .investigation-step:hover { color: #fff; }
+  .investigation-step[aria-current="true"] { color: #c7beff; }
+  .investigation-step strong, .investigation-step small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .investigation-step strong { font-size: 11px; }
+  .investigation-step small { margin-top: 3px; color: #8992a3; font-size: 10px; }
+  .investigation-step span:last-child { align-self: center; color: #a7afbc; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .investigation-step.running span:last-child { color: #c8c0ff; }
+  .stage-work { display: grid; gap: 5px; border-left: 2px solid #596170; padding-left: 9px; }
+  .stage-work strong { font-size: 11px; }
+  .stage-work span { color: #969faf; font-size: 11px; }
+  .artifact.compact { margin-bottom: 5px; border: 0; border-radius: 0; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 7px 1px; background: transparent; }
+  .artifact.compact small { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .activity-groups { display: grid; gap: 8px; }
+  .activity-group { overflow: hidden; border: 1px solid var(--stroke); border-radius: 9px; background: rgb(255 255 255 / .018); }
+  .activity-group[open] { border-color: rgb(139 124 246 / .32); }
+  .activity-group summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 10px; cursor: pointer; list-style: none; }
+  .activity-group summary::-webkit-details-marker { display: none; }
+  .activity-group summary::after { color: #8490a2; content: "›"; font-size: 16px; grid-column: 2; grid-row: 1; }
+  .activity-group[open] summary::after { transform: rotate(90deg); }
+  .activity-group strong, .activity-group small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-group strong { font-size: 12px; }
+  .activity-group small { margin-top: 3px; color: #8993a3; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .activity-group-body { border-top: 1px solid var(--stroke); padding: 9px 10px 10px; }
+  .activity-group-note { margin: 0 0 9px; color: #b0b8c5; }
+  .agent-event { display: grid; grid-template-columns: 45px minmax(0, 1fr); gap: 8px; border-top: 1px solid rgb(255 255 255 / .06); padding: 7px 0; }
+  .agent-event:first-of-type { border-top: 0; }
+  .agent-event code { color: #b6aaff; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .agent-event strong, .agent-event span { display: block; }
+  .agent-event strong { font-size: 11px; }
+  .agent-event span { margin-top: 2px; color: #8993a3; font-size: 10px; }
+  .artifact-browser { display: grid; gap: 12px; }
+  .artifact-index { display: grid; gap: 2px; }
+  .artifact-choice { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; border: 0; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 8px 1px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+  .artifact-choice:hover, .artifact-choice[aria-pressed="true"] { color: #c9c1ff; }
+  .artifact-choice strong, .artifact-choice small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .artifact-choice strong { font-size: 11px; }
+  .artifact-choice small { margin-top: 3px; color: #8993a3; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .artifact-choice span { align-self: center; color: #818b9b; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .artifact-preview { overflow: hidden; border: 1px solid var(--stroke); border-radius: 9px; background: #0a0d12; }
+  .artifact-preview header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--stroke); padding: 9px 10px; }
+  .artifact-preview header strong { font-size: 11px; }
+  .artifact-preview header span { color: #8d97a7; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+  .artifact-preview pre { max-height: 280px; overflow: auto; margin: 0; padding: 11px; color: #c7ced8; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+  .dependency-map { display: grid; grid-template-columns: 1fr 28px 1fr 28px 1fr; align-items: center; gap: 4px; }
+  .dependency-map span { overflow: hidden; border: 1px solid var(--stroke); border-radius: 7px; padding: 7px; background: rgb(255 255 255 / .025); color: #c1c8d3; font-size: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+  .dependency-map i { color: #767f90; font-style: normal; text-align: center; }
+
+  @media (max-width: 1060px) {
+    .workspace-content { grid-template-columns: minmax(410px, 56%) minmax(320px, 44%); }
+    .stage-map { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .stage-map::before { display: none; }
+  }
+  @media (max-width: 800px) {
+    html, body { overflow: auto; }
+    .ticket-layout { height: auto; min-height: calc(100vh - 58px); grid-template-columns: 1fr; }
+    .ticket-pane { min-height: 250px; border-right: 0; border-bottom: 1px solid var(--stroke); }
+    .workspace-content { grid-template-columns: 1fr; }
+    .plan-tree { min-height: 420px; border-right: 0; border-bottom: 1px solid var(--stroke); }
+  }
+  @media (max-width: 560px) {
+    .topbar { padding-inline: 12px; }
+    .topbar-actions span { display: none; }
+    .plan-header, .plan-tree, .inspector-header, .tab-panel { padding-inline: 14px; }
+    .plan-heading { flex-direction: column; }
+    .stage-map { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .selection-context { align-items: flex-start; flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<!-- Experimental standalone copy of the current dashboard shell in public/index.html. -->
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">C</span><span>Ticket Agent</span></div>
+    <div class="topbar-actions"><span>Repository · ~/Projects/agent-plan-workspace</span><button class="icon-button" type="button" aria-label="Settings">⚙</button></div>
+  </header>
+
+  <div class="ticket-layout">
+    <aside class="ticket-pane">
+      <header class="pane-header">
+        <div><span class="eyebrow">Tickets</span><h1>Needs you first</h1></div>
+        <div class="pane-actions"><button class="button" type="button">New</button><button class="icon-button" type="button" aria-label="Refresh tickets">↻</button></div>
+      </header>
+      <div class="ticket-filter"><input type="search" placeholder="Filter tickets…" aria-label="Filter tickets"></div>
+      <div class="ticket-list">
+        <section class="ticket-group">
+          <header><span>Running</span><b>1</b></header>
+          <button class="ticket-card selected" type="button">
+            <span class="ticket-row"><span class="dot"></span><b>LOCAL-seeded-plan</b><span>running</span></span>
+            <strong>Build a zero-state task board</strong>
+            <span class="stage-cells" aria-label="Three stages complete, Implement active"><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></span>
+            <span class="ticket-meta"><span>Implement · 3 workers</span><span>now</span></span>
+          </button>
+        </section>
+        <section class="ticket-group">
+          <header><span>Idle / queued</span><b>2</b></header>
+          <button class="ticket-card" type="button"><span class="ticket-row"><span class="dot success"></span><b>APP-42</b><span>queued</span></span><strong>Expose retained run cleanup</strong><span class="ticket-meta"><span>Not started</span><span>2m</span></span></button>
+          <button class="ticket-card" type="button"><span class="ticket-row"><span class="dot warning"></span><b>LIN-88</b><span>review</span></span><strong>Publish review packet</strong><span class="ticket-meta"><span>Verify · 1 worker</span><span>8m</span></span></button>
+        </section>
+      </div>
+      <footer class="ticket-pane-footer"><span>1 / 2 slots</span><span>Trackers</span></footer>
+    </aside>
+
+    <main class="plan-pane">
+      <header class="plan-header">
+        <div class="plan-heading">
+          <div><span class="eyebrow">LOCAL-seeded-plan · local fixture</span><h2>Build a zero-state task board</h2><p>Design a minimal local task board, then run the approved worker graph.</p></div>
+          <div class="plan-actions"><button class="button" type="button">Open worktree</button><span class="run-pill running">running</span></div>
+        </div>
+      </header>
+
+      <div class="workspace-content">
+        <section class="plan-tree" aria-labelledby="map-title">
+          <div class="map-heading"><span class="eyebrow" id="map-title">Workflow map</span><small id="map-summary"></small></div>
+          <ol class="stage-map" id="stage-map"></ol>
+          <div class="selection-context">
+            <div><span class="eyebrow" id="selection-kicker"></span><h3 id="selection-title"></h3><p id="selection-copy"></p></div>
+            <span class="selection-count" id="selection-count"></span>
+          </div>
+          <div id="map-detail"></div>
+        </section>
+
+        <aside class="inspector" aria-live="polite">
+          <section class="inspector-shell">
+            <header class="inspector-header"><div><span class="eyebrow" id="inspector-kicker"></span><h2 id="inspector-title"></h2><p id="inspector-summary"></p></div><span class="run-pill" id="inspector-status"></span></header>
+            <nav class="tabs" aria-label="Selection detail">
+              <button class="tab" type="button" data-tab="activity" role="tab">Activity</button>
+              <button class="tab" type="button" data-tab="artifacts" role="tab">Artifacts</button>
+              <button class="tab" type="button" data-tab="details" role="tab">Details</button>
+            </nav>
+            <div class="tab-panel" id="inspector-panel" role="tabpanel"></div>
+            <footer class="inspector-footer"><span id="inspector-location"></span><span id="inspector-meta"></span></footer>
+          </section>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+  const stages = [
+    { id: "requirements", title: "Clarify requirements", short: "Clarify", status: "completed", summary: "Requirements contract approved before repository work started.", owner: "requirements · gpt-5.6-sol/high", artifacts: ["requirements.md", "product-context.json"], output: [["10:12", "Requirements approved", "Scope and acceptance criteria recorded."], ["10:13", "Context captured", "Current product context persisted."]] },
+    { id: "explore", title: "Explore code", short: "Explore", status: "completed", summary: "Repository structure and related ticket work have been mapped.", owner: "exploration · gpt-5.6-sol/high", artifacts: ["implementation-delta.md", "ticket-lookahead.md"], output: [["10:15", "Repository read", "Mapped source, tests, and local conventions."], ["10:17", "Delta recorded", "Recorded dependencies and adjacent work."]] },
+    { id: "design", title: "Design & plan", short: "Design", status: "completed", summary: "A dependency-aware execution graph is ready to run.", owner: "architecture · gpt-5.6-sol/high", artifacts: ["design.md", "plan.json"], output: [["10:19", "Architecture prepared", "Worker scopes and review barriers defined."], ["10:21", "Plan approved", "Implementation graph is ready for execution."]] },
+    { id: "implement", title: "Implement", short: "Implement", status: "active", summary: "The skeleton worker is running while the next worker waits on it.", owner: "3 workers · 1 running", artifacts: ["architecture.md", "skeleton.md", "diff.patch"], output: [["10:24", "Worker started", "Application skeleton is building in the ticket worktree."], ["10:27", "Latest activity", "Editing public/styles.css and preparing the first test run."]] },
+    { id: "verify", title: "Review & verify", short: "Verify", status: "pending", summary: "Starts once the current implementation batch is accepted.", owner: "verification · waiting", artifacts: [], output: [] },
+    { id: "handoff", title: "Handoff", short: "Handoff", status: "pending", summary: "Prepares delivery evidence and integrates the verified work.", owner: "handoff · waiting", artifacts: [], output: [] }
+  ];
+  const workers = [
+    { id: "architecture", title: "Derive the domain architecture", status: "accepted", summary: "Architecture, domain language, and verification entry point are accepted.", owner: "worker:architecture", artifacts: ["architecture.md", "diff.patch"], output: [["10:23", "Worker report", "Domain architecture recorded in docs/domain-architecture.md."], ["10:24", "Verification", "Repository check entry point added."]] },
+    { id: "skeleton", title: "Create the runnable application skeleton", status: "running", summary: "Creating the shell, package scripts, and deterministic test entry point.", owner: "worker:skeleton", artifacts: ["prompt.md", "skeleton.md"], output: [["10:25", "Read", "Inspected package.json and repository conventions."], ["10:26", "Write", "Created public/index.html and source shell."], ["10:27", "Test", "Waiting for npm test to finish."]] },
+    { id: "create-tasks", title: "Create and display tasks", status: "ready", summary: "Waits on the skeleton before starting the first vertical slice.", owner: "worker:create-tasks", artifacts: [], output: [] }
+  ];
+  const activityGroups = {
+    "stage:requirements": [
+      { title: "Frame the requirements", status: "complete", at: "10:12", note: "Turn the ticket into a reviewed contract before the repository is touched.", events: [["read", "Read ticket context", "Captured scope and constraints."], ["write", "Draft requirements", "Recorded acceptance criteria."]] },
+      { title: "Record product context", status: "complete", at: "10:13", note: "Persist the durable product context used by later stages.", events: [["write", "Save product-context.json", "Linked the capability to this ticket."]] }
+    ],
+    "stage:explore": [
+      { title: "Map the repository", status: "complete", at: "10:15", note: "Find the smallest relevant slice and its verification entry points.", events: [["read", "Read source and tests", "Mapped the current task-board structure."], ["read", "Inspect package scripts", "Confirmed the deterministic test contract."]] },
+      { title: "Check the ticket horizon", status: "complete", at: "10:17", note: "Capture adjacent work that constrains this change.", events: [["write", "Save implementation delta", "Recorded the dependencies and risks."]] }
+    ],
+    "stage:design": [
+      { title: "Design the execution plan", status: "complete", at: "10:19", note: "Split the work into independently reviewable worker steps.", events: [["write", "Draft design.md", "Defined boundaries and ownership."], ["write", "Create plan.json", "Recorded dependencies and review budgets."]] },
+      { title: "Validate the graph", status: "complete", at: "10:21", note: "Check that the dependency graph is runnable before approval.", events: [["test", "Validate plan", "No missing dependencies or cycles."]] }
+    ],
+    "stage:implement": [
+      { title: "Start the first implementation batch", status: "running", at: "10:24", note: "The supervisor launched the unblocked workers and will hold the next batch at the review barrier.", events: [["start", "Launch architecture worker", "Accepted domain design is available."], ["start", "Launch skeleton worker", "Building the runnable baseline."]] }
+    ],
+    "stage:verify": [{ title: "Wait for an accepted batch", status: "waiting", at: "waiting", note: "Verification starts after the implementation batch is accepted.", events: [] }],
+    "stage:handoff": [{ title: "Wait for verification", status: "waiting", at: "waiting", note: "Handoff begins only after final review succeeds.", events: [] }],
+    "worker:architecture": [
+      { title: "Model the domain", status: "complete", at: "10:23", note: "Identify language, state transitions, and boundaries before changing the shell.", events: [["read", "Inspect task lifecycle", "Mapped creation, completion, restore, and remove actions."], ["write", "Write architecture.md", "Saved the domain language and ownership."]] },
+      { title: "Add the verification entry point", status: "complete", at: "10:24", note: "Create the smallest deterministic verification contract for later workers.", events: [["write", "Create .agent-plan/verify.mjs", "Added dependency-free repository verification."], ["test", "Run verification", "Completed successfully."]] }
+    ],
+    "worker:skeleton": [
+      { title: "Inspect the runnable baseline", status: "complete", at: "10:25", note: "Reuse the repository's package and test conventions.", events: [["read", "Read package.json", "Found the existing test contract."], ["read", "Read public shell", "Checked the current layout conventions."]] },
+      { title: "Build the application shell", status: "running", at: "10:26", note: "Create the minimal page and source structure without product behavior.", events: [["write", "Create public/index.html", "Added the application heading and empty state."], ["write", "Edit public/styles.css", "Building the visual baseline."], ["test", "Run npm test", "Currently waiting for the first result."]] }
+    ],
+    "worker:create-tasks": [{ title: "Wait for the skeleton", status: "waiting", at: "waiting", note: "This step is dependency-blocked until the runnable baseline is accepted.", events: [] }]
+  };
+  const artifactPreviews = {
+    "requirements.md": ["Requirements contract", "# Zero-state task board\n\n- Users can create a non-empty task.\n- The board shows an intentional empty state.\n- Every behavior has a deterministic check."],
+    "product-context.json": ["Product context", '{\n  "capability": "task-board",\n  "state": "planned",\n  "owner": "local-seeded-plan"\n}'],
+    "implementation-delta.md": ["Implementation delta", "## Relevant surfaces\n\n- public/index.html\n- public/styles.css\n- src/app.js\n- test/app.test.js"],
+    "ticket-lookahead.md": ["Ticket horizon", "Next work depends on a runnable shell and a stable task lifecycle."],
+    "design.md": ["Architecture plan", "## Worker boundaries\n\n1. Domain architecture\n2. Runnable skeleton\n3. Task creation\n\nEach step has a review barrier."],
+    "plan.json": ["Execution plan", '{\n  "nodes": [\n    { "id": "architecture", "dependsOn": [] },\n    { "id": "skeleton", "dependsOn": ["architecture"] },\n    { "id": "create-tasks", "dependsOn": ["skeleton"] }\n  ]\n}'],
+    "architecture.md": ["Domain architecture", "## Domain\n\nTask: title, status\n\nTransitions: create → complete → restore/remove\n\nUI owns rendering; domain owns behavior."],
+    "skeleton.md": ["Worker report", "Created the runnable shell, test entry point, and accessible empty state."],
+    "diff.patch": ["Canonical diff", "- <main></main>\n+ <main>\n+   <h1>Tasks</h1>\n+   <p>No tasks yet.</p>\n+ </main>"],
+    "prompt.md": ["Rendered worker prompt", "Create the minimum runnable application shell.\n\nScope: package scripts, public shell, deterministic test entry point.\n\nDo not implement task behavior yet."]
+  };
+
+  let selectedStageId = "implement";
+  let selectedWorkerId = null;
+  let selectedTab = "activity";
+  let selectedArtifactName = null;
+  const stageById = (id) => stages.find((stage) => stage.id === id);
+  const workerById = (id) => workers.find((worker) => worker.id === id);
+  const currentItem = () => selectedWorkerId ? workerById(selectedWorkerId) : stageById(selectedStageId);
+  const escapeHtml = (value = "") => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  const stateIcon = (status) => ({ completed: "✓", active: "↻", running: "↻", pending: "○", waiting: "○", needs_input: "?", needs_attention: "!", failed: "×", error: "×" })[status] || "○";
+  const stateLabel = (status) => ({ pending: "waiting", needs_input: "needs input", needs_attention: "needs input" })[status] || status;
+
+  function renderStageMap() {
+    document.querySelector("#stage-map").innerHTML = stages.map((stage, index) => {
+      return `<li><button class="stage-node ${stage.status}" type="button" data-stage="${stage.id}" aria-pressed="${stage.id === selectedStageId && !selectedWorkerId}"><span class="marker" aria-hidden="true">${stateIcon(stage.status)}</span><strong><em>${index + 1}.</em>${escapeHtml(stage.short)}</strong><small>${escapeHtml(stateLabel(stage.status))}</small></button></li>`;
+    }).join("");
+    document.querySelector("#map-summary").textContent = `${stages.filter((stage) => stage.status === "completed").length}/${stages.length} complete`;
+  }
+
+  function renderMapDetail() {
+    const stage = stageById(selectedStageId);
+    const isWorker = Boolean(selectedWorkerId);
+    document.querySelector("#selection-kicker").textContent = isWorker ? "Implementation graph" : `Stage ${stages.findIndex((item) => item.id === stage.id) + 1} of ${stages.length}`;
+    document.querySelector("#selection-title").textContent = isWorker ? workerById(selectedWorkerId).title : stage.title;
+    document.querySelector("#selection-copy").textContent = isWorker ? workerById(selectedWorkerId).summary : stage.summary;
+    document.querySelector("#selection-count").textContent = stage.id === "implement" ? `${workers.length} workers · 2 dependencies` : `${stage.artifacts.length} artifacts`;
+    if (stage.id === "implement") {
+      document.querySelector("#map-detail").innerHTML = `<div class="worker-map">${workers.map((worker) => `<button class="worker-node ${worker.status}" type="button" data-worker="${worker.id}" aria-pressed="${worker.id === selectedWorkerId}"><span class="state-icon">${worker.status === "accepted" ? "✓" : worker.status === "running" ? "↻" : "·"}</span><span><strong>${escapeHtml(worker.title)}</strong><small>${escapeHtml(worker.owner)} · ${escapeHtml(worker.summary)}</small></span><span class="worker-status ${worker.status}">${escapeHtml(worker.status)}</span></button>`).join("")}</div>`;
+      return;
+    }
+    const events = stage.output.length ? stage.output : [["waiting", stage.summary]];
+    document.querySelector("#map-detail").innerHTML = `<div class="stage-log">${events.map(([time, title, detail]) => `<div><time>${escapeHtml(time)}</time><span><strong>${escapeHtml(title)}</strong>${detail ? `<br><small>${escapeHtml(detail)}</small>` : ""}</span></div>`).join("")}</div>`;
+  }
+
+  function activityGroupsFor(item, stage, isWorker) {
+    return activityGroups[isWorker ? `worker:${item.id}` : `stage:${stage.id}`] || [];
+  }
+
+  function artifactKind(name) {
+    return name.endsWith(".patch") ? "diff" : name.endsWith(".json") ? "data" : name === "prompt.md" ? "prompt" : "report";
+  }
+
+  function activityGroupsHtml(item, stage, isWorker) {
+    const groups = activityGroupsFor(item, stage, isWorker);
+    return `<div class="map-heading"><span class="eyebrow">Saved activity</span><small>${groups.length} groups</small></div><section class="activity-groups">${groups.map((group, index) => `<details class="activity-group" ${group.status === "running" || (index === 0 && groups.length === 1) ? "open" : ""}><summary><span><strong>${escapeHtml(group.title)}</strong><small>${escapeHtml(group.status)} · ${escapeHtml(group.at)} · ${group.events.length} event${group.events.length === 1 ? "" : "s"}</small></span></summary><div class="activity-group-body"><p class="activity-group-note">${escapeHtml(group.note)}</p>${group.events.length ? group.events.map(([kind, title, detail]) => `<div class="agent-event"><code>${escapeHtml(kind)}</code><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span></div></div>`).join("") : `<p class="empty">No events yet.</p>`}</div></details>`).join("")}</section>`;
+  }
+
+  function artifactBrowserHtml(item, scope) {
+    if (!item.artifacts.length) return `<p class="empty">No persisted artifacts yet.</p>`;
+    if (!item.artifacts.includes(selectedArtifactName)) selectedArtifactName = item.artifacts[0];
+    const [title, preview] = artifactPreviews[selectedArtifactName] || [selectedArtifactName, "Artifact preview is not available for this record."];
+    return `<div class="artifact-browser"><div class="artifact-index">${item.artifacts.map((artifact) => `<button class="artifact-choice" type="button" data-artifact="${escapeHtml(artifact)}" aria-pressed="${artifact === selectedArtifactName}"><span><strong>${escapeHtml(artifact)}</strong><small>${escapeHtml(scope)} · persisted</small></span><span>${artifactKind(artifact)}</span></button>`).join("")}</div><section class="artifact-preview"><header><strong>${escapeHtml(title)}</strong><span>${artifactKind(selectedArtifactName)}</span></header><pre>${escapeHtml(preview)}</pre></section></div>`;
+  }
+
+  function stepIndexHtml(stage) {
+    if (stage.id !== "implement") return `<div class="stage-work"><strong>One persisted stage activity stream</strong><span>${escapeHtml(stage.owner)} · named groups are reconstructed from saved reasoning summaries and tool events.</span></div>`;
+    return `<div class="investigation-steps">${workers.map((worker) => `<button class="investigation-step ${worker.status}" type="button" data-inspector-worker="${worker.id}" aria-current="${worker.id === selectedWorkerId}"><span><strong>${escapeHtml(worker.title)}</strong><small>${escapeHtml(worker.summary)}</small></span><span>${escapeHtml(worker.status)}</span></button>`).join("")}</div>`;
+  }
+
+  function detailsHtml(item, stage, isWorker) {
+    const dependency = stage.id === "implement" ? `<div class="dependency-map"><span>Architecture</span><i>→</i><span>Skeleton</span><i>→</i><span>Create tasks</span></div>` : `<div class="stage-work"><strong>Workflow order</strong><span>${escapeHtml(stage.summary)}</span></div>`;
+    return `<p class="overview-copy">${escapeHtml(item.summary)}</p><dl class="fact-list"><div><dt>Selection</dt><dd>${isWorker ? "Implementation step" : "Workflow stage"}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(item.owner)}</dd></div><div><dt>Saved groups</dt><dd>${activityGroupsFor(item, stage, isWorker).length}</dd></div><div><dt>Artifacts</dt><dd>${item.artifacts.length}</dd></div></dl><section class="inspector-section"><header><strong>${stage.id === "implement" ? "Step index" : "Stage record"}</strong><span>${stage.id === "implement" ? `${workers.length} steps` : "saved"}</span></header>${stepIndexHtml(stage)}</section><section class="inspector-section"><header><strong>Dependency map</strong><span>plan edges</span></header>${dependency}</section>`;
+  }
+
+  function renderInspector() {
+    const item = currentItem();
+    const isWorker = Boolean(selectedWorkerId);
+    const stage = stageById(selectedStageId);
+    document.querySelector("#inspector-kicker").textContent = isWorker ? "Worker · Implement" : `Workflow stage · ${stage.short}`;
+    document.querySelector("#inspector-title").textContent = item.title;
+    document.querySelector("#inspector-summary").textContent = item.summary;
+    document.querySelector("#inspector-status").textContent = item.status;
+    document.querySelector("#inspector-status").className = `run-pill ${item.status}`;
+    document.querySelector("#inspector-location").textContent = isWorker ? "ticket-runs/local-seeded-plan/worktree" : "isolated ticket run";
+    document.querySelector("#inspector-meta").textContent = isWorker ? item.owner : item.owner;
+    document.querySelectorAll("[data-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.tab === selectedTab)));
+    const panel = document.querySelector("#inspector-panel");
+    if (selectedTab === "activity") {
+      panel.innerHTML = activityGroupsHtml(item, stage, isWorker);
+      return;
+    }
+    if (selectedTab === "artifacts") {
+      panel.innerHTML = artifactBrowserHtml(item, isWorker ? `worker:${item.id}` : stage.id);
+      return;
+    }
+    panel.innerHTML = detailsHtml(item, stage, isWorker);
+  }
+
+  function render() {
+    renderStageMap();
+    renderMapDetail();
+    renderInspector();
+  }
+
+  document.addEventListener("click", (event) => {
+    const stage = event.target.closest("[data-stage]");
+    if (stage) {
+      selectedStageId = stage.dataset.stage;
+      selectedWorkerId = null;
+      selectedArtifactName = null;
+      selectedTab = "activity";
+      render();
+      return;
+    }
+    const worker = event.target.closest("[data-worker]");
+    if (worker) {
+      selectedStageId = "implement";
+      selectedWorkerId = worker.dataset.worker;
+      selectedArtifactName = null;
+      selectedTab = "activity";
+      render();
+      return;
+    }
+    const inspectorWorker = event.target.closest("[data-inspector-worker]");
+    if (inspectorWorker) {
+      selectedStageId = "implement";
+      selectedWorkerId = inspectorWorker.dataset.inspectorWorker;
+      selectedArtifactName = null;
+      selectedTab = "activity";
+      render();
+      return;
+    }
+    const artifact = event.target.closest("[data-artifact]");
+    if (artifact) {
+      selectedArtifactName = artifact.dataset.artifact;
+      renderInspector();
+      return;
+    }
+    const tab = event.target.closest("[data-tab]");
+    if (tab) {
+      selectedTab = tab.dataset.tab;
+      renderInspector();
+    }
+  });
+
+  render();
+</script>
+</body>
+</html>

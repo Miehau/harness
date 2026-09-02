@@ -18,12 +18,8 @@ function initialState(cwd) {
 }
 
 export function normalizeSettings(value = {}) {
-  const maxConcurrentTickets = Number(value.maxConcurrentTickets);
   const pollIntervalSeconds = Number(value.pollIntervalSeconds);
   return {
-    maxConcurrentTickets: Number.isInteger(maxConcurrentTickets) && maxConcurrentTickets >= 1 && maxConcurrentTickets <= 32
-      ? maxConcurrentTickets
-      : 2,
     projectMode: value.projectMode === "automatic" ? "automatic" : "manual",
     pollIntervalSeconds: Number.isInteger(pollIntervalSeconds) && pollIntervalSeconds >= 15 && pollIntervalSeconds <= 3600
       ? pollIntervalSeconds

@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
-import { admissionCandidates, occupiedTicketIds } from "./admission.js";
+import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
 import { JiraClient } from "./jira.js";
@@ -74,16 +74,6 @@ const mergeQueues = new Map();
 let ticketCache = new Map();
 let trackerRefresh = null;
 let pollTimer = null;
-
-function executionCapacity(state = store.read()) {
-  return normalizeSettings(state.settings).maxConcurrentTickets;
-}
-
-function ensureTicketCapacity(ticketId, state = store.read()) {
-  const occupied = occupiedTicketIds(state);
-  const capacity = executionCapacity(state);
-  if (!occupied.has(ticketId) && occupied.size >= capacity) throw new Error(`${capacity} ticket slots are occupied, including approval checkpoints`);
-}
 
 function writeSse(client, chunk) {
   if (client.response.destroyed) {
@@ -405,7 +395,6 @@ async function mirrorCheckpoint(ticketId) {
 
 async function beginTicket(ticket, { automaticAdmission = false } = {}) {
   if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
-  ensureTicketCapacity(ticket.id);
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
     if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
@@ -638,7 +627,7 @@ async function admitAutomaticTickets(tickets) {
   const state = store.read();
   if (state.settings.projectMode !== "automatic") return [];
   const admitted = [];
-  for (const ticket of admissionCandidates(tickets, state, executionCapacity(state))) admitted.push(await beginTicket(ticket, { automaticAdmission: true }));
+  for (const ticket of admissionCandidates(tickets, state)) admitted.push(await beginTicket(ticket, { automaticAdmission: true }));
   return admitted;
 }
 
@@ -2051,7 +2040,7 @@ async function api(request, response, url) {
     return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
-    const models = await harness.models();
+    const models = await harness.models("openai-codex");
     const providers = [...new Set(models.map((model) => model.provider).filter(Boolean))];
     return json(response, 200, {
       models,
@@ -2086,6 +2075,19 @@ async function api(request, response, url) {
     let cleared = 0;
     const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set([...activeTickets.keys(), ...activeMerges])); });
     return json(response, 200, { cleared, state });
+  }
+  const forget = url.pathname.match(/^\/api\/tickets\/([^/]+)\/forget$/);
+  if (request.method === "POST" && forget) {
+    const id = decodeURIComponent(forget[1]);
+    if (!(await body(request)).confirmed) throw new Error("Confirm permanently forgetting this run");
+    if (activeTickets.has(id) || activeMerges.has(id)) throw new Error("Cancel the active run before forgetting it");
+    const run = ticketRun(store.read(), id);
+    await cleanupRetainedRun({ run, dataDir, previewManager: previews });
+    const state = await update((draft) => {
+      delete draft.ticketRuns[id];
+      if (draft.selectedTicketId === id) draft.selectedTicketId = null;
+    });
+    return json(response, 200, { forgotten: true, ticketId: id, state });
   }
   if (request.method === "GET" && url.pathname === "/api/retention") {
     return json(response, 200, await retentionInventory(store.read(), dataDir));
@@ -2170,8 +2172,6 @@ async function api(request, response, url) {
   if (request.method === "POST" && url.pathname === "/api/stage-profiles") {
     const input = await body(request);
     const profiles = normalizeStageProfiles(input.profiles);
-    const requestedCapacity = Number(input.settings?.maxConcurrentTickets);
-    if (!Number.isInteger(requestedCapacity) || requestedCapacity < 1 || requestedCapacity > 32) throw new Error("Maximum concurrent tickets must be an integer from 1 to 32");
     if (!["manual", "automatic"].includes(input.settings?.projectMode)) throw new Error("Project mode must be manual or automatic");
     const requestedPollInterval = Number(input.settings?.pollIntervalSeconds);
     if (!Number.isInteger(requestedPollInterval) || requestedPollInterval < 15 || requestedPollInterval > 3600) throw new Error("Polling interval must be an integer from 15 to 3600 seconds");
@@ -2229,7 +2229,6 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/local/load") {
     const input = await body(request);
-    ensureTicketCapacity("new-local-run");
     return json(response, 201, await loadLocalRun(String(input.path || "fixtures/zero-state-task-board")));
   }
 
@@ -2239,8 +2238,6 @@ async function api(request, response, url) {
     if (!ids.length) throw new Error("Select at least one ticket");
     const tickets = ids.map((id) => ticketCache.get(id));
     if (tickets.some((ticket) => !ticket)) throw new Error("Refresh the ticket sources before starting the selection");
-    const available = executionCapacity() - occupiedTicketIds(store.read()).size;
-    if (tickets.length > available) throw new Error(`Only ${Math.max(0, available)} ticket slots are available`);
     for (const ticket of tickets) await beginTicket(ticket);
     return json(response, 202, { accepted: true, ticketIds: ids });
   }
@@ -2304,7 +2301,6 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     if (run.recovery?.kind === "delivery") {
       if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
-      ensureTicketCapacity(id);
       const contextContent = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")?.content || null;
       const diff = run.reviews?.at(-1)?.diff || null;
       scheduleTicketIntegration(id, { diff, contextContent }).catch(() => {});
@@ -2312,7 +2308,6 @@ async function api(request, response, url) {
     }
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
-    ensureTicketCapacity(id);
     if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
     if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
     else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
@@ -2385,7 +2380,6 @@ async function api(request, response, url) {
   const approve = url.pathname.match(/^\/api\/tickets\/([^/]+)\/approve$/);
   if (request.method === "POST" && approve) {
     const id = decodeURIComponent(approve[1]);
-    ensureTicketCapacity(id);
     const run = ticketRun(store.read(), id);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
     const violations = planReviewViolations(run.plan);

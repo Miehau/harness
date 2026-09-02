@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Main C · Selected worker</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#101317; --line:#2a3038; --text:#e6eaee; --muted:#808893; --you:#e07070; --gate:#d4b06a; --run:#6ea3e8; --ok:#6fca94; --rev:#c49be8; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--text); font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button, textarea { font: inherit; color: inherit; }
+  .app { display:grid; height:100vh; grid-template-rows:36px 1fr 22px; }
+  .top, .status { display:flex; align-items:center; gap:14px; padding:0 12px; background:#0e1115; color:var(--muted); border-bottom:1px solid var(--line); }
+  .status { border-bottom:0; border-top:1px solid var(--line); font-size:11px; }
+  .brand { color:var(--text); font-weight:700; }
+  .pill { border:1px solid #5a2f34; padding:1px 6px; color:var(--you); }
+  .spacer { flex:1; }
+  .layout { display:grid; min-height:0; grid-template-columns:320px 1fr; }
+  .rail { border-right:1px solid var(--line); background:var(--panel); padding:8px; }
+  .g { margin:8px 4px 4px; color:var(--muted); font-size:10px; letter-spacing:.12em; }
+  .ticket { display:grid; gap:5px; width:100%; margin:0 0 5px; padding:8px; border:1px solid #6e3a3e; border-radius:4px; background:#1b1416; }
+  .row { display:flex; align-items:center; gap:7px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--you); }
+  .id { font-weight:700; }
+  .st { margin-left:auto; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--you); }
+  .stages { display:grid; grid-template-columns:repeat(6,1fr); gap:3px; height:4px; }
+  .stages i { background:#2b323b; } .stages i.done { background:#3f8f66; } .stages i.now { background:var(--you); }
+  .meta { display:flex; justify-content:space-between; color:var(--muted); font-size:10px; }
+  .main { display:grid; min-width:0; grid-template-rows:auto auto 1fr auto; }
+  .ticket-head { display:flex; align-items:center; gap:10px; padding:8px 14px; border-bottom:1px solid var(--line); color:var(--muted); }
+  .ticket-head b { color:var(--text); }
+  .worker { padding:10px 14px; border-bottom:1px solid var(--line); }
+  h1 { margin:2px 0 7px; font:700 16px/1.2 ui-sans-serif, system-ui, sans-serif; }
+  .kv { display:flex; gap:14px; color:var(--muted); font-size:11px; }
+  .fail { margin-top:8px; border:1px solid #5a2f34; padding:7px 8px; background:#1b1214; color:#f0c2c2; }
+  .actions { display:flex; gap:6px; margin-top:8px; }
+  .btn { min-height:26px; padding:0 9px; border:1px solid #3a424c; background:#1a1f25; cursor:pointer; }
+  .btn.pri { border-color:#6e3a3e; background:#2a1618; color:#f0c2c2; }
+  .body { display:grid; min-height:0; grid-template-columns:1.15fr .85fr; }
+  .col { min-height:0; overflow:auto; padding:12px 14px; }
+  .col + .col { border-left:1px solid var(--line); }
+  .h { margin-bottom:8px; color:var(--muted); font-size:10px; letter-spacing:.12em; }
+  .log { display:grid; gap:5px; }
+  .log div { padding-bottom:5px; border-bottom:1px solid #1e242c; }
+  .log b { color:var(--gate); } .bad { color:var(--you); }
+  .d { color:var(--you); } .a { color:var(--ok); }
+  .steer { display:grid; grid-template-columns:1fr auto; gap:8px; padding:8px 14px; border-top:1px solid var(--line); background:#0f1318; }
+  textarea { min-height:42px; resize:vertical; border:1px solid #3a424c; padding:7px 8px; background:#0a0c10; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top"><span class="brand">TICKET AGENT</span><span>main-c · selected worker</span><span class="pill">3 NEED YOU</span><span class="spacer"></span><span>~/work/app</span></header>
+  <div class="layout">
+    <aside class="rail">
+      <div class="g">NEEDS YOU</div>
+      <div class="ticket">
+        <div class="row"><span class="dot"></span><span class="id">TEXT-7F2</span><span class="st">needs you</span></div>
+        <div>Merge-queue rebase</div>
+        <div class="stages"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i></i></div>
+        <div class="meta"><span>verify · 2 agents</span><span>9s idle</span></div>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="ticket-head"><b>TEXT-7F2</b><span>verify</span><span>2 agents</span><span>gpt-5.6-terra/high</span><span>attempt 3/8</span><span>96/400</span></div>
+      <section class="worker">
+        <div class="row"><span class="id">worker:rebase</span><span class="st">needs you</span></div>
+        <h1>Fix merge-queue rebase</h1>
+        <div class="kv"><span>write · isolated worktree</span><span>last tool verify · 9s idle</span></div>
+        <div class="fail">duplicate preview-port bind in src/previews.js</div>
+        <div class="actions">
+          <button class="btn pri" type="button">Retry</button>
+          <button class="btn" type="button">Open worktree</button>
+          <button class="btn" type="button">Restart step</button>
+          <button class="btn" type="button">Prompt</button>
+          <button class="btn" type="button">Cancel worker</button>
+        </div>
+      </section>
+      <div class="body">
+        <section class="col">
+          <div class="h">DECISION STREAM</div>
+          <div class="log">
+            <div>14:21:18  <b>decision</b>  reuse availablePort(); do not add another listener</div>
+            <div>14:21:33  edit src/previews.js · scoped to bind helper</div>
+            <div>14:21:44  <b>decision</b>  drop hardcoded 4318 fallback</div>
+            <div>14:21:58  named command verify</div>
+            <div class="bad">14:22:01  FAIL  preview still bound on 4318 · invariant unchanged</div>
+          </div>
+        </section>
+        <section class="col">
+          <div class="h">EVIDENCE</div>
+          <pre><span class="d">- const port = Number(process.env.PORT || 4318);</span>
+<span class="a">+ const port = await availablePort(host);</span>
+  server.listen(port, host);</pre>
+          <div class="h" style="margin-top:14px">SIBLINGS</div>
+          <div>tests · queued · waiting on rebase</div>
+        </section>
+      </div>
+      <form class="steer">
+        <textarea>Reuse availablePort(); if the worktree preview is still bound, fail closed.</textarea>
+        <button class="btn pri" type="button">Interrupt + redirect</button>
+      </form>
+    </main>
+  </div>
+  <footer class="status">the selected worker is the document · ticket is context in the chrome · steer is always visible · graph is not the default</footer>
+</div>
+</body>
+</html>

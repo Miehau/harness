@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v1 · Fleet command center</title>
+<style>
+  :root {
+    --bg: #111318; --panel: #161a20; --stroke: #2c333c; --text: #d7dde5; --dim: #8b95a2;
+    --you: #e0c36a; --run: #6cb6ff; --ok: #7dcea0; --err: #f07a7a; --wait: #c7a4ea;
+    --sel: #241e10; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 12px/1.35 var(--sans); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { background: none; border: 0; cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 1px solid var(--run); outline-offset: -1px; }
+  .app { display: grid; height: 100vh; grid-template-rows: 32px auto minmax(0,1fr) 22px; overflow: hidden; }
+  .top { display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--stroke); background: #0e1116; }
+  .top b { font-size: 12px; }
+  .modes { display: flex; margin-left: 8px; border: 1px solid var(--stroke); }
+  .modes button { padding: 4px 10px; color: var(--dim); font: 11px var(--mono); }
+  .modes button.on { background: #2a6fad; color: #fff; }
+  .modes button.on.debug { background: #8a6d1f; }
+  .modes button.on.auto { background: #21543a; }
+  .search { min-width: 220px; margin-left: 8px; border: 1px solid var(--stroke); background: #0b0d11; padding: 4px 8px; font: 11px var(--mono); }
+  .chip { border: 1px solid var(--stroke); padding: 2px 7px; color: var(--dim); font: 11px var(--mono); }
+  .chip.hot { border-color: #6a5a22; color: var(--you); background: #241e10; }
+  .chip.ok { border-color: #21543a; color: var(--ok); }
+  .grow { flex: 1; }
+  .k { border: 1px solid #445; padding: 0 5px; font: 10px var(--mono); }
+  .matrix-wrap { border-bottom: 1px solid var(--stroke); background: #0e1116; }
+  .matrix { display: grid; grid-template-columns: 176px repeat(6, minmax(0,1fr)); gap: 1px; padding: 6px 10px 8px; }
+  .mh { color: var(--dim); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; padding: 0 4px 4px; }
+  .tlabel { display: flex; flex-direction: column; justify-content: center; padding: 4px 6px; text-align: left; }
+  .tlabel code { color: #9ec0ee; font: 10px var(--mono); }
+  .tlabel strong { font-size: 11px; }
+  .tlabel.on { background: #1a2230; }
+  .cell { min-height: 34px; border: 1px solid var(--stroke); background: var(--panel); padding: 4px 6px; text-align: left; }
+  .cell:hover { border-color: #5b6b80; }
+  .cell.on { border-color: var(--you); background: var(--sel); box-shadow: inset 3px 0 0 var(--you); }
+  .cell.run { border-color: #2d4d6e; background: #14202c; }
+  .cell.you { border-color: #6a5a22; background: #241e10; }
+  .cell.wait { border-color: #5b4b74; background: #1a1522; }
+  .cell.ok { color: var(--ok); }
+  .cell .w { display: block; overflow: hidden; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .cell small { display: block; color: var(--dim); font: 9px var(--mono); }
+  .work { display: grid; min-height: 0; grid-template-columns: 252px minmax(0,1fr) 292px; }
+  .pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--stroke); }
+  .pane:last-child { border-right: 0; }
+  .ph { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--stroke); color: var(--dim); font: 10px var(--mono); letter-spacing: .07em; text-transform: uppercase; }
+  .scroll { min-height: 0; flex: 1; overflow: auto; }
+  .item { display: grid; grid-template-columns: 8px minmax(0,1fr) auto; gap: 8px; align-items: start; width: 100%; padding: 7px 10px; border-bottom: 1px solid #222830; text-align: left; }
+  .item:hover { background: #1a1f27; }
+  .item.on { background: #1a2a3c; }
+  .item .dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: currentColor; }
+  .you { color: var(--you); } .run { color: var(--run); } .ok { color: var(--ok); } .err { color: var(--err); } .wait { color: var(--wait); }
+  .item b, .dec b { display: block; font-size: 12px; }
+  .item small, .dec span { color: var(--dim); font: 10px var(--mono); }
+  .dec { display: grid; grid-template-columns: 8px minmax(0,1fr); gap: 8px; padding: 8px 10px; border-bottom: 1px solid #222830; }
+  .evhead { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--stroke); }
+  .evhead h1 { margin: 0; font-size: 15px; }
+  .evhead p { margin: 3px 0 0; color: var(--dim); font: 11px var(--mono); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: start; }
+  .btn { border: 1px solid #3b4552; background: #1c232c; padding: 5px 9px; font-size: 11px; }
+  .btn.primary { background: #2a6fad; border-color: #2a6fad; color: #fff; }
+  .btn.good { background: #21543a; border-color: #2e7a52; color: var(--ok); }
+  .btn.danger { color: var(--err); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .tabs { display: flex; border-bottom: 1px solid var(--stroke); background: #0e1116; }
+  .tab { height: 28px; padding: 0 11px; color: var(--dim); font: 11px var(--mono); }
+  .tab.on { color: #fff; box-shadow: inset 0 -1px 0 #fff; }
+  .split { display: grid; min-height: 0; flex: 1; grid-template-columns: 1fr 1fr; }
+  .split > div { min-width: 0; overflow: auto; }
+  .split > div + div { border-left: 1px solid var(--stroke); }
+  pre { margin: 0; padding: 10px 12px; overflow: auto; font: 11px/1.45 var(--mono); white-space: pre-wrap; }
+  .add { color: var(--ok); } .del { color: var(--err); }
+  .log { padding: 6px 12px; font: 11px var(--mono); border-bottom: 1px solid #222830; }
+  .log time { color: #66707c; margin-right: 8px; }
+  .log.cur { background: #1a2a22; }
+  textarea { width: 100%; height: 70px; border: 1px solid var(--stroke); background: #0b0d11; padding: 7px; font: 11px var(--mono); resize: vertical; }
+  .kv { display: grid; grid-template-columns: 84px 1fr; gap: 3px 8px; padding: 2px 10px; font: 11px var(--mono); }
+  .kv dt { color: var(--dim); }
+  .box { padding: 8px 10px; border-top: 1px solid var(--stroke); }
+  .status { display: flex; align-items: center; gap: 12px; padding: 0 10px; font: 11px var(--mono); }
+  .status.debug { background: #8a6d1f; color: #1a1408; }
+  .status.watch { background: #17324d; color: #d7e7f7; }
+  .status.auto { background: #21543a; color: #d7f0e2; }
+  .badge { background: var(--you); color: #1a1408; padding: 0 6px; font-weight: 700; }
+  .toast { position: fixed; right: 16px; bottom: 36px; z-index: 20; max-width: 420px; border: 1px solid #3d444b; background: #1b1f23; padding: 9px 12px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: 140ms ease; font-size: 12px; }
+  .toast.show { opacity: 1; transform: none; }
+  .overlay { position: fixed; inset: 0; z-index: 30; display: none; place-items: start center; padding-top: 12vh; background: rgb(0 0 0 / .55); }
+  .overlay.on { display: grid; }
+  .palette { width: min(560px, 92vw); border: 1px solid #4a5564; background: #161a20; }
+  .palette input { width: 100%; border: 0; border-bottom: 1px solid var(--stroke); background: transparent; padding: 10px 12px; font: 13px var(--mono); }
+  .palette button { display: block; width: 100%; padding: 8px 12px; text-align: left; }
+  .palette button:hover, .palette button.active { background: #1a2a3c; }
+  .palette small { color: var(--dim); font: 10px var(--mono); }
+  .gnode { display: flex; gap: 8px; align-items: center; padding: 5px 12px; font: 11px var(--mono); }
+  .gnode i { width: 7px; height: 7px; background: currentColor; }
+  .note { padding: 10px 12px; color: var(--dim); font-size: 12px; }
+  .breaks { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--stroke); }
+  .breaks label { display: flex; gap: 5px; align-items: center; color: var(--dim); font: 10px var(--mono); }
+  .proto { color: var(--wait); font: 10px var(--mono); letter-spacing: .06em; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <b>Ticket Agent</b>
+    <span class="proto">V1 PROTOTYPE</span>
+    <div class="modes" id="modes"></div>
+    <input class="search" id="jump" placeholder="⌘K  jump to ticket, worker, gate…" readonly>
+    <span class="chip" id="slot-chip"></span>
+    <span class="chip hot" id="need-chip"></span>
+    <span class="grow"></span>
+    <button class="btn" id="reset" type="button">Reset scenario</button>
+    <span>/Users/michal/work/app</span>
+  </header>
+  <div class="matrix-wrap"><div class="matrix" id="matrix"></div></div>
+  <section class="work">
+    <aside class="pane">
+      <div class="ph">Needs you <span id="need-count"></span></div>
+      <div class="scroll" id="needs"></div>
+      <div class="ph">This cell · workers</div>
+      <div class="scroll" id="workers"></div>
+      <div class="ph">Agentic decisions</div>
+      <div class="scroll" id="decisions"></div>
+    </aside>
+    <section class="pane" id="center"></section>
+    <aside class="pane" id="right"></aside>
+  </section>
+  <footer class="status watch" id="status"></footer>
+</div>
+<div class="toast" id="toast"></div>
+<div class="overlay" id="overlay">
+  <div class="palette">
+    <input id="pal-input" placeholder="Jump or run an action…" autocomplete="off">
+    <div id="pal-list"></div>
+  </div>
+</div>
+<script>
+const STAGES = [
+  ["requirements", "Req"],
+  ["explore", "Explore"],
+  ["design", "Design"],
+  ["implement", "Implement"],
+  ["verify", "Verify"],
+  ["handoff", "Handoff"]
+];
+
+const seed = () => ({
+  mode: "watch",
+  tab: "evidence",
+  breakOn: { plan: true, review: true, fail: true, input: true },
+  selected: { ticket: "TEXT-7F2", stage: "verify", worker: "rebase" },
+  steer: "Reuse availablePort(); do not add another listener. If the worktree preview is still bound, fail closed.",
+  clock: 0,
+  tickets: [
+    {
+      id: "TEXT-7F2", title: "Merge-queue rebase", source: "local",
+      stages: {
+        requirements: { status: "completed", label: "contract" },
+        explore: { status: "completed", label: "horizon" },
+        design: { status: "completed", label: "plan" },
+        implement: { status: "completed", label: "rebase impl" },
+        verify: { status: "needs_attention", label: "worker:rebase", detail: "verify fail · 3 att" },
+        handoff: { status: "idle", label: "" }
+      },
+      workers: {
+        rebase: {
+          title: "worker:rebase", stage: "verify", agent: "gpt-5.6-terra/high",
+          status: "needs_attention", attempt: 3, max: 8, files: 5, lines: 96,
+          budget: "5/8 files · 96/400", permission: "write · seeded", lastTool: "verify · exit 1",
+          idle: 8, elapsed: 221, finding: "duplicate preview-port bind in src/previews.js",
+          diff: `<span class="del">- const port = Number(process.env.PORT || 4318);</span>
+<span class="add">+ const port = await availablePort(host);</span>
+<span class="del">- server.listen(port);</span>
+<span class="add">+ server.listen(port, host);</span>`,
+          output: [
+            ["14:21:58", "named command verify"],
+            ["14:22:01", "FAIL e2e-daemon · preview still bound on 4318"],
+            ["14:22:01", "needs_attention · Watch breakpoint"]
+          ],
+          decisions: [
+            { tone: "err", title: "Fail closed on duplicate bind", meta: "14:22:01 · verification rejected" },
+            { tone: "", title: "Do not touch merge algorithm", meta: "14:21:18 · scoped fix to previews.js" },
+            { tone: "run", title: "Reuse availablePort()", meta: "14:21:44 · drop hardcoded 4318" }
+          ],
+          prompt: `# verify · worker:rebase\nTicket TEXT-7F2. Restore unique preview binds after rebase onto origin/main.\nWrite scope: src/previews.js, test/e2e-daemon.test.js.\nDo not change merge-queue scheduling.`,
+          artifacts: ["verify.log", "git.diff  +18 −11", "agent-prompt.md", "screenshot: e2e-recovery"]
+        }
+      }
+    },
+    {
+      id: "APP-1901", title: "Auth session expiry", source: "linear",
+      stages: {
+        requirements: { status: "completed", label: "✓" },
+        explore: { status: "completed", label: "✓" },
+        design: { status: "completed", label: "✓" },
+        implement: { status: "running", label: "session", detail: "write session.ts" },
+        verify: { status: "idle", label: "tests wait" },
+        handoff: { status: "idle", label: "" }
+      },
+      workers: {
+        session: {
+          title: "worker:session", stage: "implement", agent: "gpt-5.6-terra/high",
+          status: "running", attempt: 1, max: 8, files: 3, lines: 84,
+          budget: "3/8 files · 84/400", permission: "write · seeded", lastTool: "edit src/session.ts",
+          idle: 0, elapsed: 47, finding: "",
+          diff: `<span class="add">+ export function expired(session, now = Date.now()) {</span>
+<span class="add">+   return now - session.touchedAt > session.ttlMs;</span>
+<span class="add">+ }</span>`,
+          output: [
+            ["14:21:40", "read src/auth.ts"],
+            ["14:21:52", "edit src/session.ts · sliding clock"],
+            ["14:22:06", "decision · expiry uses last touch, not login"]
+          ],
+          decisions: [
+            { tone: "run", title: "Sliding clock, not login time", meta: "14:22:06 · worker:session" },
+            { tone: "", title: "Keep cookie name unchanged", meta: "14:21:12 · compatibility" }
+          ],
+          prompt: `# implement · worker:session\nExpire idle sessions. Do not invalidate active requests. Tests are a sibling worker.`,
+          artifacts: ["agent-prompt.md", "implementation-delta.json"]
+        },
+        tests: {
+          title: "worker:tests", stage: "implement", agent: "gpt-5.6-sol/high",
+          status: "blocked", attempt: 0, max: 8, files: 0, lines: 0,
+          budget: "0/8 files · 0/400", permission: "write · waits session", lastTool: "—",
+          idle: 47, elapsed: 47, finding: "blocked on worker:session",
+          diff: "",
+          output: [["14:21:12", "waiting on dependency worker:session"]],
+          decisions: [{ tone: "", title: "Wait for session implementation", meta: "dependency · not started" }],
+          prompt: `# implement · worker:tests\nBlocked until session worker commits.`,
+          artifacts: []
+        }
+      }
+    },
+    {
+      id: "APP-1842", title: "Zero-state board", source: "local",
+      stages: {
+        requirements: { status: "completed", label: "✓" },
+        explore: { status: "completed", label: "✓" },
+        design: { status: "awaiting_approval", label: "plan gate", detail: "2 workers ready" },
+        implement: { status: "idle", label: "2 queued" },
+        verify: { status: "idle", label: "" },
+        handoff: { status: "idle", label: "" }
+      },
+      workers: {
+        supervisor: {
+          title: "supervisor", stage: "design", agent: "gpt-5.6-sol/high",
+          status: "awaiting_approval", attempt: 1, max: 1, files: 0, lines: 0,
+          budget: "plan only", permission: "none", lastTool: "plan",
+          idle: 120, elapsed: 390, finding: "Approve local execution plan",
+          diff: "",
+          output: [
+            ["14:18:02", "exploration complete · 11 files"],
+            ["14:19:12", "split skeleton vs domain into two workers"]
+          ],
+          decisions: [
+            { tone: "you", title: "Split skeleton vs domain", meta: "14:19:12 · awaiting you" },
+            { tone: "", title: "Keep fixture prompt-free", meta: "14:18:40 · plan.json contract" }
+          ],
+          prompt: `# design · supervisor\nProduce a two-worker implement graph. Manual pauses at every verified batch.`,
+          artifacts: ["plan.json", "exploration.md", "requirements.md"],
+          plan: true
+        },
+        architecture: {
+          title: "worker:architecture", stage: "implement", agent: "gpt-5.6-sol/high",
+          status: "ready", attempt: 0, max: 8, files: 0, lines: 0,
+          budget: "≤8/400", permission: "write · queued", lastTool: "—",
+          idle: 0, elapsed: 0, finding: "",
+          diff: "", output: [], decisions: [],
+          prompt: "Derive domain architecture after plan approval.", artifacts: []
+        },
+        skeleton: {
+          title: "worker:skeleton", stage: "implement", agent: "gpt-5.6-terra/high",
+          status: "ready", attempt: 0, max: 8, files: 0, lines: 0,
+          budget: "≤8/400", permission: "write · queued", lastTool: "—",
+          idle: 0, elapsed: 0, finding: "",
+          diff: "", output: [], decisions: [],
+          prompt: "Create runnable application skeleton after plan approval.", artifacts: []
+        }
+      }
+    },
+    {
+      id: "LIN-88", title: "Preview ports", source: "linear",
+      stages: {
+        requirements: { status: "completed", label: "✓" },
+        explore: { status: "completed", label: "✓" },
+        design: { status: "completed", label: "✓" },
+        implement: { status: "completed", label: "collide fix" },
+        verify: { status: "review_ready", label: "review", detail: "+12 −4" },
+        handoff: { status: "idle", label: "" }
+      },
+      workers: {
+        preview: {
+          title: "worker:preview", stage: "verify", agent: "gpt-5.6-terra/high",
+          status: "review_ready", attempt: 1, max: 8, files: 2, lines: 16,
+          budget: "2/8 files · 16/400", permission: "write · seeded", lastTool: "verify · exit 0",
+          idle: 25, elapsed: 180, finding: "",
+          diff: `<span class="add">+ const port = await availablePort("127.0.0.1");</span>
+<span class="del">- preview.listen(4173);</span>
+<span class="add">+ preview.listen(port);</span>`,
+          output: [
+            ["14:20:11", "named command verify · pass"],
+            ["14:20:12", "review_ready · accept commits this batch"]
+          ],
+          decisions: [
+            { tone: "wait", title: "Unique bind per worktree", meta: "14:20:00 · verified" }
+          ],
+          prompt: `# verify · worker:preview\nTicket-isolated preview ports. Accepting cherry-picks into the ticket worktree.`,
+          artifacts: ["git.diff  +12 −4", "verify.log", "screenshot: desktop", "screenshot: mobile"]
+        }
+      }
+    }
+  ]
+});
+
+let state = seed();
+let toastTimer;
+const $ = (id) => document.getElementById(id);
+
+function ticket(id) { return state.tickets.find((t) => t.id === id); }
+function worker(t, id) { return t?.workers?.[id] || null; }
+function selectedTicket() { return ticket(state.selected.ticket); }
+function selectedWorker() {
+  const t = selectedTicket();
+  return worker(t, state.selected.worker) || Object.values(t?.workers || {})[0];
+}
+
+function cellWorkers(t, stage) {
+  return Object.entries(t.workers).filter(([, w]) => w.stage === stage);
+}
+
+function isYou(status) {
+  return ["needs_attention", "awaiting_approval", "review_ready", "needs_input"].includes(status);
+}
+
+function needsYou() {
+  const items = [];
+  for (const t of state.tickets) {
+    for (const [id, w] of Object.entries(t.workers)) {
+      if (!isYou(w.status)) continue;
+      if (state.mode === "auto" && w.status === "review_ready" && !state.breakOn.review) continue;
+      if (state.mode === "auto" && w.status === "awaiting_approval" && !state.breakOn.plan) continue;
+      items.push({ ticket: t.id, title: t.title, worker: id, stage: w.stage, status: w.status, finding: w.finding || w.title });
+    }
+  }
+  return items;
+}
+
+function occupied() {
+  return state.tickets.filter((t) => Object.values(t.workers).some((w) => ["running", "fixing", "blocked"].includes(w.status))).length;
+}
+
+function tone(status) {
+  if (status === "needs_attention" || status === "failed") return "err";
+  if (status === "running" || status === "fixing") return "run";
+  if (status === "review_ready" || status === "awaiting_approval" || status === "needs_input") return status === "review_ready" ? "wait" : "you";
+  if (status === "completed" || status === "accepted" || status === "ready") return "ok";
+  return "";
+}
+
+function cellClass(stage, selected) {
+  const s = stage.status;
+  const bits = ["cell"];
+  if (selected) bits.push("on");
+  if (s === "running") bits.push("run");
+  else if (s === "needs_attention") bits.push("you");
+  else if (s === "awaiting_approval") bits.push("you");
+  else if (s === "review_ready") bits.push("wait");
+  else if (s === "completed" || s === "accepted") bits.push("ok");
+  return bits.join(" ");
+}
+
+function notify(message) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2800);
+}
+
+function select(ticketId, stage, workerId) {
+  const t = ticket(ticketId);
+  if (!t) return;
+  const fallback = cellWorkers(t, stage)[0]?.[0] || Object.keys(t.workers)[0];
+  state.selected = { ticket: ticketId, stage, worker: workerId || fallback };
+  if (["running", "needs_attention"].includes(worker(t, state.selected.worker)?.status)) state.tab = state.tab === "prompt" ? "prompt" : "evidence";
+  render();
+}
+
+function renderMatrix() {
+  const head = [`<div class="mh">Ticket</div>`, ...STAGES.map(([, l]) => `<div class="mh">${l}</div>`)].join("");
+  const rows = state.tickets.map((t) => {
+    const label = `<button class="tlabel ${t.id === state.selected.ticket ? "on" : ""}" data-jump="${t.id}"><code>${t.id}</code><strong>${t.title}</strong></button>`;
+    const cells = STAGES.map(([id]) => {
+      const st = t.stages[id];
+      const on = t.id === state.selected.ticket && id === state.selected.stage;
+      const labelText = st.label || "";
+      const body = labelText
+        ? `<span class="w ${tone(st.status)}">${st.status === "completed" && labelText === "✓" ? "✓" : labelText}</span>${st.detail ? `<small>${st.detail}</small>` : ""}`
+        : `<span class="w"> </span>`;
+      return `<button class="${cellClass(st, on)}" data-cell="${t.id}:${id}">${body}</button>`;
+    }).join("");
+    return label + cells;
+  }).join("");
+  $("matrix").innerHTML = head + rows;
+}
+
+function renderNeeds() {
+  const items = needsYou();
+  $("need-count").textContent = items.length;
+  $("needs").innerHTML = items.map((item) => {
+    const on = item.ticket === state.selected.ticket && item.worker === state.selected.worker;
+    return `<button class="item ${on ? "on" : ""} ${tone(item.status)}" data-cell="${item.ticket}:${item.stage}" data-worker="${item.worker}"><span class="dot"></span><span><b>${item.ticket} · ${item.worker}</b><small>${item.finding}</small></span><small>${item.status.replaceAll("_", " ")}</small></button>`;
+  }).join("") || `<div class="note">Nothing needs you. Fleet is running or idle.</div>`;
+}
+
+function renderWorkers() {
+  const t = selectedTicket();
+  const rows = cellWorkers(t, state.selected.stage);
+  $("workers").innerHTML = rows.map(([id, w]) => {
+    const on = id === state.selected.worker;
+    return `<button class="item ${on ? "on" : ""} ${tone(w.status)}" data-worker-only="${id}"><span class="dot"></span><span><b>${w.title}</b><small>${w.status.replaceAll("_", " ")} · ${w.lastTool}</small></span><small>${w.status === "running" ? `${w.elapsed}s` : w.status === "blocked" ? "wait" : ""}</small></button>`;
+  }).join("") || `<div class="note">No workers in this stage yet.</div>`;
+}
+
+function renderDecisions() {
+  const w = selectedWorker();
+  const extra = state.tickets.flatMap((t) => Object.values(t.workers).flatMap((x) =>
+    (x.decisions || []).filter((d) => d.fleet).map((d) => ({ ...d, title: `${t.id} ${d.title}` }))
+  ));
+  $("decisions").innerHTML = (w?.decisions || []).map((d) =>
+    `<div class="dec ${d.tone}"><span class="dot"></span><div><b>${d.title}</b><span>${d.meta}</span></div></div>`
+  ).join("") || `<div class="note">No decisions recorded for this worker.</div>`;
+}
+
+function actionButtons(w, t) {
+  if (!w) return "";
+  if (w.status === "needs_attention") {
+    return `<button class="btn primary" data-act="retry">Retry worker</button>
+      <button class="btn" data-act="steer">Apply steer</button>
+      <button class="btn" data-act="restart">Restart from verify</button>
+      <button class="btn danger" data-act="cancel">Cancel worker</button>`;
+  }
+  if (w.status === "review_ready") {
+    return `<button class="btn good" data-act="accept">Accept commit</button>
+      <button class="btn" data-act="changes">Request changes</button>`;
+  }
+  if (w.status === "awaiting_approval" || w.plan) {
+    return `<button class="btn" data-act="manual">Run manually</button>
+      <button class="btn good" data-act="auto-graph">Auto run graph</button>
+      <button class="btn" data-act="edit-plan">Edit graph JSON</button>`;
+  }
+  if (w.status === "running") {
+    return `<button class="btn primary" data-act="steer">Interrupt + redirect</button>
+      <button class="btn danger" data-act="cancel">Cancel worker</button>`;
+  }
+  if (w.status === "blocked") return `<button class="btn" disabled>Waiting on sibling</button>`;
+  if (w.status === "ready") return `<button class="btn" disabled>Queued until plan/gate</button>`;
+  return "";
+}
+
+function tabBody(w) {
+  if (!w) return `<div class="note">Select a cell.</div>`;
+  if (state.tab === "output") {
+    return w.output.map((row, i) => `<div class="log ${i === w.output.length - 1 ? "cur" : ""}"><time>${row[0]}</time>${row[1]}</div>`).join("") || `<div class="note">No output yet.</div>`;
+  }
+  if (state.tab === "prompt") return `<pre>${w.prompt || "Prompt not rendered."}</pre>`;
+  if (state.tab === "artifacts") {
+    return (w.artifacts || []).map((a) => `<div class="log">${a}</div>`).join("") || `<div class="note">No artifacts.</div>`;
+  }
+  if (state.tab === "graph") {
+    const t = selectedTicket();
+    return STAGES.map(([id, label]) => {
+      const st = t.stages[id];
+      const kids = cellWorkers(t, id).map(([, x]) => x.title).join(", ");
+      return `<div class="gnode ${tone(st.status)}"><i></i><span>${label} · ${st.status.replaceAll("_", " ")}${kids ? ` · ${kids}` : ""}</span></div>`;
+    }).join("");
+  }
+  const diff = w.diff || `<div class="note">No repository changes in this cell.</div>`;
+  const out = (w.output || []).slice(-4).map((row) => `<div class="log"><time>${row[0]}</time>${row[1]}</div>`).join("") || `<div class="note">No live output.</div>`;
+  return `<div class="split"><div><div class="ph">Canonical evidence</div>${w.diff ? `<pre>${diff}</pre>` : diff}</div><div><div class="ph">Last output</div>${out}</div></div>`;
+}
+
+function renderCenter() {
+  const t = selectedTicket();
+  const w = selectedWorker();
+  const tabs = ["evidence", "output", "prompt", "artifacts", "graph"];
+  $("center").innerHTML = `
+    <div class="evhead">
+      <div>
+        <h1>${t.id} · ${state.selected.stage} · ${w?.title || "—"}</h1>
+        <p>${(w?.status || "").replaceAll("_", " ")} · ${w?.agent || ""} · attempt ${w?.attempt || 0}/${w?.max || 0} · ${w?.finding || "no blocker"}</p>
+      </div>
+      <div class="actions">${actionButtons(w, t)}</div>
+    </div>
+    <div class="tabs">${tabs.map((id) => `<button class="tab ${state.tab === id ? "on" : ""}" data-tab="${id}">${id}</button>`).join("")}</div>
+    <div class="scroll">${tabBody(w)}</div>`;
+}
+
+function renderRight() {
+  const w = selectedWorker();
+  const t = selectedTicket();
+  if (!w) { $("right").innerHTML = ""; return; }
+  $("right").innerHTML = `
+    <div class="ph">Worker state</div>
+    <dl>
+      <div class="kv"><dt>status</dt><dd class="${tone(w.status)}">${w.status.replaceAll("_", " ")}</dd></div>
+      <div class="kv"><dt>mode</dt><dd>${state.mode} · stop on you</dd></div>
+      <div class="kv"><dt>attempt</dt><dd>${w.attempt} / ${w.max} corrections</dd></div>
+      <div class="kv"><dt>budget</dt><dd>${w.budget}</dd></div>
+      <div class="kv"><dt>permission</dt><dd>${w.permission}</dd></div>
+      <div class="kv"><dt>last tool</dt><dd>${w.lastTool}</dd></div>
+      <div class="kv"><dt>idle / run</dt><dd>${w.idle}s idle · ${w.elapsed}s elapsed</dd></div>
+      <div class="kv"><dt>worktree</dt><dd>${t.id}</dd></div>
+    </dl>
+    <div class="ph">Break on</div>
+    <div class="breaks">
+      ${["plan", "review", "fail", "input"].map((k) => `<label><input type="checkbox" data-break="${k}" ${state.breakOn[k] ? "checked" : ""}> ${k}</label>`).join("")}
+    </div>
+    <div class="ph">Steer / redirect</div>
+    <div class="box">
+      <textarea id="steer">${state.steer}</textarea>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn primary" data-act="steer">Interrupt + redirect</button>
+        <button class="btn" data-act="prompt">Edit prompt</button>
+      </div>
+    </div>
+    <div class="ph">Keys</div>
+    <div class="log"><span class="k">j</span> <span class="k">k</span> needs you · <span class="k">enter</span> cell · <span class="k">a</span> accept · <span class="k">s</span> steer · <span class="k">1</span><span class="k">2</span><span class="k">3</span> mode · <span class="k">⌘K</span></div>`;
+}
+
+function renderChrome() {
+  const n = needsYou().length;
+  $("modes").innerHTML = ["debug", "watch", "auto"].map((m) =>
+    `<button class="${state.mode === m ? `on ${m}` : ""}" data-mode="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`
+  ).join("");
+  $("slot-chip").textContent = `${occupied()} / 4 slots`;
+  $("need-chip").textContent = `${n} need you`;
+  $("need-chip").className = n ? "chip hot" : "chip ok";
+  const bar = $("status");
+  bar.className = `status ${state.mode}`;
+  bar.innerHTML = `<span>${state.mode.toUpperCase()}</span>
+    ${n ? `<span class="badge">${n} NEED YOU</span>` : `<span>clear</span>`}
+    <span class="grow">${state.mode === "debug" ? "You drive every gate. Continue = retry selected. Auto is off." : state.mode === "auto" ? "Auto accepts verified review_ready. Still stops on needs_attention." : "Stop on plan / review / fail. Running workers are followed, not interrupted."}</span>
+    <span>j/k queue · click a cell to inspect</span>`;
+}
+
+function render() {
+  const steer = $("steer");
+  if (steer) state.steer = steer.value;
+  renderChrome();
+  renderMatrix();
+  renderNeeds();
+  renderWorkers();
+  renderDecisions();
+  renderCenter();
+  renderRight();
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  if (mode === "auto") {
+    state.breakOn.review = false;
+    state.breakOn.plan = false;
+    autoAdvance();
+  } else if (mode === "watch") {
+    state.breakOn = { plan: true, review: true, fail: true, input: true };
+  } else {
+    state.breakOn = { plan: true, review: true, fail: true, input: true };
+  }
+  render();
+  notify(`Mode ${mode}. ${needsYou().length} item(s) still need you.`);
+}
+
+function autoAdvance() {
+  const lin = ticket("LIN-88");
+  const w = lin?.workers.preview;
+  if (w && w.status === "review_ready") {
+    acceptWorker(lin, "preview", true);
+  }
+}
+
+function acceptWorker(t, id, silent) {
+  const w = t.workers[id];
+  w.status = "accepted";
+  t.stages[w.stage] = { status: "completed", label: "accepted", detail: "+12 −4" };
+  if (w.stage === "verify") t.stages.handoff = { status: "completed", label: "queued merge" };
+  if (!silent) notify(`${t.id} accepted. Next batch may start.`);
+  if (state.selected.ticket === t.id) state.selected.stage = "handoff";
+}
+
+function retrySelected() {
+  const t = selectedTicket();
+  const w = selectedWorker();
+  if (!w) return;
+  w.status = "running";
+  w.attempt += 1;
+  w.lastTool = "retry · verify";
+  w.idle = 0;
+  t.stages[w.stage] = { status: "running", label: w.title, detail: `attempt ${w.attempt}` };
+  notify(`${w.title} retrying (attempt ${w.attempt}).`);
+  render();
+  setTimeout(() => {
+    if (w.status !== "running") return;
+    w.status = "needs_attention";
+    w.lastTool = "verify · exit 1";
+    w.finding = "duplicate preview-port bind still present";
+    t.stages[w.stage] = { status: "needs_attention", label: w.title, detail: `verify fail · ${w.attempt} att` };
+    w.output.push(["14:22:40", "FAIL still bound · needs_attention"]);
+    w.decisions.unshift({ tone: "err", title: "Retry did not change the invariant", meta: "same failing log line" });
+    notify("Retry finished. Same finding — steer or restart.");
+    render();
+  }, 1600);
+}
+
+function approvePlan(kind) {
+  const t = ticket("APP-1842");
+  t.workers.supervisor.status = "accepted";
+  t.stages.design = { status: "completed", label: "plan" };
+  t.stages.implement = { status: "running", label: "architecture", detail: "2 agents" };
+  t.workers.architecture.status = "running";
+  t.workers.architecture.stage = "implement";
+  t.workers.skeleton.status = "blocked";
+  t.workers.skeleton.stage = "implement";
+  t.workers.architecture.lastTool = "write src/domain.ts";
+  t.workers.architecture.elapsed = 1;
+  notify(kind === "auto-graph" ? "Plan approved · auto graph started." : "Plan approved · running manually, gates still stop you.");
+  select("APP-1842", "implement", "architecture");
+}
+
+function applySteer() {
+  const t = selectedTicket();
+  const w = selectedWorker();
+  const text = ($("steer")?.value || state.steer).trim();
+  if (!text) return notify("Write a redirect first.");
+  state.steer = text;
+  w.decisions.unshift({ tone: "you", title: `Steer: ${text.slice(0, 72)}`, meta: "operator redirect" });
+  if (w.status === "running" || w.status === "needs_attention") {
+    w.status = "running";
+    w.lastTool = "redirect applied";
+    t.stages[w.stage] = { status: "running", label: w.title, detail: "steered" };
+  }
+  notify("Redirect queued into the worker session.");
+  render();
+}
+
+function act(name) {
+  const t = selectedTicket();
+  const w = selectedWorker();
+  if (name === "retry") return retrySelected();
+  if (name === "steer") return applySteer();
+  if (name === "accept") { acceptWorker(t, state.selected.worker); render(); return; }
+  if (name === "manual" || name === "auto-graph") return approvePlan(name);
+  if (name === "edit-plan") { state.tab = "prompt"; notify("Graph JSON would open here. Prompt tab shows the design contract."); render(); return; }
+  if (name === "restart") { notify("Would restore verify checkpoint, drop later work, keep audit."); return; }
+  if (name === "cancel") {
+    w.status = "cancelled";
+    t.stages[w.stage] = { status: "cancelled", label: "cancelled" };
+    notify(`${w.title} cancelled.`);
+    render();
+    return;
+  }
+  if (name === "changes") {
+    w.status = "fixing";
+    t.stages[w.stage] = { status: "running", label: w.title, detail: "correction" };
+    notify("Correction requested. Worker will rerun with your note.");
+    render();
+    return;
+  }
+  if (name === "prompt") { state.tab = "prompt"; render(); }
+}
+
+function paletteItems() {
+  const q = $("pal-input").value.trim().toLowerCase();
+  const items = [];
+  for (const t of state.tickets) {
+    items.push({ label: `${t.id}  ${t.title}`, sub: "ticket", run: () => {
+      const stage = Object.entries(t.stages).find(([, s]) => ["needs_attention", "awaiting_approval", "review_ready", "running"].includes(s.status))?.[0] || "implement";
+      select(t.id, stage);
+    } });
+    for (const [id, w] of Object.entries(t.workers)) {
+      items.push({ label: `${t.id}  ${w.title}`, sub: w.status.replaceAll("_", " "), run: () => select(t.id, w.stage, id) });
+    }
+  }
+  items.push({ label: "Mode: Debug", sub: "stop everywhere", run: () => setMode("debug") });
+  items.push({ label: "Mode: Watch", sub: "stop on you", run: () => setMode("watch") });
+  items.push({ label: "Mode: Auto", sub: "accept verified", run: () => setMode("auto") });
+  items.push({ label: "Reset scenario", sub: "restore test data", run: () => { state = seed(); render(); notify("Scenario reset."); } });
+  return items.filter((item) => !q || `${item.label} ${item.sub}`.toLowerCase().includes(q));
+}
+
+function openPalette() {
+  $("overlay").classList.add("on");
+  $("pal-input").value = "";
+  drawPalette(0);
+  $("pal-input").focus();
+}
+
+function drawPalette(active = 0) {
+  const items = paletteItems();
+  $("pal-list").innerHTML = items.slice(0, 12).map((item, i) =>
+    `<button class="${i === active ? "active" : ""}" data-pal="${i}"><b>${item.label}</b><br><small>${item.sub}</small></button>`
+  ).join("") || `<div class="note">No matches.</div>`;
+  $("pal-list").dataset.active = String(active);
+  $("pal-list").dataset.count = String(Math.min(items.length, 12));
+}
+
+document.addEventListener("click", (event) => {
+  const mode = event.target.closest("[data-mode]");
+  if (mode) return setMode(mode.dataset.mode);
+  const cell = event.target.closest("[data-cell]");
+  if (cell) {
+    const [id, stage] = cell.dataset.cell.split(":");
+    return select(id, stage, cell.dataset.worker);
+  }
+  const jump = event.target.closest("[data-jump]");
+  if (jump) {
+    const t = ticket(jump.dataset.jump);
+    const stage = Object.entries(t.stages).find(([, s]) => ["needs_attention", "awaiting_approval", "review_ready", "running"].includes(s.status))?.[0] || "implement";
+    return select(t.id, stage);
+  }
+  const only = event.target.closest("[data-worker-only]");
+  if (only) { state.selected.worker = only.dataset.workerOnly; return render(); }
+  const tab = event.target.closest("[data-tab]");
+  if (tab) { state.tab = tab.dataset.tab; return render(); }
+  const action = event.target.closest("[data-act]");
+  if (action) return act(action.dataset.act);
+  const pal = event.target.closest("[data-pal]");
+  if (pal) {
+    paletteItems()[Number(pal.dataset.pal)]?.run();
+    $("overlay").classList.remove("on");
+    return;
+  }
+  if (event.target.id === "overlay") $("overlay").classList.remove("on");
+  if (event.target.id === "jump") openPalette();
+  if (event.target.id === "reset") { state = seed(); render(); notify("Scenario reset."); }
+});
+
+document.addEventListener("change", (event) => {
+  const br = event.target.dataset.break;
+  if (br) { state.breakOn[br] = event.target.checked; render(); }
+});
+
+document.addEventListener("keydown", (event) => {
+  const palOpen = $("overlay").classList.contains("on");
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    return palOpen ? $("overlay").classList.remove("on") : openPalette();
+  }
+  if (event.key === "Escape") { $("overlay").classList.remove("on"); return; }
+  if (palOpen) {
+    const items = paletteItems().slice(0, 12);
+    let active = Number($("pal-list").dataset.active || 0);
+    if (event.key === "ArrowDown") { event.preventDefault(); drawPalette(Math.min(items.length - 1, active + 1)); }
+    if (event.key === "ArrowUp") { event.preventDefault(); drawPalette(Math.max(0, active - 1)); }
+    if (event.key === "Enter") { event.preventDefault(); items[active]?.run(); $("overlay").classList.remove("on"); }
+    return;
+  }
+  if (event.target.matches("textarea, input")) return;
+  const queue = needsYou();
+  const idx = queue.findIndex((i) => i.ticket === state.selected.ticket && i.worker === state.selected.worker);
+  if (event.key === "j") {
+    const next = queue[Math.min(queue.length - 1, idx + 1)] || queue[0];
+    if (next) select(next.ticket, next.stage, next.worker);
+  }
+  if (event.key === "k") {
+    const prev = queue[Math.max(0, idx - 1)] || queue.at(-1);
+    if (prev) select(prev.ticket, prev.stage, prev.worker);
+  }
+  if (event.key === "a") act("accept");
+  if (event.key === "s") { $("steer")?.focus(); event.preventDefault(); }
+  if (event.key === "1") setMode("debug");
+  if (event.key === "2") setMode("watch");
+  if (event.key === "3") setMode("auto");
+  if (event.key === "?") notify("j/k needs-you · click matrix · a accept · s steer · 1/2/3 mode · ⌘K jump");
+});
+
+$("pal-input").addEventListener("input", () => drawPalette(0));
+
+setInterval(() => {
+  state.clock += 1;
+  const session = ticket("APP-1901")?.workers.session;
+  if (session?.status === "running") {
+    session.elapsed += 1;
+    if (state.clock % 7 === 0) {
+      session.output.push([`14:22:${String(10 + (state.clock % 50)).padStart(2, "0")}`, "edit src/session.ts · ttlMs from config"]);
+      session.lastTool = "edit src/session.ts";
+    }
+    if (state.selected.ticket === "APP-1901" && state.selected.worker === "session") {
+      const t = $("right")?.querySelector(".kv dd");
+      if (t) renderChrome();
+      renderWorkers();
+      if (state.tab === "output" || state.tab === "evidence") renderCenter();
+    }
+  }
+  const rebase = ticket("TEXT-7F2")?.workers.rebase;
+  if (rebase?.status === "needs_attention") rebase.idle += 1;
+}, 1000);
+
+render();
+</script>
+</body>
+</html>

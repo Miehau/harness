@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock A · Explorer + Editors</title>
+<style>
+  :root {
+    --activity: #181818;
+    --sidebar: #252526;
+    --editor: #1e1e1e;
+    --panel: #181818;
+    --bar: #007acc;
+    --stroke: #3c3c3c;
+    --text: #cccccc;
+    --dim: #8b8b8b;
+    --mute: #6b6b6b;
+    --you: #c9b458;
+    --run: #4fc1ff;
+    --ok: #89d185;
+    --err: #f14c4c;
+    --wait: #c586c0;
+    --sel: #04395e;
+    --hover: #2a2d2e;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: #111; color: var(--text); font: 12px/1.4 var(--sans); }
+  button, input { font: inherit; color: inherit; }
+  button { background: none; border: 0; cursor: pointer; }
+  .app { display: grid; height: 100vh; grid-template-rows: 22px minmax(0, 1fr) 22px; overflow: hidden; }
+  .menubar { display: flex; align-items: center; gap: 14px; padding: 0 10px; background: #3c3c3c; color: #ddd; font-size: 11px; }
+  .menubar b { color: #fff; font-weight: 650; }
+  .menubar span { color: #bbb; }
+  .menubar .spacer { flex: 1; }
+  .k { border: 1px solid #555; border-radius: 3px; padding: 0 5px; color: #ccc; font: 10px var(--mono); }
+  .work { display: grid; min-height: 0; height: 100%; grid-template-columns: 48px 268px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .activity { display: flex; flex-direction: column; align-items: center; padding: 8px 0; gap: 4px; background: var(--activity); border-right: 1px solid #000; }
+  .activity button { width: 48px; height: 42px; color: #858585; font-size: 16px; }
+  .activity button.active { color: #fff; border-left: 2px solid #fff; }
+  .activity .bottom { margin-top: auto; }
+  .sidebar { display: flex; flex-direction: column; min-width: 0; background: var(--sidebar); border-right: 1px solid var(--stroke); }
+  .side-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 6px; color: #bbb; font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .filter { margin: 0 8px 8px; width: calc(100% - 16px); border: 1px solid var(--stroke); border-radius: 2px; padding: 5px 7px; background: #1e1e1e; color: var(--text); }
+  .tree { flex: 1; overflow: auto; padding: 0 0 12px; }
+  .group { margin-top: 8px; }
+  .group > header { display: flex; align-items: center; gap: 6px; padding: 3px 10px; color: #ddd; font: 11px var(--sans); font-weight: 650; }
+  .group > header em { margin-left: auto; color: var(--dim); font: 10px var(--mono); font-style: normal; }
+  .row { display: grid; grid-template-columns: 14px 10px minmax(0, 1fr) auto; gap: 6px; align-items: center; width: 100%; padding: 3px 10px 3px 16px; color: var(--text); text-align: left; }
+  .row:hover { background: var(--hover); }
+  .row.sel { background: var(--sel); }
+  .row .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--mono); }
+  .row small { display: block; color: var(--dim); font-size: 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .you { color: var(--you); }
+  .run { color: var(--run); }
+  .ok { color: var(--ok); }
+  .err { color: var(--err); }
+  .wait { color: var(--wait); }
+  .child { padding-left: 34px; grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .child .meta { color: var(--mute); font: 10px var(--mono); }
+  .main { display: grid; min-width: 0; grid-template-rows: 35px minmax(220px, 1fr) 28px 210px; background: var(--editor); }
+  .tabs { display: flex; align-items: stretch; overflow: hidden; border-bottom: 1px solid var(--stroke); background: #2d2d2d; }
+  .tab { display: flex; align-items: center; gap: 7px; padding: 0 12px; border-right: 1px solid #252526; color: #9d9d9d; font-size: 12px; }
+  .tab.active { background: var(--editor); color: #fff; }
+  .tab i { color: var(--you); font-style: normal; font-size: 9px; }
+  .editor { min-height: 0; overflow: auto; padding: 10px 14px 16px; }
+  .editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .editor-head h1 { margin: 0; font-size: 15px; font-weight: 650; }
+  .editor-head p { margin: 3px 0 0; color: var(--dim); font-size: 11px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { border: 1px solid var(--stroke); border-radius: 3px; padding: 2px 7px; color: #bbb; font: 10px var(--mono); }
+  .grid2 { display: grid; grid-template-columns: 1.2fr .8fr; gap: 10px; min-height: 180px; }
+  .card { border: 1px solid #4a4a4a; background: #2a2d2e; min-height: 170px; }
+  .card header { display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--stroke); color: #bbb; font: 10px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .event { display: grid; grid-template-columns: 54px 10px minmax(0, 1fr); gap: 8px; padding: 5px 8px; border-bottom: 1px solid #2a2a2a; font: 11px var(--mono); }
+  .event time { color: var(--mute); }
+  .event b { font-weight: 600; color: #ddd; }
+  .event .live { color: var(--run); }
+  pre.diff { margin: 0; padding: 8px; overflow: auto; color: #c8c8c8; font: 11px/1.45 var(--mono); }
+  .add { color: #89d185; }
+  .del { color: #f48771; }
+  .breadcrumb { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-top: 1px solid var(--stroke); color: var(--dim); font: 11px var(--mono); background: #1b1b1b; }
+  .panel { display: grid; grid-template-rows: 28px 1fr; border-top: 1px solid var(--stroke); background: var(--panel); }
+  .ptabs { display: flex; gap: 0; border-bottom: 1px solid var(--stroke); }
+  .ptab { padding: 0 12px; height: 28px; color: #888; font: 10px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .ptab.active { color: #fff; border-bottom: 1px solid #fff; }
+  .pbody { display: grid; grid-template-columns: 1.4fr .9fr; min-height: 0; overflow: hidden; }
+  .plist { overflow: auto; }
+  .prob { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; text-align: left; width: 100%; }
+  .prob:hover, .prob.sel { background: #2a2d2e; }
+  .prob strong { display: block; font-size: 12px; }
+  .prob small { color: var(--dim); font: 10px var(--mono); }
+  .steer { display: grid; grid-template-rows: auto 1fr auto; border-left: 1px solid var(--stroke); padding: 8px; gap: 6px; }
+  .steer textarea { width: 100%; height: 70px; resize: none; border: 1px solid var(--stroke); background: #1e1e1e; color: var(--text); padding: 6px 8px; font: 11px var(--mono); }
+  .actions { display: flex; gap: 6px; }
+  .btn { border: 1px solid #474747; background: #2a2a2a; padding: 4px 8px; font-size: 11px; }
+  .btn.primary { background: #0e639c; border-color: #0e639c; color: #fff; }
+  .btn.danger { color: #f48771; border-color: #5a3030; }
+  .status { display: flex; align-items: center; gap: 14px; padding: 0 10px; background: var(--bar); color: #fff; font: 11px var(--mono); }
+  .status .grow { flex: 1; }
+  .badge { background: #c9b458; color: #1e1e1e; border-radius: 2px; padding: 0 5px; font-weight: 700; }
+  .mocktag { position: fixed; top: 28px; right: 10px; z-index: 5; background: #000c; border: 1px solid #c9b458; color: #c9b458; padding: 3px 7px; font: 10px var(--mono); letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div class="mocktag">MOCK A · EXPLORER + EDITORS</div>
+<div class="app">
+  <div class="menubar">
+    <b>Ticket Agent</b>
+    <span>File</span><span>View</span><span>Run</span><span>Terminal</span>
+    <span class="spacer"></span>
+    <span>/Users/michal/work/app</span>
+    <span class="k">⌘K</span>
+  </div>
+  <div class="work">
+    <nav class="activity">
+      <button class="active" title="Fleet">[]</button>
+      <button title="Review">[]</button>
+      <button title="Artifacts">#</button>
+      <button title="Search">/</button>
+      <button class="bottom" title="Settings">*</button>
+    </nav>
+    <aside class="sidebar">
+      <div class="side-head">Fleet explorer <span>3 you · 4 workers</span></div>
+      <input class="filter" value="" placeholder="Filter tickets, workers, files…">
+      <div class="tree">
+        <section class="group">
+          <header>Needs you <em>3</em></header>
+          <button class="row you"><span>▾</span><span class="dot"></span><span class="id">TEXT-7F2<small>verify failed · 3 corrections</small></span></button>
+          <button class="row child sel err"><span class="dot"></span><span>worker:rebase<small>needs attention</small></span><span class="meta">8s idle</span></button>
+          <button class="row you"><span>▸</span><span class="dot"></span><span class="id">APP-1842<small>plan approval · 2 ready</small></span></button>
+          <button class="row you"><span>▸</span><span class="dot"></span><span class="id">LIN-88<small>review ready · +12 −4</small></span></button>
+        </section>
+        <section class="group">
+          <header>Running <em>1</em></header>
+          <button class="row run"><span>▾</span><span class="dot"></span><span class="id">APP-1901<small>implement · 2 agents</small></span></button>
+          <button class="row child run"><span class="dot"></span><span>worker:session<small>write src/session.ts</small></span><span class="meta">12s</span></button>
+          <button class="row child"><span class="dot"></span><span>worker:tests<small>blocked on session</small></span><span class="meta">wait</span></button>
+        </section>
+        <section class="group">
+          <header>Queue <em>0 / 4 slots</em></header>
+        </section>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="tabs">
+        <button class="tab">APP-1901 session.ts <span class="run">●</span></button>
+        <button class="tab active">TEXT-7F2 rebase <i>!</i></button>
+        <button class="tab">LIN-88 diff</button>
+        <button class="tab">APP-1842 plan.json</button>
+      </div>
+      <section class="editor">
+        <div class="editor-head">
+          <div>
+            <h1>Fix merge-queue rebase</h1>
+            <p>worker:rebase · gpt-5.6-terra/high · attempt 3/8 · isolated worktree</p>
+          </div>
+          <div class="pills">
+            <span class="pill err">needs attention</span>
+            <span class="pill">verify</span>
+            <span class="pill">write · ≤8/400</span>
+            <span class="pill">3m 41s · 28 calls</span>
+          </div>
+        </div>
+        <div class="grid2">
+          <article class="card">
+            <header>Last agentic decision <span>attempt 3</span></header>
+            <div class="event"><time>14:22:01</time><span class="err">●</span><span><b>Verification rejected</b><br>rebase onto origin/main left duplicate preview-port bind in src/previews.js</span></div>
+            <div class="event"><time>14:21:44</time><span class="run">●</span><span><b>Chose targeted edit</b><br>keep existing availablePort(), drop hardcoded 4318 fallback</span></div>
+            <div class="event"><time>14:21:18</time><span>●</span><span><b>Read failing evidence</b><br>verify.mjs · e2e-daemon.test.js · 2 screenshots</span></div>
+          </article>
+          <article class="card">
+            <header>Canonical diff <span>+18 −11</span></header>
+            <pre class="diff"><span class="del">- const port = Number(process.env.PORT || 4318);</span>
+<span class="add">+ const port = await availablePort(host);</span>
+<span class="del">- server.listen(port);</span>
+<span class="add">+ server.listen(port, host);</span>
+            </pre>
+          </article>
+        </div>
+      </section>
+      <div class="breadcrumb">TEXT-7F2 ▸ verify ▸ worker:rebase ▸ src/previews.js ▸ hunk 2 · evidence is canonical Git</div>
+      <section class="panel">
+        <div class="ptabs">
+          <button class="ptab active">Problems 3</button>
+          <button class="ptab">Output</button>
+          <button class="ptab">Steer</button>
+          <button class="ptab">Timeline</button>
+        </div>
+        <div class="pbody">
+          <div class="plist">
+            <button class="prob sel"><span class="err">●</span><span><strong>TEXT-7F2 verification stalled</strong><small>3 correction rounds · last error: duplicate port bind</small></span><span class="pill">retry / inspect</span></button>
+            <button class="prob"><span class="you">●</span><span><strong>APP-1842 plan gate</strong><small>2 workers ready · Run manually or Auto graph</small></span><span class="pill">approve</span></button>
+            <button class="prob"><span class="wait">●</span><span><strong>LIN-88 review ready</strong><small>preview ports collide · +12 −4 · accept commits next batch</small></span><span class="pill">accept</span></button>
+          </div>
+          <form class="steer">
+            <span style="color:#bbb;font:10px var(--mono);letter-spacing:.06em;text-transform:uppercase">Steer selected worker</span>
+            <textarea>Don't add a new listener. Reuse availablePort() and fail the run if the worktree preview is still bound.</textarea>
+            <div class="actions">
+              <button class="btn primary" type="button">Interrupt + redirect</button>
+              <button class="btn" type="button">Retry as-is</button>
+              <button class="btn danger" type="button">Cancel worker</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+  <footer class="status">
+    <span>Debug</span>
+    <span>3 / 4 slots</span>
+    <span class="badge">3 NEED YOU</span>
+    <span class="grow">APP-1901 writing · TEXT-7F2 blocked · LIN-88 review · APP-1842 plan</span>
+    <span>42k in · 9k out</span>
+    <span>Pi · terra/high</span>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Main A · Command cockpit</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#101317; --line:#2a3038; --text:#e6eaee; --muted:#808893; --you:#e07070; --gate:#d4b06a; --run:#6ea3e8; --ok:#6fca94; --rev:#c49be8; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--text); font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { font: inherit; color: inherit; }
+  .app { display:grid; height:100vh; grid-template-rows:36px 1fr 22px; }
+  .top, .status { display:flex; align-items:center; gap:14px; padding:0 12px; background:#0e1115; color:var(--muted); border-bottom:1px solid var(--line); }
+  .status { border-bottom:0; border-top:1px solid var(--line); font-size:11px; }
+  .brand { color:var(--text); font-weight:700; }
+  .pill { border:1px solid #5a2f34; padding:1px 6px; color:var(--you); }
+  .spacer { flex:1; }
+  .k { border:1px solid #3a414a; padding:0 5px; background:#1a1f25; color:#c5ccd4; }
+  .layout { display:grid; min-height:0; grid-template-columns:320px 1fr; }
+  .rail { border-right:1px solid var(--line); background:var(--panel); padding:8px; }
+  .g { margin:8px 4px 4px; color:var(--muted); font-size:10px; letter-spacing:.12em; }
+  .ticket { display:grid; gap:5px; width:100%; margin:0 0 5px; padding:8px; border:1px solid #6e3a3e; border-radius:4px; background:#1b1416; text-align:left; }
+  .row { display:flex; align-items:center; gap:7px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--you); }
+  .id { font-weight:700; }
+  .st { margin-left:auto; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--you); }
+  .stages { display:grid; grid-template-columns:repeat(6,1fr); gap:3px; height:4px; }
+  .stages i { background:#2b323b; } .stages i.done { background:#3f8f66; } .stages i.now { background:var(--you); }
+  .meta { display:flex; justify-content:space-between; color:var(--muted); font-size:10px; }
+  .agent { display:grid; grid-template-columns:10px 1fr auto; gap:6px; align-items:center; font-size:11px; }
+  .bar { height:4px; margin-top:3px; background:#262c34; } .bar i { display:block; height:100%; background:var(--you); width:70%; }
+  .main { display:grid; min-width:0; grid-template-rows:auto 1fr auto; }
+  .head { padding:12px 16px 10px; border-bottom:1px solid var(--line); }
+  h1 { margin:3px 0 8px; font:700 16px/1.2 ui-sans-serif, system-ui, sans-serif; }
+  .fail { border:1px solid #5a2f34; padding:8px; background:#1b1214; color:#f0c2c2; }
+  .actions { display:flex; gap:6px; margin-top:8px; }
+  .btn { min-height:26px; padding:0 9px; border:1px solid #3a424c; background:#1a1f25; cursor:pointer; }
+  .btn.pri { border-color:#6e3a3e; background:#2a1618; color:#f0c2c2; }
+  .split { display:grid; min-height:0; grid-template-columns:1.05fr .95fr; }
+  .col { min-height:0; overflow:auto; padding:12px 14px; }
+  .col + .col { border-left:1px solid var(--line); }
+  .h { margin-bottom:8px; color:var(--muted); font-size:10px; letter-spacing:.12em; }
+  .log { display:grid; gap:4px; }
+  .log b { color:var(--gate); }
+  .bad { color:var(--you); }
+  .diff { border:1px solid var(--line); padding:10px; background:#0a0c10; }
+  .d { color:var(--you); } .a { color:var(--ok); }
+  .ticket-agents { padding:8px 16px 12px; border-top:1px solid var(--line); background:#0f1318; }
+  .ta { display:grid; grid-template-columns:90px minmax(0,1fr) 70px 90px; gap:8px; padding:4px 0; border-bottom:1px solid #1e242c; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top"><span class="brand">TICKET AGENT</span><span>main-a · command cockpit</span><span class="pill">3 NEED YOU</span><span class="spacer"></span><span><span class="k">n</span> new · graph is <span class="k">g</span></span><span>~/work/app</span></header>
+  <div class="layout">
+    <aside class="rail">
+      <div class="g">NEEDS YOU</div>
+      <div class="ticket">
+        <div class="row"><span class="dot"></span><span class="id">TEXT-7F2</span><span class="st">needs you</span></div>
+        <div>Merge-queue rebase</div>
+        <div class="stages"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i></i></div>
+        <div class="meta"><span>verify · 2 agents</span><span>9s idle</span></div>
+        <div class="agent"><span class="dot"></span><span>rebase<div class="bar"><i></i></div></span><span>3 att</span></div>
+        <div class="agent"><span class="dot" style="background:#4b5560"></span><span>tests</span><span>queued</span></div>
+      </div>
+    </aside>
+    <main class="main">
+      <section class="head">
+        <div class="row"><span class="id">TEXT-7F2</span><span class="st">needs you · verify · worker:rebase</span></div>
+        <h1>Merge-queue rebase</h1>
+        <div class="fail">duplicate preview-port bind in src/previews.js · worktree paused · retry stays in the same tree</div>
+        <div class="actions">
+          <button class="btn pri" type="button">Retry worker</button>
+          <button class="btn" type="button">Steer</button>
+          <button class="btn" type="button">Open worktree</button>
+          <button class="btn" type="button">Restart from verify</button>
+          <button class="btn" type="button">Cancel</button>
+        </div>
+      </section>
+      <div class="split">
+        <section class="col">
+          <div class="h">LAST ACTIVITY · DECISIONS</div>
+          <div class="log">
+            <div>14:21:18  <b>decision</b>  reuse availablePort()</div>
+            <div>14:21:33  edit src/previews.js</div>
+            <div>14:21:58  named command verify</div>
+            <div class="bad">14:22:01  FAIL  preview still bound on 4318</div>
+          </div>
+        </section>
+        <section class="col">
+          <div class="h">CANONICAL DIFF</div>
+          <pre class="diff"><span class="d">- const port = Number(process.env.PORT || 4318);</span>
+<span class="a">+ const port = await availablePort(host);</span>
+  server.listen(port, host);</pre>
+        </section>
+      </div>
+      <section class="ticket-agents">
+        <div class="h">AGENTS ON THIS TICKET</div>
+        <div class="ta"><span>rebase</span><span>needs attention · verify fail</span><span>3/8 att</span><span class="st">fail</span></div>
+        <div class="ta"><span>tests</span><span>waiting on rebase</span><span>—</span><span style="color:var(--muted)">queued</span></div>
+      </section>
+    </main>
+  </div>
+  <footer class="status">default body is activity + diff · 6-stage header gone · graph is a command · finding lives here, not in the rail</footer>
+</div>
+</body>
+</html>

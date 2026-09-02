@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v3 · By state</title>
+<style>
+  :root {
+    --bg: #0c0e12;
+    --surface: #14171c;
+    --lift: #1a1e25;
+    --stroke: #2a3038;
+    --text: #e7ebf0;
+    --dim: #8b939e;
+    --you: #e6b84d;
+    --run: #5eb0ff;
+    --ok: #6ecf9a;
+    --err: #f07178;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { background: none; border: 0; cursor: pointer; }
+  button:focus-visible, textarea:focus-visible { outline: 2px solid rgb(94 176 255 / .45); outline-offset: 1px; }
+  .app { display: grid; height: 100vh; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; }
+  .top { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--stroke); background: var(--surface); }
+  .brand { display: flex; flex-direction: column; }
+  .brand strong { font-size: 13px; letter-spacing: -.01em; }
+  .brand small { color: var(--dim); font: 11px var(--mono); }
+  .repo { color: var(--dim); font: 11px var(--mono); }
+  .grow { flex: 1; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--lift); font-size: 12px; }
+  .btn:hover { border-color: #3d4652; }
+  .btn.primary { border-color: #3d7ab8; background: #2a6fad; color: #fff; font-weight: 600; }
+  .btn.good { border-color: #2e7a52; color: var(--ok); }
+  .btn.danger { color: var(--err); }
+  .body { display: grid; min-height: 0; grid-template-columns: minmax(340px, 42%) minmax(0, 1fr); }
+  .fleet { display: flex; min-height: 0; flex-direction: column; overflow: auto; border-right: 1px solid var(--stroke); }
+  .section { padding: 14px 12px 8px; }
+  .section h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+  .section h2 b { min-width: 18px; color: var(--dim); font: 11px var(--mono); }
+  .section.attention h2 { color: var(--you); }
+  .section.running h2 { color: var(--run); }
+  .section.quiet h2 { color: var(--dim); }
+  .card { display: grid; width: 100%; gap: 4px; margin-bottom: 8px; padding: 10px 11px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--surface); text-align: left; }
+  .card:hover { border-color: #3d4652; background: var(--lift); }
+  .card.on { border-color: #4a5d78; background: #182230; box-shadow: inset 3px 0 0 var(--run); }
+  .card.you.on { border-color: #6a5a22; background: #221c12; box-shadow: inset 3px 0 0 var(--you); }
+  .card.err { border-color: #5a3236; }
+  .card.err.on { box-shadow: inset 3px 0 0 var(--err); }
+  .head { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: currentColor; }
+  .pulse { box-shadow: 0 0 0 0 rgb(94 176 255 / .6); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 8px transparent; } }
+  .id { color: #9ec0ee; font: 11px var(--mono); }
+  .name { font-weight: 650; }
+  .head .sp { margin-left: auto; color: var(--dim); font: 11px var(--mono); }
+  .finding { color: var(--text); font-size: 12px; }
+  .wt { overflow: hidden; color: var(--dim); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .now { color: var(--run); font: 11px var(--mono); }
+  .files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .files span { border: 1px solid var(--stroke); border-radius: 4px; padding: 1px 6px; color: #c5cdd6; font: 10px var(--mono); }
+  .observe { display: flex; min-width: 0; min-height: 0; flex-direction: column; background: #0e1116; }
+  .obs-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--stroke); }
+  .obs-head h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+  .obs-head p { margin: 6px 0 0; color: var(--dim); font: 12px var(--mono); }
+  .obs-head .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  .path { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; border: 1px solid var(--stroke); border-radius: 8px; padding: 7px 10px; background: var(--surface); font: 11px var(--mono); }
+  .path code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .banner { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+  .banner.err { border: 1px solid #5a3236; background: #2a1719; }
+  .banner.you { border: 1px solid #6a5a22; background: #241e10; }
+  .banner.run { border: 1px solid #2d4d6e; background: #14202c; }
+  .banner strong { display: block; margin-bottom: 2px; }
+  .banner span { color: var(--dim); font-size: 12px; }
+  .split { display: grid; min-height: 0; flex: 1; grid-template-rows: 1fr 1fr; }
+  .split.single { grid-template-rows: 1fr; }
+  .pane { min-height: 0; overflow: auto; border-top: 1px solid var(--stroke); }
+  .ph { padding: 8px 18px; color: var(--dim); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .ev { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; padding: 6px 18px; font: 12px var(--mono); }
+  .ev time { color: #66707c; }
+  .ev.live b { color: var(--run); }
+  pre { margin: 0; padding: 8px 18px 16px; font: 12px/1.5 var(--mono); }
+  .add { color: var(--ok); } .del { color: var(--err); }
+  .empty { display: grid; min-height: 100%; place-items: center; color: var(--dim); text-align: center; }
+  .empty strong { display: block; margin-bottom: 4px; color: var(--text); }
+  dialog { width: min(520px, calc(100vw - 32px)); border: 1px solid var(--stroke); border-radius: 12px; padding: 0; background: var(--surface); color: var(--text); }
+  dialog::backdrop { background: rgb(0 0 0 / .6); }
+  .dlg { padding: 16px; }
+  .dlg h2 { margin: 0 0 6px; font-size: 16px; }
+  .dlg p { margin: 0 0 12px; color: var(--dim); font-size: 12px; }
+  textarea { width: 100%; min-height: 140px; border: 1px solid var(--stroke); border-radius: 8px; padding: 10px; background: var(--bg); resize: vertical; }
+  .dlg footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .toast { position: fixed; right: 16px; bottom: 16px; z-index: 8; border: 1px solid var(--stroke); border-radius: 8px; padding: 9px 12px; background: var(--lift); opacity: 0; transform: translateY(8px); transition: 140ms ease; pointer-events: none; }
+  .toast.show { opacity: 1; transform: none; }
+  .tag { border-radius: 99px; padding: 2px 7px; font: 10px var(--mono); }
+  .tag.you { background: #2a2414; color: var(--you); }
+  .tag.run { background: #132233; color: var(--run); }
+  .tag.err { background: #2a1719; color: var(--err); }
+  .tag.wait { background: #1a1522; color: #c7a4ea; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><strong>Ticket Agent</strong><small>v3 · grouped by state</small></div>
+    <span class="grow"></span>
+    <span class="repo" id="repo">/Users/michal/work/app</span>
+    <button class="btn primary" id="new-task" type="button">New task</button>
+  </header>
+  <div class="body">
+    <aside class="fleet" id="fleet"></aside>
+    <main class="observe" id="observe"></main>
+  </div>
+</div>
+<dialog id="new-dialog">
+  <form class="dlg" id="new-form">
+    <h2>New task</h2>
+    <p>First line becomes the title. Starts a local run in its own worktree.</p>
+    <textarea name="description" required placeholder="Describe what you want built or changed…"></textarea>
+    <footer>
+      <button class="btn" type="button" id="new-cancel">Cancel</button>
+      <button class="btn primary" type="submit">Start in worktree</button>
+    </footer>
+  </form>
+</dialog>
+<div class="toast" id="toast"></div>
+<script>
+const WT = (slug) => `/Users/michal/.agent-plan-workspace/ticket-runs/${slug}/worktree`;
+
+const seed = () => ({
+  selected: "TEXT-7F2:rebase",
+  clock: 0,
+  agents: [
+    {
+      key: "TEXT-7F2:rebase", ticket: "TEXT-7F2", title: "Merge-queue rebase", name: "rebase",
+      group: "attention", status: "needs attention", tag: "err",
+      finding: "duplicate preview-port bind in src/previews.js",
+      worktree: WT("text-7f2"), live: false, idle: 8, elapsed: 221,
+      now: "paused after verify",
+      files: ["src/previews.js", "test/e2e-daemon.test.js"],
+      events: [
+        ["14:21:44", "decision · reuse availablePort()"],
+        ["14:21:58", "verify"],
+        ["14:22:01", "FAIL · preview still bound on 4318"]
+      ],
+      diff: `<span class="del">- const port = Number(process.env.PORT || 4318);</span>
+<span class="add">+ const port = await availablePort(host);</span>`
+    },
+    {
+      key: "APP-1842:supervisor", ticket: "APP-1842", title: "Zero-state board", name: "supervisor",
+      group: "attention", status: "plan gate", tag: "you",
+      finding: "Approve plan · 2 implement workers ready",
+      worktree: WT("app-1842"), live: false, idle: 120, elapsed: 390,
+      now: "waiting for you",
+      files: ["plan.json", "exploration.md"],
+      events: [
+        ["14:18:40", "decision · keep fixture prompt-free"],
+        ["14:19:12", "decision · split skeleton vs domain"]
+      ],
+      diff: "",
+      plan: true
+    },
+    {
+      key: "LIN-88:preview", ticket: "LIN-88", title: "Preview ports", name: "preview",
+      group: "attention", status: "review ready", tag: "you",
+      finding: "Verification passed · +12 −4",
+      worktree: WT("lin-88"), live: false, idle: 25, elapsed: 180,
+      now: "ready to accept",
+      files: ["src/previews.js"],
+      events: [
+        ["14:20:00", "decision · unique bind per worktree"],
+        ["14:20:11", "verify · pass"]
+      ],
+      diff: `<span class="add">+ const port = await availablePort("127.0.0.1");</span>
+<span class="del">- preview.listen(4173);</span>`
+    },
+    {
+      key: "APP-1901:session", ticket: "APP-1901", title: "Auth session expiry", name: "session",
+      group: "running", status: "running", tag: "run",
+      finding: "Sliding clock, not login time",
+      worktree: WT("app-1901"), live: true, idle: 0, elapsed: 47,
+      now: "edit src/session.ts",
+      files: ["src/session.ts", "src/auth.ts"],
+      events: [
+        ["14:21:40", "read src/auth.ts"],
+        ["14:21:52", "edit src/session.ts"],
+        ["14:22:06", "decision · expiry uses last touch"]
+      ],
+      diff: `<span class="add">+ export function expired(session, now = Date.now()) {</span>
+<span class="add">+   return now - session.touchedAt > session.ttlMs;</span>
+<span class="add">+ }</span>`
+    },
+    {
+      key: "APP-1901:tests", ticket: "APP-1901", title: "Auth session expiry", name: "tests",
+      group: "running", status: "waiting", tag: "wait",
+      finding: "blocked on session",
+      worktree: WT("app-1901"), live: false, idle: 47, elapsed: 47,
+      now: "waiting on sibling in the same worktree",
+      files: [],
+      events: [["14:21:12", "queued until session commits"]],
+      diff: ""
+    }
+  ]
+});
+
+let state = seed();
+let toastTimer;
+const $ = (id) => document.getElementById(id);
+const agent = (key = state.selected) => state.agents.find((a) => a.key === key);
+
+function notify(msg) {
+  $("toast").textContent = msg;
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2600);
+}
+
+function time(elapsed) {
+  return elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+}
+
+function card(a) {
+  const on = a.key === state.selected ? "on" : "";
+  const tone = a.tag === "err" ? "err you" : a.tag === "you" ? "you" : "";
+  const files = a.group === "running" && a.files.length
+    ? `<div class="files">${a.files.map((f) => `<span>${f}</span>`).join("")}</div>` : "";
+  return `<button class="card ${tone} ${on}" data-sel="${a.key}">
+    <div class="head">
+      <span class="dot ${a.live ? "pulse run" : a.tag}"></span>
+      <span class="id">${a.ticket}</span>
+      <span class="name">${a.name}</span>
+      <span class="tag ${a.tag}">${a.status}</span>
+      <span class="sp">${a.live ? time(a.elapsed) : a.idle ? `${time(a.idle)} idle` : ""}</span>
+    </div>
+    <div class="finding">${a.finding}</div>
+    <div class="wt">${a.worktree}</div>
+    ${a.group === "running" ? `<div class="now">${a.now}</div>` : ""}
+    ${files}
+  </button>`;
+}
+
+function renderFleet() {
+  const attention = state.agents.filter((a) => a.group === "attention");
+  const running = state.agents.filter((a) => a.group === "running");
+  $("fleet").innerHTML = `
+    <section class="section attention">
+      <h2>Needs attention <b>${attention.length}</b></h2>
+      ${attention.map(card).join("") || `<div class="wt">Nothing waiting on you.</div>`}
+    </section>
+    <section class="section running">
+      <h2>Running in worktrees <b>${running.length}</b></h2>
+      ${running.map(card).join("")}
+    </section>`;
+}
+
+function actions(a) {
+  if (a.status === "needs attention") {
+    return `<button class="btn primary" data-act="retry">Retry in worktree</button>
+      <button class="btn" data-act="open">Open worktree</button>
+      <button class="btn danger" data-act="cancel">Cancel</button>`;
+  }
+  if (a.plan) {
+    return `<button class="btn primary" data-act="approve">Approve plan</button>
+      <button class="btn" data-act="open">Open worktree</button>`;
+  }
+  if (a.status === "review ready") {
+    return `<button class="btn good" data-act="accept">Accept commit</button>
+      <button class="btn" data-act="open">Open worktree</button>`;
+  }
+  if (a.live) {
+    return `<button class="btn" data-act="open">Open worktree</button>
+      <button class="btn danger" data-act="cancel">Stop</button>`;
+  }
+  return `<button class="btn" data-act="open">Open worktree</button>`;
+}
+
+function banner(a) {
+  if (a.status === "needs attention") return `<div class="banner err"><strong>${a.finding}</strong><span>Worktree is paused. Retry continues in the same tree.</span></div>`;
+  if (a.plan) return `<div class="banner you"><strong>${a.finding}</strong><span>No implement writes until you approve.</span></div>`;
+  if (a.status === "review ready") return `<div class="banner you"><strong>${a.finding}</strong><span>Accepting commits this worker into the ticket worktree.</span></div>`;
+  if (a.live) return `<div class="banner run"><strong>Live · ${a.now}</strong><span>Isolated ticket worktree. The opened repo is untouched.</span></div>`;
+  return `<div class="banner run"><strong>${a.finding}</strong><span>${a.now}</span></div>`;
+}
+
+function renderObserve() {
+  const a = agent();
+  if (!a) {
+    $("observe").innerHTML = `<div class="empty"><div><strong>Select an agent</strong>Needs attention to act. Running to watch the worktree.</div></div>`;
+    return;
+  }
+  const live = a.live;
+  $("observe").innerHTML = `
+    <div class="obs-head">
+      <h1>${a.ticket} · ${a.name}</h1>
+      <p>${a.title} · ${a.status} · ${a.live ? `${time(a.elapsed)} elapsed` : `${time(a.idle)} idle`}</p>
+      <div class="row">
+        <div class="path"><span>worktree</span><code title="${a.worktree}">${a.worktree}</code></div>
+        ${actions(a)}
+      </div>
+      ${banner(a)}
+    </div>
+    <div class="split ${a.diff ? "" : "single"}">
+      <div class="pane">
+        <div class="ph">${live ? "Worktree activity" : "Last activity"}</div>
+        ${a.events.map((e, i) => `<div class="ev ${live && i === a.events.length - 1 ? "live" : ""}"><time>${e[0]}</time><b>${e[1]}</b></div>`).join("")}
+      </div>
+      ${a.diff ? `<div class="pane"><div class="ph">Worktree diff</div><pre>${a.diff}</pre></div>` : ""}
+    </div>`;
+}
+
+function render() {
+  renderFleet();
+  renderObserve();
+}
+
+function select(key) {
+  state.selected = key;
+  render();
+}
+
+function act(name) {
+  const a = agent();
+  if (name === "open") return notify(`Would open ${a.worktree} in the editor.`);
+  if (name === "retry") {
+    a.group = "running";
+    a.status = "running";
+    a.tag = "run";
+    a.live = true;
+    a.idle = 0;
+    a.now = "retry · verify";
+    notify("Retrying in the same worktree.");
+    render();
+    setTimeout(() => {
+      a.group = "attention";
+      a.status = "needs attention";
+      a.tag = "err";
+      a.live = false;
+      a.finding = "duplicate preview-port bind still present";
+      a.now = "paused after verify";
+      a.events.push(["14:22:40", "FAIL · same invariant"]);
+      notify("Still failing. Worktree unchanged.");
+      render();
+    }, 1600);
+    return;
+  }
+  if (name === "accept") {
+    a.group = "done";
+    a.status = "accepted";
+    a.tag = "ok";
+    notify("Accepted into the ticket worktree.");
+    state.selected = state.agents.find((x) => x.group === "attention")?.key || state.agents.find((x) => x.group === "running")?.key;
+    render();
+    return;
+  }
+  if (name === "approve") {
+    a.group = "done";
+    a.status = "approved";
+    const arch = {
+      key: "APP-1842:architecture", ticket: "APP-1842", title: "Zero-state board", name: "architecture",
+      group: "running", status: "running", tag: "run",
+      finding: "Derive domain from exploration",
+      worktree: WT("app-1842"), live: true, idle: 0, elapsed: 1,
+      now: "write src/domain.ts",
+      files: ["src/domain.ts"],
+      events: [["14:23:01", "write src/domain.ts"]],
+      diff: `<span class="add">+ export const Task = { id, title, status }</span>`
+    };
+    const skel = {
+      key: "APP-1842:skeleton", ticket: "APP-1842", title: "Zero-state board", name: "skeleton",
+      group: "running", status: "waiting", tag: "wait",
+      finding: "blocked on architecture",
+      worktree: WT("app-1842"), live: false, idle: 0, elapsed: 1,
+      now: "waiting in the same worktree",
+      files: [], events: [["14:23:01", "queued"]], diff: ""
+    };
+    state.agents = state.agents.filter((x) => x.key !== a.key).concat([arch, skel]);
+    state.selected = arch.key;
+    notify("Plan approved. Architecture running in the ticket worktree.");
+    render();
+    return;
+  }
+  if (name === "cancel") {
+    a.group = "done";
+    a.live = false;
+    a.status = "cancelled";
+    notify(`${a.name} stopped. Worktree kept.`);
+    state.selected = state.agents.find((x) => x.group !== "done")?.key;
+    render();
+  }
+}
+
+$("new-task").addEventListener("click", () => $("new-dialog").showModal());
+$("new-cancel").addEventListener("click", () => $("new-dialog").close());
+$("new-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = new FormData(event.target).get("description").trim();
+  const title = text.split("\n")[0].replace(/^#+\s*/, "").slice(0, 72);
+  const id = `TEXT-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const slug = id.toLowerCase();
+  const item = {
+    key: `${id}:requirements`, ticket: id, title, name: "requirements",
+    group: "running", status: "running", tag: "run",
+    finding: "Clarifying requirements · repo not accessed yet",
+    worktree: WT(slug), live: true, idle: 0, elapsed: 0,
+    now: "writing requirements contract",
+    files: ["requirements.md"],
+    events: [["now", "started from free text"]],
+    diff: ""
+  };
+  state.agents.unshift(item);
+  state.selected = item.key;
+  event.target.reset();
+  $("new-dialog").close();
+  notify(`${id} started in a new worktree.`);
+  render();
+});
+
+document.addEventListener("click", (event) => {
+  const sel = event.target.closest("[data-sel]");
+  if (sel) return select(sel.dataset.sel);
+  const action = event.target.closest("[data-act]");
+  if (action) act(action.dataset.act);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.target.matches("textarea, input")) return;
+  if (event.key === "n" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); $("new-dialog").showModal(); }
+  const visible = state.agents.filter((a) => a.group !== "done");
+  const idx = visible.findIndex((a) => a.key === state.selected);
+  if (event.key === "j") select((visible[idx + 1] || visible[0]).key);
+  if (event.key === "k") select((visible[idx - 1] || visible.at(-1)).key);
+});
+
+setInterval(() => {
+  if ($("new-dialog").open) return;
+  state.clock += 1;
+  let dirty = false;
+  for (const a of state.agents) {
+    if (a.live) {
+      a.elapsed += 1;
+      dirty = true;
+      if (state.clock % 6 === 0 && a.name === "session") {
+        a.now = "edit src/session.ts";
+        a.events.push([`14:22:${String(10 + (state.clock % 50)).padStart(2, "0")}`, "edit src/session.ts · ttlMs"]);
+        a.files = ["src/session.ts", "src/auth.ts", "src/config.ts"];
+      }
+    } else if (a.group === "attention") { a.idle += 1; dirty = true; }
+  }
+  if (dirty) render();
+}, 1000);
+
+render();
+</script>
+</body>
+</html>

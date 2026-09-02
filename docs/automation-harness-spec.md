@@ -16,9 +16,9 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 - Automatic pickup uses polling plus manual refresh. A ticket is eligible only when it is in an inferred ready state, unfinished, and has no unresolved tracker blocking dependency.
 - Explicit Linear/Jira blocking relationships are authoritative. Dependencies run before priority; priority runs before project order.
 - A model-inferred missing dependency is proposed to the user before tracker relationships or ordering change.
-- Automatic planning is just in time. A pending plan approval reserves an execution slot rather than creating a stale plan backlog.
+- Automatic planning is just in time; a pending plan approval remains available for review.
 - Manual mode supports starting several dependency-ready tickets together.
-- Concurrency has a dashboard-configurable global cap and optional per-project overrides. The initial global default is two tickets.
+- Independent ready tickets may run concurrently.
 - Independent work continues when one ticket blocks. Pause the project only when a blocker changes shared foundations, contracts, architecture, or assumptions for later work.
 - Requirements, dependencies, and acceptance criteria are frozen at plan approval. Later tracker edits are reported at handoff but do not mutate an in-flight run. Runs stop only through the dashboard.
 - Oversized tickets may produce a proposed child-ticket and dependency breakdown. Creating or changing tracker items requires user approval.
