@@ -279,15 +279,16 @@ test("step inspector surfaces real attention findings without inventing criterio
     status: "needs_attention",
     acceptanceCriteria: ["One", "Two"],
     artifacts: [{ id: "result" }],
-    attempts: [{ verification: { findings: [{ claim: "Final-admin protection is unresolved" }] } }]
+    attempts: [{ verification: { findings: [{ severity: "high", claim: "Final-admin protection is unresolved" }] } }, { status: "interrupted" }]
   });
   assert.deepEqual(summary, {
     needsAttention: true,
     finding: "Final-admin protection is unresolved",
+    findings: [{ severity: "high", claim: "Final-admin protection is unresolved" }],
     findingCount: 1,
     criteria: ["One", "Two"],
     artifactCount: 1,
-    attemptCount: 1
+    attemptCount: 2
   });
   assert.equal(stepInspectorSummary({ status: "accepted", lastError: "stale", attempts: [] }).needsAttention, false);
 });

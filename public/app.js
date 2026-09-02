@@ -500,6 +500,16 @@ function stepEvents(run, step) {
   return [...(active?.activity?.events || trace?.events || attempt?.events || []), ...(live?.events || [])];
 }
 
+function correctionFindingsHtml(step) {
+  const findings = stepInspectorSummary(step).findings;
+  if (!findings.length) return "";
+  const title = step.status === "fixing" ? "Issues being fixed" : "Latest verification issues";
+  return `<section class="correction-findings"><header><div><span class="eyebrow">Verification feedback</span><strong>${title}</strong></div><span>${findings.length}</span></header><ol>${findings.map((finding) => {
+    const evidence = (finding.evidence || []).map((item) => `${item.file || "unknown"}${item.line ? `:${item.line}` : ""}`).join(" · ");
+    return `<li><div><span class="finding-severity severity-${escapeHtml(finding.severity || "issue")}">${escapeHtml(finding.severity || "issue")}</span>${evidence ? `<code>${escapeHtml(evidence)}</code>` : ""}</div><strong>${escapeHtml(finding.claim || finding.message || String(finding))}</strong>${finding.suggestedFix ? `<p><b>Requested fix</b>${escapeHtml(finding.suggestedFix)}</p>` : ""}</li>`;
+  }).join("")}</ol></section>`;
+}
+
 function runPanel(step) {
   const run = runFor();
   const attempt = step.attempts?.at(-1);
@@ -511,7 +521,7 @@ function runPanel(step) {
   const progress = active?.activity?.lastEvent || active?.lastEvent || (attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting");
   const purpose = step.productContext || step.acceptanceCriteria?.[0];
   const why = purpose ? `<article class="artifact"><header><span class="artifact-name">Why this worker is running</span></header><div class="artifact-body"><p>${escapeHtml(purpose)}</p></div></article>` : "";
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
 }
 
 function overviewPanel(step) {

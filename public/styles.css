@@ -1163,6 +1163,18 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .attention-summary .eyebrow { color: #f0b05d; }
 .attention-summary strong { color: #f0d7b1; font-size: 13px; line-height: 1.45; }
 .attention-summary .attention-action { width: max-content; min-height: 30px; margin-top: 2px; border-color: rgb(220 148 47 / .38); background: rgb(126 78 14 / .18); color: #f4b75f; font-size: 11px; }
+.correction-findings { display: grid; gap: 12px; margin-bottom: 14px; border: 1px solid rgb(220 148 47 / .3); border-radius: 12px; padding: 14px; background: rgb(132 85 20 / .1); }
+.correction-findings > header { display: flex; align-items: center; justify-content: space-between; }
+.correction-findings > header div { display: grid; gap: 4px; }
+.correction-findings > header strong { font-size: 14px; }
+.correction-findings > header > span { min-width: 24px; border-radius: 999px; padding: 4px 7px; background: rgb(220 148 47 / .18); color: #f0b05d; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+.correction-findings ol { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.correction-findings li { display: grid; gap: 7px; border-top: 1px solid rgb(220 148 47 / .16); padding-top: 10px; }
+.correction-findings li > div { display: flex; gap: 8px; align-items: center; }
+.correction-findings li code { overflow: hidden; color: #929aa2; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.correction-findings li > strong { color: #e6e9ee; font-size: 12px; line-height: 1.45; }
+.correction-findings li p { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin: 0; color: #aeb5c0; font-size: 11px; line-height: 1.45; }
+.correction-findings li p b, .finding-severity { color: #f0b05d; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-transform: uppercase; }
 .attention-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .worker-activity { display: grid; gap: 10px; border: 1px solid rgb(121 168 245 / .22); border-radius: 10px; padding: 12px; background: rgb(18 27 41 / .55); }
 .worker-activity > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

@@ -101,13 +101,14 @@ export function stageDetailModel(run, stageId) {
 
 export function stepInspectorSummary(step) {
   const attempts = step?.attempts || [];
-  const latest = attempts.at(-1);
+  const latest = [...attempts].reverse().find((attempt) => attempt.verification) || attempts.at(-1);
   const findings = latest?.verification?.findings || [];
   const needsAttention = ["needs_attention", "failed", "interrupted", "cancelled"].includes(step?.status);
   const finding = firstLine(step?.lastError || findings[0]?.claim || findings[0]?.message || (typeof findings[0] === "string" ? findings[0] : "") || latest?.violations?.[0], "The worker needs attention before the workflow can continue.");
   return {
     needsAttention,
     finding,
+    findings,
     findingCount: Math.max(findings.length, needsAttention ? 1 : 0),
     criteria: step?.acceptanceCriteria || [],
     artifactCount: step?.artifacts?.length || 0,
