@@ -96,7 +96,7 @@ test("answer --approve submits an empty requirements response", async () => {
 
 test("restart exposes the dashboard restart route", async () => {
   let called;
-  await runCli(["restart", "ticket-1", "stage:design"], {
+  await runCli(["restart", "ticket-1", "stage:design", "--confirm"], {
     env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
     fetchImpl: async (url, options) => {
       called = { url, body: JSON.parse(options.body) };
@@ -106,7 +106,7 @@ test("restart exposes the dashboard restart route", async () => {
     stderr: { write() {} }
   });
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/restart");
-  assert.deepEqual(called.body, { target: "stage:design" });
+  assert.deepEqual(called.body, { target: "stage:design", confirmed: true });
 });
 
 test("accept --auto enables automatic continuation at a review checkpoint", async () => {
