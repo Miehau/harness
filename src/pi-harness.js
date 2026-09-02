@@ -17,7 +17,7 @@ import { visualEvidenceMedia } from "./artifacts.js";
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
 export const MAX_VERIFICATION_ACTIONS = 20;
-export const MAX_VERIFICATION_MS = 3 * 60 * 1000;
+export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
