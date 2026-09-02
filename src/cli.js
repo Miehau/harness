@@ -15,6 +15,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
+  profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
   answer <ticketId> <text|--approve> Approve or answer an open question
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
@@ -89,6 +90,14 @@ async function handleCommand(command, rest, ctx) {
   if (command === "pause") {
     const id = await resolveTicketId(rest[0], ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/pause", { body: {}, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "profile") {
+    const [profileId, model, thinking, explicitId] = rest;
+    if (!profileId || !model || !thinking) throw new Error("Usage: agent-plan profile <stage> <model> <thinking> [ticketId]");
+    const id = await resolveTicketId(explicitId, ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/stage-profiles/" + encodeURIComponent(profileId), { body: { model, thinking }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

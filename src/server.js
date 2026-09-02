@@ -2185,6 +2185,25 @@ async function api(request, response, url) {
     if (settings.projectMode === "automatic") refreshTrackers().catch(() => {});
     return json(response, 200, state);
   }
+  const ticketStageProfile = url.pathname.match(/^\/api\/tickets\/([^/]+)\/stage-profiles\/([^/]+)$/);
+  if (request.method === "POST" && ticketStageProfile) {
+    const ticketId = decodeURIComponent(ticketStageProfile[1]);
+    const profileId = decodeURIComponent(ticketStageProfile[2]);
+    const input = await body(request);
+    const run = ticketRun(store.read(), ticketId);
+    if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing its stage profile");
+    if (!run.stageProfiles?.[profileId]) throw new Error("Unknown stage profile");
+    const profiles = normalizeStageProfiles({
+      ...run.stageProfiles,
+      [profileId]: { ...run.stageProfiles[profileId], model: input.model, thinking: input.thinking }
+    });
+    await harness.validateProfiles({ [profileId]: profiles[profileId] });
+    await update((draft) => {
+      if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing its stage profile");
+      ticketRun(draft, ticketId).stageProfiles[profileId] = profiles[profileId];
+    });
+    return json(response, 200, { ticketId, profile: profiles[profileId] });
+  }
   if (request.method === "GET" && url.pathname === "/api/tickets") {
     return json(response, 200, await refreshTrackers());
   }

@@ -108,3 +108,18 @@ test("accept --auto enables automatic continuation at a review checkpoint", asyn
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/accept");
   assert.deepEqual(called.body, { auto: true });
 });
+
+test("profile overrides one stage on a stopped run", async () => {
+  let called;
+  await runCli(["profile", "verification", "gpt-5.6-terra", "high", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ ticketId: "ticket-1" }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/stage-profiles/verification");
+  assert.deepEqual(called.body, { model: "gpt-5.6-terra", thinking: "high" });
+});
