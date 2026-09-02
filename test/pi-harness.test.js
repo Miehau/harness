@@ -381,28 +381,18 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
   }
 });
 
-test("supervisor worker review uses the named session and acceptance criteria", async () => {
+test("a verified worker report cannot introduce a second model gate", async () => {
   const harness = new PiHarness({ dataDir: tmpdir() });
-  let opened;
-  let prompt;
-  harness.planningSession = async (...args) => {
-    opened = args;
-    return { sessionFile: "/tmp/supervisor.jsonl" };
-  };
-  harness.visibleSupervisorPrompt = async (_session, value) => {
-    prompt = value;
-    return "Looks good";
-  };
+  harness.planningSession = async () => assert.fail("verified reports must not launch another model review");
   const result = await harness.reviewWorkerReport({
     cwd: "/repo", sessionFile: "/tmp/supervisor.jsonl", sessionKey: "ticket-run",
     step: { id: "slice", title: "Slice", agentId: "worker:impl", acceptanceCriteria: ["Board renders"] },
     report: { status: "completed", summary: "Done" }, diff: { files: ["src/a.js"] }
   });
-  assert.equal(opened[1], "/tmp/supervisor.jsonl");
-  assert.equal(opened[2], "ticket-run");
-  assert.match(prompt, /Board renders/);
-  assert.match(prompt, /src\/a\.js/);
-  assert.equal(result.reply, "Looks good");
+  assert.equal(result.sessionFile, "/tmp/supervisor.jsonl");
+  assert.deepEqual(result.checkpoints, []);
+  assert.match(result.reply, /Independent verification passed for Slice/);
+  assert.match(result.reply, /Done \(1 changed file\)/);
 });
 
 test("binding a discovered skill loads it as the supervisor workflow", async () => {

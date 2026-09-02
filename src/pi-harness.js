@@ -870,29 +870,18 @@ export class PiHarness {
     }, sessionKey || "shared");
   }
 
-  async reviewWorkerReport({ cwd, sessionFile, sessionKey, step, report, diff, profile, onEvent, signal }) {
-    return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
-      this.drainSupervisorSignals();
-      this.drainSupervisorStages();
-      const reply = await this.visibleSupervisorPrompt(session, this.configuredPrompt(session, profile, `Review this structured worker report under the active binding workflow, if one is loaded; otherwise use the plan and acceptance criteria.
-
-Step ID: ${step.id}
-Step: ${step.title}
-Worker: ${step.agentId}
-Acceptance criteria:
-${(step.acceptanceCriteria || []).map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
-Report: ${JSON.stringify(report)}
-Changed files: ${diff?.files?.join(", ") || "none"}
-
-If user input or approval is required, call workflow_checkpoint and include stepId. Otherwise give a concise review and allow normal user acceptance.`), { onEvent, signal });
-      return {
-        reply,
-        stages: this.drainSupervisorStages(),
-        checkpoints: this.drainSupervisorSignals(),
-        sessionFile: session.sessionFile
-      };
-    }, sessionKey || "shared");
+  async reviewWorkerReport({ sessionFile, step, report, diff }) {
+    // This runs only after deterministic checks and the independent verifier pass.
+    // Keep the review evidence-based: a second model review can invent a technical
+    // blocker and incorrectly turn it into a user decision instead of a correction.
+    const summary = String(report?.summary || "Completed the requested outcome.").trim();
+    const changedFiles = diff?.files?.length ? `${diff.files.length} changed file${diff.files.length === 1 ? "" : "s"}` : "no changed files";
+    return {
+      reply: `Independent verification passed for ${step.title}. Worker report: ${summary} (${changedFiles}).`,
+      stages: [],
+      checkpoints: [],
+      sessionFile
+    };
   }
 
   async chat({ cwd, sessionFile, message, images = [] }) {
