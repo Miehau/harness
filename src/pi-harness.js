@@ -676,7 +676,7 @@ export class PiHarness {
         const highlights = failureHighlights(rawOutput);
         const output = eventText(`${rawOutput}${highlights ? `\n\nFailure highlights:\n${highlights}` : ""}`);
         if (!attempt && transientRepositoryCheckFailure(output)) continue;
-        return { status: "failed", command, summary: `${command} failed.`, output, evidence: [], durationMs: Date.now() - startedAt };
+        return { status: "failed", command, summary: `${command} failed.`, output, failureHighlights: highlights, evidence: [], durationMs: Date.now() - startedAt };
       }
     }
   }

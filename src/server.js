@@ -52,7 +52,7 @@ export function repositoryCheckReview(checks) {
       evidence: [],
       suggestedFix: missingVisualEvidence
         ? "Configure a preview command or make the verification contract capture the required visual evidence."
-        : `Make ${checks.command} pass.\n\n${checks.output}`,
+        : `Make ${checks.command} pass.${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : `\n\n${checks.output}`}`,
       confidence: "high"
     }] : [],
     checks

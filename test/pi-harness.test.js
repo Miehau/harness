@@ -200,6 +200,8 @@ test("bounded repository failure output retains both context and the final faili
     assert.match(result.output, /Failure highlights/);
     assert.match(result.output, /not ok 237 - preserves the proof record/);
     assert.match(result.output, /test\/proof\.test\.js:42:1/);
+    assert.match(result.failureHighlights, /not ok 237 - preserves the proof record/);
+    assert.doesNotMatch(result.failureHighlights, /BEGIN-CONTEXT/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -39,6 +39,18 @@ test("harness screenshots satisfy a passing check that lacked its own visual art
   assert.deepEqual(repositoryCheckReview(checks).findings, []);
 });
 
+test("repository failures send correction workers only focused highlights", () => {
+  const review = repositoryCheckReview({
+    status: "failed",
+    command: "node .agent-plan/verify.mjs",
+    summary: "node .agent-plan/verify.mjs failed.",
+    output: "thousands of passing TAP lines",
+    failureHighlights: "not ok 17 - retains the steering claim\nexpected: queued\nactual: withheld"
+  });
+  assert.match(review.findings[0].suggestedFix, /not ok 17/);
+  assert.doesNotMatch(review.findings[0].suggestedFix, /thousands of passing/);
+});
+
 test("GET /api/health and compact run omit artifact content", async () => {
   await withDaemon(async (daemon) => {
     const health = await invoke(daemon, "GET", "/api/health");
