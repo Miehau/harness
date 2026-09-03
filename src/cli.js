@@ -338,8 +338,8 @@ function terminal(run) {
 }
 
 if (process.argv[1] && import.meta.url === ("file://" + process.argv[1])) {
-  runCli(process.argv.slice(2)).then((code) => process.exit(code), (error) => {
+  runCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => {
     process.stderr.write(error.message + String.fromCharCode(10));
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
