@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -242,6 +242,18 @@ test("correction pauses at the round cap or when findings repeat", () => {
   const capped = shouldPauseCorrection({ round: 3, findings, previousFingerprint: "other" });
   assert.equal(capped.pause, true);
   assert.match(capped.reason, /3 verification attempts/);
+});
+
+test("correction pause output retains the latest actionable evidence", () => {
+  const reason = correctionPauseReason("Paused after 3 verification attempts.", [{
+    severity: "high",
+    claim: "Sentence-final root paths evade scope checks",
+    evidence: [{ file: "src/scope.js", line: 42 }],
+    suggestedFix: "Cover punctuation delimiters with a table-driven regression."
+  }]);
+  assert.match(reason, /\[HIGH\] Sentence-final root paths evade scope checks/);
+  assert.match(reason, /src\/scope\.js:42/);
+  assert.match(reason, /table-driven regression/);
 });
 
 test("compact run and public state omit artifact bodies", () => {

@@ -478,6 +478,16 @@ export function shouldPauseCorrection({ round, findings, previousFingerprint, ma
   return { pause: false, fingerprint };
 }
 
+export function correctionPauseReason(reason, findings = []) {
+  const details = actionableFindings([{ findings }]).map((finding) => {
+    const evidence = finding.evidence?.[0] || {};
+    const location = evidence.file ? ` (${evidence.file}${evidence.line ? `:${evidence.line}` : ""})` : "";
+    const fix = String(finding.suggestedFix || finding.suggested_fix || "").trim();
+    return `- [${String(finding.severity || "issue").toUpperCase()}] ${finding.claim || "Verification finding"}${location}${fix ? ` — ${fix}` : ""}`;
+  });
+  return details.length ? `${reason}\nLatest actionable findings:\n${details.join("\n")}` : reason;
+}
+
 export function workflowResumeStage(run) {
   if (workflowBlockers(run?.workflow).length) return "blocked";
   const has = (kind) => (run?.artifacts || []).some((artifact) => artifact.kind === kind);

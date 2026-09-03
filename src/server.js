@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1229,18 +1229,19 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         }
         const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
         if (decision.pause) {
+          const pauseReason = correctionPauseReason(decision.reason, findings);
           await update((state) => {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
-            target.lastError = decision.reason;
+            target.lastError = pauseReason;
             current.status = "needs_attention";
-            current.lastError = decision.reason;
+            current.lastError = pauseReason;
             current.checkpoint = {
               id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
-              prompt: decision.reason, stepId, source: "verification", createdAt: new Date().toISOString()
+              prompt: pauseReason, stepId, source: "verification", createdAt: new Date().toISOString()
             };
-            setStage(current, "implement", "blocked", decision.reason);
+            setStage(current, "implement", "blocked", pauseReason);
           });
           return;
         }
@@ -1726,15 +1727,16 @@ async function finalReviewLoop(ticketId, signal) {
     }
     const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
     if (decision.pause) {
+      const pauseReason = correctionPauseReason(decision.reason, findings);
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.status = "needs_attention";
-        run.lastError = decision.reason;
+        run.lastError = pauseReason;
         run.checkpoint = {
           id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
-          prompt: decision.reason, source: "verification", createdAt: new Date().toISOString()
+          prompt: pauseReason, source: "verification", createdAt: new Date().toISOString()
         };
-        setStage(run, "verify", "blocked", decision.reason).activity = activity.snapshot();
+        setStage(run, "verify", "blocked", pauseReason).activity = activity.snapshot();
       });
       return;
     }
