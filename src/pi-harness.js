@@ -205,7 +205,9 @@ function eventText(value) {
   catch { text = String(value); }
   text ??= String(value ?? "");
   // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
-  return text.length > 10000 ? `${text.slice(0, 10000)}\n\n[truncated after 10,000 characters]` : text;
+  if (text.length <= 10000) return text;
+  const half = 5000;
+  return `${text.slice(0, half)}\n\n[${text.length - (half * 2)} characters omitted]\n\n${text.slice(-half)}`;
 }
 
 function safeEvent(event) {

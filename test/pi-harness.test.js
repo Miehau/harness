@@ -181,6 +181,25 @@ test("retries one transient filesystem cleanup race without spending a correctio
   }
 });
 
+test("bounded repository failure output retains both context and the final failing evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-output-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await writeFile(join(root, "verify.mjs"), `
+      console.log("BEGIN-CONTEXT:" + "a".repeat(12000));
+      console.error("FINAL-FAILURE: assertion 237 failed");
+      process.exit(1);
+    `);
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
+    assert.equal(result.status, "failed");
+    assert.match(result.output, /BEGIN-CONTEXT/);
+    assert.match(result.output, /characters omitted/);
+    assert.match(result.output, /FINAL-FAILURE: assertion 237 failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("prefers the repository verification contract and discovers image and video evidence when declared", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-contract-"));
   const dataDir = await mkdtemp(join(tmpdir(), "pi-contract-state-"));
