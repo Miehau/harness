@@ -532,7 +532,7 @@ export function pendingReviewFix(reviews = []) {
   const review = reviews.at(-1);
   const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
   if (!review || !findings.length || review.fix?.report?.status === "completed") return null;
-  return { round: Number(review.round) || reviews.length, findings };
+  return { round: Number(review.round) || reviews.length, findings, sessionFile: review.fix?.sessionFile || null };
 }
 
 export function interruptedStepFeedback(step = {}) {

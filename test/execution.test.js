@@ -321,8 +321,9 @@ test("correction pause output retains the latest actionable evidence", () => {
 
 test("an interrupted final-review fix resumes from persisted findings", () => {
   const findings = [{ severity: "high", claim: "Cleanup can miss a late child", evidence: [{ file: "src/process.js", line: 42 }] }];
-  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings }]), { round: 2, findings });
-  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings }]), { round: 2, findings, sessionFile: null });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { sessionFile: "/tmp/review-fix.jsonl" } }]), { round: 2, findings, sessionFile: "/tmp/review-fix.jsonl" });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings, sessionFile: null });
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "completed" } } }]), null);
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: [] }]), null);
 });

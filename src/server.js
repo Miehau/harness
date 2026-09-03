@@ -1688,7 +1688,7 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
   return { position: queued.position, promise: tracked };
 }
 
-async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
+async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
   const current = ticketRun(store.read(), ticketId);
   const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
   const fixStep = {
@@ -1709,9 +1709,14 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
   const beforeFix = await snapshotTree(current.workspace.cwd);
   const result = await harness.runStep({
     cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [],
-    images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
+    images: reviewImages, forkSessionFile: null, resumeSessionFile: sessionFile, feedback: "", ticketId, runId: current.runId,
     profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "review fixer"),
+    onSessionFile: (nextSessionFile) => update((state) => {
+      const run = ticketRun(state, ticketId);
+      const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+      review.fix = { ...review.fix, sessionFile: nextSessionFile, rootCauseClusters, startedAt: review.fix?.startedAt || new Date().toISOString() };
+    }),
     signal
   });
   signal?.throwIfAborted();
@@ -1723,7 +1728,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
       const run = ticketRun(state, ticketId);
       const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
       Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
-      review.fix = { report: result.report, diff: fixDiff, rootCauseClusters, createdAt: new Date().toISOString() };
+      review.fix = { ...review.fix, report: result.report, diff: fixDiff, rootCauseClusters, sessionFile: result.sessionFile || review.fix?.sessionFile || sessionFile, createdAt: new Date().toISOString() };
       run.status = "needs_attention";
       run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
     });
@@ -1736,7 +1741,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
     const run = ticketRun(state, ticketId);
     const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
     run.artifacts.push(fixArtifact);
-    review.fix = { report: result.report, diff: fixDiff, artifact: fixArtifact, rootCauseClusters };
+    review.fix = { ...review.fix, report: result.report, diff: fixDiff, artifact: fixArtifact, rootCauseClusters, sessionFile: result.sessionFile || review.fix?.sessionFile || sessionFile };
     run.status = "reviewing";
     Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
   });
