@@ -33,11 +33,11 @@ function parse(argv) {
   return { flags, positionals, passthrough };
 }
 
-function runNode(args, cwd) {
+export function runNode(args, cwd, { spawnProcess = spawn } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { cwd, stdio: "inherit" });
+    const child = spawnProcess(process.execPath, args, { cwd, stdio: "inherit" });
     child.on("error", reject);
-    child.on("exit", (code) => resolve(code || 0));
+    child.on("exit", (code) => resolve(code ?? 1));
   });
 }
 

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "commands": {
+    "verify": ["node", ".agent-plan/verify.mjs"]
+  },
+  "environment": {
+    "pass": [],
+    "files": []
+  },
+  "ports": {
+    "variables": []
+  }
+}
