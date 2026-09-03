@@ -175,6 +175,13 @@ test("review stage becomes a findings-and-fixes timeline", () => {
   assert.match(milestones[2].detail, /Persisted completion/);
 });
 
+test("review stage names an active fixer and repeats the issues being corrected", () => {
+  const stage = { id: "verify", status: "active", updatedAt: "2026-09-03T10:00:00.000Z" };
+  const items = stageMilestones({ status: "fixing", reviews: [{ createdAt: stage.updatedAt, actionableFindings: [{ severity: "high", claim: "Scope expansion bypasses the approved plan" }] }] }, stage);
+  assert.equal(items.at(-1).title, "Focused correction in progress.");
+  assert.match(items.at(-1).detail, /Scope expansion bypasses the approved plan/);
+});
+
 test("handoff timeline exposes merge queue, conflict resolution, verification, and integration", () => {
   const milestones = stageMilestones({
     merge: {

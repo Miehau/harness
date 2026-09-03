@@ -1675,6 +1675,11 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
     acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
     status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
   };
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.status = "fixing";
+    Object.assign(setStage(run, "verify", "active", `Fixing ${findings.length} actionable review finding${findings.length === 1 ? "" : "s"} · round ${round}`), { activity: activity.snapshot() });
+  });
   const beforeFix = await snapshotTree(current.workspace.cwd);
   const result = await harness.runStep({
     cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [],
@@ -1706,6 +1711,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
     const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
     run.artifacts.push(fixArtifact);
     review.fix = { report: result.report, diff: fixDiff, artifact: fixArtifact, rootCauseClusters };
+    run.status = "reviewing";
     Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
   });
   return true;

@@ -319,7 +319,10 @@ export function stageMilestones(run, stage) {
         detail: [review.fix.report?.summary, review.fix.diff ? `${review.fix.diff.files?.length || 0} files · +${review.fix.diff.additions || 0} −${review.fix.diff.deletions || 0}` : null].filter(Boolean).join("\n\n")
       });
     }
-    if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
+    if (stage.status === "active" && run?.status === "fixing") {
+      const findings = run.reviews?.at(-1)?.actionableFindings || [];
+      items.push({ title: "Focused correction in progress.", status: "fixing", at: stage.updatedAt, detail: findingDetails(findings) || "Correcting the latest actionable review findings." });
+    } else if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
     if (stage.status === "completed") items.push({ title: "Agent review completed.", status: "complete", at: stage.updatedAt, detail: stage.summary });
     return items;
   }
