@@ -1845,7 +1845,8 @@ async function finalReviewLoop(ticketId, signal) {
     const current = ticketRun(store.read(), ticketId);
     const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));
     const rootCauseClusters = unaddressedReviewClusters(current.reviews);
-    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, restartFeedback: reviewFixConstraints(current) || pendingFix.restartFeedback, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
+    const restartFeedback = [reviewFixConstraints(current), pendingFix.restartFeedback].filter(Boolean).join("\n");
+    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, restartFeedback, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
   const resumed = ticketRun(store.read(), ticketId);
   const firstRound = Math.max(0, ...(resumed.reviews || []).map((review) => Number(review.round) || 0)) + 1;
@@ -2529,10 +2530,15 @@ async function api(request, response, url) {
   if (request.method === "POST" && restartFixer) {
     const id = decodeURIComponent(restartFixer[1]);
     const input = await body(request);
+    const before = ticketRun(store.read(), id);
+    if (!before.workspace?.cwd) throw new Error("No fixer worktree is available to inspect");
+    const currentTree = await snapshotTree(before.workspace.cwd);
+    const verificationBaseTree = before.stages.find((stage) => stage.id === "verify")?.baseTree || before.baselineTree;
+    const inheritedDiff = await diffTrees(before.workspace.cwd, verificationBaseTree, currentTree);
     let restarted;
     await update((state) => {
       const run = ticketRun(state, id);
-      restarted = restartReviewFixSession(run, input.reason);
+      restarted = restartReviewFixSession(run, input.reason, inheritedDiff.files);
       setStage(run, "verify", "active", `Restarting final-review fixer · round ${restarted.round}`);
     });
     await surfaceImmediateFailure(id, runTicket(id));

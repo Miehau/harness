@@ -75,7 +75,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
 
 export function finalReviewFixStep(round, findings, rootCauseClusters = [], restartFeedback = "") {
   const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
-  const restartInstruction = restartFeedback ? `\n\nOperator restart directive: ${restartFeedback}` : "";
+  const restartInstruction = restartFeedback ? `\n\nOperator restart directive: ${restartFeedback}\n\nThis fresh conversation inherits the existing worktree. Before editing, inspect its complete current diff. Account for every inherited changed file, revert carried work that the directive does not justify, and name every file remaining in the final diff in the worker report.` : "";
   return {
     id: `review-fix-${round}`,
     title: `Fix final review findings — round ${round}`,
@@ -664,7 +664,7 @@ export function reviewFixConstraints(run = {}) {
     .join("\n");
 }
 
-export function restartReviewFixSession(run, reason) {
+export function restartReviewFixSession(run, reason, inheritedFiles = []) {
   const feedback = String(reason || "").trim();
   if (!feedback) throw new Error("Describe why the fixer session must restart");
   if (!["paused", "needs_attention", "failed"].includes(run?.status)) throw new Error("Pause or stop the run before restarting its fixer session");
@@ -672,8 +672,10 @@ export function restartReviewFixSession(run, reason) {
   const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
   if (!review || !findings.length || !review.fix?.sessionFile) throw new Error("No active final-review fixer session is available to restart");
   const previousSessionFile = review.fix.sessionFile;
-  (run.reviewFixSessionRestarts ||= []).push({ round: review.round, previousSessionFile, reason: feedback, at: new Date().toISOString() });
-  review.fix = { ...review.fix, sessionFile: null, restartFeedback: feedback };
+  const files = [...new Set((inheritedFiles || []).map(String).filter(Boolean))].sort();
+  const restartFeedback = `${feedback}${files.length ? `\n\nInherited changed files at restart:\n${files.map((file) => `- ${file}`).join("\n")}` : ""}`;
+  (run.reviewFixSessionRestarts ||= []).push({ round: review.round, previousSessionFile, reason: feedback, inheritedFiles: files, at: new Date().toISOString() });
+  review.fix = { ...review.fix, sessionFile: null, restartFeedback };
   delete review.fix.report;
   run.status = "interrupted";
   run.checkpoint = null;

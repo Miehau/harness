@@ -503,12 +503,17 @@ test("a contaminated fixer session restarts fresh without discarding its worktre
     status: "paused", checkpoint: { kind: "pause" }, lastError: "old",
     reviews: [{ round: 18, actionableFindings: [{ severity: "high", claim: "Live capture URL is missing" }], fix: { sessionFile: "/audit/old.jsonl", startedAt: "before" } }]
   };
-  assert.deepEqual(restartReviewFixSession(run, "Remove the queued synthetic fallback"), { round: 18, previousSessionFile: "/audit/old.jsonl" });
+  assert.deepEqual(restartReviewFixSession(run, "Remove the queued synthetic fallback", ["public/app.js", "scripts/capture.mjs"]), { round: 18, previousSessionFile: "/audit/old.jsonl" });
   assert.equal(run.status, "interrupted");
   assert.equal(run.reviews[0].fix.sessionFile, null);
   assert.match(run.reviews[0].fix.restartFeedback, /synthetic fallback/);
+  assert.match(run.reviews[0].fix.restartFeedback, /Inherited changed files at restart:\n- public\/app\.js\n- scripts\/capture\.mjs/);
   assert.equal(run.reviewFixSessionRestarts[0].previousSessionFile, "/audit/old.jsonl");
-  assert.match(finalReviewFixStep(18, run.reviews[0].actionableFindings, [], run.reviews[0].fix.restartFeedback).prompt, /Operator restart directive/);
+  assert.deepEqual(run.reviewFixSessionRestarts[0].inheritedFiles, ["public/app.js", "scripts/capture.mjs"]);
+  const prompt = finalReviewFixStep(18, run.reviews[0].actionableFindings, [], run.reviews[0].fix.restartFeedback).prompt;
+  assert.match(prompt, /Operator restart directive/);
+  assert.match(prompt, /inspect its complete current diff/);
+  assert.match(prompt, /name every file remaining in the final diff/);
   assert.equal(reviewFixConstraints(run), "- Remove the queued synthetic fallback");
 });
 
