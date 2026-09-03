@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
@@ -50,7 +50,9 @@ test("ticket inspection API returns the canonical compact projection and state o
     const id = await seedRun(daemon, {
       status: "running", plan,
       stages: [{ id: "implement", title: "Implement", status: "active", summary: "Implementing Build" }],
-      activeRuns: { build: { runId: "worker-1", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing implementation" } }
+      activeRuns: { build: { runId: "worker-1", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing implementation" } },
+      merge: { sourceCwd: "/Users/person/private/workspace", error: "Merge failed in /Users/person/private/workspace" },
+      integration: { sourceCwd: "/Users/person/private/workspace", commit: "abc123" }
     });
     const result = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/inspection`);
     assert.equal(result.status, 200);
@@ -69,6 +71,7 @@ test("ticket inspection API returns the canonical compact projection and state o
       attemptId: "attempt:build:active-worker-1", reason: "active"
     });
     assert.equal("stages" in state.json.ticketRuns[id].inspectionFocus, false);
+    assert.equal(JSON.stringify(state.json).includes("/Users/person/private/workspace"), false);
   });
 });
 
@@ -242,8 +245,8 @@ test("attempt details prefer retained output artifacts and keep artifact bodies 
     const id = await seedRun(daemon, {
       status: "running", plan,
       activeRuns: { build: {
-        runId: "worker-1", attemptId: "active-worker-1", prompt: "Use api_key=0123456789abcdef",
-        activity: { events: [{ type: "phase", label: "Editing" }], rawOutput: "live output" }
+        runId: "worker-1", attemptId: "active-worker-1",
+        activity: { events: [{ type: "phase", label: "Editing" }], prompts: [{ content: "Use api_key=0123456789abcdef" }], rawOutput: "live output" }
       } }
     });
     const artifact = await persistArtifact(dataDir, { identifier: "T-1" }, {
@@ -254,6 +257,7 @@ test("attempt details prefer retained output artifacts and keep artifact bodies 
     const active = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/active-worker-1/details`);
     assert.equal(active.status, 200);
     assert.equal(active.json.prompt.state, "available");
+    assert.equal(active.json.prompt.content, "Use [redacted]");
     assert.equal(active.json.activity.state, "available");
     assert.equal(active.json.output.content, "live output");
     assert.equal(active.json.diff.state, "not_retained");
@@ -742,6 +746,56 @@ test("binding a skill creates run.checkpoint and continue resumes the ticket", a
   });
 });
 
+test("design output is redacted before artifact, checkpoint, plan, and API persistence", async () => {
+  const secret = "api_key=design_plan_secret_12345678";
+  const harness = {
+    ...mockHarness(),
+    async designTicket() {
+      return {
+        artifact: `# Design\n\n${secret}`,
+        plan: normalizePlan({
+          summary: `Plan summary ${secret}`,
+          nodes: [{
+            id: "redacted-design", title: `Implement ${secret}`, description: `Description ${secret}`,
+            prompt: `Prompt ${secret}`, permission: "read", writeScope: `src/${secret}.js`,
+            acceptanceCriteria: [`Criterion ${secret}`]
+          }]
+        }),
+        sessionFile: null
+      };
+    }
+  };
+  await withDaemon(async (daemon, { dataDir }) => {
+    const id = await seedRun(daemon, {
+      status: "interrupted",
+      stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((stage) => ({
+        id: stage, title: stage, status: ["requirements", "explore"].includes(stage) ? "completed" : stage === "design" ? "blocked" : "pending", summary: ""
+      }))
+    });
+    const run = daemon.store.read().ticketRuns[id];
+    const artifacts = await Promise.all([
+      ["requirements.md", "requirements"],
+      ["product-context.md", "product-context-snapshot"],
+      ["implementation-delta.md", "implementation-delta"]
+    ].map(async ([name, kind]) => persistArtifact(dataDir, run.ticket, {
+      name, content: `# ${kind}`, runId: run.runId, stageId: kind === "requirements" || kind === "product-context-snapshot" ? "requirements" : "explore", kind
+    })));
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(...artifacts); });
+
+    const resumed = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/resume`);
+    assert.equal(resumed.status, 202);
+    const durable = daemon.store.read().ticketRuns[id];
+    assert.equal(durable.status, "awaiting_approval");
+    assert.equal(JSON.stringify(durable).includes(secret), false);
+    assert.match(durable.checkpoint.prompt, /\[redacted\]/);
+    assert.match(durable.plan.summary, /\[redacted\]/);
+    assert.match(await readFile(durable.artifacts.find((artifact) => artifact.kind === "architecture").path, "utf8"), /\[redacted\]/);
+    assert.equal((await readFile(join(dataDir, "state-v3.json"), "utf8")).includes(secret), false);
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes(secret), false);
+  }, { harness });
+});
+
 test("continued workflow replies and checkpoints are redacted before durable persistence", async () => {
   const secret = "api_key=0123456789abcdef";
   const harness = {
@@ -821,4 +875,31 @@ test("final proof changes require concrete feedback", async () => {
     const after = await invoke(daemon, "GET", "/api/tickets/" + encodeURIComponent(id) + "/run");
     assert.equal(after.json.checkpoint.kind, "evidence_review");
   });
+});
+
+test("final proof feedback is redacted before its pending durable state is exposed", async () => {
+  const harness = {
+    ...mockHarness(),
+    runRepositoryChecks: ({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    })
+  };
+  await withDaemon(async (daemon, { dataDir }) => {
+    const id = await seedRun(daemon, {
+      status: "awaiting_evidence_review",
+      checkpoint: { id: "proof-redaction", kind: "evidence_review", title: "Review final proof" }
+    });
+    const secret = "api_key=proof_feedback_secret_12345678";
+    const result = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/evidence/changes`, {
+      body: { feedback: `Record the confirmation state again; ${secret}` }
+    });
+    assert.equal(result.status, 202);
+
+    const pending = daemon.store.read().ticketRuns[id].pendingEvidenceFeedback;
+    assert.match(pending, /Record the confirmation state again/);
+    assert.equal(pending.includes(secret), false);
+    assert.equal(JSON.stringify(await readFile(join(dataDir, "state-v3.json"), "utf8")).includes(secret), false);
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes(secret), false);
+  }, { harness });
 });

@@ -134,7 +134,7 @@ function attemptResources(run, step, attempt, active) {
   const activityCount = (attempt.events?.length || 0) + (attempt.activityGroups?.length || attempt.activity?.groups?.length || 0);
   const observedActivity = activityCount || (attempt.activity?.lastEvent || attempt.lastEvent || attempt.activity?.lastEventAt || attempt.lastEventAt ? 1 : 0);
   return {
-    prompt: availability(artifacts.some((item) => item.kind === "agent-prompt") || Boolean(active && attempt.prompt), active ? "not_yet_available" : "not_retained"),
+    prompt: availability(artifacts.some((item) => item.kind === "agent-prompt") || Boolean(active && (attempt.prompt || attempt.activity?.prompts?.length)), active ? "not_yet_available" : "not_retained"),
     activity: availability(observedActivity > 0, active ? "not_yet_available" : "not_retained", { count: observedActivity }),
     output: availability(Boolean(attempt.report || attempt.rawOutput || attempt.activity?.rawOutput) || artifacts.some((item) => item.kind === "agent-output"), active ? "not_yet_available" : "not_retained"),
     artifacts: availability(artifacts.length > 0, active ? "not_yet_available" : "not_recorded", { count: artifacts.length }),

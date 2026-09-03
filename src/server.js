@@ -164,7 +164,9 @@ function retainDurableRecord(value, limit = 16000) {
 }
 
 function retainProofFeedback(value) {
-  return boundedText(value, maxProofFeedbackLength).value.trim();
+  // Feedback is persisted while corrections run, so redact before the durable
+  // assignment rather than relying on the later final-review projection.
+  return boundedText(redactText(value), maxProofFeedbackLength).value.trim();
 }
 
 function retainWorkflowContinuation(result) {
@@ -209,6 +211,17 @@ function repositoryCheckReview(checks) {
   };
 }
 
+function finalProofCaptureEnvironment(ticketId) {
+  const run = ticketRun(store.read(), ticketId);
+  const address = server.address();
+  if (!run?.runId || !address || typeof address === "string") return {};
+  return {
+    AGENT_PLAN_CAPTURE_URL: `http://127.0.0.1:${address.port}`,
+    AGENT_PLAN_CAPTURE_TICKET_ID: ticketId,
+    AGENT_PLAN_CAPTURE_RUN_ID: run.runId
+  };
+}
+
 async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
   let preview = null;
   let evidence = [];
@@ -216,7 +229,10 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     preview = await previews.ensure({ id: previewId, cwd });
     if (preview) evidence = await previews.capture(previewId);
   }
-  const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
+  const checks = await harness.runRepositoryChecks({
+    cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
+    environment: required ? finalProofCaptureEnvironment(ticketId) : {}
+  });
   checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
   if (required && !checks.evidence.length) Object.assign(checks, { status: "failed", summary: "Visual verification produced no desktop or mobile evidence." });
   if (preview || checks.evidence.length) await update((state) => {
@@ -469,7 +485,7 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   const diffArtifact = byKind("git-attempt-diff") || byKind("git-diff");
   const verificationArtifact = byKind("step-verification");
   const savedPrompt = (content, truncated = false, total = 0) => content ? { content: redactText(content), truncated: Boolean(truncated), total: Number(total) || 0 } : null;
-  const lastPrompt = attempt.prompts?.at(-1);
+  const lastPrompt = attempt.prompts?.at(-1) || attempt.activity?.prompts?.at(-1);
   const prompt = await artifactContent(promptArtifact, 16000)
     || savedPrompt(typeof attempt.prompt === "string" ? attempt.prompt : attempt.prompt?.content, attempt.promptTruncated ?? attempt.prompt?.truncated, attempt.promptTotal ?? attempt.prompt?.total)
     || savedPrompt(lastPrompt?.content || lastPrompt?.prompt, lastPrompt?.truncated, lastPrompt?.total);
@@ -540,8 +556,12 @@ function pauseIfWorkflowBlocked(run) {
   return true;
 }
 
-async function surfaceImmediateFailure(ticketId, work) {
+async function surfaceImmediateFailure(ticketId, work, { awaitWork = true } = {}) {
+  const activeTicket = activeTickets.get(ticketId);
   const tracked = Promise.resolve(work).catch(async (error) => {
+    // Cancellation is resolved by its lifecycle owner. Do not begin a durable
+    // failure write after that owner has started daemon cleanup.
+    if (activeTicket?.controller.signal.aborted) return;
     await update((state) => {
       const run = state.ticketRuns[ticketId];
       if (!run || run.lastError) return;
@@ -552,7 +572,7 @@ async function surfaceImmediateFailure(ticketId, work) {
   await new Promise((resolve) => setImmediate(resolve));
   const run = store.read().ticketRuns?.[ticketId];
   if (run && ["failed", "needs_attention"].includes(run.status) && run.lastError) throw new Error(run.lastError);
-  return tracked;
+  return awaitWork ? tracked : undefined;
 }
 
 function setStage(run, id, status, summary = "") {
@@ -1187,17 +1207,22 @@ async function designTicket(ticketId, answers, signal) {
       onSessionFile: saveRunSession(ticketId), signal
     });
     signal?.throwIfAborted();
+    // The planner response becomes durable both as an artifact and as plan/checkpoint
+    // state. Retain one redacted, bounded representation for every model-controlled
+    // field so no original response can bypass the durable redaction boundary.
+    const designArtifact = retainDurableRecord(result.artifact);
+    const designPlan = retainDurableRecord(result.plan);
     const artifact = await persistArtifact(dataDir, run.ticket, {
-      runId: run.runId, name: "design.md", content: result.artifact, stageId: "design", kind: "architecture"
+      runId: run.runId, name: "design.md", content: designArtifact, stageId: "design", kind: "architecture"
     });
     await update((draft) => {
       const current = ticketRun(draft, ticketId);
       current.sessionFile = result.sessionFile;
-      current.plan = result.plan;
+      current.plan = designPlan;
       current.artifacts.push(artifact);
       current.status = "awaiting_approval";
       setStage(current, "design", "blocked", "Plan ready for approval").activity = activity.snapshot();
-      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: result.artifact, createdAt: new Date().toISOString() };
+      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: designArtifact, createdAt: new Date().toISOString() };
     });
   } catch (error) {
     if (signal?.aborted) return;
@@ -2726,7 +2751,9 @@ async function api(request, response, url) {
       current.status = "reviewing";
       setStage(current, "verify", "active", "Addressing final proof review feedback");
     });
-    await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)));
+    // Final review can run for minutes. The feedback is already redacted and
+    // durable above, so acknowledge this asynchronous correction immediately.
+    await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)), { awaitWork: false });
     return json(response, 202, { accepted: true, ticketId: id });
   }
 

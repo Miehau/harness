@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectApp, repoRoot } from "../scripts/inspect.js";
 import { runNav } from "../scripts/nav.mjs";
 import { captureObservability } from "../scripts/capture-observability.mjs";
+import { captureFinalProof, captureLiveViewport, cdpConnection, finalProofIdentity, readinessExpression } from "../scripts/capture-final-proof.mjs";
 import { runSeed } from "../scripts/seed.mjs";
 import { runNode, runTests } from "../scripts/test.mjs";
 import { JsonStore } from "../src/store.js";
@@ -94,6 +96,13 @@ test("dashboard source keeps supervision controls semantic and visibly focusable
   assert.match(styles, /button:focus-visible/);
   assert.match(styles, /attempt-truncation-warning/);
   assert.match(styles, /transport-status/);
+  assert.match(styles, /scrollbar-gutter: stable/);
+  assert.match(styles, /minmax\(420px, 55%\)/);
+  assert.match(app, /run\.workspace\?\.branch\?\.trim\(\)/);
+  assert.match(app, /workspace-path-display"\)\.textContent = "Local workspace"/);
+  assert.doesNotMatch(app, /workspace-path-display"\)\.textContent = state\.workspace/);
+  const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
+  assert.match(html, /id="ticket-list"[^>]*aria-label="Tickets and active workers\. Scroll to inspect every worker\."[^>]*tabindex="0"/);
 });
 
 test("seed writes JsonStore state the daemon can reload", async () => {
@@ -164,6 +173,172 @@ test("observability capture writes desktop and mobile PNGs and its repository-ow
     assert.equal((await readFile(join(evidenceDir, "observability-mobile.png"), "utf8")), "PNG 390x844");
   } finally {
     await rm(evidenceDir, { recursive: true, force: true });
+  }
+});
+
+test("final proof capture binds desktop and mobile media to the live ticket run", async () => {
+  const evidenceDir = await mkdtemp(join(tmpdir(), "agent-plan-final-proof-evidence-"));
+  const state = {
+    revision: 73,
+    ticketRuns: {
+      "mea-55": {
+        runId: "final-run-17",
+        status: "awaiting_evidence_review",
+        ticket: { identifier: "MEA-55", title: "Make every workflow step observable and debuggable" },
+        checkpoint: { id: "final-proof-review", kind: "evidence_review" }
+      }
+    }
+  };
+  try {
+    const result = await captureFinalProof({
+      evidenceDir, url: "http://127.0.0.1:4317", ticketId: "mea-55", runId: "final-run-17",
+      readState: async () => state,
+      select: async ({ ticketId }) => { state.selectedTicketId = ticketId; },
+      launch: async () => ({ connection: {}, close: async () => {} }),
+      captureViewport: async ({ path, width, height, identity }) => {
+        await writeFile(path, `PNG ${width}x${height}`);
+        return {
+          path,
+          rendered: {
+            ticketIdentifier: identity.ticketIdentifier, ticketTitle: identity.ticketTitle,
+            workflow: true, inspector: true, focusedStageId: identity.focusedStageId, focusedInspectorTitle: identity.focusedInspectorTitle, viewport: `${width}x${height}`
+          }
+        };
+      },
+      now: () => new Date("2026-09-03T10:08:00.000Z")
+    });
+    assert.deepEqual(result.captures.map(({ name, width, height }) => [name, width, height]), [
+      ["desktop", 1440, 900], ["mobile", 390, 844]
+    ]);
+    const manifest = JSON.parse(await readFile(join(evidenceDir, "final-proof-manifest.json"), "utf8"));
+    assert.deepEqual(manifest.identity, {
+      ticketId: "mea-55", ticketIdentifier: "MEA-55", ticketTitle: "Make every workflow step observable and debuggable", runId: "final-run-17", revision: 73,
+      checkpointId: "final-proof-review", checkpointKind: "evidence_review", status: "awaiting_evidence_review", focusedStageId: null, focusedInspectorTitle: null
+    });
+    assert.equal(manifest.capturedAt, "2026-09-03T10:08:00.000Z");
+    assert.match(manifest.captures[0].path, /final-mea-55-final-run-17-desktop\.png$/);
+    assert.deepEqual(manifest.captures.map(({ rendered }) => rendered.viewport), ["1440x900", "390x844"]);
+    assert.equal((await readFile(manifest.captures[1].path, "utf8")), "PNG 390x844");
+    assert.throws(() => finalProofIdentity(state, { ticketId: "mea-55", runId: "stale-run" }), /run mismatch/);
+    const focused = finalProofIdentity({
+      selectedTicketId: "mea-55", ticketRuns: {
+        "mea-55": { ...state.ticketRuns["mea-55"], inspectionFocus: { stageId: "stage:verify", workerId: "worker:proof", reason: "active" }, stages: [{ id: "verify", title: "Review & verify" }], plan: { nodes: [{ id: "proof", title: "Run final verification" }] } }
+      }
+    }, { ticketId: "mea-55", runId: "final-run-17" });
+    assert.deepEqual({ stage: focused.focusedStageId, inspector: focused.focusedInspectorTitle }, { stage: "stage:verify", inspector: "Run final verification" });
+  } finally {
+    await rm(evidenceDir, { recursive: true, force: true });
+  }
+});
+
+test("final proof readiness binds selected dashboard DOM anchors without mutating mobile presentation", async () => {
+  const expression = readinessExpression({ ticketIdentifier: "MEA-55", ticketTitle: "Observable workflow" });
+  const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
+  assert.match(expression, /#ticket-header \.eyebrow/);
+  assert.match(expression, /#ticket-header h2/);
+  assert.match(expression, /\.workflow-stages \.eyebrow/);
+  assert.match(expression, /#inspector/);
+  assert.match(html, /<section\s+id="ticket-header"(?=[\s>])/);
+  assert.match(html, /<section\s+id="inspector"(?=[\s>])/);
+  assert.equal(html.includes('id="inspector-panel"'), false);
+  assert.equal(expression.includes("style.zoom"), false);
+  assert.equal(expression.includes("finalProofScale"), false);
+
+  const visible = (innerText) => ({ innerText, getBoundingClientRect: () => ({ width: 1, height: 1, top: 0, right: 1, bottom: 1, left: 0 }) });
+  const anchors = {
+    "#ticket-header .eyebrow": [visible("MEA-55")],
+    "#ticket-header h2": [visible("Observable workflow")],
+    ".workflow-stages .eyebrow": [visible("WORKFLOW MAP")],
+    "#inspector": visible("Selected worker details")
+  };
+  const rendered = Function("document", "getComputedStyle", `return ${expression}`)(
+    {
+      querySelectorAll: (selector) => anchors[selector] || [],
+      querySelector: (selector) => anchors[selector] || null
+    },
+    () => ({ visibility: "visible", display: "block" })
+  );
+  assert.deepEqual(rendered, {
+    ticketIdentifier: "MEA-55", ticketTitle: "Observable workflow", workflow: true, inspector: true, focusedStageId: null, focusedInspectorTitle: null,
+    frame: { identity: { top: 0, right: 1, bottom: 1, left: 0 }, workflow: { top: 0, right: 1, bottom: 1, left: 0 }, inspector: { top: 0, right: 1, bottom: 1, left: 0 } }
+  });
+});
+
+test("final proof readiness rejects a stale inspector when active stage focus differs", () => {
+  const expression = readinessExpression({ ticketIdentifier: "MEA-55", ticketTitle: "Observable workflow", focusedStageId: "stage:verify", focusedInspectorTitle: "Review & verify" });
+  const visible = (innerText, attributes = {}) => ({
+    innerText, dataset: attributes.dataset || {}, getAttribute: (name) => attributes[name] || null,
+    getBoundingClientRect: () => ({ width: 1, height: 1 })
+  });
+  const anchors = {
+    "#ticket-header .eyebrow": [visible("MEA-55")],
+    "#ticket-header h2": [visible("Observable workflow")],
+    ".workflow-stages .eyebrow": [visible("WORKFLOW MAP")],
+    ".workflow-stage": [visible("Verify", { dataset: { stage: "verify" }, "aria-selected": "false" })],
+    "#inspector": visible("Handoff"),
+    "#inspector h2": [visible("Handoff")] 
+  };
+  const render = () => Function("document", "getComputedStyle", `return ${expression}`)(
+    { querySelectorAll: (selector) => anchors[selector] || [], querySelector: (selector) => anchors[selector] || null },
+    () => ({ visibility: "visible", display: "block" })
+  );
+  assert.equal(render(), null);
+  anchors[".workflow-stage"][0] = visible("Verify", { dataset: { stage: "verify" }, "aria-selected": "true" });
+  assert.equal(render(), null);
+  anchors["#inspector h2"] = [visible("Review & verify")];
+  assert.equal(render().focusedStageId, "stage:verify");
+});
+
+test("mobile final proof captures the same rendered CDP page at its natural full-page layout", async () => {
+  const evidenceDir = await mkdtemp(join(tmpdir(), "agent-plan-final-proof-mobile-"));
+  const path = join(evidenceDir, "mobile.png");
+  const calls = [];
+  const connection = {
+    async send(method, params, sessionId) {
+      calls.push({ method, params, sessionId });
+      if (method === "Target.createTarget") return { targetId: "target-1" };
+      if (method === "Target.attachToTarget") return { sessionId: "session-1" };
+      if (method === "Runtime.evaluate") return { result: { value: { ticketIdentifier: "MEA-55", ticketTitle: "Observable workflow", workflow: true, inspector: true, focusedStageId: null, focusedInspectorTitle: null, frame: { identity: { top: 0, right: 390, bottom: 50, left: 0 }, workflow: { top: 100, right: 390, bottom: 200, left: 0 }, inspector: { top: 300, right: 390, bottom: 600, left: 0 } } } } };
+      if (method === "Page.getLayoutMetrics") return { cssContentSize: { width: 390, height: 1840 } };
+      if (method === "Page.captureScreenshot") return { data: Buffer.from("natural-mobile-proof").toString("base64") };
+      return {};
+    }
+  };
+  try {
+    const captured = await captureLiveViewport({
+      connection, url: "http://127.0.0.1:4317", path, width: 390, height: 844,
+      identity: { ticketIdentifier: "MEA-55", ticketTitle: "Observable workflow" }
+    });
+    assert.equal(captured.rendered.workflow, true);
+    assert.equal(await readFile(path, "utf8"), "natural-mobile-proof");
+    const screenshot = calls.find(({ method }) => method === "Page.captureScreenshot");
+    assert.deepEqual(screenshot.params, {
+      format: "png", captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: 390, height: 1840, scale: 1 }
+    });
+    assert.ok(calls.findIndex(({ method }) => method === "Runtime.evaluate") < calls.findIndex(({ method }) => method === "Page.getLayoutMetrics"));
+    assert.ok(calls.findIndex(({ method }) => method === "Page.getLayoutMetrics") < calls.findIndex(({ method }) => method === "Page.captureScreenshot"));
+  } finally {
+    await rm(evidenceDir, { recursive: true, force: true });
+  }
+});
+
+test("CDP proof transport uses NUL frames and resolves matching responses", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let written = "";
+  output.on("data", (chunk) => {
+    written += chunk;
+    const request = JSON.parse(written.slice(0, -1));
+    input.write(`${JSON.stringify({ id: request.id, result: { ready: true } })}\0`);
+  });
+  const connection = cdpConnection({ input, output, timeoutMs: 100 });
+  try {
+    assert.deepEqual(await connection.send("Target.createTarget", { url: "about:blank" }), { ready: true });
+    assert.match(written, /Target.createTarget/);
+    assert.equal(written.endsWith("\0"), true);
+  } finally {
+    connection.close();
   }
 });
 

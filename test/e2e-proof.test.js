@@ -94,7 +94,10 @@ test("final proof blocks local integration, streams image and video, then delive
     assert.equal(await readFile(join(fixture.cwd, "delivered.txt"), "utf8"), "approved\n");
     assert.equal(calls.lastCheck.requireVisualEvidence, true);
     assert.equal(calls.lastCheck.requireVideoEvidence, true);
-  }, { harness });
+    assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_TICKET_ID, id);
+    assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_RUN_ID, "run-1");
+    assert.match(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  }, { harness, listen: true });
 });
 
 test("verified tracker tickets with no changes complete without remote delivery", { concurrency: true }, async () => {

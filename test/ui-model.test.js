@@ -229,8 +229,8 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
     merge: {
       status: "integrated", queuedAt: "2026-08-25T10:00:00.000Z", startedAt: "2026-08-25T10:01:00.000Z",
       sourceCwd: "/repo", branch: "codex/ticket", conflicts: ["src/app.js"], resolverStartedAt: "2026-08-25T10:02:00.000Z",
-      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined both state transitions." },
-      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed." }
+      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined /Users/operator/private/repo state transitions." },
+      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed in /Users/operator/private/repo." }
     },
     integration: { sourceCwd: "/repo", commit: "abc123", integratedAt: "2026-08-25T10:05:00.000Z" }, artifacts: []
   }, { id: "handoff", status: "completed" });
@@ -238,6 +238,10 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
     "Added to merge queue.", "Automated merge started.", "Merge conflicts found.",
     "Conflict-resolution agent completed.", "Merged result verified.", "Changes integrated into the working directory."
   ]);
+  const renderedMilestones = milestones.map((item) => item.detail).join("\n");
+  assert.equal(renderedMilestones.includes("/repo"), false);
+  assert.match(milestones[0].detail, /Target repository selected/);
+  assert.match(milestones.at(-1).detail, /Commit: `abc123`/);
 });
 
 test("handoff timeline lists captured visual evidence as proof without inventing shots", () => {

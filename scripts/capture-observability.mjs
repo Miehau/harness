@@ -35,7 +35,7 @@ async function withSeededDaemon(fn) {
 async function captureScreenshot({ url, path, width, height, source = process.env }) {
   const browser = await previewChromiumPath(source);
   await exec(browser, [
-    "--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
+    "--headless=new", "--disable-gpu", "--no-sandbox",
     `--window-size=${width},${height}`, `--screenshot=${path}`, url
   ], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
   return path;

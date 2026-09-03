@@ -371,6 +371,10 @@ function findingDetails(findings) {
   return findings.map((finding, index) => `### Finding ${index + 1} · ${finding.severity || "issue"}\n\n${finding.claim || "Unspecified finding"}${finding.suggestedFix ? `\n\n**Suggested fix:** ${finding.suggestedFix}` : ""}`).join("\n\n");
 }
 
+function milestoneText(value, fallback = "") {
+  return String(value || fallback).replace(/(^|[\s"'`(])(?:~\/|\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z]:\\[^\s"'`),;]+)/g, "$1[path]");
+}
+
 export function stageMilestones(run, stage) {
   const activity = stage?.activity;
   if (stage?.id === "verify") {
@@ -406,13 +410,13 @@ export function stageMilestones(run, stage) {
       detail: evidence.map((shot) => `- \`${shot.name}\``).join("\n")
     });
     const merge = run?.merge;
-    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository: \`${merge.sourceCwd}\`\n\nTicket branch: \`${merge.branch}\`` });
+    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository selected\n\nTicket branch: \`${merge.branch}\`` });
     if (merge?.startedAt) items.push({ title: "Automated merge started.", status: "merging", at: merge.startedAt, detail: "Git is merging in an isolated integration worktree; the opened repository remains untouched until verification passes." });
-    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${file}\``).join("\n") });
-    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: merge.resolutionArtifact?.content || "Conflicts resolved in the isolated integration worktree." });
-    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: merge.checks?.summary || "Repository checks passed." });
-    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: merge.error });
-    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Repository: \`${run.integration.sourceCwd}\`\n\nCommit: \`${run.integration.commit}\`` });
+    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${milestoneText(file)}\``).join("\n") });
+    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: milestoneText(merge.resolutionArtifact?.content, "Conflicts resolved in the isolated integration worktree.") });
+    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: milestoneText(merge.checks?.summary, "Repository checks passed.") });
+    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: milestoneText(merge.error) });
+    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Commit: \`${run.integration.commit}\`` });
     return items;
   }
   return [];

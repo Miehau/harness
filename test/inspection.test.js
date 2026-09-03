@@ -45,7 +45,7 @@ test("projects every workflow stage and parallel worker with stable selectable i
     stages,
     plan: { nodes: [{ id: "parallel", type: "group", children: [first, second] }] },
     activeRuns: {
-      api: { runId: "active-api", startedAt: at(6), lastEventAt: at(7), lastEvent: "Editing API" },
+      api: { runId: "active-api", startedAt: at(6), lastEventAt: at(7), lastEvent: "Editing API", activity: { prompts: [{ content: "Continue the API worker" }] } },
       ui: { runId: "active-ui", startedAt: at(6), lastEventAt: at(8), lastEvent: "Editing UI" }
     }
   }), { now: Date.parse(at(9)), revision: 12 });
@@ -58,6 +58,7 @@ test("projects every workflow stage and parallel worker with stable selectable i
   assert.deepEqual(projection.focus, { stageId: "stage:implement", workerId: "worker:api", attemptId: "attempt:api:active-active-api", reason: "active" });
   assert.equal(projection.attempts[0].timing.elapsedMs, 180000);
   assert.equal(projection.attempts[0].resources.output.state, "not_yet_available");
+  assert.equal(projection.attempts[0].resources.prompt.state, "available");
 });
 
 test("focus falls back from actionable failure to the latest evidence-backed completion", () => {

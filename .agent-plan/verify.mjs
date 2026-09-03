@@ -7,7 +7,7 @@ import { inflateSync } from "node:zlib";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const evidenceDirectory = process.env.AGENT_PLAN_EVIDENCE_DIR;
-const expectedScreenshots = ["observability-desktop.png", "observability-mobile.png"];
+const finalProofManifest = "final-proof-manifest.json";
 const checks = [
   { name: "node scripts/test.mjs", args: ["scripts/test.mjs"] },
   { name: "node scripts/test.mjs --check", args: ["scripts/test.mjs", "--check"] }
@@ -125,7 +125,7 @@ for (const check of checks) {
 }
 
 if (evidenceDirectory) {
-  const capture = { name: "node scripts/capture-observability.mjs", args: ["scripts/capture-observability.mjs"] };
+  const capture = { name: "node scripts/capture-final-proof.mjs", args: ["scripts/capture-final-proof.mjs"] };
   process.stdout.write(`Running ${capture.name}\n`);
   const result = await runCheck(capture);
   if (result.error || result.code !== 0) {
@@ -134,13 +134,24 @@ if (evidenceDirectory) {
   } else {
     const outputDirectory = isAbsolute(evidenceDirectory) ? evidenceDirectory : resolve(repositoryRoot, evidenceDirectory);
     process.stdout.write("Validating dashboard evidence\n");
-    for (const name of expectedScreenshots) {
-      try {
-        await validatePng(join(outputDirectory, name));
-      } catch (error) {
-        failed = true;
-        process.stderr.write(`Failed dashboard evidence ${name}: ${error.message}\n`);
+    try {
+      const manifest = JSON.parse(await readFile(join(outputDirectory, finalProofManifest), "utf8"));
+      if (manifest.source !== "live-ticket-run" || !manifest.identity?.ticketId || !manifest.identity?.runId || !Number.isInteger(manifest.identity?.revision) || Number.isNaN(Date.parse(manifest.capturedAt))) {
+        throw new Error("manifest is not bound to a live ticket run, revision, and capture time");
       }
+      const captures = manifest.captures || [];
+      if (captures.length !== 2 || !["desktop", "mobile"].every((name) => captures.some((item) => item.name === name))) {
+        throw new Error("manifest is missing desktop or mobile final proof");
+      }
+      for (const capture of captures) {
+        if (capture.rendered?.ticketIdentifier !== manifest.identity.ticketIdentifier || capture.rendered?.ticketTitle !== manifest.identity.ticketTitle || capture.rendered?.workflow !== true || capture.rendered?.inspector !== true || !capture.rendered?.frame || capture.rendered?.focusedStageId !== (manifest.identity.focusedStageId || null) || capture.rendered?.focusedInspectorTitle !== (manifest.identity.focusedInspectorTitle || null)) {
+          throw new Error(`${capture.name || "unknown"} proof did not confirm the selected ticket identity, active focus, and loaded workflow inspector`);
+        }
+        await validatePng(join(outputDirectory, capture.path.split(/[\\/]/).at(-1)));
+      }
+    } catch (error) {
+      failed = true;
+      process.stderr.write(`Failed dashboard evidence ${finalProofManifest}: ${error.message}\n`);
     }
   }
 }

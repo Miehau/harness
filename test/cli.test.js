@@ -137,7 +137,7 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
       status: "running", plan,
       stages: [{ id: "implement", title: "Implement", status: "active", summary: "Parallel implementation" }],
       activeRuns: {
-        api: { runId: "active-api", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing API", activity: { rawOutput: "streamed API output" } },
+        api: { runId: "active-api", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing API", activity: { prompts: [{ content: "Inspect the API contract" }], rawOutput: "streamed API output" } },
         ui: { runId: "active-ui", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing UI" }
       }
     });
@@ -148,6 +148,7 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
     assert.deepEqual(timeline.workers.map((worker) => worker.id), ["worker:api", "worker:ui"]);
     assert.deepEqual(timeline.attempts.map((attempt) => attempt.runId), ["active-api", "active-ui"]);
     assert.equal(timeline.attempts[0].resources.output.state, "available");
+    assert.equal(timeline.attempts[0].resources.prompt.state, "available");
     assert.equal(timeline.attempts[1].resources.checks.state, "not_yet_available");
   });
 });

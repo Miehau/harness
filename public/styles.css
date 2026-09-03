@@ -69,7 +69,8 @@ input:focus, select:focus, textarea:focus { border-color: #6e9fee; box-shadow: 0
 .connection-dot { width: 7px; height: 7px; border-radius: 50%; background: #66d28c; box-shadow: 0 0 7px rgb(102 210 140 / .6); }
 .ticket-filter { flex: none; padding: 10px 12px 6px; }
 .ticket-filter input { width: 100%; padding: 8px 10px; font-size: 12px; }
-.ticket-list { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 5px 9px 12px; }
+.ticket-list { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 5px 9px 12px; }
+.ticket-list:focus-visible { outline: 2px solid #79a8f5; outline-offset: -2px; }
 .ticket-batch-actions { padding: 0 10px 8px; }
 .ticket-batch-actions .button { width: 100%; }
 .ticket-entry { display: flex; align-items: flex-start; gap: 7px; }
@@ -1093,7 +1094,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
     min-width: 0;
     box-sizing: border-box;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(300px, 44%) minmax(0, 56%);
+    grid-template-rows: minmax(420px, 55%) minmax(0, 45%);
   }
   .ticket-pane, .plan-pane, .plan-header, .plan-heading, .plan-heading > div, .workspace-content, .plan-tree, .inspector { min-width: 0; max-width: 100%; }
   .ticket-pane { display: flex; }
@@ -1215,7 +1216,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 }
 
 @media (max-width: 800px) {
-  .layout.ticket-layout { --queue-width: auto; grid-template-columns: 1fr; grid-template-rows: minmax(300px, 44%) minmax(0, 56%); }
+  .layout.ticket-layout { --queue-width: auto; grid-template-columns: 1fr; grid-template-rows: minmax(420px, 55%) minmax(0, 45%); }
   .workspace-content { grid-template-columns: 1fr; grid-template-rows: minmax(300px, 50%) minmax(0, 50%); }
   .plan-tree { border-right: 0; border-bottom: 1px solid var(--stroke); }
   .worker-inspector .inspector-header { padding-inline: 16px; }
@@ -1630,4 +1631,23 @@ button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:
   .attempt-index { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
   .attempt-chip { flex: none; min-height: 30px; }
   .transport-status { width: 100%; white-space: normal; }
+
+  /* Narrow screens use one natural document flow: neither the ticket rail nor
+     nested work panes may consume a fixed portion of the only viewport. */
+  html, body { height: auto; overflow-x: hidden; overflow-y: auto; }
+  .app-shell { height: auto; min-height: 100vh; overflow: visible; }
+  .layout.ticket-layout { display: block; min-height: 0; flex: none; overflow: visible; padding: 0; }
+  .ticket-pane { max-height: 260px; overflow: hidden; border-width: 0 0 1px; }
+  .ticket-list { max-height: 156px; }
+  .layout.ticket-layout.sidebar-collapsed .ticket-pane { display: none; }
+  .plan-pane, .plan-header, .workspace-content, .plan-tree, .inspector { overflow: visible; }
+  .plan-header { max-height: none; }
+  .workspace-content { display: block; }
+  .plan-tree { border-right: 0; border-bottom: 1px solid var(--stroke); }
+  .inspector { min-height: 0; }
+}
+
+@media (max-width: 560px) {
+  .ticket-heading .plan-actions, .ticket-heading .supervisor-control { align-items: center; width: auto; flex-direction: row; flex-wrap: wrap; }
+  .ticket-heading .supervisor-control select, .ticket-heading .plan-actions .button { width: auto; }
 }

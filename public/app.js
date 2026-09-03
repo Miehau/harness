@@ -394,7 +394,7 @@ function renderHeader() {
     ? `<span class="run-pill">archived · inspection only</span>`
     : !run
       ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace?.branch?.trim() ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = !isArchivedRun(run) && run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
@@ -1100,9 +1100,11 @@ function render() {
   if (!state) return;
   const context = renderContext();
   const draft = clarificationDraft();
-  $("#workspace-path").value = state.workspace.cwd;
-  $("#workspace-path-display").textContent = state.workspace.cwd;
-  $("#workspace-settings").title = state.workspace.cwd;
+  $("#workspace-path").value = state.workspace?.cwd || "";
+  // The workspace location is selected only in the explicit picker; its normal
+  // dashboard control must not disclose a local filesystem path.
+  $("#workspace-path-display").textContent = "Local workspace";
+  $("#workspace-settings").title = "Select repository";
   const run = runFor();
   loadInspection(run);
   if (!deliberateSelection && !inspectionFor(run) && !selectedStageId && !selectedStepId) selectedStageId = preferredStageId(run?.stages);
@@ -1742,7 +1744,8 @@ events.onerror = () => {
 };
 
 state = await api("/api/state");
-try { piModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }
+try { piModels = (await api("/api/models")).models || []; }
+catch (error) { notify(error.message); }
 await refreshTickets();
 render();
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());
