@@ -588,6 +588,10 @@ export function recoverableCleanReview(run = {}) {
   return { round: Number(review.round) || run.reviews.length, checks, diff: review.diff };
 }
 
+export function sessionImages(sessionFile, images = []) {
+  return sessionFile ? [] : images;
+}
+
 export function interruptedStepFeedback(step = {}) {
   const attempts = Array.isArray(step.attempts) ? step.attempts : [];
   const latest = attempts.at(-1);

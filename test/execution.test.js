@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, resumeStage, rewindRun, sessionImages, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -380,6 +380,12 @@ test("a persisted clean review resumes at final proof without rerunning reviewer
   assert.equal(recoverableCleanReview({ reviews: [clean], pendingEvidenceFeedback: "Please revise" }), null);
   assert.equal(recoverableCleanReview({ reviews: [clean], checkpoint: { kind: "evidence_review" } }), null);
   assert.equal(recoverableCleanReview({ reviews: [{ ...clean, reviews: [] }] }), null);
+});
+
+test("resuming a model session does not re-embed its existing image context", () => {
+  const images = [{ mimeType: "image/png", data: "large-base64-payload" }];
+  assert.equal(sessionImages(null, images), images);
+  assert.deepEqual(sessionImages("/tmp/persisted-session.jsonl", images), []);
 });
 
 test("a verifier transport failure does not resurrect superseded correction feedback", () => {
