@@ -279,7 +279,7 @@ export class ProcessContainment {
     });
     timeout.catch(() => {});
     try { return await Promise.race([Promise.resolve().then(operation), timeout]); }
-    finally { clearTimeout(timer); if (doReject) doReject(new Error("cleared")); }
+    finally { clearTimeout(timer); }
   }
 
   #unresolved(identity, reason, error) {

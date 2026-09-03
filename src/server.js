@@ -610,7 +610,6 @@ async function waitForWorkerAbort(promise) {
     await Promise.race([promise.catch(() => {}), new Promise((resolve) => { resolveTimer = resolve; timer = setTimeout(resolve, workerAbortWaitMs); })]);
   } finally {
     clearTimeout(timer);
-    if (resolveTimer) resolveTimer();
   }
 }
 
