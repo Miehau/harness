@@ -3,6 +3,16 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
+function checkFailureFeedback(check, log = "") {
+  const highlights = String(log).split(/\r?\n/).filter((line) =>
+    /not ok\b|FAIL(?:ED)?\b|\b(?:error|expected|actual|AssertionError|ERR_)\b/i.test(line)
+  ).slice(-80).join("\n").slice(-6000);
+  return {
+    id: `check:${check.id}`,
+    body: [`GitHub check "${check.name}" failed (${check.conclusion}).`, highlights, check.details_url].filter(Boolean).join("\n\n")
+  };
+}
+
 function repositoryFromRemote(remote) {
   const match = String(remote).match(/(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)[/:](.+?)(?:\.git)?$/i);
   if (!match) throw new Error(`Unsupported origin URL: ${remote}`);
@@ -63,12 +73,18 @@ export class GitHubDelivery {
       ...(comments || []).filter((comment) => comment.body).map((comment) => ({ id: `comment:${comment.id}`, body: comment.body, path: comment.path, line: comment.line || comment.original_line, author: comment.user?.login }))
     ];
     const checkRuns = checks?.check_runs || [];
+    const failedChecks = checkRuns.filter((check) => check.status === "completed" && !["success", "neutral", "skipped"].includes(check.conclusion));
+    const checkFeedback = await Promise.all(failedChecks.map(async (check) => {
+      let log = "";
+      try { log = await this.api.request(`${root}/actions/jobs/${check.id}/logs`); } catch {}
+      return checkFailureFeedback(check, log);
+    }));
     const hasStatuses = (statuses?.statuses || []).length > 0;
     const pending = checkRuns.some((check) => check.status !== "completed") || (hasStatuses && statuses.state === "pending");
     const failed = checkRuns.some((check) => check.status === "completed" && !["success", "neutral", "skipped"].includes(check.conclusion)) || (hasStatuses && ["failure", "error"].includes(statuses.state));
     return {
       headSha: pull.head.sha,
-      feedback,
+      feedback: [...feedback, ...checkFeedback],
       checks: failed ? "failed" : pending ? "pending" : "passed",
       mergeable: !pull.draft && pull.mergeable === true,
       ready: !pull.draft && pull.mergeable === true && !failed && !pending && !feedback.length,

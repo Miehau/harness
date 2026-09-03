@@ -28,6 +28,21 @@ test("GitHub waits for checks and feedback then squash-merges", async () => {
   assert.equal(JSON.parse(calls.at(-1).input.body).merge_method, "squash");
 });
 
+test("GitHub exposes failed check logs as actionable feedback", async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/pulls/7")) return response({ head: { sha: "abc" }, mergeable: true, mergeable_state: "blocked", draft: false, merged: false });
+    if (url.endsWith("/reviews") || url.endsWith("/comments")) return response([]);
+    if (url.endsWith("/check-runs")) return response({ check_runs: [{ id: 99, name: "verify", status: "completed", conclusion: "failure", details_url: "https://ci/99" }] });
+    if (url.endsWith("/actions/jobs/99/logs")) return response("noise\nnot ok 3 - cleanup remains durable\n  expected: complete\n  actual: incomplete");
+    if (url.endsWith("/status")) return response({ statuses: [] });
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const status = await new GitHubDelivery({ repository: "acme/app", token: "token", fetchImpl }).status({ id: 7 });
+  assert.equal(status.checks, "failed");
+  assert.equal(status.feedback[0].id, "check:99");
+  assert.match(status.feedback[0].body, /not ok 3.*expected: complete.*actual: incomplete/s);
+});
+
 test("GitLab treats unresolved review discussions as feedback", async () => {
   const delivery = new GitLabDelivery({ project: "group/app", token: "token", fetchImpl: async (url) =>
     response(url.endsWith("/discussions") ? [{ notes: [{ id: 2, body: "Fix this", resolvable: true, resolved: false, system: false }] }] : {
