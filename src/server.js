@@ -78,6 +78,13 @@ export function reconcileVisualChecks(checks, evidence = [], { required = false,
   return checks;
 }
 
+export function closeSseClients(clients) {
+  for (const client of clients) {
+    try { client.response.end(); } catch {}
+  }
+  clients.clear();
+}
+
 export async function createDaemon(options = {}) {
   const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
   const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
@@ -2696,6 +2703,7 @@ async function close({ exit = false } = {}) {
   closed = true;
   clearInterval(pollTimer);
   clearInterval(sseHeartbeat);
+  closeSseClients(clients);
   for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
   await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
   try { harness.reset(); } catch {}

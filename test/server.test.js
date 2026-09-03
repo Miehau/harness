@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
+import { closeSseClients, reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("reports missing visual evidence instead of mislabeling passing checks", () => {
@@ -19,6 +19,17 @@ test("reports missing visual evidence instead of mislabeling passing checks", ()
   assert.equal(review.findings[0].category, "evidence");
   assert.equal(review.findings[0].claim, "Visual verification produced no desktop or mobile evidence.");
   assert.doesNotMatch(review.findings[0].suggestedFix, /Make .* pass|238 tests passed/);
+});
+
+test("daemon shutdown ends open event streams before closing the server", () => {
+  let ended = 0;
+  const clients = new Set([
+    { response: { end() { ended += 1; } } },
+    { response: { end() { ended += 1; } } }
+  ]);
+  closeSseClients(clients);
+  assert.equal(ended, 2);
+  assert.equal(clients.size, 0);
 });
 
 test("harness screenshots satisfy a passing check that lacked its own visual artifact", () => {
