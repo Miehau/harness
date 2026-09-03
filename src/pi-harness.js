@@ -1019,7 +1019,7 @@ Diff:
 ${diff.patch || "No textual diff"}
 
 Deterministic gate:
-${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "", output: eventText(checks?.output || "") }, null, 2)}
+${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }, null, 2)}
 
 Return ONLY JSON:
 {

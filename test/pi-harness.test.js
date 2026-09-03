@@ -343,7 +343,8 @@ test("fresh verification receives the completed deterministic gate", async () =>
 
     assert.equal(result.summary, "Verified");
     assert.match(prompt, /The deterministic gate has already run/);
-    assert.match(prompt, /10 tests passed/);
+    assert.match(prompt, /Checks passed\./);
+    assert.doesNotMatch(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
     assert.match(prompt, /primary review packet/);
