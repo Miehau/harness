@@ -260,7 +260,7 @@ async function timeline(explicitId, ctx) {
   const activeStep = steps.find((item) => run.activeRuns?.[item.id])
     || steps.find((item) => ["running", "fixing", "verifying"].includes(item.status));
   const step = activeStep
-    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan)) : null)
+    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan, run.checkpoint?.stepId)) : null)
     || null;
   const events = step
     ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]

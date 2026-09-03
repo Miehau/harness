@@ -100,6 +100,25 @@ test("timeline follows an active verification stage instead of an accepted step"
   });
 });
 
+test("timeline follows the stopped step named by the current checkpoint", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [
+      { id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "read", args: '{"path":"old.js"}', at: "1" }] }] },
+      { id: "blocked", title: "Blocked", status: "needs_attention", attempts: [{ events: [{ type: "tool_end", tool: "edit", result: "failed", isError: true, at: "2" }] }] }
+    ] });
+    const id = await seedRun(daemon, {
+      status: "needs_attention", plan,
+      stages: [{ id: "implement", status: "blocked" }],
+      checkpoint: { id: "cp", kind: "needs_attention", stepId: "blocked", title: "Correction stalled" }
+    });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, "blocked");
+    assert.equal(timeline.json.stepStatus, "needs_attention");
+    assert.equal(timeline.json.events[0].isError, true);
+  });
+});
+
 test("approve without an id uses the selected ticket (run manually)", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({
