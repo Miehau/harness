@@ -444,17 +444,22 @@ function workerReportTool(capture) {
   return defineTool({
     name: "worker_report",
     label: "Worker report",
-    description: "Return the structured final result of this worker run to the persistent supervisor.",
+    description: "Return the structured final result of this worker run to the persistent supervisor. List steering IDs only when this worker explicitly incorporated the delivered instruction; delivery alone is not acknowledgment.",
     promptSnippet: "Report the worker outcome to the supervisor",
-    promptGuidelines: ["Always call worker_report as the final action. It terminates the worker turn."],
+    promptGuidelines: ["Always call worker_report as the final action. It terminates the worker turn.", "Use acknowledgedSteerIds only for [agent-plan-steer:...] instructions you explicitly incorporated."],
     parameters: Type.Object({
       status: Type.Union([Type.Literal("completed"), Type.Literal("needs_input"), Type.Literal("awaiting_approval")]),
       summary: Type.String(),
       artifact: Type.String(),
-      request: Type.Optional(Type.String())
+      request: Type.Optional(Type.String()),
+      acknowledgedSteerIds: Type.Optional(Type.Array(Type.String())),
+      incorporatedSteerIds: Type.Optional(Type.Array(Type.String()))
     }),
     async execute(_toolCallId, params) {
-      capture(params);
+      capture({
+        ...params,
+        acknowledgedSteerIds: [...new Set([...(params.acknowledgedSteerIds || []), ...(params.incorporatedSteerIds || [])].map(String).filter(Boolean))]
+      });
       return {
         content: [{ type: "text", text: `Reported ${params.status} to supervisor` }],
         details: params,
@@ -525,6 +530,7 @@ export class PiHarness {
     this.supervisorStages = [];
     this.supervisorQueues = new Map();
     this.sessionGuidance = new WeakMap();
+    this.activeSteeringSessions = new Map();
   }
 
   async sessionTrace(sessionFile, { after, before } = {}) {
@@ -683,6 +689,7 @@ export class PiHarness {
     }
     this.planning.clear();
     this.supervisorQueues.clear();
+    this.activeSteeringSessions.clear();
     this.supervisorSignals = [];
     this.supervisorStages = [];
   }
@@ -1170,7 +1177,25 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
+  steeringSessionKey({ ticketId, runId, stepId, attemptId }) {
+    return `${ticketId}\0${runId}\0${stepId}\0${attemptId}`;
+  }
+
+  async steer({ ticketId, runId, stepId, attemptId, steerId, instruction }) {
+    const target = { ticketId, runId, stepId, attemptId };
+    const entry = this.activeSteeringSessions.get(this.steeringSessionKey(target));
+    if (!entry) {
+      const error = new Error("The bound Pi worker session is not active yet or has already stopped.");
+      error.code = "steering_session_unavailable";
+      throw error;
+    }
+    await entry.session.steer(instruction);
+    const acceptedAt = new Date().toISOString();
+    await entry.onSteering?.({ ...target, steerId, instruction, acceptedAt });
+    return { sessionId: entry.session.sessionId || null, acceptedAt };
+  }
+
+  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onSessionActive, onSessionInactive, onSteering, ticketId = "shared", runId = "legacy", attemptId = null, profile, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
     await mkdir(sessionDir, { recursive: true });
@@ -1201,6 +1226,9 @@ Every reported finding triggers an automatic correction round. Report concrete d
     });
     session.setSessionName(step.agentId);
     await onSessionFile?.(session.sessionFile);
+    const steeringTarget = attemptId ? { ticketId, runId, stepId: step.id, attemptId } : null;
+    const steeringKey = steeringTarget && this.steeringSessionKey(steeringTarget);
+    const steeringEntry = steeringTarget && { session, onSteering };
     const unbindAbort = bindAbort(session, signal);
     const availableSkills = session.resourceLoader.getSkills().skills;
     const skillBlocks = [];
@@ -1214,6 +1242,7 @@ References are relative to ${skill.baseDir}.
 ${stripFrontmatter(content).trim()}
 </skill>`);
     }
+    if (steeringKey) this.activeSteeringSessions.set(steeringKey, steeringEntry);
     let output = "";
     const events = [];
     let lastThinkingAt = 0;
@@ -1239,7 +1268,11 @@ ${stripFrontmatter(content).trim()}
         ? continuation
         : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
-      await session.prompt(prompt, { images });
+      // prompt() starts streaming before it resolves, so Pi—not the daemon—owns the
+      // safe boundary after the current turn and any repository tool calls.
+      const prompting = session.prompt(prompt, { images });
+      if (steeringTarget) await onSessionActive?.(steeringTarget);
+      await prompting;
       signal?.throwIfAborted();
       const rawOutput = output || lastAssistantText(session);
       if (!report) throw new Error("Worker did not finish with the required worker_report tool");
@@ -1255,6 +1288,8 @@ ${stripFrontmatter(content).trim()}
     } finally {
       unsubscribe();
       await unbindAbort();
+      if (steeringKey && this.activeSteeringSessions.get(steeringKey) === steeringEntry) this.activeSteeringSessions.delete(steeringKey);
+      await onSessionInactive?.(steeringTarget);
       session.dispose();
     }
   }

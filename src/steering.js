@@ -193,6 +193,18 @@ export function claimNextSteering(run, target, { now = Date.now(), ttlMs = STEER
   return firstPending;
 }
 
+export function releaseSteeringClaim(run, steerId, claimId, { now = Date.now(), reason = "Pi session was not active yet." } = {}) {
+  const record = claimedRecord(run, steerId, claimId);
+  if (!record) return null;
+  // No session.steer() call was possible, so this is not an uncertain delivery retry.
+  // Restore the claim budget before the same active attempt drains it at a safe boundary.
+  record.state = "queued";
+  record.claim.attempts = Math.max(0, (record.claim.attempts || 0) - 1);
+  Object.assign(record.claim, { claimId: null, claimedAt: null, expiresAt: null });
+  event(record, "session_unavailable", now, { reason });
+  return record;
+}
+
 function claimedRecord(run, steerId, claimId) {
   const record = ensureSteeringLedger(run).records.find((item) => item.id === steerId);
   return record?.state === "claimed" && record.claim?.claimId === claimId ? record : null;

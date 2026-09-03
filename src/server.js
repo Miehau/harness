@@ -30,7 +30,7 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
-import { beginStepAttempt, claimNextSteering, failSteering, markSteeringDelivered, submitSteering, targetMatches } from "./steering.js";
+import { acknowledgeSteering, beginStepAttempt, claimNextSteering, failSteering, markSteeringDelivered, recoverSteeringClaims, releaseSteeringClaim, submitSteering, targetMatches } from "./steering.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -71,6 +71,7 @@ const clients = new Set();
 const activeSteps = new Map();
 const activeTickets = new Map();
 const activeMerges = new Set();
+const steeringDrainTimers = new Map();
 const mergeQueues = new Map();
 let ticketCache = new Map();
 let trackerRefresh = null;
@@ -296,11 +297,66 @@ function appendSteeringRejection(run, input, outcome) {
   return run.steeringRejections.at(-1);
 }
 
+function steeringDrainKey(target) {
+  return `${target.ticketId}\0${target.runId}\0${target.stepId}\0${target.attemptId}`;
+}
+
+function clearSteeringDrain(target) {
+  const key = steeringDrainKey(target);
+  const timer = steeringDrainTimers.get(key);
+  if (timer) clearTimeout(timer);
+  steeringDrainTimers.delete(key);
+}
+
+function scheduleSteeringDrain(ticketId, target) {
+  clearSteeringDrain(target);
+  const run = store.read().ticketRuns[ticketId];
+  const active = run?.activeRuns?.[target.stepId];
+  if (active?.piSessionState !== "active" || !targetMatches(run, target)) return;
+  const claim = run.steering?.records
+    ?.filter((record) => record.state === "claimed" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId)
+    .sort((left, right) => left.sequence - right.sequence)[0];
+  const expiresAt = Date.parse(claim?.claim?.expiresAt || "");
+  if (!Number.isFinite(expiresAt)) return;
+  const key = steeringDrainKey(target);
+  const timer = setTimeout(() => {
+    (async () => {
+      steeringDrainTimers.delete(key);
+      const current = store.read().ticketRuns[ticketId];
+      if (!targetMatches(current, target) || current.activeRuns?.[target.stepId]?.piSessionState !== "active") {
+        await update((state) => {
+          const run = state.ticketRuns[ticketId];
+          for (const record of run?.steering?.records || []) {
+            if (record.state !== "claimed" || record.runId !== target.runId || record.stepId !== target.stepId || record.attemptId !== target.attemptId) continue;
+            failSteering(run, record.id, {
+              code: "target_replaced",
+              reason: "The bound worker attempt ended or was replaced before the delivery claim expired."
+            });
+          }
+        });
+        return;
+      }
+      await drainSteering(ticketId, target);
+      scheduleSteeringDrain(ticketId, target);
+    })().catch(() => {});
+  }, Math.max(0, expiresAt - Date.now()) + 1);
+  timer.unref();
+  steeringDrainTimers.set(key, timer);
+}
+
 async function drainSteering(ticketId, target) {
-  const next = ticketRun(store.read(), ticketId).steering?.records?.find((record) =>
-    record.state === "queued" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId
-  );
+  let next = null;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    // A resumed saved session is the only place a stale claim can be retried. This
+    // preserves FIFO and never lets a surviving claim bypass its predecessor.
+    recoverSteeringClaims(run);
+    next = run.steering.records.find((record) =>
+      record.state === "queued" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId
+    );
+  });
   if (next) await deliverSteering(ticketId, next.id);
+  scheduleSteeringDrain(ticketId, target);
 }
 
 async function deliverSteering(ticketId, steerId) {
@@ -310,9 +366,21 @@ async function deliverSteering(ticketId, steerId) {
     const run = ticketRun(state, ticketId);
     const record = run.steering?.records?.find((item) => item.id === steerId);
     if (!record || record.state !== "queued") return;
+    // Claim the target's earliest pending record, not necessarily the just-submitted
+    // one, so concurrent submissions retain durable FIFO order.
     claim = claimNextSteering(run, { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId });
   });
   if (!claim) return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  let deliverable = false;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    if (!targetMatches(run, claim)) {
+      failSteering(run, claim.id, { reason: "The bound worker attempt changed before Pi accepted this correction.", code: "target_replaced" });
+      return;
+    }
+    deliverable = true;
+  });
+  if (!deliverable) return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
   try {
     const evidence = await harness.steer({
       ticketId: claim.ticketId,
@@ -334,7 +402,18 @@ async function deliverSteering(ticketId, steerId) {
     if (delivered) await drainSteering(ticketId, claim);
     return delivered || ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
   } catch (error) {
-    // Keep a claimed record for bounded, crash-safe recovery instead of guessing whether Pi queued it.
+    if (error?.code === "steering_session_unavailable") {
+      let requeued = null;
+      await update((state) => {
+        const run = ticketRun(state, ticketId);
+        const active = run.activeRuns?.[claim.stepId];
+        if (active?.piSessionState === "starting" && targetMatches(run, claim)) requeued = releaseSteeringClaim(run, claim.id, claim.claim.claimId, { reason: error.message });
+      });
+      return requeued || ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+    }
+    // A thrown session.steer() may have queued the message. Keep that claim for
+    // bounded crash-safe recovery instead of guessing whether Pi accepted it.
+    scheduleSteeringDrain(ticketId, claim);
     return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
   }
 }
@@ -1108,7 +1187,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          Object.assign(current.activeRuns[stepId], { lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false });
+          Object.assign(current.activeRuns[stepId], { lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" });
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
@@ -1125,9 +1204,50 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
+          onSessionActive: async (target) => {
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              const active = current.activeRuns?.[target.stepId];
+              if (active?.attemptId === target.attemptId && targetMatches(current, target)) active.piSessionState = "active";
+            });
+            await drainSteering(ticketId, target);
+          },
+          onSessionInactive: async (target) => {
+            if (!target) return;
+            clearSteeringDrain(target);
+            // Pausing intentionally retains this logical attempt and its queued work.
+            // Every other session end makes its bound target terminal for steering.
+            if (signal?.aborted && /run paused/i.test(String(signal.reason?.message || signal.reason || ""))) return;
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              for (const record of current.steering?.records || []) {
+                if (!["queued", "claimed"].includes(record.state) || record.runId !== target.runId || record.stepId !== target.stepId || record.attemptId !== target.attemptId) continue;
+                failSteering(current, record.id, {
+                  code: "target_replaced",
+                  reason: "The bound Pi worker session ended before this steering delivery settled."
+                });
+              }
+            });
+          },
+          onSteering: (delivery) => activity.onEvent({
+            type: "steering_delivery", label: `Pi accepted steering ${delivery.steerId}`,
+            steerId: delivery.steerId, instruction: delivery.instruction, acceptedAt: delivery.acceptedAt
+          }),
+          attemptId,
           signal
         });
         signal?.throwIfAborted();
+        const acknowledgedSteerIds = [...new Set((result.report.acknowledgedSteerIds || []).map(String).filter(Boolean))];
+        if (acknowledgedSteerIds.length) await update((state) => {
+          const current = ticketRun(state, ticketId);
+          for (const steerId of acknowledgedSteerIds) {
+            const record = current.steering?.records?.find((item) => item.id === steerId);
+            if (!record || record.runId !== current.runId || record.stepId !== stepId || record.attemptId !== attemptId) continue;
+            acknowledgeSteering(current, steerId, {
+              evidence: { source: "worker_report", workerRunId, summary: result.report.summary, acknowledgedSteerIds }
+            });
+          }
+        });
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
@@ -2627,6 +2747,8 @@ async function close({ exit = false } = {}) {
   closed = true;
   clearInterval(pollTimer);
   clearInterval(sseHeartbeat);
+  for (const timer of steeringDrainTimers.values()) clearTimeout(timer);
+  steeringDrainTimers.clear();
   for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
   await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
   try { harness.reset(); } catch {}
