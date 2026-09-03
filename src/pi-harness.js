@@ -218,7 +218,7 @@ function failureHighlights(output) {
   const lines = String(output || "").split(/\r?\n/);
   const selected = [];
   for (let index = 0; index < lines.length; index++) {
-    if (!/^(?:not ok\b|FAIL(?:ED)?\b|\s+(?:location|failureType|error|code|name|expected|actual|operator):)/i.test(lines[index])) continue;
+    if (!/^(?:not ok\b|FAIL(?:ED)?\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(lines[index])) continue;
     selected.push(lines[index].slice(0, 500));
   }
   return [...new Set(selected)].slice(-40).join("\n").slice(-4500);

@@ -221,7 +221,10 @@ test("bounded repository failure output retains both context and the final faili
       console.log("BEGIN-CONTEXT:" + "a".repeat(6000));
       console.log("not ok 237 - preserves the proof record");
       console.log("  location: 'test/proof.test.js:42:1'");
-      console.log("  error: 'Expected 200 but received 400'");
+      console.log("  error: |-");
+      console.log("    Command failed: git worktree add --detach /tmp/feature abc123");
+      console.log("    fatal: failed to read .git/worktrees/feature/commondir");
+      console.log("  code: 128");
       console.log("b".repeat(12000));
       process.exit(1);
     `);
@@ -233,6 +236,8 @@ test("bounded repository failure output retains both context and the final faili
     assert.match(result.output, /not ok 237 - preserves the proof record/);
     assert.match(result.output, /test\/proof\.test\.js:42:1/);
     assert.match(result.failureHighlights, /not ok 237 - preserves the proof record/);
+    assert.match(result.failureHighlights, /Command failed: git worktree add/);
+    assert.match(result.failureHighlights, /fatal: failed to read/);
     assert.doesNotMatch(result.failureHighlights, /BEGIN-CONTEXT/);
   } finally {
     await rm(root, { recursive: true, force: true });
