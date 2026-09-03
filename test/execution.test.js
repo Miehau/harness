@@ -75,7 +75,7 @@ test("cancelling a run stops every active step and preserves it for resume", () 
 });
 
 test("pausing a run preserves the live attempt and session as an audit checkpoint", () => {
-  const plan = normalizePlan({ nodes: [{ id: "one", title: "One", status: "running", attempts: [] }] });
+  const plan = normalizePlan({ nodes: [{ id: "one", title: "One", status: "verifying", attempts: [] }] });
   const run = {
     status: "running", checkpoint: null, sessionFile: "/tmp/supervisor.jsonl",
     stages: [{ id: "implement", status: "active", summary: "Working" }], plan,
