@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
@@ -8,6 +8,7 @@ import { visualEvidenceMedia } from "./artifacts.js";
 import { execFileTree, signalProcessTree } from "./process-tree.js";
 
 const screenshotScript = fileURLToPath(new URL("../scripts/screenshot.mjs", import.meta.url));
+const snapshotServerScript = fileURLToPath(new URL("../scripts/preview-snapshot-server.mjs", import.meta.url));
 const activeStepSelector = ".step.status-running[data-step], .step.status-fixing[data-step], .step.status-verifying[data-step], .step.status-interrupted[data-step], .step.status-needs_attention[data-step], .step.status-review_ready[data-step]";
 
 export function availablePort(host = "127.0.0.1") {
@@ -37,6 +38,11 @@ async function chromiumPath(source = process.env) {
 
 function commandExecutable(cwd, command) {
   return command[0].startsWith("./") ? resolve(cwd, command[0]) : command[0];
+}
+
+async function isAgentPlanWorkspace(cwd) {
+  try { return JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).name === "agent-plan-workspace"; }
+  catch { return false; }
 }
 
 async function waitUntilReady(url, child, fetchImpl, timeoutMs = 60000, probeTimeoutMs = 2000) {
@@ -99,7 +105,13 @@ export class PreviewManager {
         await writeFile(join(environment.AGENT_PLAN_DATA_DIR, "state-v3.json"), JSON.stringify(seedState, null, 2));
       }
     }
-    const child = this.spawn(commandExecutable(cwd, command), command.slice(1), { cwd, env: environment, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    let previewCommand = command;
+    if (seedState && environment.AGENT_PLAN_DATA_DIR && await isAgentPlanWorkspace(cwd)) {
+      const seedFile = join(environment.AGENT_PLAN_DATA_DIR, "proof-state.json");
+      await writeFile(seedFile, JSON.stringify(seedState, null, 2));
+      previewCommand = [process.execPath, snapshotServerScript, join(cwd, "src/server.js"), cwd, environment.AGENT_PLAN_DATA_DIR, "127.0.0.1", String(port), seedFile];
+    }
+    const child = this.spawn(commandExecutable(cwd, previewCommand), previewCommand.slice(1), { cwd, env: environment, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
     const url = `http://127.0.0.1:${port}`;

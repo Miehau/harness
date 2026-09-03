@@ -26,7 +26,7 @@ export async function body(request) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
-export async function staticFile(response, pathname, publicDir, headers = {}) {
+export async function staticFile(response, pathname, publicDir) {
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
   const file = normalize(join(publicDir, relative));
   if (!file.startsWith(publicDir)) return json(response, 403, { error: "Forbidden" });
@@ -35,8 +35,7 @@ export async function staticFile(response, pathname, publicDir, headers = {}) {
   response.writeHead(200, {
     "content-type": contentTypes[extname(file)] || "application/octet-stream",
     "content-security-policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'",
-    "x-content-type-options": "nosniff",
-    ...headers
+    "x-content-type-options": "nosniff"
   });
   createReadStream(file).on("error", () => response.destroy()).pipe(response);
 }
@@ -50,14 +49,13 @@ export function authorizeApi(request, response, url, apiToken) {
   return false;
 }
 
-export function createHandleRequest({ publicDir, requestContext, apiToken, host, port, api }) {
+export function createHandleRequest({ publicDir, apiToken, host, port, api }) {
   return async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     try {
-      const context = await requestContext?.(request, url) || {};
       if (url.pathname.startsWith("/api/") && !authorizeApi(request, response, url, apiToken)) return;
       if (url.pathname.startsWith("/api/")) await api(request, response, url);
-      else await staticFile(response, context.pathname || url.pathname, context.publicDir || publicDir, context.headers);
+      else await staticFile(response, url.pathname, publicDir);
     } catch (error) {
       if (!response.headersSent) json(response, 400, { error: error.message });
       else response.end();

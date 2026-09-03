@@ -100,6 +100,34 @@ test("restarts a seeded preview so recurring gates cannot reuse stale run state"
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
 
+test("self-preview launches worktree server code with an immutable live-state restore", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-evidence-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "agent-plan-workspace", scripts: { start: "node src/server.js" } }));
+    await writeFile(join(root, "src", "server.js"), "export async function createDaemon() {}\n");
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "start"] } }));
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => {};
+    let spawned;
+    const manager = new PreviewManager({
+      dataDir, portImpl: async () => 47821, fetchImpl: async () => ({ ok: true }),
+      spawnImpl: (file, args, options) => { spawned = { file, args, options }; return child; }
+    });
+
+    const snapshot = { version: 6, revision: 42, ticketRuns: { ticket: { status: "reviewing" } } };
+    await manager.ensure({ id: "ticket", cwd: root, seedState: snapshot });
+
+    assert.equal(spawned.file, process.execPath);
+    assert.match(spawned.args[0], /preview-snapshot-server\.mjs$/);
+    assert.equal(spawned.args[1], join(root, "src/server.js"));
+    assert.deepEqual(JSON.parse(await readFile(spawned.args.at(-1), "utf8")), snapshot);
+    manager.stop("ticket");
+  } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("a timed-out Chromium capture is usable when its screenshot was written", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "preview-timeout-"));
   try {

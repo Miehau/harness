@@ -118,26 +118,6 @@ test("GET /api/health and compact run omit artifact content", async () => {
   });
 });
 
-test("proof route serves worktree UI assets with authoritative daemon APIs", async () => {
-  await withDaemon(async (daemon, { cwd }) => {
-    await mkdir(join(cwd, "public"), { recursive: true });
-    await writeFile(join(cwd, "public", "index.html"), "<script type=\"module\" src=\"/app.js\"></script>worktree-ui");
-    await writeFile(join(cwd, "public", "app.js"), "export const source = 'ticket-worktree';\n");
-    const id = await seedRun(daemon, { workspace: { cwd } });
-
-    const proofPath = `/__proof/${encodeURIComponent(id)}`;
-    const page = await invoke(daemon, "GET", proofPath);
-    assert.match(page.text, /worktree-ui/);
-    assert.match(page.headers["set-cookie"], /agent_plan_proof_ticket=/);
-    const asset = await invoke(daemon, "GET", "/app.js", { headers: { cookie: page.headers["set-cookie"].split(";")[0] } });
-    assert.match(asset.text, /ticket-worktree/);
-    const state = await invoke(daemon, "GET", "/api/state", { headers: { cookie: page.headers["set-cookie"].split(";")[0] } });
-    assert.equal(state.json.ticketRuns[id].status, "clarifying");
-    const contractState = await invoke(daemon, "GET", `${proofPath}/api/state`);
-    assert.equal(contractState.json.ticketRuns[id].status, "clarifying");
-  });
-});
-
 test("ticket selection returns the selected public run without artifact bodies", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, { artifacts: [{ id: "a", name: "proof.md", content: "private body" }] });
