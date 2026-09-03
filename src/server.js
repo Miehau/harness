@@ -1027,13 +1027,29 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         vcsChange = await beginJjChange(stepCwd, { changeId: step.vcsChange?.changeId, title: step.title });
         await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).vcsChange = vcsChange; });
       }
-      const beforeTree = await snapshotTree(stepCwd);
+      let beforeTree = await snapshotTree(stepCwd);
       const stepBaseTree = step.baseTree || beforeTree;
       await update((state) => {
         const target = findNode(ticketRun(state, ticketId).plan, stepId);
         target.baseTree ||= stepBaseTree;
       });
-      let nextFeedback = feedback;
+      let rollbackFeedback = "";
+      if (step.baseTree && beforeTree) {
+        const existingDiff = await diffTrees(stepCwd, step.baseTree, beforeTree);
+        const existingBudget = diffReviewBudget(step, existingDiff);
+        if (reviewBudgetRequiresRollback(existingBudget)) {
+          beforeTree = await restoreTree(stepCwd, step.baseTree);
+          rollbackFeedback = `The harness rolled back a runaway prior diff before this attempt: ${existingBudget.reasons.join("; ")}. Re-implement this slice from its clean step checkpoint with focused edits; do not copy whole files from another worktree.`;
+          await update((state) => {
+            const target = findNode(ticketRun(state, ticketId).plan, stepId);
+            target.rollbackHistory ||= [];
+            target.rollbackHistory.push({ at: new Date().toISOString(), reason: rollbackFeedback, diff: existingDiff, reviewBudgetResult: existingBudget });
+            target.diff = null;
+            target.reviewBudgetResult = null;
+          });
+        }
+      }
+      let nextFeedback = feedback || rollbackFeedback;
       const priorVerification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification || {};
       if (!nextFeedback && step.status === "interrupted") {
         const findings = actionableFindings([priorVerification]);
