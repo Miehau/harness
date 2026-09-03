@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 
 export const PROCESS_OWNERSHIP_ENV = "AGENT_PLAN_EXECUTION_OWNER";
 export const gracefulSignal = "SIGTERM";
@@ -47,7 +47,20 @@ export function sameProcessIdentity(expected, observed, token) {
     && observed.ownershipToken === token);
 }
 
-async function linuxOwnerUid(pid, procRoot, readFileImpl) {
+async function linuxOwnerUid(pid, procRoot, readFileImpl, directoryStat) {
+  // /proc/PID directory ownership is kernel-provided ownership evidence. Use
+  // it as a prefilter on the live adapter so inaccessible foreign processes do
+  // not turn an otherwise empty owned cleanup into an unresolved result.
+  if (directoryStat) {
+    try {
+      const metadata = await directoryStat(`${procRoot}/${pid}`);
+      if (Number.isInteger(metadata?.uid) && metadata.uid >= 0) return { uid: metadata.uid };
+    } catch (error) {
+      if (["ENOENT", "ESRCH"].includes(error.code)) return null;
+      if (["EACCES", "EPERM"].includes(error.code)) return { unresolved: { pid, reason: "discovery-ownership-observation-failed", error: message(error) } };
+      throw error;
+    }
+  }
   let status;
   try { status = await readFileImpl(`${procRoot}/${pid}/status`, "utf8"); }
   catch (error) {
@@ -65,17 +78,23 @@ async function linuxOwnerUid(pid, procRoot, readFileImpl) {
 
 async function linuxIdentity(pid, token, procRoot, readFileImpl) {
   let environment;
-  let stat;
-  try {
-    [environment, stat] = await Promise.all([
-      readFileImpl(`${procRoot}/${pid}/environ`),
-      readFileImpl(`${procRoot}/${pid}/stat`, "utf8")
-    ]);
-  } catch (error) {
+  try { environment = await readFileImpl(`${procRoot}/${pid}/environ`); }
+  catch (error) {
     if (error.code === "ENOENT" || error.code === "ESRCH") return null;
     throw error;
   }
+  // Most same-UID processes are unrelated. Read their inexpensive ownership
+  // capability first, reserving stat parsing for a positively token-owned
+  // target. This keeps each repeated quiescence snapshot bounded in busy CI
+  // environments without treating a missing token as attribution evidence.
   const owned = environment.toString().split("\0").includes(`${PROCESS_OWNERSHIP_ENV}=${token}`);
+  if (!owned) return null;
+  let stat;
+  try { stat = await readFileImpl(`${procRoot}/${pid}/stat`, "utf8"); }
+  catch (error) {
+    if (error.code === "ENOENT" || error.code === "ESRCH") return null;
+    throw error;
+  }
   const close = stat.lastIndexOf(")");
   const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/);
   // A zombie has already exited and cannot receive a signal. Treat it exactly
@@ -97,6 +116,7 @@ export function createPlatformAdapter({
   procRoot = "/proc",
   readDirectory = readdir,
   readFileImpl = readFile,
+  statImpl = null,
   kill = process.kill.bind(process),
   currentUid = typeof process.getuid === "function" ? process.getuid() : null
 } = {}) {
@@ -114,35 +134,44 @@ export function createPlatformAdapter({
       reason: "Safe process discovery requires the daemon user identity"
     });
   }
+  // Keep injected /proc fixtures self-contained: production's real /proc gets
+  // the inexpensive directory-owner prefilter, while fixture adapters retain
+  // their explicit status-file behavior unless they opt in with statImpl.
+  const directoryStat = statImpl || (procRoot === "/proc" ? stat : null);
   return Object.freeze({
     platform,
     supported: true,
     async discover(token) {
       const entries = await readDirectory(procRoot);
-      const processes = [];
-      const unresolved = [];
-      for (const entry of entries) {
-        if (!/^\d+$/.test(entry)) continue;
+      // Discovery is repeated around each termination phase. Inspecting /proc
+      // serially can consume the whole cleanup deadline on a busy CI host,
+      // leaving an otherwise live, owned fixture unsignaled. Each entry remains
+      // independently attributed by UID, token, and start time; concurrency
+      // only bounds observation time and does not broaden attribution.
+      const inspected = await Promise.all(entries.map(async (entry) => {
+        if (!/^\d+$/.test(entry)) return null;
         const pid = Number(entry);
         // Token-bearing children inherit the daemon's real UID. A readable
         // foreign UID is irrelevant, but an unreadable status cannot establish
         // foreign ownership and must remain durable cleanup uncertainty.
-        const owner = await linuxOwnerUid(pid, procRoot, readFileImpl);
-        if (owner?.unresolved) {
-          unresolved.push(owner.unresolved);
-          continue;
-        }
-        if (owner?.uid !== currentUid) continue;
-        let identity;
-        try { identity = await linuxIdentity(pid, token, procRoot, readFileImpl); }
-        catch (error) {
+        const owner = await linuxOwnerUid(pid, procRoot, readFileImpl, directoryStat);
+        if (owner?.unresolved) return { unresolved: owner.unresolved };
+        if (owner?.uid !== currentUid) return null;
+        try {
+          const identity = await linuxIdentity(pid, token, procRoot, readFileImpl);
+          return identity?.ownershipToken === token ? { process: identity } : null;
+        } catch (error) {
           if (["EACCES", "EPERM"].includes(error.code)) {
-            unresolved.push({ pid, reason: "discovery-observation-failed", error: message(error) });
-            continue;
+            return { unresolved: { pid, reason: "discovery-observation-failed", error: message(error) } };
           }
           throw error;
         }
-        if (identity?.ownershipToken === token) processes.push(identity);
+      }));
+      const processes = [];
+      const unresolved = [];
+      for (const item of inspected) {
+        if (item?.process) processes.push(item.process);
+        if (item?.unresolved) unresolved.push(item.unresolved);
       }
       return { processes, unresolved };
     },
@@ -408,7 +437,10 @@ export class ProcessContainment {
       this.record.diagnostics.push("Process cleanup ended without a bounded quiescent discovery");
     }
 
-    this.record.outcome = this.record.unresolved.length ? "incomplete" : "complete";
+    // Discovery can catch a process while it is exiting. When every candidate
+    // vanishes before a signal is sent, cleanup did no work and must retain the
+    // same fast, successful outcome as an initially empty discovery.
+    this.record.outcome = this.record.unresolved.length ? "incomplete" : this.record.actions.length ? "complete" : "not-required";
     return this.#finish(launches);
 
   }

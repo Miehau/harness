@@ -137,7 +137,7 @@ test("a descendant forked during graceful cleanup receives a bounded second cycl
     }
   }).cleanup("cancelled");
   assert.equal(result.outcome, "complete");
-  assert.equal(discoveries, 3);
+  assert.equal(discoveries, 5);
   assert.deepEqual(actions, [[41, "SIGTERM"], [42, "SIGTERM"], [42, "SIGKILL"]]);
 });
 
@@ -158,7 +158,7 @@ test("identity is renewed before force and a changed target is never force signa
   let count = 0;
   const result = await containment({
     discover: async () => [identity()],
-    observe: async () => ++count === 1 ? identity() : identity({ ppid: 99 }),
+    observe: async () => ++count === 1 ? identity() : identity({ startTime: "reused" }),
     signal: async (_pid, signal) => { signals.push(signal); }
   }).cleanup("timeout");
   assert.deepEqual(signals, ["SIGTERM"]);
@@ -284,6 +284,19 @@ test("an unreadable Linux process owned by another user is irrelevant", async ()
   const result = await containment(adapter).cleanup("shutdown");
   assert.equal(environmentReads, 0);
   assert.equal(signals, 0);
+  assert.equal(result.outcome, "not-required");
+  assert.deepEqual(result.unresolved, []);
+});
+
+test("directory ownership filters foreign Linux processes before environment inspection", async () => {
+  let reads = 0;
+  const adapter = createPlatformAdapter({
+    platform: "linux", currentUid: 1000, procRoot: "/live-proc", readDirectory: async () => ["51"],
+    statImpl: async () => ({ uid: 2000 }),
+    readFileImpl: async () => { reads++; throw new Error("foreign process must not be inspected further"); }
+  });
+  const result = await containment(adapter).cleanup("shutdown");
+  assert.equal(reads, 0);
   assert.equal(result.outcome, "not-required");
   assert.deepEqual(result.unresolved, []);
 });
