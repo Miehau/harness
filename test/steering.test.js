@@ -15,7 +15,8 @@ import {
 function fixture() {
   const step = {
     id: "ledger", type: "step", title: "Build ledger", status: "running", permission: "write",
-    writeScope: "src/steering.js, test/steering.test.js", expectedFiles: ["src/steering.js"], attempts: [],
+    writeScope: "src/steering.js, test/steering.test.js", expectedFiles: ["src/steering.js"],
+    acceptanceCriteria: ["Preserve FIFO order and the claim guard"], attempts: [],
     activeAttempt: { id: "attempt-stable", status: "active", startedAt: "2025-01-01T00:00:00.000Z" }
   };
   return {
@@ -105,9 +106,15 @@ test("unsafe input is withheld while malformed input and terminal targets create
 
 test("validation conservatively escalates ambiguous, multi-action, and permission-expanding requests", () => {
   assert.equal(validateSteeringInstruction("Fix it").code, "ambiguous_instruction");
+  const scopedStep = { permission: "write", writeScope: "src/steering.js", expectedFiles: ["src/steering.js"] };
+  for (const instruction of [
+    "Remove it safely.", "Revise this safely.", "Correct that.",
+    "Update src/steering.js safely.", "Delete it in src/steering.js."
+  ]) {
+    assert.equal(validateSteeringInstruction(instruction, { step: scopedStep }).code, "ambiguous_instruction");
+  }
   assert.equal(validateSteeringInstruction("1. Update the parser\n2. Add a route").code, "multiple_actions");
   assert.equal(validateSteeringInstruction("Edit the implementation safely.", { step: { permission: "read" } }).code, "permission_expansion");
-  const scopedStep = { permission: "write", writeScope: "src/steering.js", expectedFiles: ["src/steering.js"] };
   assert.equal(validateSteeringInstruction("Update lib/outside.js safely.", { step: scopedStep }).code, "scope_expansion");
   assert.equal(validateSteeringInstruction("Modify /etc/passwd safely.", { step: scopedStep }).code, "scope_expansion");
   assert.equal(validateSteeringInstruction("Update package.json safely.", { step: scopedStep }).code, "scope_expansion");
@@ -116,7 +123,48 @@ test("validation conservatively escalates ambiguous, multi-action, and permissio
   assert.equal(validateSteeringInstruction("Update Dockerfile safely.", { step: scopedStep }).code, "scope_expansion");
   assert.equal(validateSteeringInstruction("Update Dockerfile.", { step: scopedStep }).code, "scope_expansion");
   assert.equal(validateSteeringInstruction("Change src/../package.json safely.", { step: scopedStep }).code, "scope_expansion");
-  assert.equal(validateSteeringInstruction("Update ./src/steering.js safely.", { step: scopedStep }).ok, true);
+  assert.equal(validateSteeringInstruction("Replace the JSON store with Postgres.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Implement OAuth login flow.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Create a password-reset endpoint in src/steering.js.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Revise the approved architecture so all storage uses Redis.", { step: scopedStep }).code, "architecture_expansion");
+  assert.equal(validateSteeringInstruction("Refactor every module in the repository.", { step: scopedStep }).code, "scope_expansion");
+  assert.equal(validateSteeringInstruction("Add CSV export to src/steering.js.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Support CSV export in src/steering.js.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Develop a CSV exporter in src/steering.js.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Switch persistence to SQLite.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Allow users to download report data in src/steering.js.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Adopt an unplanned event store.", { step: scopedStep }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Reverse the steering queue so newest messages are delivered first in src/steering.js.", { step: scopedStep }).code, "conflicting_instruction");
+  const behavioralStep = {
+    ...scopedStep, title: "Update steering ledger",
+    acceptanceCriteria: ["FIFO delivery and the claim guard keep steering durable"]
+  };
+  assert.equal(validateSteeringInstruction("Update ledger safely.", { step: behavioralStep }).code, "ambiguous_instruction");
+  for (const instruction of [
+    "Remove FIFO delivery from src/steering.js.",
+    "Disable FIFO delivery from src/steering.js.",
+    "No longer provide FIFO delivery from src/steering.js."
+  ]) assert.equal(validateSteeringInstruction(instruction, { step: behavioralStep }).code, "conflicting_instruction");
+  assert.equal(validateSteeringInstruction("Remove deprecated FIFO delivery from src/steering.js.", {
+    step: { ...behavioralStep, acceptanceCriteria: ["Remove deprecated FIFO delivery"] }
+  }).ok, true);
+  assert.equal(validateSteeringInstruction("Implement OAuth login flow.", {
+    step: { ...scopedStep, acceptanceCriteria: ["Implement OAuth login flow"] }
+  }).ok, true);
+  assert.equal(validateSteeringInstruction("Add CSV export to src/steering.js.", {
+    step: { ...scopedStep, acceptanceCriteria: ["Add CSV export"] }
+  }).ok, true);
+  assert.equal(validateSteeringInstruction("Switch persistence to SQLite.", {
+    step: { ...scopedStep, acceptanceCriteria: ["Use SQLite persistence"] }
+  }).ok, true);
+  assert.equal(validateSteeringInstruction("Allow users to download report data in src/steering.js.", {
+    step: { ...scopedStep, acceptanceCriteria: ["Users can download report data"] }
+  }).ok, true);
+  assert.equal(validateSteeringInstruction("Allow users to download report data in src/steering.js.", {
+    step: { ...scopedStep, acceptanceCriteria: ["Users can view report data and download source files"] }
+  }).code, "requirement_expansion");
+  assert.equal(validateSteeringInstruction("Update ./src/steering.js safely.", { step: scopedStep }).code, "ambiguous_instruction");
+  assert.equal(validateSteeringInstruction("Update src/steering.js with the focused correction.", { step: scopedStep }).ok, true);
 });
 
 test("logical attempt identity survives interruption and is reused on resume", () => {

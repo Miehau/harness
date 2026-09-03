@@ -67,14 +67,91 @@ test("Pi steering queues the stable instruction on the active worker session and
 function activePlan() {
   const plan = normalizePlan({ nodes: [{
     id: "ledger", title: "Ledger", permission: "write", writeScope: "src/steering.js",
-    expectedFiles: ["src/steering.js"], acceptanceCriteria: ["Steering is durable"]
+    expectedFiles: ["src/steering.js"], acceptanceCriteria: ["FIFO delivery and the claim guard keep steering durable"]
   }] });
   Object.assign(plan.nodes[0], { status: "running", activeAttempt: { id: "attempt-1", status: "active" } });
   return plan;
 }
 
-test("an uncertain steering claim becomes an explained terminal failure when its worker ends", async () => {
+test("an unsafe steer remains the visible needs-input gate after its active worker settles", async () => {
+  let releaseWorker;
+  const workerStarted = new Promise((resolve) => { releaseWorker = resolve; });
+  let settleWorker;
+  const workerSettled = new Promise((resolve) => { settleWorker = resolve; });
   const plan = normalizePlan({ nodes: [{ id: "ledger", title: "Ledger", permission: "read", acceptanceCriteria: ["Steering is durable"] }] });
+  Object.assign(plan.nodes[0], { status: "interrupted", activeAttempt: { id: "attempt-1", status: "interrupted" } });
+  const harness = {
+    ...mockHarness(),
+    async runStep({ onSessionActive, ticketId, runId, attemptId }) {
+      await onSessionActive({ ticketId, runId, stepId: "ledger", attemptId });
+      releaseWorker();
+      await workerSettled;
+      return { prompt: "", rawOutput: "", output: "# Result", reviewNotes: [], sessionFile: null, report: { status: "completed", summary: "Done", artifact: "# Result" } };
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "paused", plan, workspace: { cwd: process.cwd() }, activeRuns: {} });
+    const resume = invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} });
+    await workerStarted;
+    const unsafe = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Edit src/steering.js safely." } });
+    assert.equal(unsafe.json.state, "withheld");
+    settleWorker();
+    await resume;
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].activeRuns.ledger) await new Promise((resolve) => setTimeout(resolve, 10));
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.status, "awaiting_input");
+    assert.equal(run.checkpoint.source, "steering");
+    assert.equal(run.checkpoint.kind, "needs_input");
+    assert.notEqual(run.checkpoint.kind, "step_review");
+  }, { harness, cwd: process.cwd() });
+});
+
+test("a worker failure retains an accepted steer on its durable attempt audit", async () => {
+  let workerStarted;
+  const started = new Promise((resolve) => { workerStarted = resolve; });
+  let releaseWorker;
+  const release = new Promise((resolve) => { releaseWorker = resolve; });
+  const plan = normalizePlan({ nodes: [{
+    id: "ledger", title: "Ledger", permission: "read",
+    acceptanceCriteria: ["FIFO steering behavior is durable"]
+  }] });
+  Object.assign(plan.nodes[0], { status: "interrupted", activeAttempt: { id: "attempt-durable", status: "interrupted" } });
+  const harness = {
+    ...mockHarness(),
+    async steer() { return { session: "pi-session-1" }; },
+    async runStep({ onSessionActive, ticketId, runId, attemptId }) {
+      await onSessionActive({ ticketId, runId, stepId: "ledger", attemptId });
+      workerStarted();
+      await release;
+      throw new Error("worker crashed");
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "paused", plan, workspace: { cwd: process.cwd() }, activeRuns: {} });
+    const resume = invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} });
+    await started;
+    const steer = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, {
+      body: { instruction: "Preserve FIFO steering behavior for this worker." }
+    });
+    assert.equal(steer.json.state, "delivered");
+    assert.equal(steer.json.target.attemptId, "attempt-durable");
+    releaseWorker();
+    await resume;
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].status !== "needs_attention") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const step = daemon.store.read().ticketRuns[id].plan.nodes[0];
+    assert.equal(step.activeAttempt.id, "attempt-durable");
+    assert.equal(step.activeAttempt.status, "failed");
+    assert.equal(step.attempts.at(-1).attemptId, "attempt-durable");
+    assert.equal(daemon.store.read().ticketRuns[id].steering.records[0].attemptId, step.attempts.at(-1).attemptId);
+  }, { harness, cwd: process.cwd() });
+});
+
+test("an uncertain steering claim becomes an explained terminal failure when its worker ends", async () => {
+  const plan = normalizePlan({ nodes: [{ id: "ledger", title: "Ledger", permission: "read", acceptanceCriteria: ["FIFO steering behavior is durable"] }] });
   Object.assign(plan.nodes[0], { status: "interrupted", activeAttempt: { id: "attempt-1", status: "interrupted" } });
   const harness = {
     ...mockHarness(),
@@ -134,6 +211,11 @@ test("a pre-session steering claim is released and drains in FIFO order once del
     assert.equal(pending.events.at(-1).type, "session_unavailable");
 
     ready = true;
+    // The failed first call was made before Pi registered the session. Model the
+    // subsequent session-active callback before expecting the FIFO drain.
+    await daemon.store.update((state) => {
+      state.ticketRuns[id].activeRuns.ledger.piSessionState = "active";
+    });
     await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with the claim guard." } });
     const records = daemon.store.read().ticketRuns[id].steering.records;
     assert.deepEqual(records.map((record) => record.state), ["delivered", "delivered"]);

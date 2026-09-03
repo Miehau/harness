@@ -6,7 +6,8 @@ import { invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 function activePlan({ status = "running", attemptStatus = "active" } = {}) {
   const plan = normalizePlan({ nodes: [{
     id: "ledger", title: "Update steering ledger", permission: "write", writeScope: "src/steering.js",
-    expectedFiles: ["src/steering.js"], estimatedChangedLines: 10, acceptanceCriteria: ["Steering is durable"]
+    expectedFiles: ["src/steering.js"], estimatedChangedLines: 10,
+    acceptanceCriteria: ["FIFO delivery and the claim guard keep steering durable"]
   }] });
   Object.assign(plan.nodes[0], { status, activeAttempt: { id: "attempt-1", status: attemptStatus, startedAt: "2025-01-01T00:00:00.000Z" } });
   return plan;
@@ -16,7 +17,7 @@ async function seedActiveRun(daemon, extras = {}) {
   const plan = extras.plan || activePlan();
   return seedRun(daemon, {
     status: "running", plan,
-    activeRuns: { ledger: { runId: "worker-1", attemptId: "attempt-1", startedAt: "2025-01-01T00:00:00.000Z" } },
+    activeRuns: { ledger: { runId: "worker-1", attemptId: "attempt-1", startedAt: "2025-01-01T00:00:00.000Z", piSessionState: "active" } },
     ...extras
   });
 }
@@ -93,6 +94,54 @@ test("invalid and unsafe steering produce auditable rejection or a visible check
   });
 });
 
+test("ambiguous write steering is withheld without Pi delivery", async () => {
+  for (const instruction of ["Remove it safely.", "Update src/steering.js safely.", "Delete it in src/steering.js.", "Update ledger safely."]) {
+    let deliveries = 0;
+    const harness = { ...mockHarness(), async steer() { deliveries++; } };
+    await withDaemon(async (daemon) => {
+      const id = await seedActiveRun(daemon);
+      const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction } });
+      assert.equal(result.json.state, "withheld");
+      assert.equal(deliveries, 0);
+      const run = daemon.store.read().ticketRuns[id];
+      assert.equal(run.steering.records[0].reasonCode, "ambiguous_instruction");
+      assert.equal(run.checkpoint.kind, "needs_input");
+    }, { harness });
+  }
+});
+
+test("removing approved behavior is withheld without Pi delivery", async () => {
+  let deliveries = 0;
+  const harness = { ...mockHarness(), async steer() { deliveries++; } };
+  await withDaemon(async (daemon) => {
+    const id = await seedActiveRun(daemon);
+    const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, {
+      body: { instruction: "Remove FIFO delivery from src/steering.js." }
+    });
+    assert.equal(result.json.state, "withheld");
+    assert.equal(deliveries, 0);
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.steering.records[0].reasonCode, "conflicting_instruction");
+    assert.equal(run.checkpoint.kind, "needs_input");
+  }, { harness });
+});
+
+test("an in-scope path cannot authorize an unapproved feature expansion", async () => {
+  let deliveries = 0;
+  const harness = { ...mockHarness(), async steer() { deliveries++; } };
+  await withDaemon(async (daemon) => {
+    const id = await seedActiveRun(daemon);
+    const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, {
+      body: { instruction: "Allow users to download report data in src/steering.js." }
+    });
+    assert.equal(result.json.state, "withheld");
+    assert.equal(deliveries, 0);
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.steering.records[0].reasonCode, "requirement_expansion");
+    assert.equal(run.checkpoint.kind, "needs_input");
+  }, { harness });
+});
+
 test("multi-action steering is withheld instead of being delivered", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedActiveRun(daemon);
@@ -130,6 +179,21 @@ test("terminal steering is actionable without adding attempt lifecycle history",
   });
 });
 
+test("a session that has already ended rejects steering without creating a delivery claim", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedActiveRun(daemon, {
+      activeRuns: { ledger: { runId: "worker-1", attemptId: "attempt-1", piSessionState: "unavailable" } }
+    });
+    const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with FIFO delivery." } });
+    assert.equal(result.json.state, "rejected");
+    assert.match(result.json.reason, /no longer available/);
+    assert.match(result.json.nextCondition, /Wait for the worker outcome/);
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.steering.records.length, 0);
+    assert.equal(run.steeringRejections.at(-1).code, "worker_unavailable");
+  });
+});
+
 test("a target changed during Pi delivery cannot be recorded as delivered", async () => {
   let daemonRef;
   const harness = {
@@ -149,5 +213,27 @@ test("a target changed during Pi delivery cannot be recorded as delivered", asyn
     const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with FIFO delivery." } });
     assert.equal(result.json.state, "failed");
     assert.equal(result.json.reason, "The bound worker attempt changed before Pi accepted this correction.");
+  }, { harness });
+});
+
+test("Pi teardown during a steering call cannot be recorded as delivery", async () => {
+  let daemonRef;
+  const harness = {
+    ...mockHarness(),
+    async steer() {
+      await daemonRef.store.update((state) => {
+        state.ticketRuns["ticket-1"].activeRuns.ledger.piSessionState = "unavailable";
+      });
+      return { session: "pi-session-1" };
+    }
+  };
+  await withDaemon(async (daemon) => {
+    daemonRef = daemon;
+    const id = await seedActiveRun(daemon);
+    const result = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with FIFO delivery." } });
+    assert.equal(result.json.state, "failed");
+    const record = daemon.store.read().ticketRuns[id].steering.records[0];
+    assert.equal(record.reasonCode, "target_replaced");
+    assert.match(record.reason, /session ended/);
   }, { harness });
 });

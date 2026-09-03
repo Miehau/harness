@@ -11,6 +11,19 @@ export const steeringStates = Object.freeze(["queued", "claimed", "delivered", "
 const deliveryTerminalStates = new Set(["delivered", "acknowledged", "withheld", "failed"]);
 const scopeExpansion = /\b(?:ignore|bypass|override|expand|exceed)\b[^.\n]{0,50}\b(?:scope|permission|instruction|approval|constraint)|\b(?:outside|beyond)\b[^.\n]{0,30}\b(?:scope|write scope)|\b(?:sudo|administrator|root access|deploy|publish|push to|merge to)\b/i;
 const vagueInstruction = /^(?:fix|change|update|improve|handle|do|continue|try|make it work|address that|fix it|do that)[.!]?$/i;
+const broadScopeExpansion = /\b(?:refactor|rewrite|rework|migrate|overhaul|modify|change)\b[^.\n]{0,80}\b(?:every|all|entire|whole)\b[^.\n]{0,80}\b(?:repository|repo|codebase|project|module|modules|system)\b|\b(?:across|throughout)\b[^.\n]{0,80}\b(?:repository|repo|codebase|project|all modules)\b/i;
+const orderingPolarityConflict = /\b(?:reverse|invert)\b[^.\n]{0,160}\b(?:fifo|queue|order)\b/i;
+const destructiveDirective = /\b(?:delete|disable|discard|drop|eliminate|remove|retire|reverse|invert)\b|\b(?:no\s+longer|without)\b/i;
+// Steers are not an alternate planning channel. Strip only directive and syntax
+// words, then require every remaining requested concept to be in an explicit,
+// behavioral approval. This makes the safe path an allow-list derived from the
+// plan, rather than a growing list of unsafe products, verbs, or architectures.
+const correspondenceStopWords = new Set([
+  "a", "an", "and", "all", "also", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the", "this", "that", "these", "those", "to", "with", "within",
+  "add", "adjust", "allow", "build", "change", "convert", "correct", "create", "delete", "develop", "disable", "discard", "drop", "edit", "eliminate", "enable", "ensure", "establish", "expose", "fix", "implement", "improve", "introduce", "invert", "launch", "make", "migrate", "modify", "preserve", "provide", "redesign", "refactor", "remove", "rename", "replace", "retire", "reverse", "revise", "rework", "rewrite", "run", "support", "switch", "update", "use", "write",
+  "approved", "code", "correction", "file", "focused", "implementation", "it", "longer", "new", "no", "safely", "source", "the", "without", "worker"
+]);
+const architectureReference = /\b(?:architecture|architectural)\b/i;
 
 function timestamp(value = Date.now()) {
   return typeof value === "string" ? value : new Date(value).toISOString();
@@ -43,6 +56,88 @@ function mentionedFilePaths(text) {
   ];
   return [...new Set(patterns.flatMap((pattern) => [...text.matchAll(pattern)]
     .map((match) => normalizeScopePath(match[1].replace(/\.$/, "")))))];
+}
+
+function approvedSteeringSources(step) {
+  const list = (value) => Array.isArray(value) ? value : value ? [value] : [];
+  // Titles and IDs identify planning records but do not specify an approved
+  // behavior. Delivery must instead trace to the detailed context or an explicit
+  // requirement, capability, delta, or acceptance criterion.
+  return [
+    step?.description, step?.productContext, ...list(step?.acceptanceCriteria),
+    ...list(step?.requirements), ...list(step?.capabilities), ...list(step?.deltas)
+  ].filter(Boolean).map((value) => String(value));
+}
+
+function correspondenceTerms(text) {
+  let withoutPaths = text.toLowerCase();
+  for (const path of mentionedFilePaths(text)) withoutPaths = withoutPaths.replaceAll(path.toLowerCase(), " ");
+  return [...new Set(withoutPaths.match(/[a-z0-9][a-z0-9-]*/g)?.filter((term) => term.length > 1 && !correspondenceStopWords.has(term)) || [])];
+}
+
+function approvedCorrespondence(requested, source) {
+  if (requested.length < 2) return false;
+  const terms = source.toLowerCase().match(/[a-z0-9][a-z0-9-]*/g) || [];
+  const positions = requested.map((term) => terms.indexOf(term));
+  if (positions.some((position) => position < 0)) return false;
+  // A bag of words assembled from unrelated criteria is not approval for a new
+  // capability. Require the requested concepts to appear together in one approved
+  // statement, with an ordered three-term behavior phrase where applicable.
+  const span = Math.max(...positions) - Math.min(...positions) + 1;
+  if (span > requested.length + 2) return false;
+  if (requested.length < 3) return true;
+  return requested.slice(0, -2).some((_, index) => {
+    const phrase = requested.slice(index, index + 3);
+    return terms.some((_, termIndex) => phrase.every((term, offset) => terms[termIndex + offset] === term));
+  });
+}
+
+function sourceAuthorizesDestructiveChange(requested, source) {
+  return source.split(/[.!?;]/).some((statement) =>
+    destructiveDirective.test(statement) && approvedCorrespondence(requested, statement)
+  );
+}
+
+function unapprovedChange(text, step, { mentionedPaths = [], approvedFiles = [] } = {}) {
+  const requested = correspondenceTerms(text);
+  // A scoped path identifies where to work, not what correction to make. The one
+  // exception is the established CLI shorthand "focused correction": it is a
+  // bounded edit only when it names an approved file. Pronoun-only directives
+  // still create the normal needs-input checkpoint.
+  if (!requested.length) {
+    const focusedCorrection = /\bfocused\s+correction\b/i.test(text);
+    const pathsAreApproved = mentionedPaths.length === 1 && approvedFiles.some((scope) =>
+      mentionedPaths[0] === scope || mentionedPaths[0].startsWith(`${scope}/`)
+    );
+    if (focusedCorrection && pathsAreApproved) return null;
+    return {
+      code: "ambiguous_instruction",
+      reason: "The instruction does not identify an approved behavior; clarify the concrete correction before delivery."
+    };
+  }
+  if (requested.length < 2) {
+    return {
+      code: "ambiguous_instruction",
+      reason: "The instruction does not identify enough approved behavior to be a concrete correction; clarify it before delivery."
+    };
+  }
+  const matchingSources = approvedSteeringSources(step).filter((source) => approvedCorrespondence(requested, source));
+  if (matchingSources.length) {
+    // Approved behavior is protected by default. A destructive or polarity-changing
+    // directive needs its own local approval, not merely a term overlap with the
+    // behavior it would remove.
+    if (destructiveDirective.test(text) && !matchingSources.some((source) => sourceAuthorizesDestructiveChange(requested, source))) {
+      return {
+        code: "conflicting_instruction",
+        reason: "The instruction removes or reverses approved behavior without an explicit approved destructive change."
+      };
+    }
+    return null;
+  }
+  return {
+    code: architectureReference.test(text) ? "architecture_expansion" : "requirement_expansion",
+    reason: "The instruction names behavior or architecture not approved for this step; clarify it as a plan change before delivery."
+  };
 }
 
 export function createSteeringLedger(raw = {}) {
@@ -81,9 +176,19 @@ export function validateSteeringInstruction(value, { step = null, maxLength = ST
   if (step?.permission !== "write" && /\b(?:edit|write|modify|delete|create|rename|replace)\b/i.test(text)) {
     return { ok: false, disposition: "escalated", code: "permission_expansion", reason: "The instruction requests writes from a non-writing step." };
   }
+  // An explicit path violation is more actionable than a generic capability term
+  // (for example, package.json must remain a scope expansion, not a requirement one).
   if (approvedFiles.length && mentionedPaths.some((path) => !approvedFiles.some((scope) => path === scope || path.startsWith(`${scope}/`)))) {
     return { ok: false, disposition: "escalated", code: "scope_expansion", reason: "The instruction names a path outside the approved step scope." };
   }
+  if (broadScopeExpansion.test(text)) {
+    return { ok: false, disposition: "escalated", code: "scope_expansion", reason: "The instruction expands beyond one safely bounded step correction." };
+  }
+  if (orderingPolarityConflict.test(text)) {
+    return { ok: false, disposition: "escalated", code: "conflicting_instruction", reason: "The instruction conflicts with the approved FIFO steering order." };
+  }
+  const expansion = unapprovedChange(text, step, { mentionedPaths, approvedFiles });
+  if (expansion) return { ok: false, disposition: "escalated", ...expansion };
   return { ok: true, disposition: "accepted", code: null, reason: null, text };
 }
 
@@ -108,6 +213,9 @@ export function resolveSteeringTarget(run, { stepId = null } = {}) {
   const [resolvedStepId, active] = activeEntries[0];
   const step = findNode(run.plan, resolvedStepId);
   const attempt = activeAttemptForStep(step, active);
+  if (!paused && active?.piSessionState === "unavailable") {
+    return { ok: false, code: "worker_unavailable", reason: "The bound worker session is no longer available; wait for its outcome or resume an interrupted attempt before steering." };
+  }
   if (!step || !attempt?.id || (paused ? step.status !== "interrupted" : !["running", "fixing"].includes(step.status))) return { ok: false, code: "attempt_not_active", reason: "The active step has no durable logical attempt." };
   return { ok: true, target: { ticketId: run.id, runId: run.runId, stepId: resolvedStepId, attemptId: attempt.id }, paused };
 }

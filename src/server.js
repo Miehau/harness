@@ -297,6 +297,10 @@ function appendSteeringRejection(run, input, outcome) {
   return run.steeringRejections.at(-1);
 }
 
+function steeringCheckpointPending(run) {
+  return run?.status === "awaiting_input" && run.checkpoint?.source === "steering" && run.checkpoint.kind === "needs_input";
+}
+
 function steeringDrainKey(target) {
   return `${target.ticketId}\0${target.runId}\0${target.stepId}\0${target.attemptId}`;
 }
@@ -395,6 +399,10 @@ async function deliverSteering(ticketId, steerId) {
       const run = ticketRun(state, ticketId);
       if (!targetMatches(run, claim)) {
         failSteering(run, claim.id, { reason: "The bound worker attempt changed before Pi accepted this correction.", code: "target_replaced" });
+        return;
+      }
+      if (run.activeRuns?.[claim.stepId]?.piSessionState !== "active") {
+        failSteering(run, claim.id, { reason: "The bound Pi worker session ended before this correction could be recorded as delivered.", code: "target_replaced" });
         return;
       }
       delivered = markSteeringDelivered(run, claim.id, claim.claim.claimId, { evidence: evidence || { queuedBy: "pi" } });
@@ -1215,6 +1223,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           onSessionInactive: async (target) => {
             if (!target) return;
             clearSteeringDrain(target);
+            // Mark the exact live handle unavailable before an operator can submit
+            // another steer during verification or result persistence.
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              const active = current.activeRuns?.[target.stepId];
+              if (active?.attemptId === target.attemptId) active.piSessionState = "unavailable";
+            });
             // Pausing intentionally retains this logical attempt and its queued work.
             // Every other session end makes its bound target terminal for steering.
             if (signal?.aborted && /run paused/i.test(String(signal.reason?.message || signal.reason || ""))) return;
@@ -1271,6 +1286,28 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
         const workerGate = workerReportCheckpoint(currentStep, result.report);
+        if (steeringCheckpointPending(ticketRun(store.read(), ticketId))) {
+          const attemptActivity = activity.snapshot();
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            if (!steeringCheckpointPending(current)) return;
+            const target = findNode(current.plan, stepId);
+            target.status = "needs_input";
+            target.diff = diff;
+            target.reviewNotes = reviewNotes;
+            target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
+            target.reviewBudgetResult = reviewBudget;
+            if (vcsChange) target.vcsChange = vcsChange;
+            target.sessionFile = result.sessionFile;
+            target.artifacts = [artifacts[0]];
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_input", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            current.artifacts.push(...artifacts);
+            delete current.activeRuns[stepId];
+            setStage(current, "implement", "blocked", current.checkpoint.title);
+          });
+          await mirrorCheckpoint(ticketId);
+          return;
+        }
         if (violations.length || (result.report.status !== "completed" && !workerGate)) {
           const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
           const attemptActivity = activity.snapshot();
@@ -1448,18 +1485,27 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const active = current.activeRuns[stepId] || {};
         const activity = active.activity || {};
         failed.attempts ||= [];
-        failed.attempts.push({
-          runId: active.runId || null,
-          attemptId: `attempt-${failed.attempts.length + 1}`,
-          startedAt: active.startedAt || new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          status: "failed",
-          events: activity.events || [],
-          activityGroups: activity.groups || [],
-          rawOutput: activity.rawOutput || "",
-          sessionFile: active.sessionFile || failed.sessionFile || null,
-          error: error.message
-        });
+        // A worker failure belongs to the logical attempt that accepted steering;
+        // never invent a sequential ID that would orphan its delivery ledger.
+        const attemptId = active.attemptId || failed.activeAttempt?.id;
+        if (attemptId) {
+          failed.activeAttempt = {
+            ...(failed.activeAttempt || {}), id: attemptId, status: "failed", workerRunId: null,
+            startedAt: failed.activeAttempt?.startedAt || active.startedAt || null, failedAt: new Date().toISOString()
+          };
+          failed.attempts.push({
+            runId: active.runId || null,
+            attemptId,
+            startedAt: active.startedAt || new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            status: "failed",
+            events: activity.events || [],
+            activityGroups: activity.groups || [],
+            rawOutput: activity.rawOutput || "",
+            sessionFile: active.sessionFile || failed.sessionFile || null,
+            error: error.message
+          });
+        }
         failed.status = "failed";
         failed.lastError = error.message;
         delete current.activeRuns[stepId];
@@ -2382,7 +2428,9 @@ async function api(request, response, url) {
     });
     if (!outcome.record) return json(response, 200, steeringResponse(null, {
       reason: outcome.reason || outcome.validation?.reason,
-      nextCondition: outcome.terminal ? "Start a new run or resume a non-terminal run before submitting steering." : "Submit one concrete, safely scoped correction to an active worker."
+      nextCondition: outcome.terminal ? "Start a new run or resume a non-terminal run before submitting steering."
+        : outcome.code === "worker_unavailable" ? "Wait for the worker outcome or resume its interrupted attempt before submitting steering."
+          : "Submit one concrete, safely scoped correction to an active worker."
     }));
     if (outcome.escalated) {
       await mirrorCheckpoint(ticketId);
