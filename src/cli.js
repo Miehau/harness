@@ -236,7 +236,7 @@ async function timeline(explicitId, ctx) {
     || null;
   const stage = (run.stages || []).find((item) => item.status === "active");
   const events = step
-    ? (step.attempts || []).flatMap((attempt) => attempt.events || [])
+    ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]
     : stage?.activity?.events || [];
   return {
     ticketId: id,

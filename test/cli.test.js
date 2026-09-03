@@ -53,6 +53,20 @@ test("select, timeline, resume, and queue clear talk to the same routes as the i
   });
 });
 
+test("timeline includes the active worker before its attempt is persisted", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "running" }] });
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      activeRuns: { build: { activity: { events: [{ type: "tool_start", tool: "read", args: '{"path":"src/app.js"}', at: "2026-09-03T00:00:00.000Z" }] } } }
+    });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.events.length, 1);
+    assert.equal(timeline.json.events[0].tool, "read");
+  });
+});
+
 test("approve without an id uses the selected ticket (run manually)", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({
