@@ -1677,7 +1677,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, ve
   };
   const beforeFix = await snapshotTree(current.workspace.cwd);
   const result = await harness.runStep({
-    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
+    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [],
     images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
     profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "review fixer"),

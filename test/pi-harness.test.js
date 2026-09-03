@@ -145,6 +145,19 @@ test("synthetic review steps can omit optional planning arrays", () => {
   assert.match(prompt, /one to three informative, direct sentences/);
 });
 
+test("review fixer context stays focused when historical artifacts are large", () => {
+  const plan = { title: "Ticket plan", summary: "Implement the ticket", nodes: [] };
+  const step = {
+    id: "review-fix-4", title: "Fix review findings", role: "implementation", harness: "pi",
+    contextPolicy: "seeded", permission: "write", writeScope: "**", skills: [], references: [],
+    prompt: "Correct the persisted findings.", expectedArtifacts: ["review-fix.md"],
+    acceptanceCriteria: ["The reported defect is resolved"]
+  };
+  const prompt = stepContext({ plan, step, artifacts: [] });
+  assert.match(prompt, /Correct the persisted findings/);
+  assert.ok(prompt.length < 10000);
+});
+
 test("runs the repository's root npm test script as a deterministic gate", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-checks-"));
   try {
