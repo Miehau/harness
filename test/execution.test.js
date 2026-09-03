@@ -310,6 +310,7 @@ test("an audited scope expansion starts a fresh bounded correction window", () =
 test("compact run and public state omit artifact bodies", () => {
   const run = {
     id: "t1", runId: "r1", status: "awaiting_approval", lastError: null,
+    ticket: { id: "t1", identifier: "MEA-1", title: "Compact title", source: "linear", state: { id: "s1", name: "In Progress", type: "started", color: "#fff" }, description: "large private description" },
     checkpoint: { kind: "awaiting_approval", title: "Approve" },
     workflow: { skillName: "shape-feature", checkpoints: [] },
     stages: [{ id: "design", diff: { files: ["a.js"], patch: "large stage patch" }, activity: { prompts: [{ content: "# private prompt" }], rawOutput: "private output", groups: [{ events: [] }], events: [{ type: "tool_end", output: "x".repeat(3000) }] } }],
@@ -325,6 +326,8 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(compact.status, "awaiting_approval");
   assert.equal(compact.checkpoint.title, "Approve");
   assert.equal(compact.workflow.skillName, "shape-feature");
+  assert.deepEqual(compact.ticket, { id: "t1", identifier: "MEA-1", title: "Compact title", source: "linear", provider: null, state: { id: "s1", name: "In Progress", type: "started" } });
+  assert.equal(compact.ticket.description, undefined);
   assert.equal("artifacts" in compact, false);
   const published = publicState({ selectedTicketId: "t1", ticketRuns: { t1: run }, retainedRuns: {} });
   assert.equal(published.ticketRuns.t1.artifacts[0].name, "design.md");

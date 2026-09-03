@@ -629,6 +629,14 @@ export function compactRun(run, revision = null) {
   return {
     id: run?.id || null,
     runId: run?.runId || null,
+    ticket: run?.ticket ? {
+      id: run.ticket.id,
+      identifier: run.ticket.identifier,
+      title: run.ticket.title,
+      source: run.ticket.source || null,
+      provider: run.ticket.provider || null,
+      state: run.ticket.state ? { id: run.ticket.state.id, name: run.ticket.state.name, type: run.ticket.state.type } : null
+    } : null,
     status: run?.status || null,
     checkpoint: run?.checkpoint || null,
     lastError: run?.lastError || null,
