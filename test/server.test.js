@@ -5,7 +5,21 @@ import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
+import { repositoryCheckReview } from "../src/server.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
+
+test("reports missing visual evidence instead of mislabeling passing checks", () => {
+  const review = repositoryCheckReview({
+    status: "failed",
+    failureKind: "visual-evidence",
+    command: "node .agent-plan/verify.mjs",
+    summary: "Visual verification produced no desktop or mobile evidence.",
+    output: "238 tests passed\nVerification passed"
+  });
+  assert.equal(review.findings[0].category, "evidence");
+  assert.equal(review.findings[0].claim, "Visual verification produced no desktop or mobile evidence.");
+  assert.doesNotMatch(review.findings[0].suggestedFix, /Make .* pass|238 tests passed/);
+});
 
 test("GET /api/health and compact run omit artifact content", async () => {
   await withDaemon(async (daemon) => {

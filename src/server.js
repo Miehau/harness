@@ -40,6 +40,25 @@ function cliOption(name, fallback, argv = process.argv.slice(2)) {
   return index >= 0 ? argv[index + 1] : fallback;
 }
 
+export function repositoryCheckReview(checks) {
+  const missingVisualEvidence = checks.failureKind === "visual-evidence";
+  return {
+    role: "deterministic",
+    summary: checks.summary,
+    findings: checks.status === "failed" ? [{
+      severity: "blocking",
+      category: missingVisualEvidence ? "evidence" : "tests",
+      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}`,
+      evidence: [],
+      suggestedFix: missingVisualEvidence
+        ? "Configure a preview command or make the verification contract capture the required visual evidence."
+        : `Make ${checks.command} pass.\n\n${checks.output}`,
+      confidence: "high"
+    }] : [],
+    checks
+  };
+}
+
 export async function createDaemon(options = {}) {
   const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
   const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
@@ -138,22 +157,6 @@ function captureStepActivity(ticketId, stepId, runId) {
   });
 }
 
-function repositoryCheckReview(checks) {
-  return {
-    role: "deterministic",
-    summary: checks.summary,
-    findings: checks.status === "failed" ? [{
-      severity: "blocking",
-      category: "tests",
-      claim: `Repository check failed: ${checks.command}`,
-      evidence: [],
-      suggestedFix: `Make ${checks.command} pass.\n\n${checks.output}`,
-      confidence: "high"
-    }] : [],
-    checks
-  };
-}
-
 async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
   let preview = null;
   let evidence = [];
@@ -163,7 +166,11 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
   }
   const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
   checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
-  if (required && !checks.evidence.length) Object.assign(checks, { status: "failed", summary: "Visual verification produced no desktop or mobile evidence." });
+  if (required && !checks.evidence.length) Object.assign(checks, {
+    status: "failed",
+    failureKind: "visual-evidence",
+    summary: "Visual verification produced no desktop or mobile evidence."
+  });
   if (preview || checks.evidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
