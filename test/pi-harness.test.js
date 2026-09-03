@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 
@@ -147,6 +147,13 @@ test("existing verification contracts remain correctable by visual steps", () =>
   assert.equal(plan.nodes[0].writeScope, "public,test,.agent-plan");
   assert.match(stepContext({ plan: original, step: original.nodes[0], artifacts: [] }), /Write scope: public,test,.agent-plan/);
   assert.equal(ensureVerificationContractStep(plan, true, true), plan);
+});
+
+test("focused screenshot corrections do not receive repository inspection tools", () => {
+  const finding = { severity: "high", category: "requirements", claim: "The screenshot omits the proof panel", evidence: [{ file: "proof.png", line: 1 }] };
+  assert.deepEqual(verificationTools([finding], [{ data: "image" }]), []);
+  assert.deepEqual(verificationTools([finding], []), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(verificationTools([{ ...finding, evidence: [{ file: "src/app.js", line: 1 }] }], [{ data: "image" }]), ["read", "grep", "find", "ls"]);
 });
 
 test("synthetic review steps can omit optional planning arrays", () => {

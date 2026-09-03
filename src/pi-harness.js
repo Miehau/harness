@@ -392,6 +392,11 @@ export function workerWriteScope(step) {
   return [...new Set(scope)].join(",");
 }
 
+export function verificationTools(focusFindings = [], images = []) {
+  const imageFinding = (finding) => (finding.evidence || []).some(({ file }) => /\.(?:png|jpe?g|webp)$/i.test(String(file || "")));
+  return focusFindings.length && images.length && focusFindings.every(imageFinding) ? [] : ["read", "grep", "find", "ls"];
+}
+
 function includeVisualVerificationScope(plan) {
   if (!flattenSteps(plan).some((step) => workerWriteScope(step) !== String(step.writeScope || ""))) return plan;
   const scoped = structuredClone(plan);
@@ -973,7 +978,7 @@ export class PiHarness {
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: ["read", "grep", "find", "ls"],
+      tools: verificationTools(focusFindings, images),
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
@@ -1003,7 +1008,7 @@ export class PiHarness {
 
 Review this slice without relying on the implementation conversation. Inspect repository evidence. The deterministic gate has already run; use its result below rather than attempting to rerun it.
 
-${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}` : "This is the initial verification pass for this slice."}
+${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}${verificationTools(focusFindings, images).length ? "" : "\n\nThese findings concern only the attached visual evidence. Judge the supplied screenshots directly and return the required JSON without repository inspection."}` : "This is the initial verification pass for this slice."}
 
 Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than ${MAX_VERIFICATION_ACTIONS} repository read, search, find, or list actions.
 Treat the supplied acceptance criteria, diff, worker artifact, and deterministic result as the primary review packet. Start there. Open an unchanged repository file only when you can name the concrete medium-or-higher risk that file will confirm or refute; use targeted reads and searches rather than broad repository surveys. Stop inspecting once every acceptance criterion and concrete risk is resolved.
