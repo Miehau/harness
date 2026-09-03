@@ -499,7 +499,10 @@ export function findingsFingerprint(findings = []) {
   return actionableFindings([{ findings }])
     .map((finding) => {
       const evidence = finding.evidence?.[0] || {};
-      return `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
+      const diagnostic = !evidence.file || /^repository check failed:/i.test(String(finding.claim || ""))
+        ? finding.suggestedFix || finding.suggested_fix || ""
+        : "";
+      return `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}:${diagnostic}`.toLowerCase();
     })
     .sort()
     .join("|");

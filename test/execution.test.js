@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -270,6 +270,14 @@ test("correction pauses when findings repeat but allows distinct medium-or-highe
   const capped = shouldPauseCorrection({ round: 12, findings, previousFingerprint: "other" });
   assert.equal(capped.pause, true);
   assert.match(capped.reason, /12 verification attempts/);
+});
+
+test("changed repository failure diagnostics count as correction progress", () => {
+  const first = [{ severity: "blocking", category: "tests", claim: "Repository check failed: node verify.mjs", suggestedFix: "not ok 1 - request returned 400" }];
+  const second = [{ severity: "blocking", category: "tests", claim: "Repository check failed: node verify.mjs", suggestedFix: "not ok 1 - expected 0 actual 1" }];
+  const fingerprint = findingsFingerprint(first);
+  assert.equal(shouldPauseCorrection({ round: 2, findings: first, previousFingerprint: fingerprint }).pause, true);
+  assert.equal(shouldPauseCorrection({ round: 2, findings: second, previousFingerprint: fingerprint }).pause, false);
 });
 
 test("recurring review clusters survive changed wording and duplicate reviewers", () => {
