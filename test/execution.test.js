@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, finalReviewFixStep, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -325,6 +325,14 @@ test("correction pause output retains the latest actionable evidence", () => {
   assert.match(reason, /\[HIGH\] Sentence-final root paths evade scope checks/);
   assert.match(reason, /src\/scope\.js:42/);
   assert.match(reason, /table-driven regression/);
+});
+
+test("final-review fixes keep audit prose out of the product repository", () => {
+  const findings = [{ severity: "high", claim: "Cleanup can miss a late child" }];
+  const step = finalReviewFixStep(2, findings, ["correctness:src/process.js"]);
+  assert.deepEqual(step.expectedArtifacts, []);
+  assert.match(step.prompt, /Cleanup can miss a late child/);
+  assert.match(step.prompt, /Fix the general invariant/);
 });
 
 test("an interrupted final-review fix resumes from persisted findings", () => {

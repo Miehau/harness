@@ -68,6 +68,21 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
   };
 }
 
+export function finalReviewFixStep(round, findings, rootCauseClusters = []) {
+  const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
+  return {
+    id: `review-fix-${round}`,
+    title: `Fix final review findings — round ${round}`,
+    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}`,
+    contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
+    permission: "write", writeScope: "**", skills: [], references: [],
+    // Review prose belongs in the harness audit store, never in the product repository.
+    expectedArtifacts: [],
+    acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
+    status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
+  };
+}
+
 export function appendBounded(value, addition, limit) {
   const chunk = String(addition || "");
   if (chunk.length >= limit) return chunk.slice(-limit);

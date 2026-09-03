@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1692,17 +1692,8 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
 
 async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
   const current = ticketRun(store.read(), ticketId);
-  const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
-  const fixStep = {
-    id: `review-fix-${round}`,
-    title: `Fix final review findings — round ${round}`,
-    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}`,
-    contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
-    permission: "write", writeScope: "**", skills: [], references: [],
-    expectedArtifacts: [`review-fixes-round-${round}.md`],
-    acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
-    status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
-  };
+  const fixArtifactName = `review-fixes-round-${round}.md`;
+  const fixStep = finalReviewFixStep(round, findings, rootCauseClusters);
   await update((state) => {
     const run = ticketRun(state, ticketId);
     run.status = "fixing";
@@ -1737,7 +1728,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
     return false;
   }
   const fixArtifact = await persistArtifact(dataDir, current.ticket, {
-    runId: current.runId, name: fixStep.expectedArtifacts[0], content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
+    runId: current.runId, name: fixArtifactName, content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
   });
   await update((state) => {
     const run = ticketRun(state, ticketId);
