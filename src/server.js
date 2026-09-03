@@ -30,6 +30,7 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
+import { beginStepAttempt, claimNextSteering, failSteering, markSteeringDelivered, submitSteering, targetMatches } from "./steering.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -267,6 +268,75 @@ function ticketRun(state, ticketId) {
   const run = state.ticketRuns[ticketId];
   if (!run) throw new Error("Ticket run not found");
   return run;
+}
+
+function steeringResponse(record, { reason = null, nextCondition = null } = {}) {
+  const target = record && { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId };
+  const state = record?.state || "rejected";
+  const defaultCondition = state === "queued" ? "The bound worker must be active before Pi delivery can begin."
+    : state === "claimed" ? "Wait for the current Pi delivery claim to settle or expire."
+    : state === "withheld" ? "Answer the steering checkpoint before changing scope or authority."
+    : state === "failed" ? "Inspect the delivery audit and submit a new focused correction if appropriate."
+    : state === "delivered" ? "The worker can acknowledge the delivered correction in its report."
+    : "No further steering action is required.";
+  return { steerId: record?.id || null, target: target || null, state, reason: reason || record?.reason || null, nextCondition: nextCondition || defaultCondition };
+}
+
+function appendSteeringRejection(run, input, outcome) {
+  run.steeringRejections ||= [];
+  run.steeringRejections.push({
+    id: `steer-rejection-${randomUUID()}`,
+    instruction: String(input.instruction ?? input.text ?? "").trim(),
+    author: String(input.author || "operator").trim() || "operator",
+    code: outcome.code || outcome.validation?.code || "rejected",
+    reason: outcome.reason || outcome.validation?.reason || "The steering request was rejected.",
+    createdAt: new Date().toISOString()
+  });
+  if (run.steeringRejections.length > 50) run.steeringRejections.splice(0, run.steeringRejections.length - 50);
+  return run.steeringRejections.at(-1);
+}
+
+async function drainSteering(ticketId, target) {
+  const next = ticketRun(store.read(), ticketId).steering?.records?.find((record) =>
+    record.state === "queued" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId
+  );
+  if (next) await deliverSteering(ticketId, next.id);
+}
+
+async function deliverSteering(ticketId, steerId) {
+  if (typeof harness.steer !== "function") return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  let claim = null;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    const record = run.steering?.records?.find((item) => item.id === steerId);
+    if (!record || record.state !== "queued") return;
+    claim = claimNextSteering(run, { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId });
+  });
+  if (!claim) return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  try {
+    const evidence = await harness.steer({
+      ticketId: claim.ticketId,
+      runId: claim.runId,
+      stepId: claim.stepId,
+      attemptId: claim.attemptId,
+      steerId: claim.id,
+      instruction: `[agent-plan-steer:${claim.id}]\n${claim.instruction}`
+    });
+    let delivered = null;
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      if (!targetMatches(run, claim)) {
+        failSteering(run, claim.id, { reason: "The bound worker attempt changed before Pi accepted this correction.", code: "target_replaced" });
+        return;
+      }
+      delivered = markSteeringDelivered(run, claim.id, claim.claim.claimId, { evidence: evidence || { queuedBy: "pi" } });
+    });
+    if (delivered) await drainSteering(ticketId, claim);
+    return delivered || ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  } catch (error) {
+    // Keep a claimed record for bounded, crash-safe recovery instead of guessing whether Pi queued it.
+    return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  }
 }
 
 async function promptsForStage(run, stage) {
@@ -1025,7 +1095,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const currentStep = findNode(latest.plan, stepId);
         const workerRunId = randomUUID();
         const startedAt = new Date().toISOString();
-        const attemptId = `attempt-${(currentStep.attempts?.length || 0) + 1}`;
+        let attemptId;
         const contextArtifacts = [
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
           ...dependencyArtifacts(latest.plan, currentStep)
@@ -1033,10 +1103,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
+          const attempt = beginStepAttempt(current, stepId, { workerRunId, resume: target.status === "interrupted" });
+          attemptId = attempt.id;
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          current.activeRuns[stepId] = { runId: workerRunId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
+          Object.assign(current.activeRuns[stepId], { lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false });
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
@@ -2164,6 +2236,42 @@ async function api(request, response, url) {
     if (!step) throw new Error("Step not found");
     return json(response, 200, await harness.sessionTrace(step.sessionFile));
   }
+  const steering = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steering$/);
+  if (request.method === "GET" && steering) {
+    const run = ticketRun(store.read(), decodeURIComponent(steering[1]));
+    return json(response, 200, { records: run.steering?.records || [], rejections: run.steeringRejections || [] });
+  }
+  if (request.method === "POST" && steering) {
+    const ticketId = decodeURIComponent(steering[1]);
+    const input = await body(request);
+    let outcome;
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      outcome = submitSteering(run, input, { author: input.author || "operator", stepId: String(input.stepId || "").trim() || null });
+      if (!outcome.record) appendSteeringRejection(run, input, outcome);
+      if (outcome.escalated) {
+        run.status = "awaiting_input";
+        run.checkpoint = {
+          id: randomUUID(), kind: "needs_input", title: "Steering requires clarification",
+          prompt: `${outcome.validation.reason}\n\nInstruction:\n${outcome.record.instruction}`,
+          questions: [outcome.validation.reason], stepId: outcome.record.stepId, source: "steering", steerId: outcome.record.id,
+          createdAt: new Date().toISOString()
+        };
+        setStage(run, "implement", "blocked", outcome.validation.reason);
+      }
+    });
+    if (!outcome.record) return json(response, 200, steeringResponse(null, {
+      reason: outcome.reason || outcome.validation?.reason,
+      nextCondition: outcome.terminal ? "Start a new run or resume a non-terminal run before submitting steering." : "Submit one concrete, safely scoped correction to an active worker."
+    }));
+    if (outcome.escalated) {
+      await mirrorCheckpoint(ticketId);
+      return json(response, 200, steeringResponse(outcome.record));
+    }
+    const record = outcome.paused ? outcome.record : await deliverSteering(ticketId, outcome.record.id);
+    return json(response, 200, steeringResponse(record, outcome.paused ? { nextCondition: "Resume this paused run manually; the correction remains queued for its saved attempt." } : {}));
+  }
+
   const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)\/stages\/([^/]+)\/prompts$/);
   if (request.method === "GET" && stagePrompts) {
     const run = ticketRun(store.read(), decodeURIComponent(stagePrompts[1]));

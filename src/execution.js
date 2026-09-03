@@ -533,6 +533,8 @@ export function compactRun(run, revision = null) {
     checkpoint: run?.checkpoint || null,
     lastError: run?.lastError || null,
     workflow: run?.workflow || null,
+    steering: run?.steering || { nextSequence: 1, records: [] },
+    steeringRejections: run?.steeringRejections || [],
     revision
   };
 }

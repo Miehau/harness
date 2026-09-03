@@ -93,16 +93,23 @@ export function activeAttemptForStep(step, activeRun = null) {
 }
 
 export function resolveSteeringTarget(run, { stepId = null } = {}) {
-  if (!run || terminalRunStatusSet.has(run.status) || !["running", "fixing", "verifying", "reviewing"].includes(run.status)) {
+  const permanentlyTerminal = new Set(["completed", "failed", "needs_attention", "cancelled"]);
+  if (!run || permanentlyTerminal.has(run.status)) {
+    return { ok: false, code: "target_not_active", terminal: true, reason: "This ticket run is terminal; start or resume the appropriate run before steering it." };
+  }
+  const paused = run.status === "paused";
+  if (!paused && !["running", "fixing", "verifying", "reviewing"].includes(run.status)) {
     return { ok: false, code: "target_not_active", reason: "The ticket run has no active worker target." };
   }
-  const activeEntries = Object.entries(run.activeRuns || {}).filter(([id, active]) => active && (!stepId || id === stepId));
-  if (activeEntries.length !== 1) return { ok: false, code: activeEntries.length ? "ambiguous_target" : "target_not_active", reason: activeEntries.length ? "Select exactly one active step." : "The selected step is not active." };
+  const activeEntries = paused
+    ? flattenSteps(run.plan).filter((step) => step.status === "interrupted" && step.activeAttempt?.status === "interrupted" && (!stepId || step.id === stepId)).map((step) => [step.id, null])
+    : Object.entries(run.activeRuns || {}).filter(([id, active]) => active && (!stepId || id === stepId));
+  if (activeEntries.length !== 1) return { ok: false, code: activeEntries.length ? "ambiguous_target" : "target_not_active", reason: activeEntries.length ? "Select exactly one resumable step." : "The selected step is not active." };
   const [resolvedStepId, active] = activeEntries[0];
   const step = findNode(run.plan, resolvedStepId);
   const attempt = activeAttemptForStep(step, active);
-  if (!step || !attempt?.id || !["running", "fixing"].includes(step.status)) return { ok: false, code: "attempt_not_active", reason: "The active step has no durable logical attempt." };
-  return { ok: true, target: { ticketId: run.id, runId: run.runId, stepId: resolvedStepId, attemptId: attempt.id } };
+  if (!step || !attempt?.id || (paused ? step.status !== "interrupted" : !["running", "fixing"].includes(step.status))) return { ok: false, code: "attempt_not_active", reason: "The active step has no durable logical attempt." };
+  return { ok: true, target: { ticketId: run.id, runId: run.runId, stepId: resolvedStepId, attemptId: attempt.id }, paused };
 }
 
 export function submitSteering(run, value, { author = "operator", stepId = null, now = Date.now(), idFactory = randomUUID } = {}) {
@@ -131,7 +138,7 @@ export function submitSteering(run, value, { author = "operator", stepId = null,
   };
   event(record, state === "queued" ? "accepted" : "withheld", at, validation.reason ? { reason: validation.reason, code: validation.code } : {});
   ledger.records.push(record);
-  return { accepted: validation.ok, escalated: !validation.ok, record, validation };
+  return { accepted: validation.ok, escalated: !validation.ok, paused: Boolean(target.paused), record, validation };
 }
 
 export function targetMatches(run, record) {
