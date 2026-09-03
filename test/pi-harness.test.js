@@ -226,6 +226,7 @@ test("bounded repository failure output retains both context and the final faili
       console.log("    fatal: failed to read .git/worktrees/feature/commondir");
       console.log("  code: 128");
       console.log("Final proof dashboard did not render selected MEA-55 workflow within 45 seconds");
+      console.log("AFTER-FAILURE-NOISE:" + "c".repeat(120000));
       console.error("CHROME-NOISE:" + "b".repeat(120000));
       process.exit(1);
     `);

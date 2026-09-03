@@ -116,10 +116,10 @@ export async function projectEnvironment(cwd, config, { source = process.env, ex
   return environment;
 }
 
-export function redactCommandOutput(value, environment) {
+export function redactCommandOutput(value, environment, { truncate = true } = {}) {
   let output = String(value || "");
   for (const secret of Object.values(environment).filter((item) => String(item).length >= 8)) output = output.replaceAll(String(secret), "[REDACTED]");
-  return output.slice(-100000);
+  return truncate ? output.slice(-100000) : output;
 }
 
 export async function runProjectCommand(cwd, name, { signal, execImpl = execFileTree, source = process.env } = {}) {

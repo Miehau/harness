@@ -711,8 +711,9 @@ export class PiHarness {
         if (signal?.aborted) throw error;
         // Bound each process channel before combining them. A noisy stderr tail
         // must not evict the causal stdout line (or the process error itself).
-        const rawOutput = redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).map(eventText).join("\n"), environment);
-        const highlights = failureHighlights(rawOutput);
+        const channels = [error.stdout, error.stderr, error.message].filter(Boolean);
+        const rawOutput = redactCommandOutput(channels.map(eventText).join("\n"), environment);
+        const highlights = failureHighlights(redactCommandOutput(channels.join("\n"), environment, { truncate: false }));
         const output = eventText(`${rawOutput}${highlights ? `\n\nFailure highlights:\n${highlights}` : ""}`);
         if (!attempt && transientRepositoryCheckFailure(output)) continue;
         return { status: "failed", command, summary: `${command} failed.`, output, failureHighlights: highlights, evidence: [], durationMs: Date.now() - startedAt };
