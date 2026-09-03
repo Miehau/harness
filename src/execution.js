@@ -485,6 +485,20 @@ export function pendingReviewFix(reviews = []) {
   return { round: Number(review.round) || reviews.length, findings };
 }
 
+export function interruptedStepFeedback(step = {}) {
+  const attempts = Array.isArray(step.attempts) ? step.attempts : [];
+  const latest = attempts.at(-1);
+  if (latest?.status === "failed"
+    && latest.report?.status === "completed"
+    && latest.checks?.status === "passed"
+    && !latest.verification) {
+    return "The worker result and deterministic checks are already complete. The independent verifier failed before producing a result. Preserve the current implementation, make no edits, and report completed so the harness can retry verification.";
+  }
+  const priorVerification = [...attempts].reverse().find((attempt) => attempt.verification)?.verification;
+  const findings = actionableFindings([priorVerification || {}]);
+  return findings.length ? `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}` : "";
+}
+
 export function correctionPauseReason(reason, findings = []) {
   const details = actionableFindings([{ findings }]).map((finding) => {
     const evidence = finding.evidence?.[0] || {};

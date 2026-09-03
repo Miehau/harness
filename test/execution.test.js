@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -266,6 +266,18 @@ test("an interrupted final-review fix resumes from persisted findings", () => {
   assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings });
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "completed" } } }]), null);
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: [] }]), null);
+});
+
+test("a verifier transport failure does not resurrect superseded correction feedback", () => {
+  const oldFinding = { severity: "blocking", claim: "Old repository failure", suggestedFix: "Very large stale log" };
+  const step = { attempts: [
+    { status: "verification_failed", verification: { findings: [oldFinding] } },
+    { status: "failed", report: { status: "completed" }, checks: { status: "passed" }, verification: null, error: "Provider rejected image" }
+  ] };
+  const feedback = interruptedStepFeedback(step);
+  assert.match(feedback, /independent verifier failed/);
+  assert.match(feedback, /make no edits/);
+  assert.doesNotMatch(feedback, /Old repository failure|stale log/);
 });
 
 test("an audited scope expansion starts a fresh bounded correction window", () => {
