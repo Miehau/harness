@@ -442,17 +442,29 @@ export function nextRunnableBatch(plan) {
 const actionableSeverities = new Set(["critical", "high", "medium", "blocking", "warning"]);
 
 export function actionableFindings(reviews) {
-  const seen = new Set();
-  return reviews.flatMap((review) => review.findings || [])
-    .filter((finding) => {
-      const severity = String(finding.severity || "").toLowerCase();
-      if (!actionableSeverities.has(severity)) return false;
-      const evidence = finding.evidence?.[0] || {};
-      const key = `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  const findings = reviews.flatMap((review) => review.findings || [])
+    .filter((finding) => actionableSeverities.has(String(finding.severity || "").toLowerCase()));
+  const hasSpecificTestFinding = findings.some((finding) =>
+    String(finding.category || "").toLowerCase() === "tests"
+    && (finding.evidence?.[0]?.file || finding.acceptanceCriterion)
+    && !/^repository check failed:/i.test(String(finding.claim || ""))
+  );
+  const unique = new Map();
+  for (const finding of findings) {
+    if (hasSpecificTestFinding
+      && String(finding.category || "").toLowerCase() === "tests"
+      && /^repository check failed:/i.test(String(finding.claim || ""))) continue;
+    const evidence = finding.evidence?.[0] || {};
+    const criterion = String(finding.acceptanceCriterion || "").trim().toLowerCase();
+    const file = String(evidence.file || "").trim().toLowerCase();
+    const key = criterion && file
+      ? `${String(finding.category || "general").toLowerCase()}:${criterion}:${file}`
+      : `${file}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
+    const previous = unique.get(key);
+    const detail = (finding.evidence?.length || 0) * 1000 + String(finding.claim || "").length + String(finding.suggestedFix || finding.suggested_fix || "").length;
+    if (!previous || detail > previous.detail) unique.set(key, { finding, detail });
+  }
+  return [...unique.values()].map(({ finding }) => finding);
 }
 
 export const MAX_CORRECTION_ROUNDS = 12;

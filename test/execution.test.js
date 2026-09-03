@@ -51,6 +51,19 @@ test("final review keeps every unique actionable finding", () => {
   assert.equal(findings.length, 3);
 });
 
+test("final review collapses a generic test failure and reviewer paraphrases into one concrete defect", () => {
+  const criterion = "Full repository tests pass.";
+  const findings = actionableFindings([
+    { findings: [{ severity: "blocking", category: "tests", claim: "Repository check failed: node verify.mjs", suggestedFix: "not ok 4" }] },
+    { findings: [{ severity: "high", category: "tests", claim: "An async test was cancelled.", acceptanceCriterion: criterion, evidence: [{ file: "test/run.test.js", line: 20 }] }] },
+    { findings: [{ severity: "high", category: "tests", claim: "The worker test deadlocks while awaiting resume.", acceptanceCriterion: criterion, evidence: [{ file: "test/run.test.js", line: 24 }, { file: "src/server.js", line: 10 }], suggestedFix: "Start resume without awaiting it, release the worker, and then await resume." }] },
+    { findings: [{ severity: "high", category: "requirements", claim: "Ambiguous input is accepted.", evidence: [{ file: "src/steering.js", line: 12 }] }] }
+  ]);
+  assert.equal(findings.length, 2);
+  assert.match(findings[0].claim, /deadlocks/);
+  assert.match(findings[1].claim, /Ambiguous/);
+});
+
 test("automatic corrections ignore findings below medium severity", () => {
   const findings = actionableFindings([{ findings: [
     { severity: "low", claim: "Could rename this helper" },
