@@ -415,16 +415,16 @@ export function projectCommandTool(cwd, signal) {
   return defineTool({
     name: "project_command",
     label: "Project command",
-    description: `Run one named argv command declared in ${projectConfigPath}; arbitrary shell strings and extra arguments are not accepted.`,
+    description: `Run one repository-approved argv command. Optional safe word arguments can narrow commands such as test filters.`,
     promptSnippet: "Run a repository-approved development command",
     promptGuidelines: ["Use this for focused tests, lint, type checks, formatting, and builds declared by the repository."],
-    parameters: Type.Object({ name: Type.String() }),
-    async execute(_toolCallId, { name }) {
+    parameters: Type.Object({ name: Type.String(), args: Type.Optional(Type.Array(Type.String())) }),
+    async execute(_toolCallId, { name, args = [] }) {
       if (name === "verify") return {
         content: [{ type: "text", text: `The framework runs ${verificationEntry} once after worker_report; continue without rerunning it.` }],
         details: { status: "deferred", command: name }, isError: false
       };
-      const result = await runProjectCommand(cwd, name, { signal });
+      const result = await runProjectCommand(cwd, name, { signal, args });
       return { content: [{ type: "text", text: result.output || `${name} ${result.status}` }], details: result, isError: result.status === "failed" };
     }
   });

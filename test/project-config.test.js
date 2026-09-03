@@ -13,6 +13,16 @@ test("detects conventional package commands when no contract exists", async () =
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("keeps conventional test commands available beside an explicit contract", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-config-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node tests.js" } }));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { verify: ["node", "verify.js"] } }));
+    assert.deepEqual((await loadProjectConfig(root)).commands, { test: ["npm", "run", "test"], verify: ["node", "verify.js"] });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("rejects shell escapes and inline code evaluators", () => {
   assert.throws(() => normalizeProjectConfig({ commands: { bad: ["bash", "-lc", "rm -rf ."] } }), /blocked executable/);
   assert.throws(() => normalizeProjectConfig({ commands: { bad: ["node", "-e", "process.exit()"] } }), /inline code/);
@@ -69,5 +79,18 @@ test("runs a named argv command without a shell or unlisted daemon secrets", asy
     const result = await runProjectCommand(root, "check", { source: { PATH: process.env.PATH, UNLISTED: "must-not-leak" } });
     assert.equal(result.status, "passed");
     assert.equal(result.output.trim(), "isolated");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("allows bounded word arguments for focused commands", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { test: ["node", "tests.mjs"] } }));
+    let called;
+    const execImpl = async (_executable, args) => { called = args; return { stdout: "ok", stderr: "" }; };
+    await runProjectCommand(root, "test", { args: ["process-containment"], execImpl, source: {} });
+    assert.deepEqual(called, ["tests.mjs", "process-containment"]);
+    await assert.rejects(runProjectCommand(root, "test", { args: ["--watch"], execImpl }), /unsafe arguments/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
