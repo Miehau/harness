@@ -4,8 +4,13 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PreviewManager } from "../src/previews.js";
+import { PreviewManager, previewChromiumPath } from "../src/previews.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
+
+test("locates Chromium from common CI environment variables", async () => {
+  assert.equal(await previewChromiumPath({ CHROME_BIN: process.execPath }), process.execPath);
+  assert.equal(await previewChromiumPath({ GOOGLE_CHROME_BIN: process.execPath }), process.execPath);
+});
 
 test("does not reuse a port held by another ticket preview", async () => {
   const ports = [47821, 47821, 47822];

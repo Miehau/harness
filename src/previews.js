@@ -30,11 +30,15 @@ export function availablePort(host = "127.0.0.1") {
 async function chromiumPath(source = process.env) {
   const candidates = [
     source.CHROMIUM_PATH,
+    source.CHROME_BIN,
+    source.GOOGLE_CHROME_BIN,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome"
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/snap/bin/chromium"
   ].filter(Boolean);
   for (const candidate of candidates) try { await access(candidate); return candidate; } catch {}
   throw new Error("Chromium was not found; set CHROMIUM_PATH for visual evidence capture");
