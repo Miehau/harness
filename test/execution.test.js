@@ -267,7 +267,7 @@ test("recurring review clusters survive changed wording and duplicate reviewers"
     { actionableFindings: [finding("Postgres is accepted"), finding("OAuth is accepted")] },
     { actionableFindings: [finding("CSV export is accepted")] },
     { actionableFindings: [finding("SQLite is accepted")] }
-  ]), ["requirements:src/steering.js"]);
+  ]), ["requirements:src/steering.js:12"]);
   assert.deepEqual(recurringReviewClusters([
     { actionableFindings: [finding("First occurrence")] },
     { actionableFindings: [finding("Second occurrence")] }
@@ -276,6 +276,11 @@ test("recurring review clusters survive changed wording and duplicate reviewers"
     { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] },
     { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] },
     { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] }
+  ]), []);
+  assert.deepEqual(recurringReviewClusters([
+    { actionableFindings: [{ ...finding("First defect"), evidence: [{ file: "test/run.test.js", line: 10 }] }] },
+    { actionableFindings: [{ ...finding("Second defect"), evidence: [{ file: "test/run.test.js", line: 40 }] }] },
+    { actionableFindings: [{ ...finding("Third defect"), evidence: [{ file: "test/run.test.js", line: 80 }] }] }
   ]), []);
 });
 

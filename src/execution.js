@@ -486,7 +486,8 @@ export function recurringReviewClusters(reviews = [], minRounds = 3) {
       const evidence = finding.evidence?.[0] || {};
       const surface = String(evidence.file || finding.acceptanceCriterion || "").trim().toLowerCase();
       if (!surface) return null;
-      return `${String(finding.category || "general").toLowerCase()}:${surface}`;
+      const location = evidence.file && evidence.line ? `${surface}:${evidence.line}` : surface;
+      return `${String(finding.category || "general").toLowerCase()}:${location}`;
     }).filter(Boolean));
     for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
   }
