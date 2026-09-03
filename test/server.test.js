@@ -302,6 +302,10 @@ test("operator can auditably waive a stopped false verifier finding without acce
     assert.equal(run.plan.nodes[0].status, "review_ready");
     assert.equal(run.plan.nodes[0].verificationWaivers[0].reason, "This behavior is explicitly owned by the next slice.");
     assert.deepEqual(run.plan.nodes[0].verificationWaivers[0].findings, [finding]);
+    assert.deepEqual(run.plan.nodes[0].attempts[0].verificationDisposition, {
+      status: "waived", at: run.plan.nodes[0].verificationWaivers[0].at,
+      reason: "This behavior is explicitly owned by the next slice.", source: "operator"
+    });
     assert.equal(run.checkpoint.kind, "step_review");
     assert.match(run.checkpoint.title, /verification waiver/);
   });

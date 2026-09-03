@@ -2536,8 +2536,10 @@ async function api(request, response, url) {
       if (!step || step.status !== "needs_attention" || run.checkpoint?.stepId !== stepId || run.checkpoint?.source !== "verification") {
         throw new Error("Only a stopped verifier finding can be waived");
       }
-      const verification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification;
-      const waiver = { at: new Date().toISOString(), reason, source: "operator", findings: actionableFindings([verification]) };
+      const attempt = [...(step.attempts || [])].reverse().find((item) => item.verification);
+      if (!attempt) throw new Error("No verifier finding is available to waive");
+      const waiver = { at: new Date().toISOString(), reason, source: "operator", findings: actionableFindings([attempt?.verification]) };
+      attempt.verificationDisposition = { status: "waived", at: waiver.at, reason, source: waiver.source };
       step.verificationWaivers ||= [];
       step.verificationWaivers.push(waiver);
       step.status = "review_ready";
