@@ -37,23 +37,28 @@ function commandExecutable(cwd, command) {
   return command[0].startsWith("./") ? resolve(cwd, command[0]) : command[0];
 }
 
-async function waitUntilReady(url, child, fetchImpl, timeoutMs = 60000) {
+async function waitUntilReady(url, child, fetchImpl, timeoutMs = 60000, probeTimeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Preview process exited with code ${child.exitCode}`);
-    try { if ((await fetchImpl(url)).ok) return; } catch {}
-    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now())));
+    try { if ((await fetchImpl(url, { signal: controller.signal })).ok) return; } catch {}
+    finally { clearTimeout(timer); }
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500, Math.max(0, deadline - Date.now()))));
   }
   throw new Error(`Preview did not become ready within ${Math.round(timeoutMs / 1000)} seconds`);
 }
 
 export class PreviewManager {
-  constructor({ dataDir, spawnImpl = spawn, execImpl = exec, fetchImpl = fetch, portImpl = availablePort } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, execImpl = exec, fetchImpl = fetch, portImpl = availablePort, readyTimeoutMs = 60000, probeTimeoutMs = 2000 } = {}) {
     this.dataDir = dataDir;
     this.spawn = spawnImpl;
     this.exec = execImpl;
     this.fetch = fetchImpl;
     this.port = portImpl;
+    this.readyTimeoutMs = readyTimeoutMs;
+    this.probeTimeoutMs = probeTimeoutMs;
     this.active = new Map();
     this.ports = new Set();
   }
@@ -91,7 +96,7 @@ export class PreviewManager {
     let output = "";
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
     const url = `http://127.0.0.1:${port}`;
-    try { await waitUntilReady(url, child, this.fetch); }
+    try { await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs); }
     catch (error) { this.ports.delete(port); child.kill("SIGTERM"); throw new Error(`${error.message}\n${output}`.trim()); }
     const publicPreview = { id, cwd, command: commandName, port, url, startedAt: new Date().toISOString() };
     this.active.set(id, { child, cwd, get output() { return output; }, public: publicPreview });

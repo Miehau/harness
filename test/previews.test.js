@@ -65,6 +65,26 @@ test("starts a conventional package preview when a legacy contract omits one", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a hanging preview probe cannot bypass the readiness deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "node server.js" } }));
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+    let killed = false;
+    child.kill = () => { killed = true; child.exitCode = 0; child.emit("exit", 0); };
+    const manager = new PreviewManager({
+      portImpl: async () => 47821,
+      spawnImpl: () => child,
+      readyTimeoutMs: 30,
+      probeTimeoutMs: 5,
+      fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))
+    });
+    await assert.rejects(manager.ensure({ id: "hanging-preview", cwd: root }), /Preview did not become ready/);
+    assert.equal(killed, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("stopAll terminates every preview process", () => {
   const manager = new PreviewManager({});
   const killed = [];
