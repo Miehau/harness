@@ -549,13 +549,53 @@ export function artifactMetadata(artifact) {
   return rest;
 }
 
+function publicEvent(event, detailed) {
+  const clone = { ...event };
+  for (const key of ["args", "output", "result", "detail"]) {
+    if (typeof clone[key] !== "string") continue;
+    if (!detailed) delete clone[key];
+    else if (clone[key].length > 2000) clone[key] = `${clone[key].slice(0, 2000)}\n… output truncated; open the saved session for full detail`;
+  }
+  return clone;
+}
+
+function publicActivity(activity, detailed = true) {
+  if (!activity) return activity;
+  const clone = { ...activity, events: (activity.events || []).map((event) => publicEvent(event, detailed)) };
+  delete clone.prompts;
+  delete clone.rawOutput;
+  delete clone.groups;
+  return clone;
+}
+
+function diffSummary(diff) {
+  if (!diff) return diff;
+  const { patch, ...summary } = diff;
+  return summary;
+}
+
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
-  for (const stage of clone.stages || []) if (stage.activity) delete stage.activity.prompts;
+  for (const stage of clone.stages || []) {
+    stage.activity = publicActivity(stage.activity);
+    stage.diff = diffSummary(stage.diff);
+  }
   for (const step of flattenSteps(clone.plan)) {
     if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
+    for (const [index, attempt] of (step.attempts || []).entries()) {
+      const detailed = index === step.attempts.length - 1;
+      attempt.events = (attempt.events || []).map((event) => publicEvent(event, detailed));
+      delete attempt.activityGroups;
+      delete attempt.rawOutput;
+      if (attempt.verification) delete attempt.verification.rawOutput;
+      if (Array.isArray(attempt.artifacts)) attempt.artifacts = attempt.artifacts.map(artifactMetadata);
+    }
+  }
+  for (const review of clone.reviews || []) {
+    review.diff = diffSummary(review.diff);
+    if (review.fix) review.fix.diff = diffSummary(review.fix.diff);
   }
   return clone;
 }
@@ -563,9 +603,10 @@ export function publicRun(run) {
 export function publicState(state) {
   if (!state) return state;
   const clone = structuredClone(state);
-  for (const bucket of ["ticketRuns", "retainedRuns"]) {
-    for (const [id, run] of Object.entries(clone[bucket] || {})) clone[bucket][id] = publicRun(run);
+  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
+    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
   }
+  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
   return clone;
 }
 

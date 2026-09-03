@@ -859,17 +859,26 @@ function renderSelection() {
 }
 
 function selectTicket(ticketId, stepId = null, persist = true) {
-  state.selectedTicketId = ticketId;
-  selectedStepId = stepId;
-  selectedStageId = null;
-  selectedArtifactId = null;
-  activeTab = stepId ? "run" : "activity";
-  rememberView();
-  render();
-  if (!persist) return;
   const selection = ++latestTicketSelection;
   pendingTicketSelections++;
-  api(`/api/tickets/${encodeURIComponent(ticketId)}/select`, { method: "POST", body: "{}" })
+  const request = persist
+    ? api(`/api/tickets/${encodeURIComponent(ticketId)}/select`, { method: "POST", body: "{}" })
+    : api("/api/state").then((next) => ({ ...next, run: next.ticketRuns?.[ticketId] }));
+  request
+    .then((result) => {
+      if (selection !== latestTicketSelection) return;
+      if (!persist) state = result;
+      else {
+        state.selectedTicketId = result.selectedTicketId;
+        if (result.run) state.ticketRuns[ticketId] = result.run;
+      }
+      selectedStepId = stepId;
+      selectedStageId = null;
+      selectedArtifactId = null;
+      activeTab = stepId ? "run" : "activity";
+      rememberView();
+      render();
+    })
     .catch(async (error) => {
       try { if (selection === latestTicketSelection) { state = await api("/api/state"); render(); } }
       catch {}

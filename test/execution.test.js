@@ -312,9 +312,13 @@ test("compact run and public state omit artifact bodies", () => {
     id: "t1", runId: "r1", status: "awaiting_approval", lastError: null,
     checkpoint: { kind: "awaiting_approval", title: "Approve" },
     workflow: { skillName: "shape-feature", checkpoints: [] },
-    stages: [{ id: "design", activity: { prompts: [{ content: "# private prompt" }] } }],
+    stages: [{ id: "design", diff: { files: ["a.js"], patch: "large stage patch" }, activity: { prompts: [{ content: "# private prompt" }], rawOutput: "private output", groups: [{ events: [] }], events: [{ type: "tool_end", output: "x".repeat(3000) }] } }],
     artifacts: [{ id: "a", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret body" }],
-    plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }] }] }
+    plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }], attempts: [
+      { rawOutput: "old", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "historical detail" }] },
+      { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], verification: { rawOutput: "review transcript" } }
+    ] }] },
+    reviews: [{ diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" } } }]
   };
   const compact = compactRun(run, 9);
   assert.equal(compact.revision, 9);
@@ -322,9 +326,32 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(compact.checkpoint.title, "Approve");
   assert.equal(compact.workflow.skillName, "shape-feature");
   assert.equal("artifacts" in compact, false);
-  const published = publicState({ ticketRuns: { t1: run }, retainedRuns: {} });
+  const published = publicState({ selectedTicketId: "t1", ticketRuns: { t1: run }, retainedRuns: {} });
   assert.equal(published.ticketRuns.t1.artifacts[0].name, "design.md");
   assert.equal(published.ticketRuns.t1.artifacts[0].content, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].artifacts[0].content, undefined);
   assert.equal(published.ticketRuns.t1.stages[0].activity.prompts, undefined);
+  assert.equal(published.ticketRuns.t1.stages[0].activity.rawOutput, undefined);
+  assert.equal(published.ticketRuns.t1.stages[0].activity.groups, undefined);
+  assert.equal(published.ticketRuns.t1.stages[0].diff.patch, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[0].events[0].output, undefined);
+  assert.match(published.ticketRuns.t1.plan.nodes[0].attempts[1].events[0].output, /truncated/);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].rawOutput, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].activityGroups, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].verification.rawOutput, undefined);
+  assert.equal(published.ticketRuns.t1.reviews[0].diff.patch, undefined);
+});
+
+test("public state fully projects only the selected run", () => {
+  const selected = { id: "selected", runId: "r1", status: "running", artifacts: [{ id: "a" }], stages: [], plan: { nodes: [] } };
+  const other = { id: "other", runId: "r2", status: "paused", artifacts: [{ id: "b" }], stages: [], plan: { nodes: [] } };
+  const published = publicState({ revision: 7, selectedTicketId: "selected", ticketRuns: { selected, other }, retainedRuns: {} });
+  assert.ok(Array.isArray(published.ticketRuns.selected.artifacts));
+  assert.deepEqual(published.ticketRuns.other, compactRun(other, 7));
+});
+
+test("public state keeps retained audits compact", () => {
+  const retained = { id: "old", runId: "run-old", status: "completed", artifacts: [{ content: "x".repeat(10000) }] };
+  const published = publicState({ revision: 4, ticketRuns: {}, retainedRuns: { "old:run-old": retained } });
+  assert.deepEqual(published.retainedRuns["old:run-old"], compactRun(retained, 4));
 });

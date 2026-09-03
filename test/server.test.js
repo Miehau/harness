@@ -72,13 +72,15 @@ test("GET /api/health and compact run omit artifact content", async () => {
   });
 });
 
-test("ticket selection returns a compact acknowledgment", async () => {
+test("ticket selection returns the selected public run without artifact bodies", async () => {
   await withDaemon(async (daemon) => {
-    const id = await seedRun(daemon);
+    const id = await seedRun(daemon, { artifacts: [{ id: "a", name: "proof.md", content: "private body" }] });
     const selected = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/select`, { body: {} });
-    assert.deepEqual(Object.keys(selected.json).sort(), ["revision", "selectedTicketId"]);
+    assert.deepEqual(Object.keys(selected.json).sort(), ["revision", "run", "selectedTicketId"]);
     assert.equal(selected.json.selectedTicketId, id);
     assert.equal(selected.json.revision > 0, true);
+    assert.equal(selected.json.run.id, id);
+    assert.equal(selected.json.run.artifacts[0].content, undefined);
   });
 });
 
