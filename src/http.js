@@ -50,16 +50,14 @@ export function authorizeApi(request, response, url, apiToken) {
   return false;
 }
 
-export function createHandleRequest({ publicDir, staticContext, apiToken, host, port, api }) {
+export function createHandleRequest({ publicDir, requestContext, apiToken, host, port, api }) {
   return async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     try {
+      const context = await requestContext?.(request, url) || {};
       if (url.pathname.startsWith("/api/") && !authorizeApi(request, response, url, apiToken)) return;
       if (url.pathname.startsWith("/api/")) await api(request, response, url);
-      else {
-        const context = await staticContext?.(request, url) || {};
-        await staticFile(response, url.pathname, context.publicDir || publicDir, context.headers);
-      }
+      else await staticFile(response, context.pathname || url.pathname, context.publicDir || publicDir, context.headers);
     } catch (error) {
       if (!response.headersSent) json(response, 400, { error: error.message });
       else response.end();

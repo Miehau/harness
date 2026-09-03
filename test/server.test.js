@@ -125,13 +125,16 @@ test("proof route serves worktree UI assets with authoritative daemon APIs", asy
     await writeFile(join(cwd, "public", "app.js"), "export const source = 'ticket-worktree';\n");
     const id = await seedRun(daemon, { workspace: { cwd } });
 
-    const page = await invoke(daemon, "GET", `/?proof-ticket=${encodeURIComponent(id)}`);
+    const proofPath = `/__proof/${encodeURIComponent(id)}`;
+    const page = await invoke(daemon, "GET", proofPath);
     assert.match(page.text, /worktree-ui/);
     assert.match(page.headers["set-cookie"], /agent_plan_proof_ticket=/);
     const asset = await invoke(daemon, "GET", "/app.js", { headers: { cookie: page.headers["set-cookie"].split(";")[0] } });
     assert.match(asset.text, /ticket-worktree/);
     const state = await invoke(daemon, "GET", "/api/state", { headers: { cookie: page.headers["set-cookie"].split(";")[0] } });
     assert.equal(state.json.ticketRuns[id].status, "clarifying");
+    const contractState = await invoke(daemon, "GET", `${proofPath}/api/state`);
+    assert.equal(contractState.json.ticketRuns[id].status, "clarifying");
   });
 });
 

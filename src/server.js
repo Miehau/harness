@@ -2777,9 +2777,15 @@ async function api(request, response, url) {
   json(response, 404, { error: "Not found" });
 }
 
-function proofStaticContext(request, url) {
+function proofRequestContext(request, url) {
   const cookieName = "agent_plan_proof_ticket";
-  const requestedId = url.searchParams.get("proof-ticket");
+  const proofPath = url.pathname.match(/^\/__proof\/([^/]+)(\/api\/.*)?$/);
+  let requestedId = null;
+  if (proofPath) try { requestedId = decodeURIComponent(proofPath[1]); } catch {}
+  if (proofPath?.[2]) {
+    url.pathname = proofPath[2];
+    return {};
+  }
   const cookieId = String(request.headers.cookie || "").split(";").map((item) => item.trim().split("=")).find(([name]) => name === cookieName)?.[1];
   let ticketId = requestedId;
   if (!ticketId && cookieId) try { ticketId = decodeURIComponent(cookieId); } catch {}
@@ -2787,11 +2793,12 @@ function proofStaticContext(request, url) {
   if (!cwd) return null;
   return {
     publicDir: join(cwd, "public"),
+    pathname: requestedId ? "/" : url.pathname,
     headers: requestedId ? { "set-cookie": `${cookieName}=${encodeURIComponent(ticketId)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=300` } : {}
   };
 }
 
-const handleRequest = createHandleRequest({ publicDir, staticContext: proofStaticContext, apiToken, host, port, api });
+const handleRequest = createHandleRequest({ publicDir, requestContext: proofRequestContext, apiToken, host, port, api });
 const server = createServer(handleRequest);
 const sseHeartbeat = setInterval(() => {
   for (const client of clients) writeSse(client, ":\n\n");

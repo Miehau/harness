@@ -205,7 +205,7 @@ test("visual checks receive the live ticket and run capture identity", () => {
 });
 
 test("proof capture targets live state through a ticket-scoped static route", () => {
-  assert.equal(proofCaptureUrl({ port: 4317 }, "ticket / one"), "http://127.0.0.1:4317/?proof-ticket=ticket%20%2F%20one");
+  assert.equal(proofCaptureUrl({ port: 4317 }, "ticket / one"), "http://127.0.0.1:4317/__proof/ticket%20%2F%20one");
   assert.equal(proofCaptureUrl(null, "ticket"), null);
 });
 

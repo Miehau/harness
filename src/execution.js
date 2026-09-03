@@ -613,7 +613,7 @@ export function liveCaptureEnvironment(target, ticketId, runId) {
 
 export function proofCaptureUrl(address, ticketId) {
   if (!address?.port || !ticketId) return null;
-  return `http://127.0.0.1:${address.port}/?proof-ticket=${encodeURIComponent(ticketId)}`;
+  return `http://127.0.0.1:${address.port}/__proof/${encodeURIComponent(ticketId)}`;
 }
 
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
