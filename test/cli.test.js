@@ -67,6 +67,23 @@ test("timeline includes the active worker before its attempt is persisted", asyn
   });
 });
 
+test("timeline follows the active run after automatic step advancement", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [
+      { id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "read", args: '{"path":"old.js"}', at: "2026-09-03T00:00:00.000Z" }] }] },
+      { id: "next", title: "Next", status: "ready" }
+    ] });
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      activeRuns: { next: { activity: { events: [{ type: "tool_start", tool: "edit", args: '{"path":"next.js"}', at: "2026-09-03T00:01:00.000Z" }] } } }
+    });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, "next");
+    assert.equal(timeline.json.events[0].tool, "edit");
+  });
+});
+
 test("timeline follows an active verification stage instead of an accepted step", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });

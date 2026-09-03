@@ -248,7 +248,8 @@ async function timeline(explicitId, ctx) {
   if (!run) throw new Error("Ticket run not found");
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   const stage = (run.stages || []).find((item) => item.status === "active");
-  const activeStep = steps.find((item) => ["running", "fixing"].includes(item.status));
+  const activeStep = steps.find((item) => run.activeRuns?.[item.id])
+    || steps.find((item) => ["running", "fixing", "verifying"].includes(item.status));
   const step = activeStep
     || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan)) : null)
     || null;
