@@ -243,7 +243,9 @@ export function blockingReasons(plan, step) {
 
 export function dependencyArtifacts(plan, step) {
   return dependencySteps(plan, step).flatMap((dependency) =>
-    (dependency.artifacts || []).map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title }))
+    (dependency.artifacts || [])
+      .filter((artifact) => artifact.kind !== "step-verification")
+      .map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title }))
   );
 }
 

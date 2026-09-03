@@ -35,6 +35,7 @@ test("a group is a hard barrier until every required child is accepted", () => {
   research.children[1].artifacts = [{ name: "risk.md", content: "risks" }];
   assert.equal(groupStatus(research), "accepted");
   assert.deepEqual(blockingReasons(plan, build), []);
+  research.children[0].artifacts.push({ name: "verification.json", kind: "step-verification", content: "large TAP audit" });
   assert.deepEqual(dependencyArtifacts(plan, build).map((artifact) => artifact.name), ["repo.md", "risk.md"]);
 });
 
