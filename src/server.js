@@ -84,6 +84,10 @@ export function closeSseClients(clients) {
   clients.clear();
 }
 
+export function settleScheduledDelivery(scheduled) {
+  return Promise.resolve(scheduled).then(({ promise }) => promise).catch(() => {});
+}
+
 export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
   const changes = [];
   for (const step of flattenSteps(run?.plan)) {
@@ -1510,6 +1514,14 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     let checks = current.merge?.checks || null;
     let change = resumedChange;
     if (!change) {
+      if (current.recovery?.kind === "delivery" && /failed/i.test(current.lastError || "")) {
+        const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
+          || String(current.lastError).slice(-4500);
+        ({ checks } = await fixRemoteFeedback(ticketId, [{
+          id: `delivery-recovery-${attempt}`,
+          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before rebasing again.`
+        }], signal, "persisted delivery verification failure"));
+      }
       await rebase();
       checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
       if (checks.status === "failed") {
@@ -1985,7 +1997,7 @@ async function finishHandoff(ticketId) {
   const contextContent = current.ticket.source === "local" ? null : (await hydrateArtifact(proposal, dataDir))?.content;
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
   const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent });
-  queued.promise.catch(() => {});
+  void settleScheduledDelivery(queued);
 }
 
 async function ensureLocalWorkspace(ticketId) {
@@ -2545,7 +2557,7 @@ async function api(request, response, url) {
       const contextArtifact = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update");
       const contextContent = (await hydrateArtifact(contextArtifact, dataDir))?.content || null;
       const diff = run.reviews?.at(-1)?.diff || null;
-      scheduleTicketIntegration(id, { diff, contextContent }).catch(() => {});
+      void settleScheduledDelivery(scheduleTicketIntegration(id, { diff, contextContent }));
       return json(response, 202, { accepted: true, ticketId: id, recovery: "delivery" });
     }
     const stage = resumeStage(run);

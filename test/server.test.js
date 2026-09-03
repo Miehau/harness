@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { auditHarnessWriteScopes, closeSseClients, reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
+import { auditHarnessWriteScopes, closeSseClients, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
 import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
@@ -31,6 +31,10 @@ test("daemon shutdown ends open event streams before closing the server", () => 
   closeSseClients(clients);
   assert.equal(ended, 2);
   assert.equal(clients.size, 0);
+});
+
+test("delivery observers consume failures from the scheduled inner promise", async () => {
+  assert.equal(await settleScheduledDelivery(Promise.resolve({ promise: Promise.reject(new Error("delivery failed")) })), undefined);
 });
 
 test("preview diagnostics cannot satisfy missing verification-contract evidence", () => {
