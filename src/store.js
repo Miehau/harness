@@ -100,6 +100,8 @@ async function migrateArtifactBodies(run, dataDir) {
     if (replacement) { pause.artifactId = replacement; changed = true; }
   }
   return changed;
+}
+
 function recoverInterruptedCleanup(run, at = new Date().toISOString()) {
   const cleanup = initializeRunCleanup(run, { legacy: true });
   for (const execution of cleanup.executions) {
@@ -136,7 +138,7 @@ function initialState(cwd) {
 
 const STATE_EVENT_DETAIL_LIMIT = 4000;
 const STATE_PROMPT_LIMIT = 50000;
-const STATE_OUTPUT_LIMIT = 50000;
+const STATE_OUTPUT_LIMIT = 100000;
 const STATE_ARTIFACT_SUMMARY_LIMIT = 1000;
 const STATE_EVENT_COUNT_LIMIT = 100;
 const STATE_PROMPT_COUNT_LIMIT = 10;
@@ -144,6 +146,15 @@ const STATE_PROMPT_COUNT_LIMIT = 10;
 function boundedAuditText(value, limit) {
   if (typeof value !== "string" || value.length <= limit) return value;
   return `${value.slice(0, limit)}\n… state detail truncated to keep the harness responsive`;
+}
+
+// Worker capture already retains a 100 KB tail. Preserve that deliberate
+// bounded window, but compact oversized legacy or malformed output further
+// before it can make a state write unexpectedly large.
+function compactOutput(value) {
+  return typeof value === "string" && value.length > STATE_OUTPUT_LIMIT
+    ? boundedAuditText(value, STATE_PROMPT_LIMIT)
+    : value;
 }
 
 function compactActivity(activity) {
@@ -158,7 +169,7 @@ function compactActivity(activity) {
     content: boundedAuditText(prompt.content, STATE_PROMPT_LIMIT),
     prompt: boundedAuditText(prompt.prompt, STATE_PROMPT_LIMIT)
   }));
-  activity.rawOutput = boundedAuditText(activity.rawOutput, STATE_OUTPUT_LIMIT);
+  activity.rawOutput = compactOutput(activity.rawOutput);
   delete activity.groups;
 }
 
@@ -220,13 +231,15 @@ export function compactPersistedState(state, dataDir = null) {
     for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
       compactDiff(step.diff);
       for (const attempt of step.attempts || []) {
+        const eventCount = (attempt.events || []).length;
+        attempt.eventsTotal = Math.max(Number(attempt.eventsTotal) || 0, eventCount);
         attempt.events = (attempt.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
           const compact = { ...event };
           for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
           return compact;
         });
-        attempt.rawOutput = boundedAuditText(attempt.rawOutput, STATE_OUTPUT_LIMIT);
-        if (attempt.verification) attempt.verification.rawOutput = boundedAuditText(attempt.verification.rawOutput, STATE_OUTPUT_LIMIT);
+        attempt.rawOutput = compactOutput(attempt.rawOutput);
+        if (attempt.verification) attempt.verification.rawOutput = compactOutput(attempt.verification.rawOutput);
         compactDiff(attempt.diff);
         compactDiff(attempt.checkDiff);
         compactDiff(attempt.aggregateDiff);

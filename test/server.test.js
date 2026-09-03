@@ -455,6 +455,8 @@ test("an expected prompt.md output and the worker prompt remain independently re
     assert.equal(outputBody.json.content, "agent output");
     assert.equal(promptBody.json.content, "worker prompt");
   }, { harness });
+});
+
 /*
 test("daemon shutdown bounds an unresponsive preview cleanup", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-shutdown-"));
@@ -563,7 +565,7 @@ test("artifact endpoint hydrates a compact body from its persisted file", async 
     });
     const id = await seedRun(daemon, { artifacts: [artifact] });
     assert.equal(daemon.store.read().ticketRuns[id].artifacts[0].content, undefined);
-    const response = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifact.id)}`);
+    const response = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifact.id)}/content`);
     assert.equal(response.status, 200);
     assert.equal(response.json.content, "full persisted proof");
   });

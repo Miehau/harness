@@ -225,7 +225,6 @@ function failureHighlights(output) {
   const lines = String(output || "").split(/\r?\n/);
   return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
 }
-}
 
 function safeEvent(event) {
   if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {

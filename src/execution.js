@@ -450,8 +450,8 @@ export function failureDetails(error, { status, reason, phase = "execution" } = 
 // may add new attempts, but must never mutate an attempt returned by this helper.
 export function snapshotActiveAttempt(step, active = {}, {
   status, completedAt = new Date().toISOString(), reason = null, error = null, phase = "execution",
-  activity = active.activity || {}, rawOutput = "", report, verification, diff, vcsChange,
-  feedback, violations, artifactRefs = []
+  activity = active.activity || {}, rawOutput = "", report, checks, verification, diff, checkDiff, aggregateDiff, vcsChange,
+  feedback, violations, reviewNotes, reviewBudgetResult, artifactRefs = []
 } = {}) {
   const attemptId = active.attemptId || `attempt-${(step.attempts?.length || 0) + 1}`;
   const bounded = boundedAttemptActivity(activity, rawOutput);
@@ -478,12 +478,17 @@ export function snapshotActiveAttempt(step, active = {}, {
     ...(prompt.value ? { prompt: prompt.value, promptTruncated, promptTotal } : {}),
     sessionFile: active.sessionFile || step.sessionFile || null,
     ...(report === undefined ? {} : { report: redactRecord(structuredClone(report)) }),
+    ...(checks === undefined ? {} : { checks: redactRecord(structuredClone(checks)) }),
     ...(verification === undefined ? {} : { verification: redactRecord(structuredClone(verification)) }),
     ...(diff === undefined ? {} : { diff: redactRecord(structuredClone(diff)) }),
+    ...(checkDiff === undefined ? {} : { checkDiff: redactRecord(structuredClone(checkDiff)) }),
+    ...(aggregateDiff === undefined ? {} : { aggregateDiff: redactRecord(structuredClone(aggregateDiff)) }),
     ...(vcsChange === undefined ? {} : { vcsChange: redactRecord(structuredClone(vcsChange)) }),
     ...(feedback === undefined ? {} : { feedback: redactText(feedback) }),
     ...(violations === undefined ? {} : { violations: redactRecord(structuredClone(violations)) }),
-    ...(artifactRefs.length ? { artifactRefs: redactRecord(structuredClone(artifactRefs)) } : {}),
+    ...(reviewNotes === undefined ? {} : { reviewNotes: redactRecord(structuredClone(reviewNotes)) }),
+    ...(reviewBudgetResult === undefined ? {} : { reviewBudgetResult: redactRecord(structuredClone(reviewBudgetResult)) }),
+    ...(artifactRefs.length ? { artifacts: redactRecord(structuredClone(artifactRefs)), artifactRefs: redactRecord(structuredClone(artifactRefs)) } : {}),
     ...(error ? { error: redactText(error) } : {})
   };
 }
@@ -592,12 +597,20 @@ function staleProof(run, stepIds, at, reason) {
   }
 }
 
-function resetStep(step) {
-  const attempts = step.attempts?.length || 0;
-  // A restart changes live worker state, never its durable attempt history.
+function resetStep(run, step, { archiveAttempts = false } = {}) {
+  const attempts = structuredClone(step.attempts || []);
+  // A restart changes live worker state, never durable evidence. Proof-aware
+  // rewinds move superseded attempt evidence to the run archive so its locator
+  // remains resolvable without letting the new worker reuse its attempt ID.
+  if (archiveAttempts && attempts.length) {
+    run.archivedAttempts ||= [];
+    run.archivedAttempts.push(...attempts.map((attempt) => ({ ...attempt, stepId: step.id })));
+    step.attempts = [];
+    step.attemptSequence = Math.max(Number(step.attemptSequence) || 0, ...attempts.map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
+  }
   Object.assign(step, { status: "ready", artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
   for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
-  return discarded.length;
+  return { archived: archiveAttempts ? attempts.length : 0, retained: archiveAttempts ? 0 : attempts.length };
 }
 
 export function rewindRun(run, target, at = new Date().toISOString()) {
@@ -646,9 +659,13 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
     const reset = steps.slice(Math.max(0, firstIndex));
     resetStepIds = reset.map((step) => step.id);
-    // Keep the count for audit compatibility; restarts preserve durable attempts.
-    retainedAttempts = reset.reduce((total, step) => total + resetStep(step), 0);
-    discardedAttempts = 0;
+    // Attempts without proof remain attached to their step for legacy inspection.
+    // Proof-bound evidence moves to the run archive, preserving its immutable
+    // locator while reserving the old attempt ID for the restarted worker.
+    const archiveAttempts = Boolean(run.proofMap?.criteria?.length);
+    const resetCounts = reset.map((step) => resetStep(run, step, { archiveAttempts }));
+    retainedAttempts = resetCounts.reduce((total, count) => total + count.retained, 0);
+    discardedAttempts = resetCounts.reduce((total, count) => total + count.archived, 0);
     staleProof(run, resetStepIds, at, "Step restart restored an earlier implementation checkpoint.");
     stageId = "implement";
   }
@@ -1109,10 +1126,25 @@ function compactActivityEvent(event = {}) {
 function publicAttempt(attempt) {
   const clone = structuredClone(attempt);
   for (const key of ["rawOutput", "activityGroups", "sessionFile", "prompt", "artifactRefs"]) delete clone[key];
-  if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20).map(compactActivityEvent);
+  if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20)
+    // Short tool-end payloads duplicate durable activity without adding a
+    // supervision signal. Keep only oversized payloads, explicitly bounded.
+    .filter((event) => event.type !== "tool_end" || String(event.output || "").length > 2000)
+    .map((event) => {
+      const compact = compactActivityEvent(event);
+      if (event.type === "tool_end" && typeof event.output === "string") {
+        const output = boundedText(event.output, 2000);
+        compact.output = output.truncated ? `${output.value}\n… output truncated for public state` : output.value;
+      }
+      return compact;
+    });
   if (clone.report) clone.report = redactRecord({ status: clone.report.status, summary: boundedText(clone.report.summary, 240).value, request: boundedText(clone.report.request, 240).value });
-  if (clone.verification) clone.verification = redactRecord({ summary: boundedText(clone.verification.summary, 240).value, findings: clone.verification.findings, checks: clone.verification.checks && { status: clone.verification.checks.status, command: clone.verification.checks.command, summary: boundedText(clone.verification.checks.summary, 240).value } });
+  if (typeof clone.feedback === "string" && clone.feedback.length > 1000) clone.feedback = `${clone.feedback.slice(0, 1000)}\n… feedback truncated for public state`;
+  if (clone.checks) clone.checks = publicChecks(clone.checks);
+  if (clone.verification) clone.verification = redactRecord({ summary: boundedText(clone.verification.summary, 240).value, findings: clone.verification.findings });
   if (clone.diff) clone.diff = redactRecord({ available: clone.diff.available, files: clone.diff.files, stat: boundedText(clone.diff.stat, 1000).value });
+  if (clone.checkDiff) clone.checkDiff = redactRecord({ available: clone.checkDiff.available, files: clone.checkDiff.files, stat: boundedText(clone.checkDiff.stat, 1000).value });
+  if (clone.aggregateDiff) clone.aggregateDiff = redactRecord({ available: clone.aggregateDiff.available, files: clone.aggregateDiff.files, stat: boundedText(clone.aggregateDiff.stat, 1000).value });
   return redactRecord(clone);
 }
 
@@ -1145,11 +1177,6 @@ function publicCheckpoint(checkpoint) {
     ...(finalChecks ? { finalChecks: { status: finalChecks.status, command: finalChecks.command || null, summary: boundedText(finalChecks.summary, 240).value } } : {}),
     ...(media ? { media: media.map(safeArtifactMetadata) } : {})
   });
-/*
-  if (!artifact || typeof artifact !== "object") return artifact;
-  const { content, bodySummary, ...rest } = artifact;
-  return rest;
-*/
 }
 
 function publicEvent(event, detailed) {
@@ -1198,46 +1225,6 @@ export function publicRun(run) {
     delete stage.activity.rawOutput;
   }
   clone.proofMap = projectProofMap(run);
-/*
-  if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
-  for (const stage of clone.stages || []) {
-    stage.activity = publicActivity(stage.activity);
-    stage.diff = diffSummary(stage.diff);
-  }
-  for (const step of flattenSteps(clone.plan)) {
-    step.diff = diffSummary(step.diff);
-    if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
-    for (const [index, attempt] of (step.attempts || []).entries()) {
-      const detailed = index === step.attempts.length - 1;
-      const events = detailed
-        ? attempt.events || []
-        : (attempt.events || []).filter((event) => ["usage", "tool_start"].includes(event.type));
-      attempt.events = events.map((event) => publicEvent(event, detailed));
-      delete attempt.activityGroups;
-      delete attempt.rawOutput;
-      if (attempt.checks) attempt.checks = publicChecks(attempt.checks);
-      if (attempt.verification) {
-        delete attempt.verification.rawOutput;
-        delete attempt.verification.checks;
-      }
-      if (typeof attempt.feedback === "string" && attempt.feedback.length > 4000) {
-        attempt.feedback = `${attempt.feedback.slice(0, 4000)}\n… feedback truncated; open the saved session for full detail`;
-      }
-      attempt.diff = diffSummary(attempt.diff);
-      attempt.checkDiff = diffSummary(attempt.checkDiff);
-      attempt.aggregateDiff = diffSummary(attempt.aggregateDiff);
-      if (Array.isArray(attempt.artifacts)) attempt.artifacts = attempt.artifacts.map(artifactMetadata);
-    }
-  }
-  for (const review of clone.reviews || []) {
-    review.diff = diffSummary(review.diff);
-    for (const item of review.reviews || []) if (item.checks) item.checks = publicChecks(item.checks);
-    if (review.fix) {
-      review.fix.diff = diffSummary(review.fix.diff);
-      review.fix.artifact = artifactMetadata(review.fix.artifact);
-    }
-*/
-  }
   for (const step of flattenSteps(clone.plan)) {
     delete step.prompt;
     delete step.productContext;
@@ -1246,7 +1233,20 @@ export function publicRun(run) {
     if (step.diff) step.diff = redactRecord({ available: step.diff.available, files: step.diff.files, stat: boundedText(step.diff.stat, 1000).value });
     delete step.sessionFile;
   }
-  if (Array.isArray(clone.reviews)) clone.reviews = clone.reviews.map((review) => ({ round: review.round, createdAt: review.createdAt, actionableFindings: redactRecord(review.actionableFindings || []), reviews: (review.reviews || []).map((item) => ({ role: item.role, summary: boundedText(item.summary, 240).value, checks: item.checks && { status: item.checks.status, command: item.checks.command || null, summary: boundedText(item.checks.summary, 240).value } })) }));
+  if (Array.isArray(clone.reviews)) clone.reviews = clone.reviews.map((review) => ({
+    round: review.round, createdAt: review.createdAt, actionableFindings: redactRecord(review.actionableFindings || []),
+    diff: diffSummary(review.diff),
+    reviews: (review.reviews || []).map((item) => ({ role: item.role, summary: boundedText(item.summary, 240).value, checks: item.checks && { status: item.checks.status, command: item.checks.command || null, summary: boundedText(item.checks.summary, 240).value } })),
+    ...(review.fix ? {
+      fix: {
+        ...(review.fix.diff ? { diff: diffSummary(review.fix.diff) } : {}),
+        ...(review.fix.artifact ? (() => {
+          const { bodySummary, path, content, ...artifact } = review.fix.artifact;
+          return { artifact: redactRecord(artifact) };
+        })() : {})
+      }
+    } : {})
+  }));
   if (clone.deliveredDiff) clone.deliveredDiff = redactRecord({ available: clone.deliveredDiff.available, files: clone.deliveredDiff.files, stat: boundedText(clone.deliveredDiff.stat, 1000).value });
   if (clone.integration?.diff) clone.integration.diff = redactRecord({ available: clone.integration.diff.available, files: clone.integration.diff.files, stat: boundedText(clone.integration.diff.stat, 1000).value });
   for (const stage of clone.stages || []) if (stage.diff) stage.diff = redactRecord({ available: stage.diff.available, files: stage.diff.files, stat: boundedText(stage.diff.stat, 1000).value });
@@ -1266,18 +1266,11 @@ export function publicRun(run) {
 export function publicState(state) {
   if (!state) return state;
   const clone = structuredClone(state);
-  for (const bucket of ["ticketRuns", "retainedRuns"]) {
-    for (const [id, run] of Object.entries(clone[bucket] || {})) clone[bucket][id] = publicRun(run);
+  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
+    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
   }
+  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
   return removePrivateLocations(clone);
-/*
-  return {
-    ...state,
-    ticketRuns: Object.fromEntries(Object.entries(state.ticketRuns || {}).map(([id, run]) => [
-      id, id === state.selectedTicketId ? publicRun(run) : compactRun(run, state.revision)
-    ])),
-    retainedRuns: Object.fromEntries(Object.entries(state.retainedRuns || {}).map(([id, run]) => [id, compactRun(run, state.revision)]))
-  };
 }
 
 export function publicPreviewState(state, ticketId) {
@@ -1293,7 +1286,6 @@ export function publicPreviewState(state, ticketId) {
     retainedRuns: {},
     notice: state?.notice || null
   });
-*/
 }
 
 export function compactRun(run, revision = null) {
@@ -1314,15 +1306,6 @@ export function compactRun(run, revision = null) {
     workflow: publicWorkflow(run?.workflow),
     proofMap: projectProofMap(run),
     cleanup: normalizeRunCleanup(run?.cleanup),
-/*
-    checkpoint: run?.checkpoint || null,
-    lastError: run?.lastError || null,
-    workflow: run?.workflow || null,
-    proofMap: projectProofMap(run),
-    // Keep cleanup evidence structured in the lightweight inspector response;
-    // it must not be collapsed into lastError because success is not implied.
-    cleanup: normalizeRunCleanup(run?.cleanup),
-*/
     revision
   };
 }

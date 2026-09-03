@@ -88,7 +88,7 @@ export async function persistArtifact(dataDir, ticket, { name, content, runId = 
   await writeFile(path, retainedContent, "utf8");
   // Bodies live only in the artifact file; JsonStore retains the bounded metadata needed to locate them.
   // The stable kind/storage identity keeps same-named internal and worker artifacts independently addressable.
-  return { id: [stageId, stepId, attemptId, storageIdentity, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, createdAt: new Date().toISOString() };
+  return { id: [stageId, stepId, attemptId, storageIdentity, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, bodyStored: true, createdAt: new Date().toISOString() };
 }
 
 function productContextPath(dataDir, sourceCwd) {

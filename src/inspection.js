@@ -251,6 +251,27 @@ function projectStage(run, stage, workers, now) {
   };
 }
 
+function legacyTimelineFields(run, focus) {
+  const stageId = focus.stageId?.replace(/^stage:/, "") || null;
+  const stepId = focus.workerId?.replace(/^worker:/, "") || null;
+  const stage = (run.stages || []).find((item) => item.id === stageId) || null;
+  const step = flattenSteps(run.plan).find((item) => item.id === stepId) || null;
+  const active = step && run.activeRuns?.[step.id];
+  const attemptId = focus.attemptId?.split(":").slice(2).join(":") || null;
+  const activeAttemptId = active && (active.attemptId || `active-${active.runId || step.id}`);
+  const attempt = activeAttemptId === attemptId ? active : (step?.attempts || []).find((item, index) => (item.attemptId || `attempt-${index + 1}`) === attemptId) || null;
+  const sourceEvents = attempt?.events || attempt?.activity?.events || stage?.activity?.events || [];
+  const events = sourceEvents.map((event) => ({
+    type: event.type || "activity", tool: event.tool || null,
+    title: text(event.label || event.title || event.tool, "Activity"),
+    at: iso(event.at), isError: Boolean(event.isError)
+  }));
+  return {
+    stepId, stepStatus: step?.status || null, stageId, stageStatus: stage?.status || null,
+    ...(events.length ? { events } : {})
+  };
+}
+
 function completionEvidence(run, workers) {
   if (run.status !== "completed") return { state: "collecting", missing: [] };
   const requiredWorkers = workers.filter((worker) => worker.required);
@@ -279,7 +300,15 @@ function focusFor(run, stages, workers, attempts) {
   if (activeWorker) return { stageId: activeWorker.stageId, workerId: activeWorker.id, attemptId: activeWorker.attemptIds.at(-1) || null, reason: "active" };
   const activeStage = stages.find((stage) => stage.lifecycle === "active");
   if (activeStage) return { stageId: activeStage.id, workerId: null, attemptId: null, reason: "active" };
+  const checkpointWorker = run.checkpoint?.stepId && workers.find((worker) => worker.stepId === run.checkpoint.stepId);
+  if (checkpointWorker) return { stageId: checkpointWorker.stageId, workerId: checkpointWorker.id, attemptId: checkpointWorker.attemptIds.at(-1) || null, reason: "actionable" };
+  // A paused stage is the current operator checkpoint; do not replace it with
+  // incomplete evidence retained by an earlier completed worker.
+  const pausedStage = stages.find((stage) => stage.status === "paused");
+  if (pausedStage) return { stageId: pausedStage.id, workerId: null, attemptId: null, reason: "actionable" };
   const blockedWorker = workers.find((worker) => worker.blocker && ["blocked", "failed", "incomplete", "interrupted", "cancelled"].includes(worker.lifecycle));
+  // A terminal worker is more actionable than its containing blocked stage:
+  // this retains the immutable attempt selection after cancellation.
   if (blockedWorker) return { stageId: blockedWorker.stageId, workerId: blockedWorker.id, attemptId: blockedWorker.attemptIds.at(-1) || null, reason: "actionable" };
   const blockedStage = stages.find((stage) => stage.blocker);
   if (blockedStage) return { stageId: blockedStage.id, workerId: null, attemptId: null, reason: "actionable" };
@@ -294,7 +323,8 @@ export function projectInspection(run, { now = Date.now(), revision = null } = {
   const attempts = [];
   const workers = [];
   for (const step of flattenSteps(run.plan)) {
-    const projected = (step.attempts || []).map((attempt, index) => projectAttempt(run, step, attempt, index, now));
+    const archived = (run.archivedAttempts || []).filter((attempt) => attempt.stepId === step.id);
+    const projected = [...archived, ...(step.attempts || [])].map((attempt, index) => projectAttempt(run, step, attempt, index, now));
     const active = run.activeRuns?.[step.id];
     if (active && !projected.some((attempt) => attempt.runId && attempt.runId === active.runId && attempt.timing.completedAt === null)) {
       projected.push(projectAttempt(run, step, { ...active, attemptId: active.attemptId || `active-${active.runId || step.id}` }, projected.length, now, true));
@@ -321,7 +351,10 @@ export function projectInspection(run, { now = Date.now(), revision = null } = {
     workers,
     attempts,
     blockers,
-    nextAction: nextAction(run)
+    nextAction: nextAction(run),
+    // Retain the former CLI focus fields as a shallow compatibility view. The
+    // dashboard and CLI still share the canonical stage/worker/attempt graph.
+    ...legacyTimelineFields(run, focus)
   };
 }
 

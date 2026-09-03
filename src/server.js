@@ -889,8 +889,11 @@ async function artifactText(artifact, limit = 100000) {
 }
 
 async function hydrateArtifacts(artifacts, limit = 60000) {
+  // Older call sites passed the storage root as the second argument. It is not
+  // a byte bound; keep those retained artifact reads at the safe default.
+  const boundedLimit = Number.isFinite(limit) ? limit : 60000;
   return Promise.all((artifacts || []).map(async (artifact) => {
-    const content = boundedText(await artifactText(artifact, limit), limit);
+    const content = boundedText(await artifactText(artifact, boundedLimit), boundedLimit);
     return { ...artifact, content: content.value, ...(content.truncated ? { truncated: true } : {}) };
   }));
 }
@@ -956,7 +959,7 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   };
   const traceTruncated = Boolean(traceContent && (traceOutput.truncated || tracePrompts.length > 20 || traceEvents.length > 100));
   const traceState = traceContent ? traceTruncated ? "truncated" : "available" : "unavailable";
-  const diff = redactRecord(attempt.diff || {});
+  const diff = redactRecord(run.attemptDiffHistory?.[step.id]?.[attempt.attemptId] || attempt.diff || {});
   const checks = redactRecord(attempt.verification?.checks || attempt.checks || {});
   const checkOutput = boundedText(checks.output || "", 16000);
   const terminationReason = boundedText(redactText(attempt.termination?.reason || attempt.terminationReason || ""), 240).value || null;
@@ -975,7 +978,7 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
     failurePhase,
     failure: failureKind || failurePhase || failureMessage ? { kind: failureKind, phase: failurePhase, message: failureMessage } : null,
     prompt: textDetail(prompt, 16000, active ? "not_yet_available" : "not_retained", promptArtifact),
-    activity: { state: activity.length > 100 ? "truncated" : activity.length ? "available" : active ? "not_yet_available" : "not_retained", items: activityItems, returned: activityItems.length, total: activity.length },
+    activity: { state: Math.max(activity.length, Number(attempt.eventsTotal) || 0) > 100 ? "truncated" : activity.length ? "available" : active ? "not_yet_available" : "not_retained", items: activityItems, returned: activityItems.length, total: Math.max(activity.length, Number(attempt.eventsTotal) || 0) },
     output: textDetail(output, 20000, active ? "not_yet_available" : outputArtifact ? "unavailable" : "not_retained", outputArtifact),
     artifacts: { state: artifactItems.length ? "available" : "not_retained", items: artifactItems, count: artifactItems.length },
     diff: diff.patch ? { state: boundedText(diff.patch, 20000).state, files: diff.files || [], stat: diff.stat || "", content: boundedText(diff.patch, 20000).value, ...(diff.patch.length > 20000 ? fallback(diffArtifact) : {}) } : { state: diffArtifact ? "unavailable" : "not_retained", ...fallback(diffArtifact) },
@@ -1710,6 +1713,7 @@ productContext: productContextBody.content, requirements: requirementsBody.conte
 async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
   const key = `${ticketId}:${stepId}`;
   if (activeSteps.has(key)) return activeSteps.get(key);
+  let activeActivity = null;
   const work = (async () => {
     signal?.throwIfAborted();
     const beforeState = store.read();
@@ -1717,7 +1721,6 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
     if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
-let activeActivity = null;
     let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
@@ -1972,7 +1975,7 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
 materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
             status: findings.length ? "verification_failed" : "verified", reason: findings.length ? "verification_findings" : "verification_complete", phase: "verification",
             activity: attemptActivity, rawOutput: result.rawOutput, report, verification, violations,
-            feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+            feedback: nextFeedback || null, diff: attemptDiff, checkDiff, aggregateDiff: diff, vcsChange, reviewNotes, reviewBudgetResult: reviewBudget,
             artifactRefs: [...artifacts, verificationArtifact].map(({ id, kind, name }) => ({ id, kind, name }))
           });
           current.artifacts.push(...artifacts, verificationArtifact);
@@ -2047,7 +2050,14 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
         // only materialize when there is still a mutable worker to snapshot.
         if (active.runId) materializeActiveAttempt(failed, active, {
           status: providerWait ? "interrupted" : "failed", reason: "worker_failure", error: error.message,
-          phase: "worker_execution", activity, ...(attemptEvidence?.checks ? { verification: { checks: attemptEvidence.checks } } : {})
+          phase: "worker_execution", activity, rawOutput: attemptEvidence?.rawOutput || "", report: attemptEvidence?.report,
+          ...(attemptEvidence?.checks ? { checks: attemptEvidence.checks, verification: { checks: attemptEvidence.checks } } : {}),
+          ...(attemptEvidence?.diff ? { diff: attemptEvidence.diff } : {}),
+          ...(attemptEvidence?.checkDiff ? { checkDiff: attemptEvidence.checkDiff } : {}),
+          ...(attemptEvidence?.aggregateDiff ? { aggregateDiff: attemptEvidence.aggregateDiff } : {}),
+          ...(attemptEvidence?.reviewNotes ? { reviewNotes: attemptEvidence.reviewNotes } : {}),
+          ...(attemptEvidence?.reviewBudgetResult ? { reviewBudgetResult: attemptEvidence.reviewBudgetResult } : {}),
+          ...(attemptEvidence?.artifacts ? { artifactRefs: attemptEvidence.artifacts.map(({ id, kind, name }) => ({ id, kind, name })) } : {})
         });
         if (attemptEvidence?.aggregateDiff) failed.diff = attemptEvidence.aggregateDiff;
         if (attemptEvidence?.reviewNotes) failed.reviewNotes = attemptEvidence.reviewNotes;
@@ -3171,11 +3181,15 @@ if (process.platform !== "darwin") throw new Error("Opening artifacts in their d
     const step = findNode(run.plan, decodeURIComponent(attemptDetail[3]));
     const attemptId = decodeURIComponent(attemptDetail[4]);
     const retained = step?.attempts?.find((item, index) => (item.attemptId || `attempt-${index + 1}`) === attemptId);
+    const archived = (run.archivedAttempts || []).find((item) => item.stepId === step?.id && item.attemptId === attemptId);
     const active = run.activeRuns?.[step?.id];
     const activeAttempt = active && (active.attemptId || `active-${active.runId || step.id}`) === attemptId
       ? { ...active, attemptId }
       : null;
-    const attempt = retained ? { ...retained, attemptId: retained.attemptId || attemptId } : activeAttempt;
+    const attempt = retained
+      ? { ...retained, attemptId: retained.attemptId || attemptId }
+      : archived ? { ...archived, attemptId }
+        : activeAttempt;
     if (!attempt) throw new Error("Attempt not found");
     return json(response, 200, await attemptDetails(run, step, attempt, { active: Boolean(activeAttempt) }));
   }
@@ -3389,7 +3403,7 @@ const contextContent = await artifactText([...(run.artifacts || [])].reverse().f
       auditVisualEvidencePolicy(current);
       prepareRunResume(current);
     });
-    if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
+    if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id), { awaitWork: false });
     else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
     else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
     else await surfaceImmediateFailure(id, runTicket(id));
