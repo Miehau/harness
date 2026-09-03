@@ -339,11 +339,14 @@ function stepCriterionIds(run, stepId) {
 }
 
 function proofGate(run, options) {
-  return proofEligibility(projectProofMap(run), options);
+  const proof = projectProofMap(run);
+  // Compatibility projections make legacy proof gaps visible, but must not impose
+  // a gate that did not exist when the run reached its human review checkpoint.
+  return proof.compatibility ? { eligible: true, blockingReasons: [] } : proofEligibility(proof, options);
 }
 
 function proofGateError(eligibility) {
-  return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""}: ${reason.message}`).join("; ")}`;
+  return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""} [${reason.code}]: ${reason.message}`).join("; ")}`;
 }
 
 function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = null } = {}) {
