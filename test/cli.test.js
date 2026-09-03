@@ -184,6 +184,23 @@ test("profile overrides one stage on a stopped run", async () => {
   assert.deepEqual(called.body, { model: "gpt-5.6-terra", thinking: "high" });
 });
 
+test("steer submits the durable outcome to a selected parallel worker", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [
+      { id: "first", title: "First", permission: "write", writeScope: "src", expectedFiles: ["src/first.js"], acceptanceCriteria: ["Works"] },
+      { id: "second", title: "Second", permission: "write", writeScope: "src", expectedFiles: ["src/second.js"], acceptanceCriteria: ["Works"] }
+    ] });
+    for (const step of plan.nodes) Object.assign(step, { status: "running", activeAttempt: { id: `attempt-${step.id}`, status: "active" } });
+    const id = await seedRun(daemon, { status: "running", plan, activeRuns: {
+      first: { runId: "worker-first", attemptId: "attempt-first" }, second: { runId: "worker-second", attemptId: "attempt-second" }
+    } });
+    const result = await runAgainstDaemon(daemon, ["steer", "Update src/second.js with the focused correction.", id, "--step", "second"]);
+    assert.equal(result.code, 0);
+    assert.equal(result.json.state, "queued");
+    assert.deepEqual(result.json.target, { ticketId: id, runId: "run-1", stepId: "second", attemptId: "attempt-second" });
+  });
+});
+
 test("revise sends focused feedback to a review-ready step", async () => {
   let called;
   await runCli(["revise", "build", "ticket-1", "Match the installed SDK interface"], {

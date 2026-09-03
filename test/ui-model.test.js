@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -344,6 +344,24 @@ test("fleet ticket view omits findings and exposes stages plus selected agents",
   assert.equal(planGate.stateLabel, "plan gate");
   assert.equal(planGate.agentCount, 2);
   assert.equal(planGate.agents.length, 0);
+});
+
+test("steering selects only an active or paused saved attempt", () => {
+  const run = { id: "ticket", runId: "run", status: "running", plan: { nodes: [{ id: "build", status: "running" }] }, activeRuns: { build: { attemptId: "attempt" } } };
+  assert.deepEqual(steeringTarget(run).target, { ticketId: "ticket", runId: "run", stepId: "build", attemptId: "attempt" });
+  const paused = { ...run, status: "paused", activeRuns: {}, plan: { nodes: [{ id: "build", status: "interrupted", activeAttempt: { id: "attempt", status: "interrupted" } }] } };
+  assert.equal(steeringTarget(paused).paused, true);
+  assert.match(steeringTarget(paused).message, /resume is still a separate manual action/i);
+  assert.equal(steeringTarget({ ...run, status: "completed" }).targetable, false);
+});
+
+test("steering lifecycle distinguishes unacknowledged Pi delivery", () => {
+  const delivered = steeringLifecycle({ state: "delivered", deliveredAt: "2026-09-03T10:01:00.000Z", deliveryEvidence: { session: "pi" } });
+  assert.equal(delivered.unacknowledged, true);
+  assert.match(delivered.label, /awaiting acknowledgment/);
+  assert.deepEqual(delivered.deliveryEvidence, { session: "pi" });
+  assert.equal(delivered.acknowledgmentEvidence, null);
+  assert.equal(steeringLifecycle({ state: "rejected" }).label, "Rejected before acceptance");
 });
 
 test("offers only restart points backed by durable checkpoints", () => {

@@ -1571,3 +1571,31 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 @media (max-width: 800px) {
   .plan-tree { --plan-tree-gutter: 16px; }
 }
+
+/* Durable active-worker steering stays distinct from review-ready changes. */
+.steering-panel { display: grid; gap: 12px; margin-top: 14px; }
+.steering-form, .steering-history { display: grid; gap: 8px; border: 1px solid var(--stroke); border-radius: 9px; padding: 11px; background: rgb(110 159 238 / .06); }
+.steering-form strong { font-size: 13px; }
+.steering-form p, .steering-unavailable { margin: 0; color: #aeb8c7; font-size: 12px; line-height: 1.45; }
+.steering-form code { overflow-wrap: anywhere; color: #a9c4ef; font-size: 10px; }
+.steering-form label { display: grid; gap: 5px; color: #9ea9b8; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.steering-form textarea { width: 100%; min-height: 72px; resize: vertical; padding: 8px; }
+.steering-form .button { justify-self: end; }
+.steering-history { background: rgb(255 255 255 / .02); }
+.steering-history > header, .steering-record > header { display: flex; justify-content: space-between; gap: 8px; }
+.steering-history > header > span:last-child { color: #8f99a7; font-size: 10px; }
+.steering-record { display: grid; gap: 7px; border: 1px solid var(--stroke); border-left: 3px solid #6ea3e8; border-radius: 8px; padding: 9px; background: rgb(5 7 12 / .28); }
+.steering-record.steering-failed { border-left-color: #e07070; }
+.steering-record.steering-withheld, .steering-record.steering-rejected { border-left-color: #c49be8; }
+.steering-record.steering-acknowledged { border-left-color: #71c895; }
+.steering-record p { margin: 0; color: #aeb8c7; font-size: 11px; line-height: 1.45; }
+.steering-record .steering-instruction { color: #e3e8ee; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.steering-meta { display: grid; gap: 3px; margin: 0; }
+.steering-meta > div { display: flex; justify-content: space-between; gap: 10px; }
+.steering-meta dt { color: #818c9c; font-size: 9px; text-transform: uppercase; }
+.steering-meta dd { margin: 0; color: #c9d2dd; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; overflow-wrap: anywhere; }
+.steering-unacknowledged { border-left: 2px solid #6ea3e8; padding-left: 7px; color: #bdd2f0 !important; }
+.steering-record details { border-top: 1px solid var(--stroke); padding-top: 6px; }
+.steering-record summary { cursor: pointer; color: #a9c4ef; font-size: 10px; }
+.steering-record pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .steering-form .button { justify-self: stretch; } .steering-meta > div { display: grid; gap: 2px; } .steering-meta dd { text-align: left; } }

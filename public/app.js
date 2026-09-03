@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -388,7 +388,7 @@ function renderPlanTree() {
   const stage = run?.stages?.find((item) => item.id === (selectedStageId || (selectedStepId ? "implement" : null)));
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
+    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>`;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
     if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
       lastClarificationKey = clarificationKey;
@@ -511,6 +511,26 @@ function correctionFindingsHtml(step) {
   }).join("")}</ol></section>`;
 }
 
+function steeringStamp(label, value) {
+  return value ? `<div><dt>${label}</dt><dd title="${escapeHtml(value)}">${escapeHtml(new Date(value).toLocaleString())}</dd></div>` : "";
+}
+
+function steeringRecordHtml(record) {
+  const item = steeringLifecycle(record);
+  const target = record.stepId ? `${record.ticketId} · run ${record.runId} · step ${record.stepId} · attempt ${record.attemptId}` : "No worker target was bound.";
+  const evidence = item.deliveryEvidence ? `<details><summary>Pi delivery evidence</summary><pre>${escapeHtml(formatOutput(JSON.stringify(item.deliveryEvidence)))}</pre></details>` : "";
+  const acknowledgment = item.acknowledgmentEvidence ? `<details><summary>Worker acknowledgment evidence</summary><pre>${escapeHtml(formatOutput(JSON.stringify(item.acknowledgmentEvidence)))}</pre></details>` : "";
+  return `<article class="steering-record steering-${escapeHtml(item.state)}"><header><span class="eyebrow">${escapeHtml(item.label)}</span><span class="run-pill">${escapeHtml(item.state)}</span></header><p class="steering-instruction">${escapeHtml(record.instruction || "No instruction recorded.")}</p><p>${escapeHtml(item.reason)}</p><dl class="steering-meta"><div><dt>Author</dt><dd>${escapeHtml(record.author || "operator")}</dd></div><div><dt>Target</dt><dd>${escapeHtml(target)}</dd></div>${steeringStamp("Submitted", item.createdAt)}${steeringStamp("Claimed", item.claimedAt)}${steeringStamp("Delivered", item.deliveredAt)}${steeringStamp("Acknowledged", item.acknowledgedAt)}</dl>${item.unacknowledged ? `<p class="steering-unacknowledged">Delivered to Pi; the worker has not acknowledged or incorporated it yet.</p>` : ""}${evidence}${acknowledgment}</article>`;
+}
+
+function steeringPanel(run, stepId = null) {
+  const selected = steeringTarget(run, stepId);
+  const records = [...(run.steering?.records || []), ...(run.steeringRejections || []).map((item) => ({ ...item, state: "rejected" }))].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  if (!selected.targetable && !records.length) return "";
+  const form = selected.targetable ? `<form class="steering-form" data-steering="${escapeHtml(run.id)}" data-steering-step="${escapeHtml(selected.target.stepId)}"><span class="eyebrow">Active worker steering</span><strong>Send one focused instruction</strong><p>${escapeHtml(selected.message)}</p><code>${escapeHtml(`${selected.target.ticketId} · run ${selected.target.runId} · step ${selected.target.stepId} · attempt ${selected.target.attemptId}`)}</code><label>Instruction<textarea name="instruction" rows="3" maxlength="4000" required placeholder="Describe one focused, in-scope correction…"></textarea></label><button class="button primary" type="submit">Queue instruction</button></form>` : `<p class="steering-unavailable">${escapeHtml(selected.reason)}</p>`;
+  return `<section class="steering-panel">${form}<section class="steering-history"><header><span class="eyebrow">Durable steering history</span><span>${records.length} record${records.length === 1 ? "" : "s"}</span></header>${records.length ? records.map(steeringRecordHtml).join("") : `<div class="run-empty">No steering instructions recorded.</div>`}</section></section>`;
+}
+
 function runPanel(step) {
   const run = runFor();
   const attempt = step.attempts?.at(-1);
@@ -522,7 +542,7 @@ function runPanel(step) {
   const progress = active?.activity?.lastEvent || active?.lastEvent || (attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting");
   const purpose = step.productContext || step.acceptanceCriteria?.[0];
   const why = purpose ? `<article class="artifact"><header><span class="artifact-name">Why this worker is running</span></header><div class="artifact-body"><p>${escapeHtml(purpose)}</p></div></article>` : "";
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}${steeringPanel(run, step.id)}`;
 }
 
 function overviewPanel(step) {
@@ -678,7 +698,8 @@ function renderInspector() {
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
     const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
-    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
+    const stagePanel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
+    const panel = `${stagePanel}${steeringPanel(run)}`;
     target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
@@ -1162,6 +1183,20 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  if (event.target.dataset.steering) {
+    event.preventDefault();
+    const form = event.target;
+    const submit = form.querySelector("button[type=submit]");
+    const instruction = String(new FormData(form).get("instruction") || "").trim();
+    if (!instruction) { notify("Enter one focused instruction"); return; }
+    submit.disabled = true;
+    try {
+      await api(`/api/tickets/${encodeURIComponent(form.dataset.steering)}/steering`, { method: "POST", body: JSON.stringify({ instruction, stepId: form.dataset.steeringStep, author: "dashboard" }) });
+      state = await api("/api/state");
+      render();
+    } catch (error) { submit.disabled = false; notify(error.message); }
+    return;
+  }
   if (event.target.id === "restart-form") {
     event.preventDefault();
     const data = new FormData(event.target);

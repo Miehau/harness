@@ -16,6 +16,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   approve-proof [ticketId]          Approve final proof and continue delivery
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
+  steer <instruction> [ticketId] [--step <stepId>] Queue one focused instruction for an active worker
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -126,6 +127,17 @@ async function handleCommand(command, rest, ctx) {
     const feedback = words.join(" ").trim();
     if (!stepId || !id || !feedback) throw new Error("Usage: agent-plan revise <stepId> <ticketId> <feedback>");
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/changes", { body: { feedback }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "steer") {
+    const flag = rest.indexOf("--step");
+    const stepId = flag >= 0 ? String(rest[flag + 1] || "").trim() : null;
+    const args = flag < 0 ? rest : rest.filter((_, index) => index !== flag && index !== flag + 1);
+    const [instruction, explicitId, ...extra] = args;
+    if (!instruction || extra.length || (flag >= 0 && !stepId)) throw new Error("Usage: agent-plan steer <instruction> [ticketId] [--step <stepId>]");
+    const id = await resolveTicketId(explicitId, ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steering", { body: { instruction, author: "cli", ...(stepId ? { stepId } : {}) }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
