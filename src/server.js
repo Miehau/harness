@@ -1412,7 +1412,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
-    cwd, plan: current.plan, step, artifacts: await hydrateArtifacts(current.artifacts, dataDir), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd, plan: current.plan, step, artifacts: [], images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
