@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -66,7 +66,7 @@ export class PreviewManager {
     throw new Error("Could not allocate a unique preview port");
   }
 
-  async ensure({ id, cwd }) {
+  async ensure({ id, cwd, seedState = null }) {
     const existing = this.active.get(id);
     if (existing?.child.exitCode === null && existing.cwd === cwd) return existing.public;
     const config = await loadProjectConfig(cwd);
@@ -80,7 +80,13 @@ export class PreviewManager {
     const environment = await projectEnvironment(cwd, config);
     for (const name of portVariables) environment[name] = String(port);
     environment.HOST = "127.0.0.1";
-    if (this.dataDir) environment.AGENT_PLAN_DATA_DIR = join(this.dataDir, "preview-state", id.replace(/[^a-z0-9._-]+/gi, "-"));
+    if (this.dataDir) {
+      environment.AGENT_PLAN_DATA_DIR = join(this.dataDir, "preview-state", id.replace(/[^a-z0-9._-]+/gi, "-"));
+      if (seedState) {
+        await mkdir(environment.AGENT_PLAN_DATA_DIR, { recursive: true });
+        await writeFile(join(environment.AGENT_PLAN_DATA_DIR, "state-v3.json"), JSON.stringify(seedState, null, 2));
+      }
+    }
     const child = this.spawn(commandExecutable(cwd, command), command.slice(1), { cwd, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });

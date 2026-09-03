@@ -180,7 +180,7 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
   let preview = null;
   let evidence = [];
   if (required) {
-    preview = await previews.ensure({ id: previewId, cwd });
+    preview = await previews.ensure({ id: previewId, cwd, seedState: { ...store.read(), selectedTicketId: ticketId } });
     if (preview) evidence = await previews.capture(previewId);
   }
   const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
