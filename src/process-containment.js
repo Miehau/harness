@@ -28,7 +28,7 @@ export function environmentForOwnership(ownership, environment = {}) {
   return { ...environment, [PROCESS_OWNERSHIP_ENV]: ownership.token };
 }
 
-/** Identity is deliberately stricter than a PID: all immutable observations and ownership must agree. */
+/** Identity is deliberately stricter than a PID: start evidence and ownership must agree. */
 export function sameProcessIdentity(expected, observed, token) {
   return Boolean(expected && observed
     && typeof token === "string" && token.length > 0
@@ -36,7 +36,10 @@ export function sameProcessIdentity(expected, observed, token) {
     && expected.pid === observed.pid
     && Number.isInteger(expected.ppid) && expected.ppid >= 0
     && Number.isInteger(observed.ppid) && observed.ppid >= 0
-    && expected.ppid === observed.ppid
+    // PPID is durable audit evidence but is not stable identity evidence: a
+    // child can be adopted by any configured subreaper, not just PID 1. PID,
+    // kernel start time, and the inherited ownership token still prove the
+    // target is the same owned process without trusting a mutable parent link.
     && typeof expected.startTime === "string" && expected.startTime.trim().length > 0
     && typeof observed.startTime === "string" && observed.startTime.trim().length > 0
     && expected.startTime === observed.startTime
@@ -74,6 +77,10 @@ async function linuxIdentity(pid, token, procRoot, readFileImpl) {
   const owned = environment.toString().split("\0").includes(`${PROCESS_OWNERSHIP_ENV}=${token}`);
   const close = stat.lastIndexOf(")");
   const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/);
+  // A zombie has already exited and cannot receive a signal. Treat it exactly
+  // as an entry that vanished between discovery and observation, rather than
+  // retaining stale /proc evidence as a live unresolved target.
+  if (fields[0] === "Z") return null;
   const ppid = Number(fields[1]);
   const startTime = fields[19];
   if (!Number.isInteger(ppid) || !startTime) throw new Error(`Malformed process identity for PID ${pid}`);
@@ -165,6 +172,7 @@ export class ProcessContainment {
     graceMs = 2_000,
     forceWaitMs = 1_000,
     timeoutMs = 5_000,
+    maxCycles = 2,
     now = Date.now,
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   } = {}) {
@@ -175,6 +183,7 @@ export class ProcessContainment {
     this.graceMs = Math.max(0, graceMs);
     this.forceWaitMs = Math.max(0, forceWaitMs);
     this.timeoutMs = Math.max(1, timeoutMs);
+    this.maxCycles = Number.isFinite(maxCycles) ? Math.max(1, Math.floor(maxCycles)) : 2;
     this.now = now;
     this.sleep = sleep;
     this.promise = null;
@@ -260,70 +269,84 @@ export class ProcessContainment {
       return this.#finish();
     }
 
-    let discovery;
-    try { discovery = normalizeDiscovery(await this.#bounded(() => this.adapter.discover(this.ownership.token), "process discovery")); }
-    catch (error) {
-      this.#unresolved(null, "discovery-failed", error);
-      this.record.diagnostics.push(`Process discovery failed: ${message(error)}`);
-      this.record.outcome = "incomplete";
-      return this.#finish();
-    }
-    this.record.diagnostics.push(...discovery.diagnostics.map(String));
-    for (const unresolved of discovery.unresolved) {
-      this.record.unresolved.push({
-        ...(Number.isInteger(unresolved?.pid) && unresolved.pid > 0 ? { pid: unresolved.pid } : {}),
-        reason: unresolved?.reason || "discovery-observation-failed",
-        ...(unresolved?.error ? { error: String(unresolved.error) } : {})
-      });
-    }
-    if (discovery.unresolved.length) {
-      this.record.diagnostics.push(`Process discovery could not inspect ${discovery.unresolved.length} process(es)`);
-    }
-    // Copy adapter values once: the evidence used for later PID-reuse checks
-    // must not be mutable while the graceful wait is in progress.
-    const targets = discovery.processes.map(({ pid, ppid, startTime, ownershipToken }) => Object.freeze({
-      pid, ppid, startTime, ownershipToken
-    }));
-    this.record.discovered = targets.map(({ pid, ppid, startTime }) => ({ pid, ppid, startTime }));
-    if (!targets.length) {
-      this.record.outcome = this.record.unresolved.length ? "incomplete" : "not-required";
-      return this.#finish();
-    }
-
-    const awaiting = [];
-    for (const identity of targets) {
-      const sent = await this.#send(identity, gracefulSignal, "graceful");
-      if (sent.safe) awaiting.push(identity);
-    }
-    if (awaiting.length && this.graceMs) {
-      try { await this.#bounded(() => this.sleep(Math.min(this.graceMs, this.timeoutMs)), "grace period"); }
+    const processed = new Set();
+    let cycles = 0;
+    while (true) {
+      let discovery;
+      try { discovery = normalizeDiscovery(await this.#bounded(() => this.adapter.discover(this.ownership.token), "process discovery")); }
       catch (error) {
-        for (const identity of awaiting) this.#unresolved(identity, "grace-wait-failed", error);
+        this.#unresolved(null, "discovery-failed", error);
+        this.record.diagnostics.push(`Process discovery failed: ${message(error)}`);
         this.record.outcome = "incomplete";
         return this.#finish();
       }
-    }
+      this.record.diagnostics.push(...discovery.diagnostics.map(String));
+      for (const unresolved of discovery.unresolved) {
+        this.record.unresolved.push({
+          ...(Number.isInteger(unresolved?.pid) && unresolved.pid > 0 ? { pid: unresolved.pid } : {}),
+          reason: unresolved?.reason || "discovery-observation-failed",
+          ...(unresolved?.error ? { error: String(unresolved.error) } : {})
+        });
+      }
+      if (discovery.unresolved.length) this.record.diagnostics.push(`Process discovery could not inspect ${discovery.unresolved.length} process(es)`);
 
-    const forced = [];
-    for (const identity of awaiting) {
-      const sent = await this.#send(identity, forceSignal, "force");
-      if (sent.safe) forced.push(identity);
-    }
-    if (forced.length && this.forceWaitMs) {
-      try { await this.#bounded(() => this.sleep(Math.min(this.forceWaitMs, this.timeoutMs)), "force period"); }
-      catch (error) {
-        for (const identity of forced) this.#unresolved(identity, "force-wait-failed", error);
+      // Copy adapter values once: the evidence used for later PID-reuse checks
+      // must not be mutable while the graceful wait is in progress. A process
+      // born during the graceful wait is handled in a fresh, bounded cycle.
+      const targets = discovery.processes.map(({ pid, ppid, startTime, ownershipToken }) => Object.freeze({
+        pid, ppid, startTime, ownershipToken
+      })).filter((identity) => !processed.has(`${identity.pid}:${identity.startTime}`));
+      for (const { pid, ppid, startTime } of targets) {
+        if (!this.record.discovered.some((known) => known.pid === pid && known.startTime === startTime)) {
+          this.record.discovered.push({ pid, ppid, startTime });
+        }
+      }
+      if (!targets.length) {
+        // A process that disappeared before a signal was necessary is the same
+        // success-path state as an empty discovery: no cleanup was required.
+        this.record.outcome = this.record.unresolved.length ? "incomplete" : this.record.actions.length ? "complete" : "not-required";
+        return this.#finish();
+      }
+      if (cycles >= this.maxCycles) {
+        for (const identity of targets) this.#unresolved(identity, "additional-owned-process-after-bounded-cycles");
         this.record.outcome = "incomplete";
         return this.#finish();
       }
-    }
-    for (const identity of forced) {
-      const final = await this.#observe(identity, "final");
-      if (final.safe) this.#unresolved(identity, "still-running-after-force");
-    }
+      cycles++;
+      for (const identity of targets) processed.add(`${identity.pid}:${identity.startTime}`);
 
-    this.record.outcome = this.record.unresolved.length ? "incomplete" : "complete";
-    return this.#finish();
+      const awaiting = [];
+      for (const identity of targets) {
+        const sent = await this.#send(identity, gracefulSignal, "graceful");
+        if (sent.safe) awaiting.push(identity);
+      }
+      if (awaiting.length && this.graceMs) {
+        try { await this.#bounded(() => this.sleep(Math.min(this.graceMs, this.timeoutMs)), "grace period"); }
+        catch (error) {
+          for (const identity of awaiting) this.#unresolved(identity, "grace-wait-failed", error);
+          this.record.outcome = "incomplete";
+          return this.#finish();
+        }
+      }
+
+      const forced = [];
+      for (const identity of awaiting) {
+        const sent = await this.#send(identity, forceSignal, "force");
+        if (sent.safe) forced.push(identity);
+      }
+      if (forced.length && this.forceWaitMs) {
+        try { await this.#bounded(() => this.sleep(Math.min(this.forceWaitMs, this.timeoutMs)), "force period"); }
+        catch (error) {
+          for (const identity of forced) this.#unresolved(identity, "force-wait-failed", error);
+          this.record.outcome = "incomplete";
+          return this.#finish();
+        }
+      }
+      for (const identity of forced) {
+        const final = await this.#observe(identity, "final");
+        if (final.safe) this.#unresolved(identity, "still-running-after-force");
+      }
+    }
   }
 
   #finish() {

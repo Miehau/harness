@@ -1065,6 +1065,9 @@ export function compactRun(run, revision = null) {
     lastError: run?.lastError || null,
     workflow: run?.workflow || null,
     proofMap: projectProofMap(run),
+    // Keep cleanup evidence structured in the lightweight inspector response;
+    // it must not be collapsed into lastError because success is not implied.
+    cleanup: normalizeRunCleanup(run?.cleanup),
     revision
   };
 }

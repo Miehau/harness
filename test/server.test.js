@@ -172,7 +172,54 @@ test("public run state preserves actionable process cleanup evidence", async () 
   });
 });
 
-test("ticket selection returns the selected public run without artifact bodies", async () => {
+test("active and retained API state preserve all cleanup outcomes and details", async () => {
+  await withDaemon(async (daemon) => {
+    const records = {
+      complete: { platform: { name: "linux", supported: true }, discovered: [{ pid: 71, ppid: 7, startTime: "101" }], actions: [{ pid: 71, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }], unresolved: [], diagnostics: [] },
+      incomplete: { platform: { name: "linux", supported: true }, discovered: [{ pid: 72, ppid: 7, startTime: "102" }], actions: [{ pid: 72, signal: "SIGKILL", status: "sent", at: "2026-09-03T10:00:01.000Z" }], unresolved: [{ pid: 72, reason: "still-running-after-force" }], diagnostics: ["Process remained after force termination"] },
+      unsupported: { platform: { name: "darwin", supported: false, reason: "Safe process identity discovery is not available" }, discovered: [], actions: [], unresolved: [], diagnostics: ["No safe adapter"] },
+      "not-required": { platform: { name: "linux", supported: true }, discovered: [], actions: [], unresolved: [], diagnostics: [] }
+    };
+    for (const [outcome, details] of Object.entries(records)) {
+      const id = `cleanup-${outcome}`;
+      const execution = {
+        executionId: `execution-${outcome}`, outcome, stepId: "build", attemptId: "attempt-1",
+        ownership: { executionId: `execution-${outcome}`, establishedAt: "2026-09-03T10:00:00.000Z", tokenPresent: true },
+        startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:00:02.000Z",
+        triggers: [{ trigger: outcome === "unsupported" ? "daemon-shutdown" : "worker-completed", at: "2026-09-03T10:00:00.000Z" }],
+        ...details
+      };
+      await seedRun(daemon, {
+        ticket: { id, identifier: `CLEAN-${outcome}`, title: `${outcome} cleanup`, description: "", source: "local", state: { name: "Local", type: "local" }, team: { name: "Local" } },
+        status: "completed",
+        cleanup: { outcome, updatedAt: "2026-09-03T10:00:02.000Z", executions: [execution] }
+      });
+    }
+    const active = await invoke(daemon, "GET", "/api/state");
+    for (const outcome of Object.keys(records)) {
+      const cleanup = active.json.ticketRuns[`cleanup-${outcome}`].cleanup;
+      assert.equal(cleanup.outcome, outcome);
+      assert.equal(cleanup.executions[0].platform.name, records[outcome].platform.name);
+      assert.deepEqual(cleanup.executions[0].unresolved, records[outcome].unresolved);
+      assert.deepEqual(cleanup.executions[0].diagnostics, records[outcome].diagnostics);
+    }
+    const compact = await invoke(daemon, "GET", "/api/tickets/cleanup-incomplete/run");
+    assert.equal(compact.json.cleanup.outcome, "incomplete");
+    assert.equal(compact.json.cleanup.executions[0].actions[0].signal, "SIGKILL");
+
+    await invoke(daemon, "POST", "/api/queue/clear", { body: {} });
+    const retained = await invoke(daemon, "GET", "/api/state");
+    for (const outcome of Object.keys(records)) {
+      const cleanup = retained.json.retainedRuns[`cleanup-${outcome}:run-1`].cleanup;
+      assert.equal(cleanup.outcome, outcome);
+      assert.equal(cleanup.executions[0].platform.supported, records[outcome].platform.supported);
+      assert.deepEqual(cleanup.executions[0].discovered, records[outcome].discovered);
+    }
+    assert.equal(Object.keys(retained.json.ticketRuns).length, 0);
+  });
+});
+
+test("ticket selection returns a compact acknowledgment", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, { artifacts: [{ id: "a", name: "proof.md", content: "private body" }] });
     const selected = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/select`, { body: {} });

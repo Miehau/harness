@@ -42,11 +42,13 @@ test("ownership is unique execution evidence and overlays launch environments", 
   assert.equal(Object.isFrozen(first), true);
 });
 
-test("identity requires PID, parent, start time, and exact ownership", () => {
+test("identity requires PID, start time, and ownership while allowing subreaper adoption", () => {
   const expected = identity();
   assert.equal(sameProcessIdentity(expected, identity(), "owner-token"), true);
+  assert.equal(sameProcessIdentity(expected, identity({ ppid: 1 }), "owner-token"), true, "init adoption preserves start-time and ownership evidence");
+  assert.equal(sameProcessIdentity(expected, identity({ ppid: 8 }), "owner-token"), true, "subreaper adoption preserves stronger immutable identity evidence");
   for (const changed of [
-    identity({ pid: 42 }), identity({ ppid: 8 }), identity({ startTime: "101" }), identity({ ownershipToken: "other" }),
+    identity({ pid: 42 }), identity({ startTime: "101" }), identity({ ownershipToken: "other" }),
     identity({ ppid: undefined }), identity({ startTime: undefined }), identity({ startTime: "" })
   ]) assert.equal(sameProcessIdentity(expected, changed, "owner-token"), false);
   for (const incomplete of [identity({ ppid: undefined }), identity({ startTime: undefined }), identity({ startTime: "" })]) {
@@ -79,6 +81,25 @@ test("returns promptly without waiting or signaling when cleanup is unnecessary"
   assert.deepEqual(result.actions, []);
 });
 
+test("a zombie owned process is safe absence rather than an unresolved live target", async () => {
+  let signals = 0;
+  const adapter = createPlatformAdapter({
+    platform: "linux",
+    currentUid: 1000,
+    procRoot: "/simulated-proc",
+    readDirectory: async () => ["51"],
+    readFileImpl: async (path) => {
+      if (path.endsWith("/status")) return "Name:\tfixture\nUid:\t1000\t1000\t1000\t1000\n";
+      if (path.endsWith("/environ")) return Buffer.from(`${PROCESS_OWNERSHIP_ENV}=owner-token\0`);
+      return `51 (fixture) Z 1 ${Array(17).fill("0").join(" ")} 123`;
+    },
+    kill: () => { signals++; }
+  });
+  const result = await containment(adapter).cleanup("worker-completed");
+  assert.equal(result.outcome, "not-required");
+  assert.equal(signals, 0);
+});
+
 test("graceful signal, bounded wait, renewed identity, and force signal are ordered", async () => {
   const events = [];
   let observations = 0;
@@ -94,6 +115,29 @@ test("graceful signal, bounded wait, renewed identity, and force signal are orde
   assert.equal(result.outcome, "complete");
   assert.deepEqual(events, ["observe-1", "SIGTERM", "wait-5", "observe-2", "SIGKILL", "wait-5", "observe-3"]);
   assert.deepEqual(result.actions.map(({ signal }) => signal), ["SIGTERM", "SIGKILL"]);
+});
+
+test("a descendant forked during graceful cleanup receives a bounded second cycle", async () => {
+  const parent = identity();
+  const child = identity({ pid: 42, startTime: "101" });
+  const actions = [];
+  let state = "parent";
+  let discoveries = 0;
+  const result = await containment({
+    discover: async () => {
+      discoveries++;
+      return state === "parent" ? [parent] : state === "child" ? [child] : [];
+    },
+    observe: async (pid) => pid === parent.pid && state === "parent" ? parent : pid === child.pid && state === "child" ? child : null,
+    signal: async (pid, signal) => {
+      actions.push([pid, signal]);
+      if (pid === parent.pid && signal === "SIGTERM") state = "child";
+      if (pid === child.pid && signal === "SIGKILL") state = "gone";
+    }
+  }).cleanup("cancelled");
+  assert.equal(result.outcome, "complete");
+  assert.equal(discoveries, 3);
+  assert.deepEqual(actions, [[41, "SIGTERM"], [42, "SIGTERM"], [42, "SIGKILL"]]);
 });
 
 test("PID reuse before graceful signaling is unresolved and never signaled", async () => {
@@ -228,7 +272,7 @@ test("disappearance and ESRCH are safe absence rather than unresolved ownership"
   const vanishedBeforeSignal = await containment({
     discover: async () => [identity()], observe: async () => null, signal: async () => assert.fail("must not signal")
   }).cleanup("normal-exit");
-  assert.equal(vanishedBeforeSignal.outcome, "complete");
+  assert.equal(vanishedBeforeSignal.outcome, "not-required");
 
   let observations = 0;
   const vanishedWhileSignaling = await containment({

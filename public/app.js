@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -16,7 +16,7 @@ const currentView = savedView.version === viewVersion;
 const savedTicketId = currentView ? savedView.ticketId || null : null;
 let selectedStepId = currentView ? savedView.selectedStepId || null : null;
 let selectedStageId = currentView ? savedView.selectedStageId || null : null;
-let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
+let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "cleanup"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
 let diffExpanded = false;
 let toastTimer;
@@ -289,7 +289,7 @@ function renderHeader() {
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
   const pauseAudit = run?.pauseHistory?.at(-1);
   const pauseBanner = pauseAudit ? `<div class="recovery-banner"><strong>${run.status === "paused" ? "Run paused" : "Resumed from pause"}</strong><span>${escapeHtml(new Date(pauseAudit.at).toLocaleString())} · ${escapeHtml(pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`)} · audit ${escapeHtml(pauseAudit.id)}</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${cleanupAdvisoryHtml(run)}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -555,6 +555,32 @@ function correctionCriterionPicker(run, options = {}) {
   return criteria.length ? `<fieldset class="criterion-picker"><legend>Affected criteria</legend>${criteria.map((criterion) => `<label><input type="checkbox" name="criterionId" value="${escapeHtml(criterion.id)}">${escapeHtml(criterion.text)}</label>`).join("")}</fieldset>` : "";
 }
 
+function cleanupList(items, empty, render) {
+  return items.length ? `<ul>${items.map(render).join("")}</ul>` : `<p class="cleanup-empty">${escapeHtml(empty)}</p>`;
+}
+
+function cleanupInspectorHtml(run) {
+  const cleanup = cleanupInspectorModel(run);
+  const executionHtml = cleanup.executions.map((execution) => {
+    const identities = [
+      ...execution.discovered,
+      ...execution.unresolved.filter((item) => item?.pid && !execution.discovered.some((known) => known.pid === item.pid))
+    ];
+    const platform = execution.platform
+      ? `${execution.platform.name || "unknown platform"} · ${execution.platform.supported ? "supported" : "unsupported"}${execution.platform.reason ? ` · ${execution.platform.reason}` : ""}`
+      : "Platform support was not recorded";
+    const title = `${execution.executionId}${execution.stepId ? ` · ${execution.stepId}` : ""}`;
+    return `<details class="cleanup-execution" ${cleanup.advisory ? "open" : ""}><summary><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(execution.outcome)}</small></span><time>${escapeHtml((execution.completedAt || execution.startedAt || "").replace("T", " ").slice(0, 19) || "not recorded")}</time></summary><div class="cleanup-evidence"><dl><div><dt>Platform</dt><dd>${escapeHtml(platform)}</dd></div><div><dt>Ownership</dt><dd>${escapeHtml(execution.ownership?.tokenPresent ? "ownership token established" : "ownership token not recorded")}</dd></div><div><dt>Started</dt><dd>${escapeHtml(execution.startedAt || "not recorded")}</dd></div><div><dt>Completed</dt><dd>${escapeHtml(execution.completedAt || "not recorded")}</dd></div></dl><section><span>Lifecycle triggers</span>${cleanupList(execution.triggers, "No lifecycle trigger was recorded.", (trigger) => `<li><code>${escapeHtml(trigger.trigger || "unspecified")}</code> ${escapeHtml(trigger.at || "")}</li>`)}</section><section><span>Affected processes</span>${cleanupList(identities, "No attributable process was discovered.", (identity) => `<li><code>pid ${escapeHtml(identity.pid || "unknown")}</code> · parent ${escapeHtml(identity.ppid ?? identity.identity?.ppid ?? "unknown")} · started ${escapeHtml(identity.startTime || identity.identity?.startTime || "unknown")}</li>`)}</section><section><span>Attempted actions</span>${cleanupList(execution.actions, "No process signal was attempted.", (action) => `<li><code>${escapeHtml(action.signal || "action")}</code> pid ${escapeHtml(action.pid || "unknown")} · ${escapeHtml(action.status || "recorded")}${action.error ? ` · ${escapeHtml(action.error)}` : ""}${action.at ? ` · ${escapeHtml(action.at)}` : ""}</li>`)}</section><section><span>Unresolved evidence</span>${cleanupList(execution.unresolved, "No unresolved process evidence.", (item) => `<li><strong>${escapeHtml(item.reason || "unresolved")}</strong>${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ""}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</li>`)}</section><section><span>Diagnostics</span>${cleanupList(execution.diagnostics, "No diagnostics were recorded.", (diagnostic) => `<li>${escapeHtml(diagnostic)}</li>`)}</section></div></details>`;
+  }).join("") || `<div class="run-empty">No worker execution has registered process containment yet.</div>`;
+  return `<section class="cleanup-inspector ${cleanup.advisory ? "advisory" : "neutral"}"><header><div><span class="eyebrow">Process containment</span><h3>${escapeHtml(cleanup.label)}</h3><p>${cleanup.advisory ? "Cleanup did not establish a successful result. Review the retained process evidence before continuing." : "Durable process-cleanup evidence remains available for this run."}</p></div><span class="cleanup-outcome">${escapeHtml(cleanup.outcome)}</span></header>${cleanup.updatedAt ? `<time class="cleanup-updated">Updated ${escapeHtml(cleanup.updatedAt)}</time>` : ""}<div class="cleanup-executions">${executionHtml}</div></section>`;
+}
+
+function cleanupAdvisoryHtml(run) {
+  const cleanup = cleanupInspectorModel(run);
+  if (!cleanup.advisory) return "";
+  return `<section class="cleanup-advisory" role="alert"><span class="eyebrow">Cleanup advisory</span><strong>${escapeHtml(cleanup.label)}</strong><p>Process cleanup is not confirmed. Open the Cleanup inspector for affected process identities, lifecycle triggers, and diagnostic reasons.</p></section>`;
+}
+
 function overviewPanel(step) {
   const run = runFor();
   const summary = stepInspectorSummary(step);
@@ -706,19 +732,19 @@ function renderInspector() {
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
-    const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
+    const stageTab = ["activity", "prompt", "artifacts", "details", "cleanup"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
-    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageTab === "cleanup" ? cleanupInspectorHtml(run) : stageDetailsPanel(run, stage, profile, artifacts);
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"], ["cleanup", "Cleanup"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
   }
   if (!step) {
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${cleanupInspectorHtml(run)}${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
-  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
+  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt", "cleanup"].includes(activeTab) ? activeTab : "run";
   const promptArtifact = workerTab === "prompt" ? [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt") : null;
   if (workerTab === "prompt") {
     loadSessionTrace(run, step);
@@ -731,7 +757,8 @@ function renderInspector() {
       : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
         : workerTab === "ticket" ? artifactsPanel(null)
           : workerTab === "prompt" ? `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>`
-            : runPanel(step);
+            : workerTab === "cleanup" ? cleanupInspectorHtml(run)
+              : runPanel(step);
   const isolated = Boolean(step.workspace?.isolated);
   const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
@@ -739,7 +766,7 @@ function renderInspector() {
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
     : (() => { const proof = proofMapView(run, { stepId: step.id }); return `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : proof.eligibility.eligible ? "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted." : `Proof gate blocked: ${escapeHtml(proof.eligibility.blockingReasons.map((reason) => reason.message).join(" "))}`}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea>${correctionCriterionPicker(run, { stepId: step.id })}<button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept & auto-run</button></section>`; })() : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
-  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
+  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"],["cleanup","Cleanup"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
   target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${workerTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(workerTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panel}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
