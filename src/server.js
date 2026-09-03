@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1323,6 +1323,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
       }
     } catch (error) {
       if (signal?.aborted) return;
+      const providerWait = providerWaitCheckpoint(error);
       await update((state) => {
         const current = ticketRun(state, ticketId);
         const failed = findNode(current.plan, stepId);
@@ -1335,7 +1336,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           attemptId: attemptEvidence?.attemptId || active.attemptId || `attempt-${failed.attempts.length + 1}`,
           startedAt: attemptEvidence?.startedAt || active.startedAt || new Date().toISOString(),
           completedAt: new Date().toISOString(),
-          status: "failed",
+          status: providerWait ? "interrupted" : "failed",
           events: activity.events || [],
           activityGroups: activity.groups || [],
           rawOutput: activity.rawOutput || attemptEvidence?.rawOutput || "",
@@ -1352,16 +1353,16 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           failed.artifacts = [attemptEvidence.artifacts[0]];
           for (const artifact of attemptEvidence.artifacts) if (!current.artifacts.some((item) => item.id === artifact.id)) current.artifacts.push(artifact);
         }
-        failed.status = "failed";
+        failed.status = providerWait ? "interrupted" : "failed";
         failed.lastError = error.message;
         delete current.activeRuns[stepId];
-        current.status = "needs_attention";
+        current.status = providerWait ? "paused" : "needs_attention";
         current.lastError = error.message;
         current.checkpoint = {
-          id: randomUUID(), kind: "needs_attention", title: `Step failed: ${failed.title}`,
-          prompt: error.message, stepId, source: "execution", createdAt: new Date().toISOString()
+          id: randomUUID(), ...(providerWait || { kind: "needs_attention", title: `Step failed: ${failed.title}`, prompt: error.message }),
+          stepId, source: "execution", createdAt: new Date().toISOString()
         };
-        setStage(current, "implement", "blocked", error.message);
+        setStage(current, "implement", providerWait ? "paused" : "blocked", error.message);
       });
     }
   })().finally(() => activeSteps.delete(key));
@@ -2015,7 +2016,8 @@ async function advanceTicket(ticketId, signal) {
       setStage(current, "implement", "active", batch.length > 1 ? `Running ${batch.length} tickets in parallel` : `Running ${batch[0].title}`);
     });
     await Promise.all(batch.map((step) => executeStep(ticketId, step.id, { signal })));
-    if (ticketRun(store.read(), ticketId).auto) return advanceTicket(ticketId, signal);
+    const afterBatch = ticketRun(store.read(), ticketId);
+    if (afterBatch.auto && !terminalRunStatusSet.has(afterBatch.status)) return advanceTicket(ticketId, signal);
     return;
   }
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
@@ -2076,15 +2078,17 @@ async function runTicket(ticketId) {
       await advanceTicket(ticketId, signal);
     } catch (error) {
       if (signal.aborted) return;
+      const providerWait = providerWaitCheckpoint(error);
       await update((state) => {
         const run = state.ticketRuns[ticketId];
         if (!run) return;
-        run.status = "needs_attention";
+        run.status = providerWait ? "paused" : "needs_attention";
         run.lastError = error.message;
+        if (providerWait) run.checkpoint = { id: randomUUID(), ...providerWait, source: "execution", createdAt: new Date().toISOString() };
         const activeStage = run.stages.find((stage) => stage.status === "active");
-        if (activeStage) { activeStage.status = "blocked"; activeStage.summary = error.message; }
+        if (activeStage) { activeStage.status = providerWait ? "paused" : "blocked"; activeStage.summary = error.message; }
       });
-      await mirrorExecutionBlocker(ticketId, error);
+      if (!providerWait) await mirrorExecutionBlocker(ticketId, error);
     }
   });
 }

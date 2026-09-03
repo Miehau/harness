@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -358,6 +358,15 @@ test("a correction keeps its verification focus after the round window resets", 
   const findings = [{ severity: "high", claim: "The supplied screenshot is incomplete" }];
   assert.deepEqual(verificationFocusFindings("Retry the interrupted correction", findings), findings);
   assert.deepEqual(verificationFocusFindings("", findings), []);
+});
+
+test("provider usage exhaustion becomes a durable wait checkpoint", () => {
+  assert.deepEqual(providerWaitCheckpoint(new Error("Codex error: The usage limit has been reached. Try again at Sep 7th, 2026 8:42 PM.")), {
+    kind: "provider_wait", title: "Paused for provider capacity",
+    prompt: "Codex error: The usage limit has been reached. Try again at Sep 7th, 2026 8:42 PM.",
+    retryAt: "Sep 7th, 2026 8:42 PM"
+  });
+  assert.equal(providerWaitCheckpoint(new Error("Verification failed")), null);
 });
 
 test("compact run and public state omit artifact bodies", () => {

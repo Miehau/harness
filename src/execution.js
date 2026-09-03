@@ -553,6 +553,18 @@ export function verificationFocusFindings(feedback, findings = []) {
   return feedback ? findings : [];
 }
 
+export function providerWaitCheckpoint(error) {
+  const message = String(error?.message || error || "").trim();
+  if (!/(usage limit (?:has been )?reached|hit your usage limit)/i.test(message)) return null;
+  const retryAt = message.match(/try again at\s+(.+?)(?:\.|$)/i)?.[1]?.trim() || null;
+  return {
+    kind: "provider_wait",
+    title: "Paused for provider capacity",
+    prompt: message,
+    ...(retryAt ? { retryAt } : {})
+  };
+}
+
 export function correctionPauseReason(reason, findings = []) {
   const details = actionableFindings([{ findings }]).map((finding) => {
     const evidence = finding.evidence?.[0] || {};

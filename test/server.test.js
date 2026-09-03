@@ -423,6 +423,34 @@ test("step execution failures persist an actionable run checkpoint", async () =>
   }, { harness });
 });
 
+test("provider usage exhaustion pauses a step without blaming its implementation", async () => {
+  const harness = {
+    ...mockHarness(),
+    runStep: async () => { throw new Error("Codex error: The usage limit has been reached. Try again at Sep 7th, 2026 8:42 PM."); }
+  };
+  await withDaemon(async (daemon, { cwd }) => {
+    const ticket = { id: "provider-wait", identifier: "LOCAL-wait", title: "Wait durably", description: "Resume after quota reset", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src", expectedFiles: ["src/app.js"], estimatedChangedLines: 20, acceptanceCriteria: ["Works"] }] });
+    const id = await seedRun(daemon, { ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "awaiting_approval", checkpoint: { id: "plan", kind: "awaiting_approval", title: "Approve" } });
+
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: true } });
+    assert.equal(approved.status, 202, approved.text);
+    const deadline = Date.now() + 3000;
+    let run;
+    while (Date.now() < deadline) {
+      run = daemon.store.read().ticketRuns[id];
+      if (run.status === "paused") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(run.status, "paused");
+    assert.equal(run.plan.nodes[0].status, "interrupted");
+    assert.equal(run.checkpoint.kind, "provider_wait");
+    assert.equal(run.checkpoint.retryAt, "Sep 7th, 2026 8:42 PM");
+    assert.equal(run.stages.find((stage) => stage.id === "implement").status, "paused");
+  }, { harness });
+});
+
 test("final proof checkpoint exposes durable review metadata", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, {
