@@ -225,7 +225,7 @@ test("bounded repository failure output retains both context and the final faili
       console.log("    Command failed: git worktree add --detach /tmp/feature abc123");
       console.log("    fatal: failed to read .git/worktrees/feature/commondir");
       console.log("  code: 128");
-      console.log("b".repeat(12000));
+      console.error("CHROME-NOISE:" + "b".repeat(120000));
       process.exit(1);
     `);
     const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
