@@ -232,7 +232,7 @@ test("plan approval ignores supervisor workflow gates", () => {
   assert.equal(planApprovalPending({ plan: { nodes: [] }, checkpoint: { kind: "awaiting_approval", source: "supervisor" } }), false);
 });
 
-test("correction pauses when findings repeat but allows distinct issues past round three", () => {
+test("correction pauses when findings repeat but allows distinct medium-or-higher issues to progress", () => {
   const findings = [{ severity: "high", claim: "Missing guard", evidence: [{ file: "src/a.ts", line: 9 }] }];
   const first = shouldPauseCorrection({ round: 1, findings, previousFingerprint: "" });
   assert.equal(first.pause, false);
@@ -241,9 +241,11 @@ test("correction pauses when findings repeat but allows distinct issues past rou
   assert.match(repeat.reason, /repeated/);
   const progressing = shouldPauseCorrection({ round: 3, findings, previousFingerprint: "other" });
   assert.equal(progressing.pause, false);
-  const capped = shouldPauseCorrection({ round: 6, findings, previousFingerprint: "other" });
+  const stillProgressing = shouldPauseCorrection({ round: 6, findings, previousFingerprint: "other" });
+  assert.equal(stillProgressing.pause, false);
+  const capped = shouldPauseCorrection({ round: 12, findings, previousFingerprint: "other" });
   assert.equal(capped.pause, true);
-  assert.match(capped.reason, /6 verification attempts/);
+  assert.match(capped.reason, /12 verification attempts/);
 });
 
 test("correction pause output retains the latest actionable evidence", () => {
