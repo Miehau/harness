@@ -608,8 +608,14 @@ export function recoverableCleanReview(run = {}) {
   return { round: Number(review.round) || run.reviews.length, checks, diff: review.diff };
 }
 
-export function sessionImages(sessionFile, images = []) {
-  return sessionFile ? [] : images;
+export function reviewFixImages(sessionFile, findings = [], images = []) {
+  if (sessionFile) return [];
+  const needsVisualContext = findings.some((finding) => {
+    const context = [finding.category, finding.claim, finding.suggestedFix, finding.suggested_fix, ...(finding.evidence || []).map((item) => item.file)].join(" ");
+    return String(finding.category || "").toLowerCase() === "accessibility"
+      || /\b(?:screenshot|image|video|visual|layout|viewport|pixel)\b/i.test(context);
+  });
+  return needsVisualContext ? images : [];
 }
 
 export function interruptedStepFeedback(step = {}) {
