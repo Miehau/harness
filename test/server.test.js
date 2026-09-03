@@ -273,6 +273,12 @@ test("operator can auditably expand one blocked step to a directly affected test
     assert.deepEqual(run.plan.nodes[0].scopeChanges.at(-1).paths, ["test/e2e.test.js"]);
     assert.match(run.checkpoint.prompt, /Approved scope expansion/);
 
+    run.plan.nodes[0].status = "needs_input";
+    const inputExpansion = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, {
+      body: { paths: ["test/focused.test.js"], reason: "The worker requested this exact bounded test scope." }
+    });
+    assert.equal(inputExpansion.status, 200, inputExpansion.text);
+
     const rejected = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, { body: { paths: ["../outside"], reason: "No" } });
     assert.equal(rejected.status, 400);
   });

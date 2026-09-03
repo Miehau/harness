@@ -2505,7 +2505,7 @@ async function api(request, response, url) {
     const state = await update((draft) => {
       const run = ticketRun(draft, ticketId);
       const step = findNode(run.plan, stepId);
-      if (!step || !["needs_attention", "failed", "interrupted"].includes(step.status)) throw new Error("Only a stopped blocked step can receive a scope expansion");
+      if (!step || !["needs_attention", "needs_input", "awaiting_approval", "failed", "interrupted"].includes(step.status)) throw new Error("Only a stopped blocked step can receive a scope expansion");
       const existing = step.writeScope.split(",").map((path) => path.trim()).filter(Boolean);
       step.writeScope = [...new Set([...existing, ...paths])].join(",");
       step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
