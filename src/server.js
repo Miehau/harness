@@ -500,10 +500,11 @@ async function settleContainment(ticketId, executionId, containment, trigger, ow
   }));
   trackPendingContainment(executionId, operation);
   let timer;
-  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), lifecycleCleanupTimeoutMs); });
+  let doResolve;
+  const timeout = new Promise((resolve) => { doResolve = resolve; timer = setTimeout(() => resolve(null), lifecycleCleanupTimeoutMs); });
   let evidence;
   try { evidence = await Promise.race([operation, timeout]); }
-  finally { clearTimeout(timer); }
+  finally { clearTimeout(timer); if (doResolve) { doResolve(null); doResolve = null; } }
   if (evidence) {
     await persistContainment(ticketId, owningRunId, executionId, evidence, lifecycle);
     return evidence;
