@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -367,6 +367,19 @@ test("an interrupted final-review fix resumes from persisted findings", () => {
   assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings, sessionFile: null });
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "completed" } } }]), null);
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: [] }]), null);
+});
+
+test("a persisted clean review resumes at final proof without rerunning reviewers", () => {
+  const clean = { round: 4, actionableFindings: [], diff: { summary: "clean" }, reviews: [
+    { role: "deterministic", checks: { status: "passed", summary: "240 tests passed" } }
+  ] };
+  assert.deepEqual(recoverableCleanReview({ reviews: [clean] }), {
+    round: 4, checks: clean.reviews[0].checks, diff: clean.diff
+  });
+  assert.equal(recoverableCleanReview({ reviews: [{ ...clean, actionableFindings: [{ severity: "medium" }] }] }), null);
+  assert.equal(recoverableCleanReview({ reviews: [clean], pendingEvidenceFeedback: "Please revise" }), null);
+  assert.equal(recoverableCleanReview({ reviews: [clean], checkpoint: { kind: "evidence_review" } }), null);
+  assert.equal(recoverableCleanReview({ reviews: [{ ...clean, reviews: [] }] }), null);
 });
 
 test("a verifier transport failure does not resurrect superseded correction feedback", () => {

@@ -579,6 +579,15 @@ export function pendingReviewFix(reviews = []) {
   return { round: Number(review.round) || reviews.length, findings, sessionFile: review.fix?.sessionFile || null };
 }
 
+export function recoverableCleanReview(run = {}) {
+  if (run.pendingEvidenceFeedback || run.checkpoint?.kind === "evidence_review") return null;
+  const review = run.reviews?.at(-1);
+  if (!review || !Array.isArray(review.actionableFindings) || review.actionableFindings.length) return null;
+  const checks = review.reviews?.find((item) => item.role === "deterministic")?.checks;
+  if (checks?.status !== "passed") return null;
+  return { round: Number(review.round) || run.reviews.length, checks, diff: review.diff };
+}
+
 export function interruptedStepFeedback(step = {}) {
   const attempts = Array.isArray(step.attempts) ? step.attempts : [];
   const latest = attempts.at(-1);

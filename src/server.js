@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1741,6 +1741,61 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
   return true;
 }
 
+async function completeCleanReview({ ticketId, current, round, checks, diff, activity, signal }) {
+  await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
+  let contextArtifact = null;
+  let contextContent = null;
+  let handoffActivity = null;
+  if (current.ticket.source !== "local") {
+    const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
+    handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
+    contextContent = await harness.updateProductContext({
+      cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
+      artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
+      diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
+    });
+    signal?.throwIfAborted();
+    if (!contextContent.trim()) throw new Error("Product context update was empty");
+    contextArtifact = await persistArtifact(dataDir, current.ticket, {
+      runId: current.runId, name: "product-context-update.md", content: contextContent,
+      stageId: "handoff", kind: "product-context-update"
+    });
+  }
+  const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
+  const media = (ticketRun(store.read(), ticketId).artifacts || [])
+    .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
+    .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }) => ({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }));
+  const finalChecks = {
+    status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
+    evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
+  };
+  const videoRequired = flattenSteps(current.plan).some((step) => step.requiresVideoEvidence);
+  if (current.ticket.source === "local") {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
+      setStage(run, "handoff", "blocked", "Review final proof before integration");
+      run.status = "awaiting_evidence_review";
+      run.checkpoint = {
+        id: randomUUID(), kind: "evidence_review", title: "Review final proof before integration",
+        prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, createdAt: new Date().toISOString()
+      };
+    });
+    return;
+  }
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.artifacts.push(contextArtifact);
+    setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
+    setStage(run, "handoff", "blocked", "Review final proof before remote merge").activity = handoffActivity.snapshot();
+    run.status = "awaiting_evidence_review";
+    run.checkpoint = {
+      id: randomUUID(), kind: "evidence_review", title: "Review final proof before remote merge",
+      prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, productContext: contextContent, createdAt: new Date().toISOString()
+    };
+  });
+}
+
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
@@ -1760,6 +1815,11 @@ async function finalReviewLoop(ticketId, signal) {
       at: new Date().toISOString(), kind: "legacy-review-artifact-cleanup", files: removedReviewArtifacts
     });
   });
+  const cleanReview = recoverableCleanReview(started);
+  if (cleanReview) {
+    await completeCleanReview({ ticketId, current: ticketRun(store.read(), ticketId), ...cleanReview, activity, signal });
+    return;
+  }
   const pendingFix = pendingReviewFix(started.reviews);
   if (pendingFix) {
     const current = ticketRun(store.read(), ticketId);
@@ -1824,58 +1884,7 @@ async function finalReviewLoop(ticketId, signal) {
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });
     if (!findings.length) {
-      await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
-      let contextArtifact = null;
-      let contextContent = null;
-      let handoffActivity = null;
-      if (current.ticket.source !== "local") {
-        const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
-        handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
-        contextContent = await harness.updateProductContext({
-          cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
-          artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
-          diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
-        });
-        signal?.throwIfAborted();
-        if (!contextContent.trim()) throw new Error("Product context update was empty");
-        contextArtifact = await persistArtifact(dataDir, current.ticket, {
-          runId: current.runId, name: "product-context-update.md", content: contextContent,
-          stageId: "handoff", kind: "product-context-update"
-        });
-      }
-      const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
-      const media = (ticketRun(store.read(), ticketId).artifacts || [])
-        .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
-        .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }) => ({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }));
-      const finalChecks = {
-        status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
-        evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
-      };
-      const videoRequired = flattenSteps(current.plan).some((step) => step.requiresVideoEvidence);
-      if (current.ticket.source === "local") {
-        await update((state) => {
-          const run = ticketRun(state, ticketId);
-          setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-          setStage(run, "handoff", "blocked", "Review final proof before integration");
-          run.status = "awaiting_evidence_review";
-          run.checkpoint = {
-            id: randomUUID(), kind: "evidence_review", title: "Review final proof before integration",
-            prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, createdAt: new Date().toISOString()
-          };
-        });
-        return;
-      }
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        run.artifacts.push(contextArtifact);
-        setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-        setStage(run, "handoff", "blocked", "Review final proof before remote merge").activity = handoffActivity.snapshot();
-        run.status = "awaiting_evidence_review";
-        run.checkpoint = {
-          id: randomUUID(), kind: "evidence_review", title: "Review final proof before remote merge",
-          prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, productContext: contextContent, createdAt: new Date().toISOString()
-        };
-      });
+      await completeCleanReview({ ticketId, current, round, checks, diff, activity, signal });
       return;
     }
     const reviewsWithCurrent = [...(current.reviews || []), { round, actionableFindings: findings }];
