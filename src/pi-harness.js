@@ -1255,12 +1255,15 @@ ${stripFrontmatter(content).trim()}
     });
     try {
       signal?.throwIfAborted();
+      const resumedAuthority = resumeSessionFile
+        ? `\n\nCurrent authority:\n- Permission: ${step.permission}\n- Effective write scope: ${step.writeScope || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\nDo not request access to a path already included in this effective write scope.`
+        : "";
       const continuation = feedback
         ? resumeSessionFile
-          ? `The user responded to this worker session.\n\n${feedback}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
+          ? `The user responded to this worker session.\n\n${feedback}${resumedAuthority}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
           : `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.`
         : resumeSessionFile
-          ? "Continue the interrupted work from this existing session. Your final action MUST be the worker_report tool."
+          ? `Continue the interrupted work from this existing session.${resumedAuthority}\n\nYour final action MUST be the worker_report tool.`
           : "";
       const prompt = resumeSessionFile
         ? continuation

@@ -437,13 +437,17 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}), open: () => ({}), forkFrom: () => ({}) }
     });
-    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read", skills: [] }] });
+    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "write", writeScope: "src,test/e2e-proof.test.js", skills: [] }] });
+    plan.nodes[0].scopeChanges = [{ paths: ["test/e2e-proof.test.js"], reason: "Canonical proof fixtures exercise this contract." }];
     await assert.rejects(harness.runStep({
       cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [],
       feedback: "Use the existing queue model", resumeSessionFile: join(root, "worker.jsonl")
     }), /required worker_report tool/);
     assert.match(prompt, /The user responded to this worker session/);
     assert.match(prompt, /Use the existing queue model/);
+    assert.match(prompt, /Effective write scope: src,test\/e2e-proof\.test\.js/);
+    assert.match(prompt, /Audited scope additions: test\/e2e-proof\.test\.js \(Canonical proof fixtures exercise this contract\.\)/);
+    assert.match(prompt, /Do not request access to a path already included/);
     assert.doesNotMatch(prompt, /Skills requested/);
 
     await assert.rejects(harness.runStep({
