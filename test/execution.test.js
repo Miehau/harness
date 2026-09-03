@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -259,6 +259,23 @@ test("recurring review clusters survive changed wording and duplicate reviewers"
     { actionableFindings: [finding("First occurrence")] },
     { actionableFindings: [finding("Second occurrence")] }
   ]), []);
+  assert.deepEqual(recurringReviewClusters([
+    { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] },
+    { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] },
+    { actionableFindings: [{ severity: "blocking", category: "tests", claim: "Repository check failed" }] }
+  ]), []);
+});
+
+test("a recurring surface receives one root-cause escalation without blocking later distinct findings", () => {
+  const finding = (claim) => ({ severity: "high", category: "requirements", claim, evidence: [{ file: "src/steering.js" }] });
+  const reviews = [
+    { actionableFindings: [finding("First bypass")] },
+    { actionableFindings: [finding("Second bypass")] },
+    { actionableFindings: [finding("Third bypass")], fix: { rootCauseClusters: ["requirements:src/steering.js"] } },
+    { actionableFindings: [finding("New ambiguity on the same surface")] }
+  ];
+  assert.deepEqual(recurringReviewClusters(reviews), ["requirements:src/steering.js"]);
+  assert.deepEqual(unaddressedReviewClusters(reviews), []);
 });
 
 test("correction pause output retains the latest actionable evidence", () => {

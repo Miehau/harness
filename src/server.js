@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicRun, publicState, recurringReviewClusters, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1743,7 +1743,7 @@ async function finalReviewLoop(ticketId, signal) {
   if (pendingFix) {
     const current = ticketRun(store.read(), ticketId);
     const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));
-    const rootCauseClusters = recurringReviewClusters(current.reviews);
+    const rootCauseClusters = unaddressedReviewClusters(current.reviews);
     if (!await applyFinalReviewFix({ ticketId, ...pendingFix, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
   const resumed = ticketRun(store.read(), ticketId);
@@ -1874,19 +1874,7 @@ async function finalReviewLoop(ticketId, signal) {
     }
     previousFingerprint = decision.fingerprint;
     const reviewsWithCurrent = [...(current.reviews || []), { actionableFindings: findings }];
-    const rootCauseClusters = recurringReviewClusters(reviewsWithCurrent);
-    const exhaustedRootCorrection = rootCauseClusters.some((key) => (current.reviews || []).some((review) => review.fix?.rootCauseClusters?.includes(key)));
-    if (exhaustedRootCorrection) {
-      const pauseReason = correctionPauseReason("A general root-cause correction was attempted, but the same review cluster remains unresolved.", findings);
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        run.status = "needs_attention";
-        run.lastError = pauseReason;
-        run.checkpoint = { id: randomUUID(), kind: "needs_attention", title: "Root-cause correction stalled", prompt: pauseReason, source: "verification", createdAt: new Date().toISOString() };
-        setStage(run, "verify", "blocked", pauseReason).activity = activity.snapshot();
-      });
-      return;
-    }
+    const rootCauseClusters = unaddressedReviewClusters(reviewsWithCurrent);
     if (!await applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
 }

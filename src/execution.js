@@ -472,12 +472,18 @@ export function recurringReviewClusters(reviews = [], minRounds = 3) {
   for (const review of reviews) {
     const keys = new Set(actionableFindings([{ findings: review.actionableFindings || review.findings || [] }]).map((finding) => {
       const evidence = finding.evidence?.[0] || {};
-      const surface = String(evidence.file || finding.acceptanceCriterion || finding.claim || "unknown").trim().toLowerCase();
+      const surface = String(evidence.file || finding.acceptanceCriterion || "").trim().toLowerCase();
+      if (!surface) return null;
       return `${String(finding.category || "general").toLowerCase()}:${surface}`;
-    }));
+    }).filter(Boolean));
     for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
   }
   return [...counts].filter(([, count]) => count >= minRounds).map(([key]) => key).sort();
+}
+
+export function unaddressedReviewClusters(reviews = []) {
+  const corrected = new Set(reviews.flatMap((review) => review.fix?.rootCauseClusters || []));
+  return recurringReviewClusters(reviews).filter((key) => !corrected.has(key));
 }
 
 export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
