@@ -60,7 +60,7 @@ export async function withDaemon(fn, opts = {}) {
   const dataDir = opts.dataDir || await mkdtemp(join(tmpdir(), "agent-plan-daemon-"));
   const cwd = opts.cwd || await mkdtemp(join(tmpdir(), "agent-plan-cwd-"));
   const daemon = await createDaemon({
-    cwd, dataDir, listen: false, lock: false, harness: opts.harness || mockHarness(), apiToken: opts.apiToken || ""
+    cwd, dataDir, listen: false, lock: false, harness: opts.harness || mockHarness(), apiToken: opts.apiToken || "", trackers: opts.trackers
   });
   try { return await fn(daemon, { dataDir, cwd }); }
   finally {

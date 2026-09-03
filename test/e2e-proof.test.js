@@ -5,10 +5,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { normalizePlan } from "../src/plan.js";
+import { beginJjChange, initializeJjWorkspace } from "../src/jj.js";
 import { commitWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
 import { mockHarness, invoke, seedRun, withDaemon } from "./helpers.js";
 
 const exec = promisify(execFile);
+const hasJj = await exec("jj", ["--version"]).then(() => true, () => false);
 const gitIdentity = {
   ...process.env,
   GIT_AUTHOR_NAME: "Proof Test",
@@ -91,6 +93,70 @@ test("final proof blocks local integration, streams image and video, then delive
     assert.equal(await readFile(join(fixture.cwd, "delivered.txt"), "utf8"), "approved\n");
     assert.equal(calls.lastCheck.requireVisualEvidence, true);
     assert.equal(calls.lastCheck.requireVideoEvidence, true);
+  }, { harness });
+});
+
+test("verified tracker tickets with no changes complete without remote delivery", { concurrency: true }, async () => {
+  const trackerCalls = [];
+  const trackers = {
+    async comment(ticket, body) { trackerCalls.push(["comment", ticket.id, body]); return { id: "comment-1" }; },
+    async transition(ticket, target) { trackerCalls.push(["transition", ticket.id, target]); return { type: "completed" }; }
+  };
+  await withDaemon(async (daemon, { cwd }) => {
+    await exec("git", ["init", "-q", "-b", "main"], { cwd });
+    await writeFile(join(cwd, "baseline.txt"), "baseline\n");
+    await exec("git", ["add", "-A"], { cwd });
+    await exec("git", ["commit", "-qm", "baseline"], { cwd, env: gitIdentity });
+    await exec("git", ["remote", "add", "origin", "https://github.com/example/project.git"], { cwd });
+    const ticket = { id: "linear-no-change", identifier: "MEA-no-change", title: "Already shipped", description: "Verify existing behavior", source: "linear", provider: "linear", state: { name: "In Progress", type: "started" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir: daemon.dataDir, ticket, runId: "run-1" });
+    const plan = normalizePlan({ title: "No change", nodes: [{ id: "verify", title: "Verify", permission: "read", acceptanceCriteria: ["Existing behavior passes"] }] });
+    plan.nodes[0].status = "accepted";
+    const diff = { available: true, files: [], fileStats: [], additions: 0, deletions: 0, changedLines: 0, patch: "", stat: "" };
+    const id = await seedRun(daemon, {
+      ticket, workspace, plan, artifacts: [{ id: "context", name: "product-context-update.md", kind: "product-context-update", content: "# Product context\n" }],
+      reviews: [{ round: 1, diff, reviews: [], actionableFindings: [] }], status: "awaiting_evidence_review",
+      checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks: { status: "passed", summary: "passed" } }
+    });
+
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`);
+    assert.equal(approved.status, 200);
+    const completed = await waitFor(daemon, id, (run) => run.status === "completed" || run.lastError);
+    assert.equal(completed.status, "completed", completed.lastError);
+    const stored = daemon.store.read().ticketRuns[id];
+    assert.equal(stored.integration.noChange, true);
+    assert.equal(stored.merge.status, "not_required");
+    assert.deepEqual(trackerCalls.map(([kind, , value]) => [kind, kind === "comment" ? value.includes("already satisfied") : value]), [["comment", true], ["transition", "done"]]);
+  }, { trackers });
+});
+
+test("accepting a no-change Jujutsu step does not create an empty ticket commit", { skip: !hasJj }, async () => {
+  const harness = {
+    ...mockHarness(),
+    runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }),
+    evidenceImages: async () => [],
+    reviewTicket: async ({ role }) => ({ role, summary: `${role} passed`, findings: [] })
+  };
+  await withDaemon(async (daemon, { cwd, dataDir }) => {
+    await exec("git", ["init", "-q", "-b", "main"], { cwd });
+    await writeFile(join(cwd, "baseline.txt"), "baseline\n");
+    await exec("git", ["add", "-A"], { cwd });
+    await exec("git", ["commit", "-qm", "baseline"], { cwd, env: gitIdentity });
+    const ticket = { id: "jj-no-change", identifier: "LOCAL-jj", title: "Already shipped", description: "Verify existing behavior", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = { ...await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket, runId: "run-1" }), vcs: "jj" };
+    await initializeJjWorkspace(workspace.cwd);
+    const vcsChange = await beginJjChange(workspace.cwd, { title: "No changes" });
+    const plan = normalizePlan({ title: "No change", nodes: [{ id: "verify", title: "Verify", permission: "write", writeScope: "baseline.txt", acceptanceCriteria: ["Existing behavior passes"] }] });
+    Object.assign(plan.nodes[0], { status: "review_ready", vcsChange, diff: { available: true, files: [], changedLines: 0, patch: "", stat: "" } });
+    const id = await seedRun(daemon, { ticket, workspace, plan, status: "awaiting_step_review", checkpoint: { id: "review", kind: "step_review", stepId: "verify", title: "Review" } });
+
+    const accepted = await invoke(daemon, "POST", `/api/tickets/${id}/steps/verify/accept`, { body: {} });
+    assert.equal(accepted.status, 202, accepted.text);
+    const reviewed = await waitFor(daemon, id, (run) => run.status === "awaiting_evidence_review" || run.lastError);
+    assert.equal(reviewed.status, "awaiting_evidence_review", reviewed.lastError);
+    assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].commit, undefined);
+    const commits = (await exec("git", ["rev-list", "--count", "main..HEAD"], { cwd: workspace.cwd })).stdout.trim();
+    assert.equal(commits, "0");
   }, { harness });
 });
 

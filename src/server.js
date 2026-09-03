@@ -63,7 +63,7 @@ function trackerHub() {
     new JiraClient(credentials.jira)
   ]);
 }
-let trackers = trackerHub();
+let trackers = options.trackers || trackerHub();
 const harness = options.harness || new PiHarness({ dataDir, publish });
 const previews = new PreviewManager({ dataDir });
 const clients = new Set();
@@ -1489,6 +1489,31 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
 
 async function scheduleTicketIntegration(ticketId, { diff, contextContent = null, signal } = {}) {
   const queuedRun = ticketRun(store.read(), ticketId);
+  if (diff?.available && diff.files?.length === 0) {
+    const integratedAt = new Date().toISOString();
+    const productContext = contextContent === null ? null : await persistProductContext(dataDir, queuedRun.workspace.sourceCwd, contextContent);
+    const handoff = await persistArtifact(dataDir, queuedRun.ticket, {
+      runId: queuedRun.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+      content: `# ${queuedRun.ticket.identifier} handoff\n\nVerified as already satisfied. No repository changes or remote review were required.`
+    });
+    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, "Verified as already satisfied. No repository changes or remote review were required."));
+    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.integration = { sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch, commit: null, integratedAt, diff, noChange: true };
+      run.deliveredDiff = diff;
+      run.merge = { status: "not_required", reason: "no_changes", integratedAt };
+      if (productContext) run.productContextPath = productContext.path;
+      run.artifacts.push(handoff);
+      run.checkpoint = null;
+      setStage(run, "handoff", "completed", "Verified with no repository changes");
+      run.status = "completed";
+      run.lastError = null;
+      run.completedAt = integratedAt;
+    });
+    await stopTicketPreviews(ticketId, "run_completed");
+    return { position: 0, promise: Promise.resolve({ noChange: true }) };
+  }
   if (queuedRun.ticket.source !== "local") return scheduleRemoteDelivery(ticketId, { diff, contextContent, signal });
   if (["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) throw new Error("This ticket is already in the merge queue");
   const sourceCwd = queuedRun.workspace.sourceCwd;
@@ -1792,18 +1817,19 @@ async function acceptStep(ticketId, stepId) {
   const message = step.commitMessage || `feat: ${step.title}\n\nWhy: ${step.description || step.title}\nRequirement: ${step.requirementIds.join(", ") || step.acceptanceCriteria.join("; ") || "Complete the approved execution-plan slice"}`;
   let commit;
   let vcsChange = step.vcsChange || null;
-  if (current.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
+  const noChanges = step.diff?.available && step.diff.files?.length === 0;
+  if (!noChanges && current.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
     if (!vcsChange?.changeId) throw new Error("The editable Jujutsu change is missing for this step");
     vcsChange = await acceptJjChange(current.workspace.cwd, { changeId: vcsChange.changeId, message, bookmark: current.workspace.branch });
     commit = vcsChange.commitId;
-  } else if (step.workspace?.isolated) {
+  } else if (!noChanges && step.workspace?.isolated) {
     let workspaceCommit = step.workspaceCommit;
     if (!workspaceCommit) {
       workspaceCommit = await commitWorkspace(step.workspace.cwd, message);
       await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).workspaceCommit = workspaceCommit; });
     }
     if (workspaceCommit) commit = await cherryPickCommit(current.workspace.cwd, workspaceCommit);
-  } else {
+  } else if (!noChanges) {
     commit = await commitWorkspace(current.workspace.cwd, message);
   }
   await update((state) => {
