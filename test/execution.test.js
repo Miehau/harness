@@ -164,6 +164,18 @@ test("final proof feedback becomes a durable actionable review finding", () => {
   assert.deepEqual(humanProofFindings("  "), []);
 });
 
+test("numbered visual proof feedback creates distinct visual correction criteria", () => {
+  const findings = humanProofFindings("Visual proof issues. (1) Remove the blank status pill. (2) Fix the clipped mobile worker row. (3) Regenerate ticket-specific desktop screenshots.");
+  assert.deepEqual(findings.map((finding) => finding.claim), [
+    "Remove the blank status pill.",
+    "Fix the clipped mobile worker row.",
+    "Regenerate ticket-specific desktop screenshots."
+  ]);
+  const step = finalReviewFixStep(17, findings);
+  assert.equal(step.requiresVisualEvidence, true);
+  assert.equal(step.acceptanceCriteria.length, 3);
+});
+
 test("automatic corrections ignore findings below medium severity", () => {
   const findings = actionableFindings([{ findings: [
     { severity: "low", claim: "Could rename this helper" },

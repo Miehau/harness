@@ -84,6 +84,7 @@ export function finalReviewFixStep(round, findings, rootCauseClusters = []) {
     // Review prose belongs in the harness audit store, never in the product repository.
     expectedArtifacts: [],
     acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
+    requiresVisualEvidence: findingsRequireVisualEvidence(findings),
     status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
   };
 }
@@ -589,10 +590,12 @@ export function pendingReviewAttempt(run, round) {
 
 export function humanProofFindings(feedback) {
   const claim = String(feedback || "").trim();
-  return claim ? [{
-    severity: "blocking", category: "human-proof-review", claim,
-    evidence: [], suggestedFix: claim, confidence: "high"
-  }] : [];
+  if (!claim) return [];
+  const numbered = [...claim.matchAll(/\(\d+\)\s+([\s\S]*?)(?=\s+\(\d+\)\s+|$)/g)].map((match) => match[1].trim());
+  return (numbered.length ? numbered : [claim]).map((item) => ({
+    severity: "blocking", category: "human-proof-review", claim: item,
+    evidence: [], suggestedFix: item, confidence: "high"
+  }));
 }
 
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
@@ -650,14 +653,17 @@ export function recoverableCleanReview(run = {}) {
   return { round: Number(review.round) || run.reviews.length, checks, diff: review.diff };
 }
 
-export function reviewFixImages(sessionFile, findings = [], images = []) {
-  if (sessionFile) return [];
-  const needsVisualContext = findings.some((finding) => {
+export function findingsRequireVisualEvidence(findings = []) {
+  return findings.some((finding) => {
     const context = [finding.category, finding.claim, finding.suggestedFix, finding.suggested_fix, ...(finding.evidence || []).map((item) => item.file)].join(" ");
     return String(finding.category || "").toLowerCase() === "accessibility"
-      || /\b(?:screenshot|image|video|visual|layout|viewport|pixel)\b/i.test(context);
+      || /\b(?:screenshot|image|video|visual|layout|viewport|pixel|desktop|mobile)\b/i.test(context);
   });
-  return needsVisualContext ? images : [];
+}
+
+export function reviewFixImages(sessionFile, findings = [], images = []) {
+  if (sessionFile) return [];
+  return findingsRequireVisualEvidence(findings) ? images : [];
 }
 
 export function interruptedStepFeedback(step = {}) {

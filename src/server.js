@@ -1897,7 +1897,7 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
-    const findings = [...actionableFindings(reviews), ...humanEvidenceFinding];
+    const findings = humanEvidenceFinding.length ? humanEvidenceFinding : actionableFindings(reviews);
     await update((state) => {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
