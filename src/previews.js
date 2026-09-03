@@ -76,7 +76,11 @@ export class PreviewManager {
 
   async ensure({ id, cwd, seedState = null }) {
     const existing = this.active.get(id);
-    if (existing?.child.exitCode === null && existing.cwd === cwd) return existing.public;
+    if (existing?.child.exitCode === null && existing.cwd === cwd && !seedState) return existing.public;
+    // A seeded preview is a proof fixture for one exact run snapshot. Restart
+    // it for the next gate instead of rendering new worktree code against old
+    // status, selection, or inspector state.
+    if (existing) this.stop(id);
     const config = await loadProjectConfig(cwd);
     const configuredName = config.commands.preview ? "preview" : config.commands.dev ? "dev" : null;
     const conventional = configuredName ? null : await detectPreviewCommand(cwd);
@@ -102,8 +106,12 @@ export class PreviewManager {
     try { await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs); }
     catch (error) { this.ports.delete(port); signalProcessTree(child); throw new Error(`${error.message}\n${output}`.trim()); }
     const publicPreview = { id, cwd, command: commandName, port, url, startedAt: new Date().toISOString() };
-    this.active.set(id, { child, cwd, get output() { return output; }, public: publicPreview });
-    child.once("exit", () => { this.active.delete(id); this.ports.delete(port); });
+    const activePreview = { child, cwd, get output() { return output; }, public: publicPreview };
+    this.active.set(id, activePreview);
+    child.once("exit", () => {
+      if (this.active.get(id) === activePreview) this.active.delete(id);
+      this.ports.delete(port);
+    });
     return publicPreview;
   }
 

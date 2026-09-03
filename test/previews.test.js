@@ -68,6 +68,38 @@ test("starts a conventional package preview when a legacy contract omits one", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("restarts a seeded preview so recurring gates cannot reuse stale run state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-evidence-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] } }));
+    const children = [];
+    const manager = new PreviewManager({
+      dataDir,
+      portImpl: async () => 47821 + children.length,
+      fetchImpl: async () => ({ ok: true }),
+      spawnImpl: () => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+        child.kill = () => { child.exitCode = 0; setImmediate(() => child.emit("exit", 0)); };
+        children.push(child);
+        return child;
+      }
+    });
+
+    await manager.ensure({ id: "ticket", cwd: root, seedState: { revision: 1 } });
+    const refreshed = await manager.ensure({ id: "ticket", cwd: root, seedState: { revision: 2 } });
+    await new Promise((resolveWait) => setImmediate(resolveWait));
+
+    assert.equal(children.length, 2);
+    assert.equal(refreshed.port, 47822);
+    assert.deepEqual(manager.list().map(({ port }) => port), [47822]);
+    assert.deepEqual(JSON.parse(await readFile(join(dataDir, "preview-state", "ticket", "state-v3.json"), "utf8")), { revision: 2 });
+    manager.stop("ticket");
+  } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("a timed-out Chromium capture is usable when its screenshot was written", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "preview-timeout-"));
   try {
