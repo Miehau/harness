@@ -81,6 +81,19 @@ test("a timed-out Chromium capture is usable when its screenshot was written", a
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
 
+test("a timed-out Chromium capture cannot reuse stale screenshot evidence", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-stale-"));
+  try {
+    const directory = join(dataDir, "visual-evidence", "ticket");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "desktop.png"), "stale");
+    const manager = new PreviewManager({ dataDir, captureTimeoutMs: 10, execImpl: async () => { throw new Error("Chromium timed out after 10ms"); } });
+    manager.active.set("ticket", { public: { url: "http://127.0.0.1:4317" } });
+    await assert.rejects(manager.capture("ticket", { source: { CHROMIUM_PATH: process.execPath } }), /timed out/);
+    await assert.rejects(readFile(join(directory, "desktop.png")), /ENOENT/);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("a hanging preview probe cannot bypass the readiness deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
   try {

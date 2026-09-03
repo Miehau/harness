@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
@@ -113,11 +113,12 @@ export class PreviewManager {
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
+      await unlink(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
       try {
         await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=2000", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
       } catch (error) {
         if (!/timed out/i.test(error.message)) throw error;
-        await access(path);
+        try { await access(path); } catch { throw error; }
       }
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
