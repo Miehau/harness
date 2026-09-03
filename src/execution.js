@@ -504,7 +504,11 @@ function similarFinding(left, right) {
 export function actionableFindings(reviews) {
   const findings = reviews.flatMap((review) => review.findings || [])
     .filter((finding) => actionableSeverities.has(String(finding.severity || "").toLowerCase()));
-  const genericGateClaim = (finding) => /^(?:repository check failed:|(?:the )?(?:authoritative )?(?:(?:canonical|verification)\s+)*(?:gate|suite) is red\b)/i.test(String(finding.claim || ""));
+  const genericGateClaim = (finding) => {
+    const claim = String(finding.claim || "");
+    return /^repository check failed:/i.test(claim)
+      || (/\b(?:gate|suite)\b/i.test(claim) && /\b(?:red|not green|reports? failures?|failed|failing)\b/i.test(claim));
+  };
   const hasSpecificTestFinding = findings.some((finding) =>
     String(finding.category || "").toLowerCase() === "tests"
     && (finding.evidence?.[0]?.file || finding.acceptanceCriterion)

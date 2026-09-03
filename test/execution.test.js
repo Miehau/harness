@@ -106,7 +106,7 @@ test("final review keeps separate stale-evidence bypass mechanisms", () => {
 
 test("a generic red-gate report does not duplicate its concrete test findings", () => {
   const findings = actionableFindings([{ findings: [
-    { severity: "high", category: "tests", claim: "The canonical verification suite is red: four tests fail", evidence: [{ file: ".agent-plan/verify.mjs", line: 7 }] },
+    { severity: "high", category: "tests", claim: "The required verification suite is not green: the supplied gate reports failures", evidence: [{ file: ".agent-plan/verify.mjs", line: 7 }] },
     { severity: "medium", category: "tests", claim: "Two assertions still expect the old rejection wording", acceptanceCriterion: "Full tests pass", evidence: [{ file: "test/proof-map.test.js", line: 99 }] }
   ] }]);
   assert.deepEqual(findings.map((finding) => finding.claim), ["Two assertions still expect the old rejection wording"]);
