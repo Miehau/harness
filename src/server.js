@@ -604,10 +604,12 @@ function startTicketWork(ticketId, work) {
 
 async function waitForWorkerAbort(promise) {
   let timer;
+  let resolveTimer;
   try {
-    await Promise.race([promise.catch(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, workerAbortWaitMs); })]);
+    await Promise.race([promise.catch(() => {}), new Promise((resolve) => { resolveTimer = resolve; timer = setTimeout(resolve, workerAbortWaitMs); })]);
   } finally {
     clearTimeout(timer);
+    if (resolveTimer) resolveTimer();
   }
 }
 
