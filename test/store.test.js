@@ -3,7 +3,22 @@ import test from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonStore } from "../src/store.js";
+import { compactPersistedState, JsonStore } from "../src/store.js";
+
+test("persisted audit detail stays bounded without losing prompts and event summaries", () => {
+  const huge = "x".repeat(300000);
+  const activity = { events: [{ type: "tool_end", tool: "test", result: huge }], prompts: [{ actor: "reviewer", content: huge }], rawOutput: huge, groups: [{ events: [] }] };
+  const attempt = { events: [{ type: "tool_end", result: huge }], rawOutput: huge, activityGroups: [{ events: [] }], verification: { rawOutput: huge } };
+  const state = { ticketRuns: { one: { stages: [{ activity }], activeRuns: { step: { activity: structuredClone(activity) } }, plan: { nodes: [{ id: "step", attempts: [attempt] }] } } }, retainedRuns: {} };
+  compactPersistedState(state);
+  assert.match(activity.prompts[0].content, /state detail truncated/);
+  assert.equal(activity.events[0].tool, "test");
+  assert.match(activity.events[0].result, /state detail truncated/);
+  assert.equal("groups" in activity, false);
+  assert.match(attempt.rawOutput, /state detail truncated/);
+  assert.equal("activityGroups" in attempt, false);
+  assert.match(attempt.verification.rawOutput, /state detail truncated/);
+});
 
 test("server restart marks active work as interrupted and clears dead runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-plan-store-"));

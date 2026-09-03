@@ -17,6 +17,51 @@ function initialState(cwd) {
   };
 }
 
+const STATE_EVENT_DETAIL_LIMIT = 8000;
+const STATE_PROMPT_LIMIT = 200000;
+const STATE_OUTPUT_LIMIT = 100000;
+
+function boundedAuditText(value, limit) {
+  if (typeof value !== "string" || value.length <= limit) return value;
+  return `${value.slice(0, limit)}\n… state detail truncated to keep the harness responsive`;
+}
+
+function compactActivity(activity) {
+  if (!activity) return;
+  activity.events = (activity.events || []).slice(-200).map((event) => {
+    const compact = { ...event };
+    for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
+    return compact;
+  });
+  activity.prompts = (activity.prompts || []).slice(-20).map((prompt) => ({
+    ...prompt,
+    content: boundedAuditText(prompt.content, STATE_PROMPT_LIMIT),
+    prompt: boundedAuditText(prompt.prompt, STATE_PROMPT_LIMIT)
+  }));
+  activity.rawOutput = boundedAuditText(activity.rawOutput, STATE_OUTPUT_LIMIT);
+  delete activity.groups;
+}
+
+export function compactPersistedState(state) {
+  for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) {
+    for (const stage of run.stages || []) compactActivity(stage.activity);
+    for (const active of Object.values(run.activeRuns || {})) compactActivity(active.activity);
+    for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
+      for (const attempt of step.attempts || []) {
+        attempt.events = (attempt.events || []).slice(-200).map((event) => {
+          const compact = { ...event };
+          for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
+          return compact;
+        });
+        attempt.rawOutput = boundedAuditText(attempt.rawOutput, STATE_OUTPUT_LIMIT);
+        if (attempt.verification) attempt.verification.rawOutput = boundedAuditText(attempt.verification.rawOutput, STATE_OUTPUT_LIMIT);
+        delete attempt.activityGroups;
+      }
+    }
+  }
+  return state;
+}
+
 export function normalizeSettings(value = {}) {
   const pollIntervalSeconds = Number(value.pollIntervalSeconds);
   return {
@@ -77,8 +122,8 @@ export class JsonStore {
       }
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
-      await this.save();
     }
+    await this.save();
     return this.read();
   }
 
@@ -96,6 +141,7 @@ export class JsonStore {
   }
 
   async save() {
+    compactPersistedState(this.state);
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
     await rename(temporary, this.file);
