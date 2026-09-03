@@ -80,6 +80,7 @@ export class PreviewManager {
     const environment = await projectEnvironment(cwd, config);
     for (const name of portVariables) environment[name] = String(port);
     environment.HOST = "127.0.0.1";
+    if (this.dataDir) environment.AGENT_PLAN_DATA_DIR = join(this.dataDir, "preview-state", id.replace(/[^a-z0-9._-]+/gi, "-"));
     const child = this.spawn(commandExecutable(cwd, command), command.slice(1), { cwd, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });

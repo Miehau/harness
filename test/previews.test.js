@@ -31,6 +31,7 @@ test("starts a named preview with isolated port variables and captures desktop a
     const preview = await manager.ensure({ id: "ticket-1", cwd: root });
     assert.equal(preview.url, "http://127.0.0.1:47821");
     assert.equal(spawns[0].options.env.APP_PORT, "47821");
+    assert.equal(spawns[0].options.env.AGENT_PLAN_DATA_DIR, join(dataDir, "preview-state", "ticket-1"));
     const evidence = await manager.capture("ticket-1", { source: { CHROMIUM_PATH: process.execPath } });
     assert.deepEqual(evidence.map(({ viewport }) => viewport), [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
     assert.deepEqual(evidence.map(({ mediaType, mediaKind }) => ({ mediaType, mediaKind })), [{ mediaType: "image/png", mediaKind: "image" }, { mediaType: "image/png", mediaKind: "image" }]);
