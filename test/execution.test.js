@@ -112,6 +112,18 @@ test("a generic red-gate report does not duplicate its concrete test findings", 
   assert.deepEqual(findings.map((finding) => finding.claim), ["Two assertions still expect the old rejection wording"]);
 });
 
+test("final review prefers a concrete root cause over a vaguer failure paraphrase", () => {
+  const criterion = "Re-running verification preserves old evidence and produces fresh proof.";
+  const findings = actionableFindings([{ findings: [
+    { severity: "blocking", category: "tests", claim: "Repository check failed: node .agent-plan/verify.mjs", suggestedFix: "The restart test timed out." },
+    { severity: "high", category: "tests", claim: "The canonical verification suite remains red: the restart test times out.", acceptanceCriterion: criterion, evidence: [{ file: "test/e2e-proof.test.js", line: 109 }, { file: "src/server.js", line: 2251 }] },
+    { severity: "high", category: "tests", claim: "The restart test waits for finalCheckHistory through GET /run, but compactRun omits finalCheckHistory, so success is unobservable.", suggestedFix: "Wait on the exposed proof locator or expose immutable review history.", acceptanceCriterion: criterion, evidence: [{ file: "test/e2e-proof.test.js", line: 143 }, { file: "src/execution.js", line: 553 }] },
+    { severity: "high", category: "tests", claim: "The restart flow times out before fresh proof appears and the suite is failing.", suggestedFix: "Trace the transition and correct it.", acceptanceCriterion: criterion, evidence: [{ file: "test/e2e-proof.test.js", line: 109 }, { file: "test/e2e-proof.test.js", line: 143 }, { file: "src/server.js", line: 2251 }] }
+  ] }]);
+  assert.equal(findings.length, 1);
+  assert.match(findings[0].claim, /compactRun omits finalCheckHistory/);
+});
+
 test("resuming review refreshes canonical findings from durable raw reviewer output", () => {
   const distinct = [
     { severity: "high", category: "correctness", claim: "Attempt IDs alias old evidence", evidence: [{ file: "src/proof-map.js", line: 84 }] },

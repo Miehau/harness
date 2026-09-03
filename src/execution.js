@@ -507,7 +507,7 @@ export function actionableFindings(reviews) {
   const genericGateClaim = (finding) => {
     const claim = String(finding.claim || "");
     return /^repository check failed:/i.test(claim)
-      || (/\b(?:gate|suite)\b/i.test(claim) && /\b(?:red|not green|reports? failures?|failed|failing)\b/i.test(claim));
+      || /^(?:the\s+)?(?:(?:required|canonical|supplied)\s+)?(?:verification\s+)?(?:gate|suite)\b.{0,80}\b(?:red|not green|failed|failing|reports?\s+failures?)\b/i.test(claim);
   };
   const hasSpecificTestFinding = findings.some((finding) =>
     String(finding.category || "").toLowerCase() === "tests"
@@ -531,7 +531,8 @@ export function actionableFindings(reviews) {
       const similar = [...unique.entries()].find(([, item]) => similarFinding(item.finding, finding));
       if (similar) [key, previous] = similar;
     }
-    const detail = (finding.evidence?.length || 0) * 1000 + String(finding.claim || "").length + String(finding.suggestedFix || finding.suggested_fix || "").length;
+    const evidenceFiles = new Set((finding.evidence || []).map((item) => item.file).filter(Boolean));
+    const detail = evidenceFiles.size * 100 + String(finding.claim || "").length + String(finding.suggestedFix || finding.suggested_fix || "").length;
     if (!previous || detail > previous.detail) unique.set(key, { finding, detail });
   }
   return [...unique.values()].map(({ finding }) => finding);
