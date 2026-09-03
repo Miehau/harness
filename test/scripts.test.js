@@ -72,13 +72,27 @@ test("dashboard source keeps supervision controls semantic and visibly focusable
   assert.match(app, /const headerActionKeys = \["startTicket", "resumeTicket"/);
   assert.match(app, /const headerSelector = headerAction/);
   assert.match(app, /function renderInspectorPreservingContext\(\)/);
+  assert.match(app, /function liveInspectionSummary\(run, step, attempt, summary\)/);
+  assert.match(app, /summary = liveInspectionSummary\(run, step, attempt, summary\)/);
+  assert.match(app, /function artifactBodyKey\(ticketId, runId, artifactId\)/);
+  assert.match(app, /artifactBodyKey\(run\?\.id, run\?\.runId, artifact\?\.id\)/);
+  assert.match(app, /hydrateArtifact\(run, promptArtifact\)/);
+  assert.match(app, /data-view-artifact/);
   assert.match(app, /event\.type === "prompt" && activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
   assert.match(app, /event\.type !== "text_delta"\) renderInspectorPreservingContext\(\)/);
   assert.match(app, /activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
+  assert.match(app, /function truncatedResourceWarning\(resource, tab\)/);
+  assert.match(app, /const warning = resource\.state === "truncated" \? truncatedResourceWarning\(resource, tab\) : ""/);
+  assert.match(app, /\$\{warning\}<section class="run-events"/);
+  assert.match(app, /\$\{warning\}<section class="attempt-checks"/);
+  assert.match(app, /\$\{warning\}<section class="attempt-trace"/);
+  assert.match(app, /\$\{warning\}<article class="artifact"/);
+  assert.match(app, /data-select-artifact="\$\{escapeHtml\(artifact\.id\)\}"/);
   assert.match(app, /workflow is not failed/);
   assert.match(app, /const status = \$\("\.transport-status"\)/);
   assert.match(app, /if \(transportState !== "connected"\) return/);
   assert.match(styles, /button:focus-visible/);
+  assert.match(styles, /attempt-truncation-warning/);
   assert.match(styles, /transport-status/);
 });
 

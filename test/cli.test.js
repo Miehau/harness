@@ -60,6 +60,22 @@ test("timeline requests the canonical endpoint without reading a run record", as
   assert.deepEqual(JSON.parse(output.join("")), projection);
 });
 
+test("runs enumerate identities and timeline selects an archived canonical projection", async () => {
+  const requests = [];
+  const output = [];
+  const fetchImpl = async (url) => {
+    requests.push(url);
+    return { ok: true, status: 200, async text() { return JSON.stringify({ runs: [], stages: [], workers: [], attempts: [], blockers: [] }); } };
+  };
+  const opts = { env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" }, fetchImpl, stdout: { write(value) { output.push(value); } }, stderr: { write() {} } };
+  assert.equal(await runCli(["list", "runs", "ticket-1"], opts), 0);
+  assert.equal(await runCli(["list", "timeline", "ticket-1", "archived-run"], opts), 0);
+  assert.deepEqual(requests, [
+    "http://127.0.0.1:4317/api/tickets/ticket-1/runs",
+    "http://127.0.0.1:4317/api/tickets/ticket-1/runs/archived-run/inspection"
+  ]);
+});
+
 test("timeline redacts key-value secrets and paths missed by an unsafe inspection response", async () => {
   const output = [];
   const code = await runCli(["timeline", "ticket-1"], {
@@ -121,7 +137,7 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
       status: "running", plan,
       stages: [{ id: "implement", title: "Implement", status: "active", summary: "Parallel implementation" }],
       activeRuns: {
-        api: { runId: "active-api", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing API" },
+        api: { runId: "active-api", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing API", activity: { rawOutput: "streamed API output" } },
         ui: { runId: "active-ui", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing UI" }
       }
     });
@@ -131,7 +147,7 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
     });
     assert.deepEqual(timeline.workers.map((worker) => worker.id), ["worker:api", "worker:ui"]);
     assert.deepEqual(timeline.attempts.map((attempt) => attempt.runId), ["active-api", "active-ui"]);
-    assert.equal(timeline.attempts[0].resources.output.state, "not_yet_available");
+    assert.equal(timeline.attempts[0].resources.output.state, "available");
     assert.equal(timeline.attempts[1].resources.checks.state, "not_yet_available");
   });
 });

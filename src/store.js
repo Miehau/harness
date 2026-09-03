@@ -1,9 +1,105 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { persistArtifact, safeName } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
 import { flattenSteps } from "./plan.js";
 import { materializeActiveAttempt } from "./execution.js";
+
+function ensureAttemptIds(run) {
+  let changed = false;
+  for (const step of flattenSteps(run.plan || { nodes: [] })) {
+    for (const [index, attempt] of (step.attempts || []).entries()) {
+      if (!attempt.attemptId) { attempt.attemptId = `attempt-${index + 1}`; changed = true; }
+    }
+    const active = run.activeRuns?.[step.id];
+    if (active && !active.attemptId) { active.attemptId = `active-${active.runId || step.id}`; changed = true; }
+  }
+  return changed;
+}
+
+async function migrateArtifactBodies(run, dataDir) {
+  let changed = false;
+  const artifacts = run.artifacts || [];
+  const legacyArtifacts = artifacts.filter((artifact) => artifact && typeof artifact === "object" && "content" in artifact);
+  const pathCounts = new Map();
+  const idCounts = new Map();
+  const usedIds = new Set(artifacts.filter((artifact) => !legacyArtifacts.includes(artifact)).map((artifact) => artifact?.id).filter(Boolean));
+  const migratedIds = new Map();
+  const artifactPathKey = (artifact) => {
+    const base = safeName(artifact.name || artifact.id || "artifact.md");
+    const filename = base.includes(".") ? base : `${base}.md`;
+    return [artifact.stageId || "legacy", artifact.stepId || "", artifact.attemptId || "", artifact.kind || "agent-output", filename].map(safeName).join(":");
+  };
+  for (const artifact of legacyArtifacts) {
+    const pathKey = artifactPathKey(artifact);
+    pathCounts.set(pathKey, (pathCounts.get(pathKey) || 0) + 1);
+    if (artifact.id) idCounts.set(artifact.id, (idCounts.get(artifact.id) || 0) + 1);
+  }
+  const uniqueId = (base) => {
+    let candidate = base || "legacy-artifact";
+    for (let suffix = 2; usedIds.has(candidate); suffix++) candidate = `${base}-${suffix}`;
+    usedIds.add(candidate);
+    return candidate;
+  };
+  for (const [index, artifact] of legacyArtifacts.entries()) {
+    if (typeof artifact.content === "string") {
+      const pathCollision = pathCounts.get(artifactPathKey(artifact)) > 1;
+      const idCollision = !artifact.id || idCounts.get(artifact.id) > 1 || usedIds.has(artifact.id);
+      const persisted = await persistArtifact(dataDir, run.ticket || { identifier: run.id || "legacy" }, {
+        name: artifact.name || artifact.id || "artifact.md",
+        content: artifact.content,
+        runId: run.runId || "legacy",
+        stageId: artifact.stageId || "legacy",
+        kind: artifact.kind || "agent-output",
+        stepId: artifact.stepId || null,
+        attemptId: artifact.attemptId || null,
+        // Legacy records may share every storage component, including kind. Keep
+        // their original ID in the storage key so migration never overwrites a body.
+        storageKey: pathCollision ? `${artifact.id || "legacy"}-${index + 1}` : null
+      });
+      artifact.path = persisted.path;
+      // Content routes and dashboard selection use IDs, not file paths. A legacy
+      // duplicate therefore needs the same durable identity separation as its body.
+      if (idCollision) {
+        const legacyId = artifact.id;
+        artifact.id = uniqueId(persisted.id);
+        if (legacyId) migratedIds.set(legacyId, [...(migratedIds.get(legacyId) || []), artifact.id]);
+      } else usedIds.add(artifact.id);
+    }
+    delete artifact.content;
+    changed = true;
+  }
+  const remapIds = (ids) => {
+    const seen = new Map();
+    return ids.map((id) => {
+      const replacements = migratedIds.get(id);
+      if (!replacements?.length) return id;
+      const index = seen.get(id) || 0;
+      seen.set(id, index + 1);
+      return replacements[index] || replacements.at(-1);
+    });
+  };
+  if (Array.isArray(run.checkpoint?.evidenceArtifactIds)) {
+    const remapped = remapIds(run.checkpoint.evidenceArtifactIds);
+    if (remapped.some((id, index) => id !== run.checkpoint.evidenceArtifactIds[index])) {
+      run.checkpoint.evidenceArtifactIds = remapped;
+      changed = true;
+    }
+  }
+  if (Array.isArray(run.checkpoint?.media)) {
+    const ids = remapIds(run.checkpoint.media.map((artifact) => artifact.id));
+    if (ids.some((id, index) => id !== run.checkpoint.media[index].id)) {
+      run.checkpoint.media = run.checkpoint.media.map((artifact, index) => ({ ...artifact, id: ids[index] }));
+      changed = true;
+    }
+  }
+  if (Array.isArray(run.pauseHistory)) for (const pause of run.pauseHistory) {
+    const replacement = migratedIds.get(pause.artifactId)?.[0];
+    if (replacement) { pause.artifactId = replacement; changed = true; }
+  }
+  return changed;
+}
 
 function initialState(cwd) {
   return {
@@ -50,11 +146,13 @@ export class JsonStore {
       this.state.stageProfiles = normalizeStageProfiles(this.state.stageProfiles);
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
-      for (const run of Object.values(this.state.ticketRuns)) {
+      for (const run of [...Object.values(this.state.ticketRuns), ...Object.values(this.state.retainedRuns)]) {
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
+        if (await migrateArtifactBodies(run, dirname(this.file))) recovered = true;
+        if (ensureAttemptIds(run)) recovered = true;
         run.auto ||= false;
         const activeRuns = run.activeRuns || {};
-        for (const step of flattenSteps(run.plan)) {
+        for (const step of flattenSteps(run.plan || { nodes: [] })) {
           if (!inFlightStepStatusSet.has(step.status)) continue;
           materializeActiveAttempt(step, activeRuns[step.id] || {}, {
             status: "interrupted",

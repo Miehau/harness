@@ -1,4 +1,5 @@
 import { dependencySteps, flattenSteps } from "./plan.js";
+import { redactText } from "./redaction.js";
 import { inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
 
 export const inspectionVersion = 1;
@@ -9,11 +10,7 @@ const completeStatuses = new Set(["completed", "accepted", "verified"]);
 
 function text(value, fallback = "") {
   const line = String(value || "").split(/\r?\n/).find((item) => item.trim()) || String(fallback || "");
-  return line
-    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|npm_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16})\b/g, "[redacted]")
-    .replace(/\b(?:sk|pk|api|token|secret|password)[-_][A-Za-z0-9_-]{8,}\b/gi, "[redacted]")
-    .replace(/(^|\s)(?:[A-Za-z]:\\|\/)(?:[^\s,;:]+[\\/])*[^\s,;:]*/g, "$1[path]")
-    .trim().slice(0, 240);
+  return redactText(line).trim().slice(0, 240);
 }
 
 function iso(...values) {
@@ -139,7 +136,7 @@ function attemptResources(run, step, attempt, active) {
   return {
     prompt: availability(artifacts.some((item) => item.kind === "agent-prompt") || Boolean(active && attempt.prompt), active ? "not_yet_available" : "not_retained"),
     activity: availability(observedActivity > 0, active ? "not_yet_available" : "not_retained", { count: observedActivity }),
-    output: availability(Boolean(attempt.report || attempt.rawOutput) || artifacts.some((item) => item.kind === "agent-output"), active ? "not_yet_available" : "not_retained"),
+    output: availability(Boolean(attempt.report || attempt.rawOutput || attempt.activity?.rawOutput) || artifacts.some((item) => item.kind === "agent-output"), active ? "not_yet_available" : "not_retained"),
     artifacts: availability(artifacts.length > 0, active ? "not_yet_available" : "not_recorded", { count: artifacts.length }),
     diff: availability(Boolean(diff?.available || diff?.files?.length || diff?.patch), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", { fileCount: diff?.files?.length || 0 }),
     checks: availability(Boolean(checks), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", { status: checks?.status || null }),

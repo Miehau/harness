@@ -3,6 +3,7 @@ const tokenPatterns = [
   /\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|npm_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16})\b/g,
   /\b(?:sk|pk|api|token|secret|password)[-_][A-Za-z0-9_-]{8,}\b/gi,
   /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}\b/gi,
+  /\b(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
   /\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|KEY))\s*[=:]\s*[^\s,;]+/g,
   /([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi
 ];
@@ -10,15 +11,15 @@ const absolutePath = /(^|[\s"'`(])(?:~\/|\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+
 
 export function redactText(value) {
   let text = String(value ?? "");
-  for (const pattern of tokenPatterns) text = text.replace(pattern, (...parts) => parts[1] && pattern === tokenPatterns[4] ? `${parts[1]}[redacted]@` : "[redacted]");
+  for (const pattern of tokenPatterns) text = text.replace(pattern, (...parts) => parts[1] && pattern === tokenPatterns[5] ? `${parts[1]}[redacted]@` : "[redacted]");
   return text.replace(absolutePath, "$1[path]");
 }
 
 export function boundedText(value, limit) {
   const text = redactText(value);
   return text.length > limit
-    ? { value: text.slice(0, limit), state: "truncated", truncated: true }
-    : { value: text, state: "available", truncated: false };
+    ? { value: text.slice(0, limit), state: "truncated", truncated: true, total: text.length }
+    : { value: text, state: "available", truncated: false, total: text.length };
 }
 
 export function redactRecord(value, key = "") {

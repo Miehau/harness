@@ -159,6 +159,11 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
       if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
       const item = redactRecord({ ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() });
       if (item.type === "prompt") {
+        const prompt = boundedText(item.content || item.prompt, 16000);
+        item.content = prompt.value;
+        item.truncated = Boolean(item.truncated) || prompt.truncated;
+        item.total = Math.max(prompt.total, Number(item.total) || 0);
+        delete item.prompt;
         pushBounded(prompts, item, 20);
         lastEventAt = item.at;
         lastEvent = item.label || lastEvent;
@@ -197,6 +202,16 @@ function boundedAttemptActivity(activity = {}, rawOutput = "") {
   return {
     events: redactRecord(structuredClone((activity.events || []).slice(-attemptEventLimit))),
     activityGroups: redactRecord(structuredClone((activity.groups || []).slice(-attemptEventLimit))),
+    prompts: (activity.prompts || []).slice(-20).map((item) => {
+      const { prompt: legacyPrompt, ...saved } = item;
+      const bounded = boundedText(saved.content || legacyPrompt, 4000);
+      return redactRecord({
+        ...saved,
+        content: bounded.value,
+        truncated: Boolean(saved.truncated) || bounded.truncated,
+        total: Math.max(bounded.total, Number(saved.total) || 0)
+      });
+    }),
     rawOutput: appendBounded("", redactText(activity.rawOutput || rawOutput), attemptOutputLimit)
   };
 }
@@ -223,6 +238,11 @@ export function snapshotActiveAttempt(step, active = {}, {
 } = {}) {
   const attemptId = active.attemptId || `attempt-${(step.attempts?.length || 0) + 1}`;
   const bounded = boundedAttemptActivity(activity, rawOutput);
+  const promptSource = active.prompt || activity.prompts?.at(-1)?.content || activity.prompts?.at(-1)?.prompt || "";
+  const prompt = boundedText(promptSource, 16000);
+  const activityPrompt = activity.prompts?.at(-1);
+  const promptTruncated = Boolean(active.promptTruncated ?? activityPrompt?.truncated) || prompt.truncated;
+  const promptTotal = Math.max(prompt.total, Number(active.promptTotal ?? activityPrompt?.total) || 0);
   const failure = failureDetails(error, { status, reason, phase });
   return {
     runId: active.runId || null,
@@ -238,6 +258,7 @@ export function snapshotActiveAttempt(step, active = {}, {
     lastEvent: redactText(activity.lastEvent || active.lastEvent || ""),
     lastEventAt: activity.lastEventAt || active.lastEventAt || null,
     ...bounded,
+    ...(prompt.value ? { prompt: prompt.value, promptTruncated, promptTotal } : {}),
     sessionFile: active.sessionFile || step.sessionFile || null,
     ...(report === undefined ? {} : { report: redactRecord(structuredClone(report)) }),
     ...(verification === undefined ? {} : { verification: redactRecord(structuredClone(verification)) }),

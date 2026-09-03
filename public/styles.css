@@ -1611,6 +1611,9 @@ button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:
 .attempt-blocker strong { color: #efd4b1; font-size: 12px; line-height: 1.45; }
 .attempt-resource-state { display: grid; gap: 4px; border: 1px dashed var(--stroke-strong); border-radius: 9px; padding: 14px; background: rgb(255 255 255 / .018); color: #9da6b4; font-size: 12px; }
 .attempt-resource-state strong { color: #c6cdd7; font-size: 12px; text-transform: capitalize; }
+.attempt-truncation-warning { display: grid; gap: 6px; margin-bottom: 10px; border: 1px solid #655228; border-radius: 9px; padding: 10px 12px; background: rgb(125 91 24 / .18); color: #e5c982; font-size: 12px; line-height: 1.45; }
+.attempt-truncation-warning strong { color: #f1d88d; }
+.attempt-truncation-warning .button { justify-self: start; }
 .attempt-resource-state.state-loading span { color: #a99dff; }
 .attempt-resource-state.state-unavailable span, .attempt-resource-state.state-not_retained span { color: #e5af77; }
 .attempt-resource-state.state-truncated span { color: #e5cf77; }

@@ -8,7 +8,8 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
-  list timeline [ticketId]          Inspector output for the active step
+  list runs [ticketId]              Active and archived run identities for a ticket
+  list timeline [ticketId] [runId]  Inspector output for an active or archived run
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
@@ -61,11 +62,15 @@ async function handleCommand(command, rest, ctx) {
       print(stdout, await backlog(ctx));
       return 0;
     }
-    if (what === "timeline" || what === "execution-timeline") {
-      print(stdout, sanitizeTimeline(await timeline(args[0], ctx)));
+    if (what === "runs") {
+      print(stdout, await runHistories(args[0], ctx));
       return 0;
     }
-    throw new Error("Usage: agent-plan list backlog|timeline [ticketId]\n" + usage);
+    if (what === "timeline" || what === "execution-timeline") {
+      print(stdout, sanitizeTimeline(await timeline(args[0], args[1], ctx)));
+      return 0;
+    }
+    throw new Error("Usage: agent-plan list backlog|runs [ticketId]|timeline [ticketId] [runId]\n" + usage);
   }
   if (command === "select") {
     const id = rest[0];
@@ -230,14 +235,22 @@ function backlogRow(ticket, run, selectedTicketId) {
   };
 }
 
-async function timeline(explicitId, ctx) {
+async function timeline(explicitId, runId, ctx) {
   const { env, fetchImpl } = ctx;
   const state = explicitId ? null : await request("GET", "/api/state", { env, fetchImpl });
   const id = explicitId || state.selectedTicketId;
   if (!id) throw new Error("Pass a ticket id (no selected run)");
   // The inspector owns focus, lifecycle, redaction, and retention semantics. Keep
   // this command a transport-only view so its JSON cannot drift from the dashboard.
-  return request("GET", "/api/tickets/" + encodeURIComponent(id) + "/inspection", { env, fetchImpl });
+  const path = runId
+    ? "/api/tickets/" + encodeURIComponent(id) + "/runs/" + encodeURIComponent(runId) + "/inspection"
+    : "/api/tickets/" + encodeURIComponent(id) + "/inspection";
+  return request("GET", path, { env, fetchImpl });
+}
+
+async function runHistories(explicitId, ctx) {
+  const id = await resolveTicketId(explicitId, ctx);
+  return request("GET", "/api/tickets/" + encodeURIComponent(id) + "/runs", { env: ctx.env, fetchImpl: ctx.fetchImpl });
 }
 
 function aliasAction(value) {

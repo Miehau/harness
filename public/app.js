@@ -88,7 +88,21 @@ function renderProfiles() {
   if (providerLabel) providerLabel.textContent = providers.length ? `Provider: ${providers.join(", ")}` : "Pi models";
 }
 
-function runFor(id = state?.selectedTicketId) { return id ? state?.ticketRuns?.[id] || null : null; }
+function runIdentity(run) { return run?.id && run?.runId ? `${run.id}:${run.runId}` : null; }
+function runsForTicket(id) {
+  if (!id) return [];
+  const current = state?.ticketRuns?.[id];
+  return [
+    ...(current ? [current] : []),
+    ...Object.values(state?.retainedRuns || {}).filter((run) => run.id === id && run.runId !== current?.runId)
+  ];
+}
+function runFor(id = state?.selectedTicketId) {
+  const runs = runsForTicket(id);
+  return runs.find((run) => run.runId === selectedRunId) || runs[0] || null;
+}
+function isArchivedRun(run) { return Boolean(run && state?.ticketRuns?.[run.id]?.runId !== run.runId); }
+function sameRun(left, right) { return runIdentity(left) === runIdentity(right); }
 function selectedTicket() { return ticketSources.tickets.find((ticket) => ticket.id === state?.selectedTicketId) || runFor()?.ticket || null; }
 function flattenSteps(plan = runFor()?.plan) { return (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]); }
 function nodeById(id, plan = runFor()?.plan) {
@@ -101,7 +115,7 @@ function nodeById(id, plan = runFor()?.plan) {
 }
 
 function inspectionFor(run = runFor()) {
-  return run ? inspections.get(run.id)?.projection || null : null;
+  return run ? inspections.get(runIdentity(run))?.projection || null : null;
 }
 
 function inspectionAttempt(id, projection = inspectionFor()) {
@@ -140,25 +154,35 @@ function syncInspectionSelection(projection = inspectionFor(), previous = null) 
 }
 
 function loadInspection(run = runFor()) {
-  if (!run || pendingInspections.has(run.id) || inspections.get(run.id)?.revision === state?.revision) return;
-  pendingInspections.add(run.id);
-  api(`/api/tickets/${encodeURIComponent(run.id)}/inspection`).then((projection) => {
-    const previous = inspections.get(run.id)?.projection || null;
-    inspections.set(run.id, { revision: projection.revision, projection });
-    if (run.id === runFor()?.id) { syncInspectionSelection(projection, previous); rememberView(); render(); }
+  const key = runIdentity(run);
+  if (!run || pendingInspections.has(key) || inspections.get(key)?.revision === state?.revision) return;
+  pendingInspections.add(key);
+  const path = isArchivedRun(run)
+    ? `/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/inspection`
+    : `/api/tickets/${encodeURIComponent(run.id)}/inspection`;
+  api(path).then((projection) => {
+    const previous = inspections.get(key)?.projection || null;
+    inspections.set(key, { revision: projection.revision, projection });
+    if (sameRun(run, runFor())) { syncInspectionSelection(projection, previous); rememberView(); render(); }
   }).catch((error) => {
-    inspections.set(run.id, { revision: state?.revision, error: error.message, projection: null });
-    if (run.id === runFor()?.id) renderInspector();
-  }).finally(() => pendingInspections.delete(run.id));
+    inspections.set(key, { revision: state?.revision, error: error.message, projection: null });
+    if (sameRun(run, runFor())) renderInspector();
+  }).finally(() => pendingInspections.delete(key));
+}
+
+function attemptDetailKey(run, attempt) {
+  return JSON.stringify([run.id, run.runId, attempt.workerId, attempt.attemptId]);
 }
 
 function loadAttemptDetails(run, attempt) {
-  if (!run || !attempt?.attemptId || !attempt.runId || pendingAttemptDetails.has(attempt.id) || attemptDetails.has(attempt.id)) return;
-  pendingAttemptDetails.add(attempt.id);
+  if (!run || !run.runId || !attempt?.attemptId) return;
+  const key = attemptDetailKey(run, attempt);
+  if (pendingAttemptDetails.has(key) || attemptDetails.has(key)) return;
+  pendingAttemptDetails.add(key);
   api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/steps/${encodeURIComponent(attempt.workerId.replace(/^worker:/, ""))}/attempts/${encodeURIComponent(attempt.attemptId)}/details`)
-    .then((detail) => { attemptDetails.set(attempt.id, { detail }); if (attempt.id === selectedAttemptId) renderInspector(); })
-    .catch((error) => { attemptDetails.set(attempt.id, { error: error.message }); if (attempt.id === selectedAttemptId) renderInspector(); })
-    .finally(() => pendingAttemptDetails.delete(attempt.id));
+    .then((detail) => { attemptDetails.set(key, { detail }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) renderInspector(); })
+    .catch((error) => { attemptDetails.set(key, { error: error.message }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) renderInspector(); })
+    .finally(() => pendingAttemptDetails.delete(key));
 }
 
 function statusIcon(status) {
@@ -247,7 +271,7 @@ function ticketCard(ticket) {
 function queueTickets() {
   const byId = new Map();
   for (const ticket of ticketSources.tickets) byId.set(ticket.id, ticket);
-  for (const run of Object.values(state.ticketRuns || {})) if (run.ticket) byId.set(run.ticket.id, run.ticket);
+  for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) if (run.ticket) byId.set(run.ticket.id, run.ticket);
   return [...byId.values()];
 }
 
@@ -366,10 +390,12 @@ function renderHeader() {
   const restartPoints = restartOptions(run);
   const restartable = run && !["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge", "completed"].includes(run.status) && !run.merge && !run.integration;
   const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
-  const action = !run
-    ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
+  const action = isArchivedRun(run)
+    ? `<span class="run-pill">archived · inspection only</span>`
+    : !run
+      ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
     : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
-  const reviewAction = run?.checkpoint?.kind === "step_review"
+  const reviewAction = !isArchivedRun(run) && run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
   const restartAudit = run?.restartHistory?.at(-1);
@@ -378,7 +404,9 @@ function renderHeader() {
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
   const pauseAudit = run?.pauseHistory?.at(-1);
   const pauseBanner = pauseAudit ? `<div class="recovery-banner"><strong>${run.status === "paused" ? "Run paused" : "Resumed from pause"}</strong><span>${escapeHtml(new Date(pauseAudit.at).toLocaleString())} · ${escapeHtml(pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`)} · audit ${escapeHtml(pauseAudit.id)}</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  const histories = runsForTicket(ticket.id);
+  const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${historySelector}</div><div class="plan-actions">${action}${reviewAction}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -489,6 +517,10 @@ function renderPlanTree() {
   const run = runFor();
   const stage = run?.stages?.find((item) => item.id === (selectedStageId || (selectedStepId ? "implement" : null)));
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
+  if (isArchivedRun(run)) {
+    target.innerHTML = `${stageSurface}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
+    return;
+  }
   if (checkpointUsesWorkspace(run)) {
     target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
@@ -507,7 +539,7 @@ function renderPlanTree() {
 }
 
 function cachedTrace(run, step) {
-  const cached = sessionTraces.get(`${run.id}:${step.id}`);
+  const cached = sessionTraces.get(`${runIdentity(run)}:${step.id}`);
   return cached && cached.sessionFile === step.sessionFile ? cached.trace : null;
 }
 
@@ -518,16 +550,22 @@ function stagePromptSignature(run, stage) {
 }
 
 function cachedStagePrompts(run, stage) {
-  const cached = stagePromptTraces.get(`${run.id}:${stage.id}`);
+  const cached = stagePromptTraces.get(`${runIdentity(run)}:${stage.id}`);
   return cached?.signature === stagePromptSignature(run, stage) ? cached.prompts : null;
+}
+
+function cachedStagePromptTrace(run, stage) {
+  const cached = stagePromptTraces.get(`${runIdentity(run)}:${stage.id}`);
+  return cached?.signature === stagePromptSignature(run, stage) ? cached.trace : null;
 }
 
 function stagePromptPanel(run, stage) {
   const saved = cachedStagePrompts(run, stage);
+  const trace = cachedStagePromptTrace(run, stage);
   const live = liveStages.get(`${run.id}:${stage.id}`)?.prompts || [];
   const prompts = [...(saved || []), ...live.map((item) => ({ prompt: item.content, at: item.at, title: item.actor || stage.title, status: stage.status }))]
     .filter((item, index, all) => item.prompt && all.findIndex((candidate) => candidate.prompt === item.prompt) === index);
-  if (!prompts.length) return saved ? `<div class="run-empty">No agent prompt has been recorded for this stage yet.</div>` : `<div class="run-empty">Loading recorded stage prompts…</div>`;
+  if (!prompts.length) return saved ? `<div class="run-empty">${trace?.state === "unavailable" ? "The retained review trace is currently unavailable." : "No agent prompt has been recorded for this stage yet."}</div>` : `<div class="run-empty">Loading recorded stage prompts…</div>`;
   return `<div class="stage-prompts">${prompts.map((item, index) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(item.title || `Prompt ${index + 1}`)}</span><span class="artifact-source status-${escapeHtml(item.status || stage.status)}">${escapeHtml((item.status || stage.status).replaceAll("_", " "))}</span></header>${item.at ? `<code class="artifact-path">${escapeHtml(new Date(item.at).toLocaleString())}</code>` : ""}<div class="artifact-body">${renderMarkdown(item.prompt)}</div></article>`).join("")}</div>`;
 }
 
@@ -727,33 +765,43 @@ function stepDiffPanel(step) {
 
 const artifactBodies = new Map();
 const pendingArtifactBodies = new Set();
-function hydrateArtifact(ticketId, artifact) {
-  if (!ticketId || !artifact?.id || artifact.content != null || artifactBodies.has(artifact.id) || pendingArtifactBodies.has(artifact.id)) return;
-  pendingArtifactBodies.add(artifact.id);
-  api(`/api/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(artifact.id)}`).then((result) => {
-    artifactBodies.set(artifact.id, result.content);
-    render();
-  }).catch(() => {}).finally(() => pendingArtifactBodies.delete(artifact.id));
+function artifactBodyKey(ticketId, runId, artifactId) {
+  return JSON.stringify([ticketId, runId || "current", artifactId]);
 }
-function artifactBody(artifact) {
-  return artifact.content != null ? artifact.content : artifactBodies.get(artifact.id);
+function artifactRoute(run, artifactId, suffix = "") {
+  return `/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(artifactId)}${suffix}`;
+}
+function hydrateArtifact(run, artifact) {
+  const key = artifactBodyKey(run?.id, run?.runId, artifact?.id);
+  if (!run?.id || !run?.runId || !artifact?.id || artifact.content != null || artifactBodies.has(key) || pendingArtifactBodies.has(key)) return;
+  pendingArtifactBodies.add(key);
+  api(artifactRoute(run, artifact.id, "/content")).then((result) => {
+    artifactBodies.set(key, result);
+    render();
+  }).catch(() => {}).finally(() => pendingArtifactBodies.delete(key));
+}
+function artifactBody(artifact, run = runFor()) {
+  return artifact.content != null ? { state: artifact.state === "truncated" ? "truncated" : "available", content: artifact.content } : artifactBodies.get(artifactBodyKey(run?.id, run?.runId, artifact?.id));
 }
 
 function artifactPreview(artifact) {
-  const content = artifactBody(artifact);
+  const resource = artifactBody(artifact);
+  const content = resource?.content;
   if (artifact.kind === "visual-evidence") return artifact.summary ? `<p>${escapeHtml(artifact.summary)}</p>` : `<div class="run-empty">No written summary was recorded for this evidence.</div>`;
-  if (content == null) return `<div class="run-empty">Loading artifact…</div>`;
-  if (artifact.kind === "git-diff") return diffPanel({ available: true, patch: content }, { id: `artifact-${artifact.id}`, actions: false });
-  if (artifact.name.endsWith(".json")) return `<pre><code data-language="json">${escapeHtml(formatOutput(content))}</code></pre>`;
-  return renderMarkdown(content);
+  if (!resource) return `<div class="run-empty">Loading artifact…</div>`;
+  if (resource.state !== "available" && resource.state !== "truncated") return resourceStateHtml(resource, "Artifact content");
+  const truncation = resource.state === "truncated" ? `<div class="diff-warning">This retained artifact is truncated in the dashboard. Open the artifact for its full retained file.</div>` : "";
+  if (artifact.kind === "git-diff") return `${truncation}${diffPanel({ available: true, patch: content }, { id: `artifact-${artifact.id}`, actions: false })}`;
+  if (artifact.name.endsWith(".json")) return `${truncation}<pre><code data-language="json">${escapeHtml(formatOutput(content))}</code></pre>`;
+  return `${truncation}${renderMarkdown(content)}`;
 }
 
 function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()?.artifacts || []) {
-  const ticketId = runFor()?.id;
+  const run = runFor();
   if (!artifacts.length) return `<div class="run-empty">No persisted artifacts yet.</div>`;
   if (!artifacts.some((artifact) => artifact.id === selectedArtifactId)) selectedArtifactId = artifacts[0].id;
   const selected = artifacts.find((artifact) => artifact.id === selectedArtifactId) || artifacts[0];
-  if (selected.kind !== "visual-evidence" && artifactBody(selected) == null) hydrateArtifact(ticketId, selected);
+  if (selected.kind !== "visual-evidence" && artifactBody(selected, run) == null) hydrateArtifact(run, selected);
   return `<div class="artifact-browser"><nav class="artifact-index" aria-label="Persisted artifacts">${artifacts.map((artifact) => `<button type="button" data-select-artifact="${escapeHtml(artifact.id)}" aria-pressed="${artifact.id === selected.id}"><span><strong>${escapeHtml(artifact.name)}</strong><small>${escapeHtml(artifact.kind)}</small></span><i>${artifact.id === selected.id ? "●" : ""}</i></button>`).join("")}</nav><article class="artifact artifact-preview"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(selected.id)}" title="Open in Zed">${escapeHtml(selected.name)} ↗</button><span class="artifact-source">${escapeHtml(selected.kind)}</span></header><div class="artifact-body">${artifactPreview(selected)}</div></article></div>`;
 }
 
@@ -764,9 +812,25 @@ function stageDetailsPanel(run, stage, profile, artifacts) {
   return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stageStepIndexHtml(run, stage)}${stageDependencyMapHtml(run, stage)}${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
 }
 
+function resourceFallbackHtml(resource) {
+  return resource?.artifact?.id && resource?.artifact?.name ? `<button class="button" type="button" data-view-artifact="${escapeHtml(resource.artifact.id)}">View retained ${escapeHtml(resource.artifact.name)}</button>` : "";
+}
+
 function resourceStateHtml(resource, label) {
   const state = resource?.state || "unavailable";
-  return `<div class="attempt-resource-state state-${escapeHtml(state)}"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(inspectionResourceLabel({ state }))}</span></div>`;
+  return `<div class="attempt-resource-state state-${escapeHtml(state)}"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(inspectionResourceLabel({ state }))}</span>${resourceFallbackHtml(resource)}</div>`;
+}
+
+function truncatedResourceWarning(resource, tab) {
+  const label = tab === "activity" ? "Activity" : tab === "checks" ? "Check output" : tab === "trace" ? "Trace" : tab[0].toUpperCase() + tab.slice(1);
+  const count = (value) => Number(value || 0).toLocaleString();
+  const summary = tab === "activity"
+    ? `Showing ${count(resource.returned ?? resource.items?.length)} of ${count(resource.total)} recorded events.`
+    : tab === "trace"
+      ? `Showing ${count(resource.returned?.events)} of ${count(resource.total?.events)} events, ${count(resource.returned?.prompts)} of ${count(resource.total?.prompts)} prompts, and ${count(resource.returned?.output)} retained output characters.`
+      : `Showing ${count(resource.returned ?? resource.content?.length)} retained characters.`;
+  const fallback = resourceFallbackHtml(resource);
+  return `<div class="attempt-truncation-warning" role="status"><strong>${escapeHtml(label)} is truncated</strong><span>${escapeHtml(summary)} This is partial content.${fallback ? " A retained artifact is available." : " No additional retained fallback is available."}</span>${fallback}</div>`;
 }
 
 function attemptDetailContent(detail, tab) {
@@ -774,20 +838,43 @@ function attemptDetailContent(detail, tab) {
   if (detail.error) return resourceStateHtml({ state: "unavailable" }, detail.error);
   const resource = detail[tab] || { state: "unavailable" };
   if (resource.state !== "available" && resource.state !== "truncated") return resourceStateHtml(resource, tab);
-  if (tab === "activity") return `<section class="run-events"><span class="eyebrow">Recorded activity · ${resource.total || resource.items?.length || 0} events</span><div>${(resource.items || []).map((item) => `<article class="attempt-event ${item.isError ? "warning" : ""}"><strong>${escapeHtml(item.label || item.type || "Activity")}</strong><small>${escapeHtml(item.at || "time not recorded")}</small>${item.detail || item.result ? `<pre>${escapeHtml(formatOutput(item.detail || item.result))}</pre>` : ""}</article>`).join("") || resourceStateHtml({ state: "not_retained" }, "Activity")}</div></section>`;
-  if (tab === "artifacts") return `<div class="artifact-list">${(resource.items || []).map((item) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(item.name || "Artifact")}</span><span class="artifact-source">${escapeHtml(item.kind || item.state)}</span></header>${item.content ? `<div class="artifact-body">${renderMarkdown(item.content)}</div>` : resourceStateHtml(item, "Artifact content")}</article>`).join("") || resourceStateHtml(resource, "Artifacts")}</div>`;
-  if (tab === "diff") return diffPanel({ available: true, patch: resource.content || "", files: resource.files || [], stat: resource.stat || "", truncated: resource.state === "truncated" }, { id: `attempt-${selectedAttemptId}`, actions: false });
-  if (tab === "checks") return `<section class="attempt-checks"><dl><div><dt>Status</dt><dd>${escapeHtml(resource.status || "not recorded")}</dd></div><div><dt>Command</dt><dd>${escapeHtml(resource.command || "not retained")}</dd></div><div><dt>Summary</dt><dd>${escapeHtml(resource.summary || "No check summary retained")}</dd></div></dl>${resource.output ? `<pre>${escapeHtml(formatOutput(resource.output))}</pre>` : resourceStateHtml(resource, "Check output")}</section>`;
-  if (tab === "trace") return `<section class="attempt-trace"><span class="eyebrow">Trace availability</span>${resource.content?.rawOutput ? `<pre>${escapeHtml(formatOutput(resource.content.rawOutput))}</pre>` : resourceStateHtml(resource, "Trace")}</section>`;
-  return `<article class="artifact"><div class="artifact-body">${renderMarkdown(resource.content || "")}</div></article>`;
+  const warning = resource.state === "truncated" ? truncatedResourceWarning(resource, tab) : "";
+  if (tab === "activity") return `${warning}<section class="run-events"><span class="eyebrow">Recorded activity · ${resource.total || resource.items?.length || 0} events</span><div>${(resource.items || []).map((item) => `<article class="attempt-event ${item.isError ? "warning" : ""}"><strong>${escapeHtml(item.label || item.type || "Activity")}</strong><small>${escapeHtml(item.at || "time not recorded")}</small>${item.detail || item.result ? `<pre>${escapeHtml(formatOutput(item.detail || item.result))}</pre>` : ""}</article>`).join("") || resourceStateHtml({ state: "not_retained" }, "Activity")}</div></section>`;
+  if (tab === "artifacts") return resource.items?.length ? `${warning}${artifactsPanel(null, resource.items)}` : resourceStateHtml(resource, "Artifacts");
+  if (tab === "diff") return `${warning}${diffPanel({ available: true, patch: resource.content || "", files: resource.files || [], stat: resource.stat || "", truncated: resource.state === "truncated" }, { id: `attempt-${selectedAttemptId}`, actions: false })}`;
+  if (tab === "checks") return `${warning}<section class="attempt-checks"><dl><div><dt>Status</dt><dd>${escapeHtml(resource.status || "not recorded")}</dd></div><div><dt>Command</dt><dd>${escapeHtml(resource.command || "not retained")}</dd></div><div><dt>Summary</dt><dd>${escapeHtml(resource.summary || "No check summary retained")}</dd></div></dl>${resource.output ? `<pre>${escapeHtml(formatOutput(resource.output))}</pre>` : resourceStateHtml(resource, "Check output")}</section>`;
+  if (tab === "trace") return `${warning}<section class="attempt-trace"><span class="eyebrow">Trace availability</span>${resource.content?.rawOutput ? `<pre>${escapeHtml(formatOutput(resource.content.rawOutput))}</pre>` : resourceStateHtml(resource, "Trace")}</section>`;
+  return `${warning}<article class="artifact"><div class="artifact-body">${renderMarkdown(resource.content || "")}</div></article>`;
+}
+
+function liveAttemptDetail(run, step, attempt, detail) {
+  const live = liveRuns.get(`${run.id}:${step?.id}`);
+  if (attempt.lifecycle !== "active" || !live || live.runId !== attempt.runId) return detail;
+  const events = live.events.slice(-100).map((event) => ({ ...event, label: event.label || event.type }));
+  return {
+    ...(detail || {}),
+    prompt: live.prompt ? {
+      state: live.promptTruncated ? "truncated" : "available", content: live.prompt,
+      returned: live.prompt.length, total: live.promptTotal || live.prompt.length
+    } : detail?.prompt,
+    activity: events.length ? { state: live.events.length > 100 ? "truncated" : "available", items: events, returned: events.length, total: live.events.length } : detail?.activity,
+    output: live.output ? { state: live.output.length > 20000 ? "truncated" : "available", content: live.output.slice(-20000), returned: live.output.slice(-20000).length, total: live.output.length } : detail?.output
+  };
+}
+
+function liveInspectionSummary(run, step, attempt, summary) {
+  const live = liveRuns.get(`${run.id}:${step?.id}`);
+  if (attempt.lifecycle !== "active" || !live?.label || live.runId !== attempt.runId) return summary;
+  return { ...summary, latestAction: live.label, latestActionAt: live.lastAt };
 }
 
 function canonicalAttemptInspector(run, step, projection, worker, attempt) {
-  const summary = inspectionSummary({ worker, attempt });
-  const stored = attemptDetails.get(attempt.id);
+  let summary = inspectionSummary({ worker, attempt });
+  summary = liveInspectionSummary(run, step, attempt, summary);
+  const stored = attemptDetails.get(attemptDetailKey(run, attempt));
   const publicAttempt = step?.attempts?.find((item) => item.attemptId === attempt.attemptId);
-  if (attempt.runId && attempt.lifecycle !== "active") loadAttemptDetails(run, attempt);
-  const detail = stored?.detail || (stored?.error ? { error: stored.error } : null);
+  loadAttemptDetails(run, attempt);
+  const detail = liveAttemptDetail(run, step, attempt, stored?.detail || (stored?.error ? { error: stored.error } : null));
   const tab = ["overview", "activity", "prompt", "output", "checks", "diff", "artifacts", "trace"].includes(activeTab) ? activeTab : "overview";
   const attempts = worker.attemptIds.map((id) => inspectionAttempt(id, projection)).filter(Boolean);
   const evidence = summary.evidence;
@@ -833,19 +920,23 @@ function renderInspector() {
   const promptArtifact = workerTab === "prompt" ? [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt") : null;
   if (workerTab === "prompt") {
     loadSessionTrace(run, step);
-    if (promptArtifact) hydrateArtifact(run.id, promptArtifact);
+    if (promptArtifact) hydrateArtifact(run, promptArtifact);
   }
-  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || artifactBody(promptArtifact || {}) || "Prompt has not been rendered yet.";
+  const promptResource = artifactBody(promptArtifact || {});
+  const renderedPrompt = liveRuns.get(`${run.id}:${step.id}`)?.prompt || run.activeRuns?.[step.id]?.prompt || cachedTrace(run, step)?.prompt || promptResource?.content || null;
+  const promptPanel = renderedPrompt != null
+    ? `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header>${promptResource?.state === "truncated" ? `<div class="diff-warning">This retained prompt is truncated in the dashboard.</div>` : ""}<div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>`
+    : promptResource ? resourceStateHtml(promptResource, "Rendered agent prompt") : `<div class="run-empty">Prompt has not been rendered yet.</div>`;
   const stepArtifacts = run.artifacts.filter((artifact) => artifact.stepId === step.id);
   const panel = workerTab === "overview" ? overviewPanel(step)
     : workerTab === "diff" ? stepDiffPanel(step)
       : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
         : workerTab === "ticket" ? artifactsPanel(null)
-          : workerTab === "prompt" ? `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>`
+          : workerTab === "prompt" ? promptPanel
             : runPanel(step);
   const isolated = Boolean(step.workspace?.isolated);
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
-  const reviewActions = step.status === "review_ready" ? run.auto
+  const reviewActions = !isArchivedRun(run) && step.status === "review_ready" ? run.auto
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
     : `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}">Accept & auto-run</button></section>` : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
@@ -857,7 +948,8 @@ function renderInspector() {
 }
 
 async function loadSessionTrace(run, step) {
-  const key = `${run.id}:${step.id}`;
+  if (isArchivedRun(run)) return;
+  const key = `${runIdentity(run)}:${step.id}`;
   const sessionFile = step.sessionFile;
   const requestKey = `${key}:${sessionFile}`;
   if (!sessionFile || cachedTrace(run, step) || pendingSessionTraces.has(requestKey)) return;
@@ -878,14 +970,14 @@ async function loadSessionTrace(run, step) {
 }
 
 async function loadStagePrompts(run, stage) {
-  const key = `${run.id}:${stage.id}`;
+  const key = `${runIdentity(run)}:${stage.id}`;
   const signature = stagePromptSignature(run, stage);
   const requestKey = `${key}:${signature}`;
   if (cachedStagePrompts(run, stage) || pendingStagePromptTraces.has(requestKey)) return;
   pendingStagePromptTraces.add(requestKey);
   try {
-    const result = await api(`/api/tickets/${encodeURIComponent(run.id)}/stages/${encodeURIComponent(stage.id)}/prompts`);
-    stagePromptTraces.set(key, { signature, prompts: result.prompts || [] });
+    const result = await api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/stages/${encodeURIComponent(stage.id)}/prompts`);
+    stagePromptTraces.set(key, { signature, prompts: result.prompts || [], trace: result.trace || null });
     if (run.id === runFor()?.id && stage.id === selectedStageId && activeTab === "prompt") renderInspectorPreservingContext();
   } catch (error) {
     stagePromptTraces.set(key, { signature, prompts: [] });
@@ -1162,9 +1254,17 @@ document.addEventListener("click", async (event) => {
     } catch (error) { notify(error.message); cleanup.disabled = false; }
     return;
   }
+  const viewArtifact = event.target.closest("[data-view-artifact]");
+  if (viewArtifact) {
+    selectedArtifactId = viewArtifact.dataset.viewArtifact;
+    activeTab = "artifacts";
+    rememberView(); renderInspector();
+    return;
+  }
   const openArtifact = event.target.closest("[data-open-artifact]");
   if (openArtifact) {
-    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/artifacts/${encodeURIComponent(openArtifact.dataset.openArtifact)}/open`, { method: "POST", body: "{}" }); notify("Opened in Zed"); }
+    const run = runFor();
+    try { await api(artifactRoute(run, openArtifact.dataset.openArtifact, "/open"), { method: "POST", body: "{}" }); notify("Opened in Zed"); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -1356,6 +1456,23 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const history = event.target.closest("[data-run-history]");
+  if (history) {
+    selectedRunId = history.value;
+    deliberateSelection = false;
+    selectedStepId = null;
+    selectedStageId = null;
+    selectedStageKey = null;
+    selectedWorkerId = null;
+    selectedAttemptId = null;
+    selectedArtifactId = null;
+    activeTab = "activity";
+    const cachedProjection = inspectionFor(runFor());
+    if (cachedProjection) syncInspectionSelection(cachedProjection);
+    rememberView();
+    render();
+    return;
+  }
   const selector = event.target.closest("[data-attempt-select]");
   if (!selector) return;
   deliberateSelection = true;
@@ -1557,7 +1674,17 @@ events.onopen = () => {
 };
 events.onmessage = ({ data }) => {
   const event = JSON.parse(data);
-  if (event.type === "state") { state = event.state; render(); return; }
+  if (event.type === "state") {
+    const wasActive = state?.ticketRuns?.[state.selectedTicketId]?.activeRuns?.[selectedStepId];
+    state = event.state;
+    if (wasActive && !state.ticketRuns?.[state.selectedTicketId]?.activeRuns?.[selectedStepId]) {
+      const run = runFor();
+      const attempt = inspectionAttempt(selectedAttemptId);
+      if (run && attempt) attemptDetails.delete(attemptDetailKey(run, attempt));
+    }
+    render();
+    return;
+  }
   if (event.type === "selection") {
     state.revision = event.revision;
     if (!pendingTicketSelections && event.selectedTicketId !== state.selectedTicketId) selectTicket(event.selectedTicketId, null, false);
@@ -1569,7 +1696,11 @@ events.onmessage = ({ data }) => {
     let live = liveRuns.get(key) || { events: [], output: "" };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "" };
     live.runId = event.runId;
-    if (event.type === "prompt") live.prompt = event.content;
+    if (event.type === "prompt") {
+      live.prompt = event.content;
+      live.promptTruncated = Boolean(event.truncated);
+      live.promptTotal = Number(event.total) || live.prompt.length;
+    }
     else if (event.type === "text_delta") live.output = appendLiveOutput(live.output, event.delta);
     else live.events.push({ ...event, at: new Date().toISOString() });
     live.events = live.events.slice(-200);
@@ -1579,6 +1710,7 @@ events.onmessage = ({ data }) => {
     liveRuns.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
       if (event.type === "prompt" && activeTab === "prompt") renderInspectorPreservingContext();
+      else if (selectedAttemptId && activeTab !== "run") renderInspectorPreservingContext();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
     }
   }

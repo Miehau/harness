@@ -122,7 +122,7 @@ export function finalReview(run) {
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,
-      mediaUrl: artifact.mediaUrl || (run?.id && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
+      mediaUrl: artifact.mediaUrl || (run?.id && run?.runId && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
     })).filter((artifact) => artifact.media),
     checks: checks ? { status: checks.status, summary: checks.summary, command: checks.command } : null,
     reviews: reviews.filter((item) => item.role !== "deterministic").map((item) => ({ role: item.role, summary: item.summary }))

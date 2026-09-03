@@ -25,7 +25,7 @@ export function safeName(value) {
 }
 
 export function artifactPathForOpen(artifacts, id, dataDir) {
-  const path = artifacts?.find((artifact) => artifact.id === id)?.path;
+  const path = artifacts?.find((artifact) => artifact?.id === id)?.path;
   const root = `${resolve(dataDir)}${sep}`;
   return path && resolve(path).startsWith(root) ? resolve(path) : null;
 }
@@ -46,16 +46,24 @@ export function visualEvidenceComment(artifacts = []) {
   return `\n\nVisual evidence attached as proof (${shots.length}):\n${shots.map((shot) => `- ${shot.name}`).join("\n")}`;
 }
 
-export async function persistArtifact(dataDir, ticket, { name, content, runId = "legacy", stageId = "run", kind = "agent-output", stepId = null, attemptId = null }) {
+function artifactStorageKey(kind, storageKey) {
+  const identity = `${String(kind || "agent-output")}\0${storageKey == null ? "" : String(storageKey)}`;
+  return `${safeName(kind)}-${createHash("sha256").update(identity).digest("hex").slice(0, 10)}`;
+}
+
+export async function persistArtifact(dataDir, ticket, { name, content, runId = "legacy", stageId = "run", kind = "agent-output", stepId = null, attemptId = null, storageKey = null }) {
   const root = join(dataDir, "ticket-runs", safeName(ticket.identifier || ticket.id), "runs", safeName(runId), "artifacts");
   const directory = join(root, safeName(stageId), ...(stepId ? [safeName(stepId)] : []), ...(attemptId ? [safeName(attemptId)] : []));
   await mkdir(directory, { recursive: true });
   const base = safeName(name || `${stageId}.md`);
   const filename = base.includes(".") ? base : `${base}.md`;
-  const path = join(directory, filename);
+  const storageIdentity = artifactStorageKey(kind, storageKey);
+  const path = join(directory, `${storageIdentity}-${filename}`);
   const retainedContent = redactText(content);
   await writeFile(path, retainedContent, "utf8");
-  return { id: [stageId, stepId, attemptId, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, content: retainedContent, createdAt: new Date().toISOString() };
+  // Bodies live only in the artifact file; JsonStore retains the bounded metadata needed to locate them.
+  // The stable kind/storage identity keeps same-named internal and worker artifacts independently addressable.
+  return { id: [stageId, stepId, attemptId, storageIdentity, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, createdAt: new Date().toISOString() };
 }
 
 function productContextPath(dataDir, sourceCwd) {

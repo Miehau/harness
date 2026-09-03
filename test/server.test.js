@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
+import { persistArtifact } from "../src/artifacts.js";
 import { runRoot } from "../src/retention.js";
 import { JsonStore } from "../src/store.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
@@ -70,6 +72,50 @@ test("ticket inspection API returns the canonical compact projection and state o
   });
 });
 
+test("inspection histories keep fresh-restart artifacts and media scoped to their archived run", async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "needs_attention", permission: "write", writeScope: "src/build.js", attempts: [{ attemptId: "original-attempt", runId: "worker-original", status: "failed", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z" }] }] });
+    const id = await seedRun(daemon, { status: "needs_attention", plan });
+    const originalRunId = daemon.store.read().ticketRuns[id].runId;
+    const ticket = daemon.store.read().ticketRuns[id].ticket;
+    const historicalHandoff = await persistArtifact(dataDir, ticket, { runId: originalRunId, stageId: "handoff", name: "handoff.md", kind: "handoff", content: "historical handoff" });
+    const historicalMediaPath = join(dataDir, "historical-proof.png");
+    await writeFile(historicalMediaPath, "historical media");
+    await daemon.store.update((state) => {
+      state.ticketRuns[id].artifacts.push(historicalHandoff, { id: "proof", name: "proof.png", kind: "visual-evidence", stageId: "handoff", path: historicalMediaPath });
+    });
+
+    const restarted = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/restart`, { body: { target: "fresh", confirmed: true } });
+    assert.equal(restarted.status, 202);
+    const activeRunId = daemon.store.read().ticketRuns[id].runId;
+    const currentHandoff = await persistArtifact(dataDir, ticket, { runId: activeRunId, stageId: "handoff", name: "handoff.md", kind: "handoff", content: "current handoff" });
+    const currentMediaPath = join(dataDir, "current-proof.png");
+    await writeFile(currentMediaPath, "current media");
+    await daemon.store.update((state) => {
+      state.ticketRuns[id].artifacts.push(currentHandoff, { id: "proof", name: "proof.png", kind: "visual-evidence", stageId: "handoff", path: currentMediaPath });
+    });
+    assert.equal(currentHandoff.id, historicalHandoff.id);
+
+    const histories = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/runs`);
+    assert.deepEqual(histories.json.runs.map((run) => [run.runId, run.archived, run.attemptCount]), [[activeRunId, false, 0], [originalRunId, true, 1]]);
+    const archived = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/runs/${encodeURIComponent(originalRunId)}/inspection`);
+    assert.equal(archived.status, 200);
+    assert.deepEqual(archived.json.attempts.map((attempt) => attempt.id), ["attempt:build:original-attempt"]);
+
+    const artifactId = encodeURIComponent(historicalHandoff.id);
+    const [historicalBody, currentBody, historicalMedia, currentMedia] = await Promise.all([
+      invoke(daemon, "GET", `/api/tickets/${id}/runs/${originalRunId}/artifacts/${artifactId}/content`),
+      invoke(daemon, "GET", `/api/tickets/${id}/runs/${activeRunId}/artifacts/${artifactId}/content`),
+      invoke(daemon, "GET", `/api/tickets/${id}/runs/${originalRunId}/artifacts/proof/media`),
+      invoke(daemon, "GET", `/api/tickets/${id}/runs/${activeRunId}/artifacts/proof/media`)
+    ]);
+    assert.equal(historicalBody.json.content, "historical handoff");
+    assert.equal(currentBody.json.content, "current handoff");
+    assert.equal(historicalMedia.text, "historical media");
+    assert.equal(currentMedia.text, "current media");
+  });
+});
+
 test("ticket inspection keeps every retained worker attempt individually addressable", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "parallel-a", title: "Parallel A", permission: "write", writeScope: "src/a.js" }, { id: "parallel-b", title: "Parallel B", permission: "write", writeScope: "src/b.js" }] });
@@ -92,7 +138,7 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     sessionTrace: async () => ({
       prompts: [{ prompt: "trace token=secret_abcdefgh", at: "2026-09-03T10:00:00.000Z" }],
       events: [{ type: "reasoning_summary", detail: "Safe summary", at: "2026-09-03T10:00:01.000Z" }],
-      rawOutput: "trace ghp_0123456789abcdefghijklmnop"
+      rawOutput: "trace ghp_0123456789abcdefghijklmnop " + "y".repeat(21000)
     })
   };
   await withDaemon(async (daemon) => {
@@ -100,15 +146,15 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     plan.nodes[0].attempts = [{
       attemptId: "attempt-1", runId: "worker-1", status: "verified", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z",
       rawOutput: "ghp_0123456789abcdefghijklmnop " + "x".repeat(21000),
-      events: [{ type: "tool_end", result: "password=secret_abcdefgh" }],
+      events: Array.from({ length: 200 }, (_, index) => ({ type: "tool_end", result: `password=secret_abcdefgh-${index}` })),
       diff: { files: ["src/a.js"], stat: "1 file", patch: "diff --git a/src/a.js b/src/a.js\n" + "x".repeat(21000) },
-      verification: { checks: { status: "passed", command: "node test", summary: "Passed", output: "token=secret_abcdefgh" } },
+      verification: { checks: { status: "passed", command: "node test", summary: "Passed", output: "token=secret_abcdefgh " + "z".repeat(17000) } },
       sessionFile: "/tmp/private-session.jsonl"
     }];
     const id = await seedRun(daemon, {
       plan,
       artifacts: [
-        { id: "prompt", name: "prompt.md", kind: "agent-prompt", stepId: "build", attemptId: "attempt-1", content: "Prompt api_key=secret_abcdefgh", path: "/tmp/prompt.md" },
+        { id: "prompt", name: "prompt.md", kind: "agent-prompt", stepId: "build", attemptId: "attempt-1", content: "Prompt api_key=secret_abcdefgh " + "p".repeat(17000), path: "/tmp/prompt.md" },
         { id: "output", name: "output.md", kind: "agent-output", stepId: "build", attemptId: "attempt-1", content: "Output token=secret_abcdefgh", path: "/tmp/output.md" },
         { id: "diff", name: "diff.patch", kind: "git-attempt-diff", stepId: "build", attemptId: "attempt-1", content: "diff", path: "/tmp/diff.patch" }
       ]
@@ -116,12 +162,18 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     const path = `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`;
     const detail = await invoke(daemon, "GET", path);
     assert.equal(detail.status, 200);
-    assert.equal(detail.json.output.state, "truncated");
+    assert.equal(detail.json.activity.state, "truncated");
+    assert.deepEqual([detail.json.activity.returned, detail.json.activity.total], [100, 200]);
+    assert.equal(detail.json.output.state, "available");
+    assert.equal(detail.json.output.content, "Output [redacted]");
+    assert.equal(detail.json.checks.state, "truncated");
     assert.equal(detail.json.diff.state, "truncated");
+    assert.equal(detail.json.prompt.state, "truncated");
     assert.equal(detail.json.prompt.content.includes("secret_abcdefgh"), false);
     assert.equal(JSON.stringify(detail.json).includes("ghp_0123456789abcdefghijklmnop"), false);
     assert.equal(JSON.stringify(detail.json).includes("/tmp/private-session.jsonl"), false);
     assert.equal(detail.json.trace.content.events[0].type, "reasoning_summary");
+    assert.equal(detail.json.trace.state, "truncated");
     assert.equal((await invoke(daemon, "GET", `/api/tickets/${id}/runs/other/steps/build/attempts/attempt-1/details`)).status, 400);
 
     const state = await invoke(daemon, "GET", "/api/state");
@@ -130,6 +182,159 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     const artifact = await invoke(daemon, "GET", `/api/tickets/${id}/artifacts/prompt`);
     assert.equal(artifact.json.content, undefined);
     assert.equal(artifact.json.path, undefined);
+  }, { harness });
+});
+
+test("long live prompts retain truncation metadata after cancellation", async () => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const prompt = "p".repeat(20000);
+  const harness = {
+    ...mockHarness(),
+    async runStep({ onEvent, signal }) {
+      onEvent({ type: "prompt", label: "Prompt rendered", content: prompt });
+      started();
+      await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const startedRequest = invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry safely" } });
+    await running;
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].activeRuns.build?.promptTotal !== prompt.length) await new Promise((resolve) => setTimeout(resolve, 10));
+    const live = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`);
+    assert.equal(live.json.prompt.state, "truncated");
+    assert.deepEqual([live.json.prompt.returned, live.json.prompt.total], [16000, prompt.length]);
+    await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/cancel`, { body: {} });
+    await startedRequest;
+    const interrupted = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`);
+    assert.equal(interrupted.json.prompt.state, "truncated");
+    assert.deepEqual([interrupted.json.prompt.returned, interrupted.json.prompt.total], [16000, prompt.length]);
+  }, { harness });
+});
+
+test("attempt details bound raw output without a retained output artifact", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src" }] });
+    plan.nodes[0].attempts = [{
+      attemptId: "attempt-1", runId: "worker-1", status: "verified",
+      rawOutput: "x".repeat(21001)
+    }];
+    const id = await seedRun(daemon, { plan });
+    const detail = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`);
+
+    assert.equal(detail.status, 200);
+    assert.equal(detail.json.output.state, "truncated");
+    assert.equal(detail.json.output.returned, 20000);
+    assert.equal(detail.json.output.total, 21001);
+  });
+});
+
+test("attempt details prefer retained output artifacts and keep artifact bodies on the bounded content route", async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "running", permission: "write", writeScope: "src" }] });
+    plan.nodes[0].attempts = [{ status: "interrupted", rawOutput: "" }];
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      activeRuns: { build: {
+        runId: "worker-1", attemptId: "active-worker-1", prompt: "Use api_key=0123456789abcdef",
+        activity: { events: [{ type: "phase", label: "Editing" }], rawOutput: "live output" }
+      } }
+    });
+    const artifact = await persistArtifact(dataDir, { identifier: "T-1" }, {
+      name: "result.md", content: "artifact api_key=0123456789abcdef", runId: "run-1", stageId: "implement", stepId: "build", attemptId: "attempt-1"
+    });
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(artifact); });
+
+    const active = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/active-worker-1/details`);
+    assert.equal(active.status, 200);
+    assert.equal(active.json.prompt.state, "available");
+    assert.equal(active.json.activity.state, "available");
+    assert.equal(active.json.output.content, "live output");
+    assert.equal(active.json.diff.state, "not_retained");
+    assert.equal(active.json.checks.state, "not_retained");
+    assert.equal(active.json.artifacts.state, "not_retained");
+    assert.equal(JSON.stringify(active.json).includes("0123456789abcdef"), false);
+
+    const legacy = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`);
+    assert.equal(legacy.status, 200);
+    assert.equal(legacy.json.output.state, "available");
+    assert.equal(legacy.json.output.content, "artifact [redacted]");
+    const metadata = await invoke(daemon, "GET", `/api/tickets/${id}/artifacts/${encodeURIComponent(artifact.id)}`);
+    assert.equal(metadata.json.content, undefined);
+    const content = await invoke(daemon, "GET", `/api/tickets/${id}/artifacts/${encodeURIComponent(artifact.id)}/content`);
+    assert.equal(content.json.state, "available");
+    assert.equal(content.json.content.includes("0123456789abcdef"), false);
+  });
+});
+
+test("migrated colliding artifact IDs retrieve their own retained bodies", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-migrated-artifacts-"));
+  try {
+    await writeFile(join(dataDir, "state-v3.json"), JSON.stringify({
+      version: 5, workspace: { cwd: dataDir }, ticketRuns: {
+        legacy: {
+          id: "legacy", runId: "legacy-run", status: "completed", ticket: { id: "legacy", identifier: "LEG-1" }, plan: { nodes: [] },
+          artifacts: [
+            { id: "legacy-output", name: "output.md", kind: "agent-output", stageId: "implement", stepId: "build", attemptId: "attempt-1", content: "first body" },
+            { id: "legacy-output", name: "output.md", kind: "agent-output", stageId: "implement", stepId: "build", attemptId: "attempt-1", content: "second body" }
+          ]
+        }
+      }
+    }));
+    await withDaemon(async (daemon) => {
+      const artifacts = daemon.store.read().ticketRuns.legacy.artifacts;
+      assert.notEqual(artifacts[0].id, artifacts[1].id);
+      const first = await invoke(daemon, "GET", `/api/tickets/legacy/artifacts/${encodeURIComponent(artifacts[0].id)}/content`);
+      const second = await invoke(daemon, "GET", `/api/tickets/legacy/artifacts/${encodeURIComponent(artifacts[1].id)}/content`);
+      assert.equal(first.json.content, "first body");
+      assert.equal(second.json.content, "second body");
+    }, { dataDir, cwd: dataDir });
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("an expected prompt.md output and the worker prompt remain independently retrievable", async () => {
+  const harness = {
+    ...mockHarness(),
+    runStep: async () => ({ report: { status: "completed", summary: "Completed" }, output: "agent output", prompt: "worker prompt", rawOutput: "" }),
+    runRepositoryChecks: async () => ({ status: "passed", command: "node --test", summary: "Passed", output: "", evidence: [] }),
+    evidenceImages: async () => [],
+    verifyStep: async () => ({ summary: "Verified", findings: [] }),
+    generateCommitMessage: async () => "feat: retain artifacts"
+  };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{
+      id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [], expectedArtifacts: ["prompt.md"]
+    }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry safely" } });
+    assert.equal(response.status, 202);
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && !daemon.store.read().ticketRuns[id].artifacts.some((artifact) => artifact.kind === "agent-prompt")) await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const artifacts = daemon.store.read().ticketRuns[id].artifacts;
+    const output = artifacts.find((artifact) => artifact.kind === "agent-output");
+    const prompt = artifacts.find((artifact) => artifact.kind === "agent-prompt");
+    assert.ok(output);
+    assert.ok(prompt);
+    assert.notEqual(output.id, prompt.id);
+    assert.notEqual(output.path, prompt.path);
+    const [outputBody, promptBody] = await Promise.all([
+      invoke(daemon, "GET", `/api/tickets/${id}/artifacts/${encodeURIComponent(output.id)}/content`),
+      invoke(daemon, "GET", `/api/tickets/${id}/artifacts/${encodeURIComponent(prompt.id)}/content`)
+    ]);
+    assert.equal(outputBody.json.content, "agent output");
+    assert.equal(promptBody.json.content, "worker prompt");
   }, { harness });
 });
 
@@ -171,6 +376,50 @@ test("workflow stage prompts expose persisted agent input with its stage context
   }, { harness });
 });
 
+test("verify-stage prompts retain independent review session handles without exposing paths", async () => {
+  const reviewSessionFile = "/tmp/private-independent-review.jsonl";
+  const harness = {
+    ...mockHarness(),
+    sessionTrace: async (sessionFile, bounds) => {
+      assert.equal(sessionFile, reviewSessionFile);
+      assert.deepEqual(bounds, { after: "2026-09-02T10:00:00.000Z", before: "2026-09-02T10:00:02.000Z" });
+      return { prompts: [{ prompt: `Independent review from ${sessionFile}`, at: "2026-09-02T10:00:01.000Z" }] };
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      reviews: [{ round: 1, reviews: [{ role: "verification", summary: "Reviewed", sessionFile: reviewSessionFile }] }],
+      stages: [{ id: "verify", title: "Final review", status: "completed", activity: { startedAt: "2026-09-02T10:00:00.000Z", completedAt: "2026-09-02T10:00:02.000Z" } }]
+    });
+    const runId = daemon.store.read().ticketRuns[id].runId;
+    const prompts = await invoke(daemon, "GET", `/api/tickets/${id}/runs/${runId}/stages/verify/prompts`);
+    assert.equal(prompts.status, 200);
+    assert.equal(prompts.json.prompts[0].title, "verification review · round 1");
+    assert.equal(prompts.json.prompts[0].prompt, "Independent review from [path]");
+    assert.deepEqual(prompts.json.trace, { state: "available", retained: 1, available: 1 });
+
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes(reviewSessionFile), false);
+    assert.equal(daemon.store.read().ticketRuns[id].reviews[0].reviews[0].sessionFile, reviewSessionFile);
+  }, { harness });
+});
+
+test("verify-stage prompt inspection reports a retained but unavailable review trace", async () => {
+  const reviewSessionFile = "/tmp/unavailable-independent-review.jsonl";
+  const harness = { ...mockHarness(), sessionTrace: async () => { throw new Error("Session file is unavailable"); } };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      reviews: [{ round: 1, reviews: [{ role: "verification", summary: "Reviewed", sessionFile: reviewSessionFile }] }],
+      stages: [{ id: "verify", title: "Final review", status: "completed" }]
+    });
+    const runId = daemon.store.read().ticketRuns[id].runId;
+    const prompts = await invoke(daemon, "GET", `/api/tickets/${id}/runs/${runId}/stages/verify/prompts`);
+    assert.equal(prompts.status, 200);
+    assert.deepEqual(prompts.json, { prompts: [], trace: { state: "unavailable", retained: 1, available: 0 } });
+    assert.equal(JSON.stringify(prompts.json).includes(reviewSessionFile), false);
+  }, { harness });
+});
+
 test("provider failure snapshots the active worker before server state is cleared", async () => {
   const harness = { ...mockHarness(), runStep: async () => { throw new Error("Provider rate limit exceeded"); } };
   await withDaemon(async (daemon) => {
@@ -190,6 +439,92 @@ test("provider failure snapshots the active worker before server state is cleare
     assert.equal(step.attempts[0].failureKind, "provider");
     assert.equal(step.attempts[0].terminationReason, "worker_failure");
     assert.equal(step.attempts[0].attemptId, "attempt-1");
+  }, { harness });
+});
+
+test("worker contexts hydrate retained artifact bodies without restoring them to state", async () => {
+  let receivedArtifacts;
+  const harness = {
+    ...mockHarness(),
+    runStep: async ({ artifacts }) => {
+      receivedArtifacts = artifacts;
+      return { report: { status: "failed", summary: "Stop after inspecting context" }, output: "", prompt: "", rawOutput: "", events: [] };
+    }
+  };
+  await withDaemon(async (daemon, { dataDir }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const artifact = await persistArtifact(dataDir, daemon.store.read().ticketRuns[id].ticket, {
+      name: "architecture.md", content: "# Retained architecture\n\napi_key=secret_abcdefgh", runId: "run-1", stageId: "design", kind: "architecture"
+    });
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(artifact); });
+    await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Check retained context" } });
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && !receivedArtifacts) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(receivedArtifacts?.find((item) => item.id === artifact.id)?.content, "# Retained architecture\n\n[redacted]");
+    assert.equal(daemon.store.read().ticketRuns[id].artifacts[0].content, undefined);
+  }, { harness });
+});
+
+test("worker-report errors are redacted before durable failure state is written", async () => {
+  const secret = "api_key=0123456789abcdef";
+  const harness = {
+    ...mockHarness(),
+    runStep: async () => ({
+      report: { status: "failed", summary: `Worker stopped with ${secret}`, request: `Rotate ${secret}` },
+      output: "No changes", prompt: "Inspect the failure", rawOutput: ""
+    })
+  };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry safely" } });
+    assert.equal(response.status, 202);
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].plan.nodes[0].status !== "needs_attention") await new Promise((resolve) => setTimeout(resolve, 10));
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.plan.nodes[0].status, "needs_attention");
+    assert.equal(JSON.stringify(run).includes("0123456789abcdef"), false);
+    assert.equal(run.stages.find((stage) => stage.id === "implement").summary.includes("[redacted]"), true);
+  }, { harness });
+});
+
+test("supervisor review replies are redacted before persistence and API projection", async () => {
+  const secret = "api_key=0123456789abcdef";
+  const harness = {
+    ...mockHarness(),
+    runStep: async () => ({ report: { status: "completed", summary: "Completed safely" }, output: "Done", prompt: "Implement safely", rawOutput: "" }),
+    runRepositoryChecks: async () => ({ status: "passed", command: "node --test", summary: "Passed", output: "", evidence: [] }),
+    evidenceImages: async () => [],
+    verifyStep: async () => ({ summary: "Verified", findings: [] }),
+    reviewWorkerReport: async () => ({ reply: `Supervisor reply includes ${secret}`, error: `Supervisor error includes ${secret}`, checkpoints: [] }),
+    generateCommitMessage: async () => "feat: complete build"
+  };
+  await withDaemon(async (daemon, { dataDir, cwd }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan, sessionFile: "/tmp/supervisor-session.jsonl",
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry safely" } });
+    assert.equal(response.status, 202);
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].plan.nodes[0].status !== "review_ready") await new Promise((resolve) => setTimeout(resolve, 10));
+    const step = daemon.store.read().ticketRuns[id].plan.nodes[0];
+    assert.equal(step.status, "review_ready");
+    assert.equal(step.supervisorReview.reply.includes(secret), false);
+    assert.equal(step.supervisorReview.error.includes(secret), false);
+    assert.equal(step.supervisorReview.reply.includes("[redacted]"), true);
+    const reloaded = await new JsonStore(join(dataDir, "state-v3.json"), cwd).init();
+    assert.equal(JSON.stringify(reloaded.ticketRuns[id]).includes(secret), false);
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes(secret), false);
   }, { harness });
 });
 
@@ -405,6 +740,41 @@ test("binding a skill creates run.checkpoint and continue resumes the ticket", a
     assert.equal(latest.json.lastError, null);
     assert.equal(latest.json.checkpoint.kind, "requirements_review");
   });
+});
+
+test("continued workflow replies and checkpoints are redacted before durable persistence", async () => {
+  const secret = "api_key=0123456789abcdef";
+  const harness = {
+    ...mockHarness(),
+    continueWorkflow: async () => ({
+      reply: `Supervisor reply includes ${secret}`,
+      stages: [{ id: "follow-up", title: `Follow up ${secret}`, status: "active", summary: `Summary ${secret}` }],
+      checkpoints: [{ kind: "needs_input", title: `Question ${secret}`, prompt: `Prompt ${secret}` }],
+      sessionFile: "/tmp/supervisor.jsonl"
+    })
+  };
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      status: "awaiting_approval",
+      workflow: {
+        skillName: "shape-feature", status: "awaiting_approval", stages: [],
+        checkpoints: [{ id: "workflow-1", kind: "awaiting_approval", title: "Continue", prompt: "Continue", source: "supervisor", blocking: true, status: "pending" }]
+      },
+      checkpoint: { id: "workflow-1", kind: "awaiting_approval", title: "Continue", prompt: "Continue", source: "supervisor" }
+    });
+    const continued = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/workflow/continue`, {
+      body: { checkpointId: "workflow-1", response: "Approved" }
+    });
+    assert.equal(continued.status, 202);
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].workflow.checkpoints.length < 2) await new Promise((resolve) => setTimeout(resolve, 10));
+    const durable = daemon.store.read().ticketRuns[id];
+    assert.equal(JSON.stringify(durable).includes(secret), false);
+    assert.equal(durable.workflow.lastReview.includes("[redacted]"), true);
+    assert.equal(durable.checkpoint.prompt.includes("[redacted]"), true);
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes(secret), false);
+  }, { harness });
 });
 
 test("agent-plan CLI wait is non-zero on needs_attention", async () => {

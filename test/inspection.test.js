@@ -114,13 +114,15 @@ test("cancellation materializes the live worker as an immutable inspectable atte
     plan: { nodes: [step("build", "running")] },
     activeRuns: { build: {
       runId: "active-build", startedAt: at(1), lastEventAt: at(2), lastEvent: "Editing implementation",
-      sessionFile: "/private/session.jsonl", activity: { rawOutput: "partial output" }
+      sessionFile: "/private/session.jsonl", prompt: "Resume with api_key=0123456789abcdef", activity: { rawOutput: "partial output", prompts: [{ content: "Resume with api_key=0123456789abcdef" }] }
     } }
   });
   markRunCancelled(current, at(3));
   const projection = projectInspection(current, { now: Date.parse(at(4)) });
   assert.equal(current.activeRuns.build, undefined);
   assert.equal(current.plan.nodes[0].attempts[0].status, "cancelled");
+  assert.equal(current.plan.nodes[0].attempts[0].prompt.includes("0123456789abcdef"), false);
+  assert.equal(current.plan.nodes[0].attempts[0].prompts.length, 1);
   assert.deepEqual(projection.focus, {
     stageId: "stage:implement", workerId: "worker:build",
     attemptId: "attempt:build:attempt-1", reason: "actionable"
