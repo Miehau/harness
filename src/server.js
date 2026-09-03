@@ -1604,7 +1604,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   }).artifacts;
   const result = await harness.runStep({
     cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
+    ticketId, runId: current.runId, profile: current.stageProfiles.handoff,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
   signal?.throwIfAborted();
