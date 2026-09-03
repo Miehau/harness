@@ -181,13 +181,17 @@ export async function pushTicketBranch(cwd, branch, execImpl = exec) {
   await git(cwd, ["push", "--set-upstream", "origin", branch], execImpl);
 }
 
+export async function unmergedPaths(cwd, execImpl = exec) {
+  return (await git(cwd, ["diff", "--name-only", "--diff-filter=U"], execImpl)).split("\n").filter(Boolean);
+}
+
 export async function rebaseOntoRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
   await git(cwd, ["fetch", "origin", base], execImpl);
   let failure;
   try { await git(cwd, ["rebase", `origin/${base}`], execImpl); }
   catch (error) { failure = error; }
   while (failure) {
-    const conflicts = (await git(cwd, ["diff", "--name-only", "--diff-filter=U"], execImpl)).split("\n").filter(Boolean);
+    const conflicts = await unmergedPaths(cwd, execImpl);
     if (!conflicts.length || !resolveConflicts) throw failure;
     try {
       await resolveConflicts({ cwd, conflicts });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, rebaseOntoRemote, safeSyncLocal } from "../src/delivery.js";
+import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, rebaseOntoRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
 
 function response(value) { return { ok: true, text: async () => JSON.stringify(value) }; }
 
@@ -75,4 +75,9 @@ test("rebase conflict resolution is scoped and continues automatically", async (
   assert.equal((await rebaseOntoRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "rebased");
   assert.deepEqual(resolved, ["src/a.js"]);
   assert.equal(calls.some((argv) => argv.includes("--continue")), true);
+});
+
+test("unmerged paths expose an interrupted rebase before delivery correction", async () => {
+  const execImpl = async () => ({ stdout: "src/server.js\ntest/server.test.js\n" });
+  assert.deepEqual(await unmergedPaths("/repo", execImpl), ["src/server.js", "test/server.test.js"]);
 });

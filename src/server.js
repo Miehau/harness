@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
-import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
+import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
@@ -1695,6 +1695,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     });
     let checks = current.merge?.checks || null;
     let change = resumedChange;
+    if ((await unmergedPaths(current.workspace.cwd)).length) await rebase();
     if (!change) {
       if (current.recovery?.kind === "delivery" && /failed/i.test(current.lastError || "")) {
         const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
