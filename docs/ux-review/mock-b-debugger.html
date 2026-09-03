@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock B · Debug Session</title>
+<style>
+  :root {
+    --bg: #1e1e1e; --panel: #252526; --stroke: #3c3c3c; --text: #cccccc; --dim: #8b8b8b;
+    --you: #c9b458; --run: #4fc1ff; --ok: #89d185; --err: #f14c4c; --wait: #c586c0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 12px/1.4 var(--sans); }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .app { display: grid; height: 100vh; grid-template-rows: 22px 36px 1fr 22px; }
+  .menubar, .status { display: flex; align-items: center; gap: 12px; padding: 0 10px; font: 11px var(--mono); }
+  .menubar { background: #3c3c3c; }
+  .toolbar { display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid var(--stroke); background: #2d2d2d; }
+  .toolbar .sep { width: 1px; height: 18px; margin: 0 6px; background: var(--stroke); }
+  .tb { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid #474747; background: #333; font-size: 11px; }
+  .tb.primary { background: #0e639c; border-color: #1177bb; color: #fff; }
+  .tb.danger { color: #f48771; }
+  .tb.active { background: #c9b458; border-color: #c9b458; color: #1e1e1e; font-weight: 700; }
+  .modes { display: flex; margin-left: auto; border: 1px solid #474747; }
+  .modes button { padding: 3px 9px; color: #aaa; }
+  .modes .on { background: #0e639c; color: #fff; }
+  .body { display: grid; min-height: 0; grid-template-columns: 280px minmax(0, 1fr) 300px; }
+  .col { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto 1fr auto 1fr; border-right: 1px solid var(--stroke); background: var(--panel); }
+  .col.right { grid-template-rows: auto auto 1fr auto; border-right: 0; border-left: 1px solid var(--stroke); }
+  .h { display: flex; justify-content: space-between; padding: 6px 10px; color: #bbb; font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--stroke); }
+  .list { overflow: auto; }
+  .stack { display: grid; grid-template-columns: 10px minmax(0,1fr) auto; gap: 7px; align-items: start; width: 100%; padding: 7px 10px; border-bottom: 1px solid #2a2a2a; text-align: left; }
+  .stack:hover { background: #2a2d2e; }
+  .stack.sel { background: #04395e; }
+  .stack .id { font: 11px var(--mono); }
+  .stack small { display: block; color: var(--dim); }
+  .dot { width: 8px; height: 8px; margin-top: 3px; border-radius: 50%; background: currentColor; }
+  .you { color: var(--you); } .run { color: var(--run); } .ok { color: var(--ok); } .err { color: var(--err); } .wait { color: var(--wait); }
+  .bp { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 8px; align-items: center; width: 100%; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; text-align: left; }
+  .bp small { display: block; color: var(--dim); }
+  .bp .box { width: 10px; height: 10px; border: 1px solid var(--you); background: var(--you); }
+  .bp.off .box { background: transparent; }
+  .center { display: grid; min-width: 0; grid-template-rows: 28px auto minmax(0,1fr); background: var(--bg); }
+  .tabs { display: flex; border-bottom: 1px solid var(--stroke); background: #2d2d2d; }
+  .tab { padding: 0 12px; height: 28px; color: #9d9d9d; }
+  .tab.on { background: var(--bg); color: #fff; }
+  .focus { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--stroke); }
+  .focus h1 { margin: 0; font-size: 14px; }
+  .focus p { margin: 2px 0 0; color: var(--dim); font: 11px var(--mono); }
+  .trace { overflow: auto; }
+  .ev { display: grid; grid-template-columns: 64px 12px minmax(0,1fr); gap: 8px; padding: 6px 12px; border-bottom: 1px solid #2a2a2a; font: 11px var(--mono); }
+  .ev.cur { background: #1a2a22; }
+  .ev time { color: #6d6d6d; }
+  .kv { display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 6px; padding: 5px 10px; font: 11px var(--mono); border-bottom: 1px solid #2a2a2a; }
+  .kv dt { color: var(--dim); }
+  .watch { padding: 8px 10px; font: 11px var(--mono); color: #ddd; border-bottom: 1px solid var(--stroke); }
+  .watch b { color: var(--run); }
+  .art { padding: 6px 10px; border-bottom: 1px solid #2a2a2a; }
+  .art code { display: block; color: #9cdcfe; font: 11px var(--mono); }
+  .art small { color: var(--dim); }
+  .steerbox { padding: 8px; border-top: 1px solid var(--stroke); }
+  textarea { width: 100%; height: 64px; border: 1px solid var(--stroke); background: #1e1e1e; color: var(--text); padding: 6px; font: 11px var(--mono); resize: none; }
+  .rowbtns { display: flex; gap: 6px; margin-top: 6px; }
+  .status { background: #16825d; color: #fff; }
+  .status.debug { background: #007acc; }
+  .badge { background: #c9b458; color: #1e1e1e; padding: 0 5px; font-weight: 700; }
+  .mocktag { position: fixed; top: 28px; right: 10px; z-index: 5; background: #000c; border: 1px solid #4fc1ff; color: #4fc1ff; padding: 3px 7px; font: 10px var(--mono); letter-spacing: .08em; }
+  .graph { padding: 8px 10px; font: 10px var(--mono); color: #9d9d9d; }
+  .gnode { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+  .gnode .bar { width: 6px; height: 6px; background: currentColor; }
+</style>
+</head>
+<body>
+<div class="mocktag">MOCK B · DEBUG SESSION</div>
+<div class="app">
+  <div class="menubar"><b>Ticket Agent</b><span>Run</span><span>Breakpoints</span><span>Workers</span><span style="margin-left:auto">/Users/michal/work/app</span></div>
+  <div class="toolbar">
+    <button class="tb primary">Continue</button>
+    <button class="tb">Pause fleet</button>
+    <button class="tb">Step gate</button>
+    <button class="tb danger">Stop</button>
+    <button class="tb">Restart from…</button>
+    <span class="sep"></span>
+    <span style="color:#bbb;font:11px var(--mono)">Break on</span>
+    <button class="tb active">needs you</button>
+    <button class="tb">review ready</button>
+    <button class="tb">plan</button>
+    <button class="tb">verify fail</button>
+    <div class="modes">
+      <button>Auto</button>
+      <button>Watch</button>
+      <button class="on">Debug</button>
+    </div>
+  </div>
+  <div class="body">
+    <aside class="col">
+      <div class="h">Call stack · live agents <span>4</span></div>
+      <div class="list">
+        <button class="stack sel err"><span class="dot"></span><span class="id">TEXT-7F2 · worker:rebase<small>verify · paused after fail</small></span><span>8s</span></button>
+        <button class="stack run"><span class="dot"></span><span class="id">APP-1901 · worker:session<small>implement · write src/session.ts</small></span><span>12s</span></button>
+        <button class="stack"><span class="dot"></span><span class="id">APP-1901 · worker:tests<small>blocked · waiting on session</small></span><span>—</span></button>
+        <button class="stack you"><span class="dot"></span><span class="id">LIN-88 · worker:preview<small>review_ready · +12 −4</small></span><span>you</span></button>
+        <button class="stack you"><span class="dot"></span><span class="id">APP-1842 · supervisor<small>awaiting_approval · 2 ready</small></span><span>you</span></button>
+      </div>
+      <div class="h">Breakpoints · gates <span>on</span></div>
+      <div class="list">
+        <button class="bp"><span class="box"></span><span>Plan approval<small>APP-1842</small></span><span class="you">hit</span></button>
+        <button class="bp"><span class="box"></span><span>Step review ready<small>every verified batch</small></span><span class="wait">hit</span></button>
+        <button class="bp"><span class="box"></span><span>Verification fail<small>needs attention</small></span><span class="err">hit</span></button>
+        <button class="bp off"><span class="box"></span><span>Worker needs_input</span><span>armed</span></button>
+        <button class="bp off"><span class="box"></span><span>Budget exceeded</span><span>armed</span></button>
+      </div>
+    </aside>
+    <section class="center">
+      <div class="tabs">
+        <button class="tab on">Watch · rebase</button>
+        <button class="tab">Diff</button>
+        <button class="tab">Prompt</button>
+        <button class="tab">Artifacts</button>
+        <button class="tab">Graph</button>
+      </div>
+      <div class="focus">
+        <div>
+          <h1>worker:rebase is paused at a verification breakpoint</h1>
+          <p>TEXT-7F2 · attempt 3 · gpt-5.6-terra/high · Continue = retry · Step gate = inspect evidence first</p>
+        </div>
+        <div>
+          <button class="tb primary">Retry worker</button>
+          <button class="tb">Open diff</button>
+        </div>
+      </div>
+      <div class="trace">
+        <div class="ev"><time>14:20:55</time><span class="run">●</span><span><b>tool</b> read e2e-daemon.test.js</span></div>
+        <div class="ev"><time>14:21:18</time><span>●</span><span><b>decision</b> treat duplicate bind as the only failing invariant; leave merge-queue algorithm alone</span></div>
+        <div class="ev"><time>14:21:33</time><span class="run">●</span><span><b>tool</b> edit src/previews.js · availablePort(host)</span></div>
+        <div class="ev"><time>14:21:44</time><span>●</span><span><b>decision</b> drop hardcoded 4318 fallback so worktrees cannot collide</span></div>
+        <div class="ev"><time>14:21:58</time><span class="run">●</span><span><b>tool</b> named command verify</span></div>
+        <div class="ev cur"><time>14:22:01</time><span class="err">●</span><span><b>breakpoint</b> verification rejected · duplicate preview-port bind still present in captured logs</span></div>
+        <div class="ev"><time>14:22:01</time><span class="you">●</span><span><b>waiting</b> operator · interrupt+redirect, retry, or restart from verify</span></div>
+      </div>
+    </section>
+    <aside class="col right">
+      <div class="h">Variables · worker state</div>
+      <dl>
+        <div class="kv"><dt>status</dt><dd class="err">needs_attention</dd></div>
+        <div class="kv"><dt>attempt</dt><dd>3 / 8 corrections</dd></div>
+        <div class="kv"><dt>budget</dt><dd>5 files / 96 lines · ok</dd></div>
+        <div class="kv"><dt>permission</dt><dd>write · seeded</dd></div>
+        <div class="kv"><dt>last tool</dt><dd>verify · exit 1</dd></div>
+        <div class="kv"><dt>idle</dt><dd>8s</dd></div>
+      </dl>
+      <div class="watch"><b>watch</b> findings[0] = "duplicate preview-port bind in src/previews.js"</div>
+      <div>
+        <div class="h">Artifacts</div>
+        <div class="art"><code>verify.log</code><small>named command output</small></div>
+        <div class="art"><code>git.diff</code><small>canonical +18 −11</small></div>
+        <div class="art"><code>agent-prompt.md</code><small>rendered attempt 3</small></div>
+        <div class="h">Ticket graph</div>
+        <div class="graph">
+          <div class="gnode ok"><span class="bar"></span>requirements</div>
+          <div class="gnode ok"><span class="bar"></span>explore</div>
+          <div class="gnode ok"><span class="bar"></span>design</div>
+          <div class="gnode ok"><span class="bar"></span>implement · accepted</div>
+          <div class="gnode err"><span class="bar"></span>verify · worker:rebase</div>
+          <div class="gnode"><span class="bar"></span>handoff</div>
+        </div>
+      </div>
+      <form class="steerbox">
+        <div class="h" style="border:0;padding:0 0 6px">Redirect paused worker</div>
+        <textarea>Reuse availablePort(); do not add another listener. If preview is still bound, fail closed.</textarea>
+        <div class="rowbtns">
+          <button class="tb primary" type="button">Apply & continue</button>
+          <button class="tb" type="button">Skip gate</button>
+        </div>
+      </form>
+    </aside>
+  </div>
+  <footer class="status debug">
+    <span>DEBUG</span>
+    <span>break-on: you</span>
+    <span class="badge">3 HITS</span>
+    <span style="flex:1">Continue retries selected · Step gate opens evidence · Auto would accept LIN-88 and keep APP-1901 running</span>
+    <span>3/4 slots · 42k in</span>
+  </footer>
+</div>
+</body>
+</html>
