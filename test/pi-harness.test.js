@@ -324,7 +324,10 @@ test("fresh verification receives the completed deterministic gate", async () =>
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}) }
     });
-    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+    const plan = normalizePlan({ title: "Verify", nodes: [
+      { id: "slice", title: "Slice", permission: "write", writeScope: "src" },
+      { id: "later", title: "Recover queued work", permission: "write", writeScope: "src", dependsOn: ["slice"], acceptanceCriteria: ["Paused work drains after resume"] }
+    ] });
 
     const input = {
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
@@ -341,6 +344,9 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.match(prompt, /Keep inspection inside the current working directory/);
     assert.match(prompt, /primary review packet/);
     assert.match(prompt, /concrete medium-or-higher risk/);
+    assert.match(prompt, /Deferred plan slices \(not acceptance criteria for this review\)/);
+    assert.match(prompt, /Recover queued work: Paused work drains after resume/);
+    assert.match(prompt, /Do not report behavior assigned exclusively to a deferred plan slice/);
     assert.doesNotMatch(prompt, /run focused deterministic checks when useful/);
 
     await harness.verifyStep({ ...input, round: 2, focusFindings: [{ severity: "high", claim: "Write guard is bypassed" }] });

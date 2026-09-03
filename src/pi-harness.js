@@ -960,6 +960,7 @@ export class PiHarness {
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
+    const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
     const unbindAbort = bindAbort(session, signal);
     let lastThinkingAt = 0;
     let actionCount = 0;
@@ -1006,6 +1007,8 @@ Write scope: ${step.writeScope || "none"}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
+Deferred plan slices (not acceptance criteria for this review):
+${deferredSlices.length ? deferredSlices.map((candidate) => `- ${candidate.title}: ${candidate.acceptanceCriteria.join("; ")}`).join("\n") : "- none"}
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 
 Worker artifact:
@@ -1033,7 +1036,7 @@ Return ONLY JSON:
 
 ${findingRubric}
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
+Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       if (budgetError) throw budgetError;
       signal?.throwIfAborted();
       const rawOutput = lastAssistantText(session);
