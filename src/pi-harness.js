@@ -703,37 +703,43 @@ export class PiHarness {
     const executionOwnership = executionContainment.ownership;
     let command = `node ${verificationEntry}`;
     let args = [join(cwd, verificationEntry)];
-    try { await access(args[0]); }
-    catch (error) {
-      if (error.code !== "ENOENT") return { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
-      let packageJson;
-      try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
-      catch (packageError) {
-        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
-      }
-      if (!packageJson.scripts?.test) {
-        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
-      }
-      command = "npm test";
-      args = ["test"];
-    }
-    let evidenceDir = null;
-    if (requireVisualEvidence) {
-      const evidenceRoot = join(this.dataDir, "visual-evidence");
-      await mkdir(evidenceRoot, { recursive: true });
-      evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
-    }
-    const startedAt = Date.now();
-    const config = await loadProjectConfig(cwd);
-    const environment = environmentForOwnership(executionOwnership, {
-      ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment,
-      ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {})
-    });
+    let environment = null;
     let result;
     let failure;
+    const startedAt = Date.now();
     try {
+      try { await access(args[0]); }
+      catch (error) {
+        if (error.code !== "ENOENT") {
+          result = { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
+          return result;
+        }
+        let packageJson;
+        try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
+        catch (packageError) {
+          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
+          return result;
+        }
+        if (!packageJson.scripts?.test) {
+          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
+          return result;
+        }
+        command = "npm test";
+        args = ["test"];
+      }
+      let evidenceDir = null;
+      if (requireVisualEvidence) {
+        const evidenceRoot = join(this.dataDir, "visual-evidence");
+        await mkdir(evidenceRoot, { recursive: true });
+        evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
+      }
+      const config = await loadProjectConfig(cwd);
+      environment = environmentForOwnership(executionOwnership, {
+        ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment,
+        ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {})
+      });
       const executable = command === "npm test" ? "npm" : process.execPath;
       for (let attempt = 0; attempt < 2; attempt++) try {
         const { stdout, stderr } = await this.exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
@@ -1349,8 +1355,10 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
-    const containment = this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal, containment: suppliedContainment }) {
+    // The daemon may persist this containment before invoking us. Never replace
+    // it: project commands must inherit the exact ownership record on disk.
+    const containment = suppliedContainment || this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
     let session;
     let unsubscribe = () => {};
     let unbindAbort = async () => {};

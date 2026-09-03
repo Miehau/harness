@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { artifactPathInDataDir } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { initializeRunCleanup } from "./execution.js";
 
 function initialState(cwd) {
   return {
@@ -158,6 +159,7 @@ export class JsonStore {
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
       for (const run of Object.values(this.state.ticketRuns)) {
+        initializeRunCleanup(run, { legacy: true });
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
         run.auto ||= false;
         run.activeRuns = {};
@@ -185,6 +187,10 @@ export class JsonStore {
           };
         }
       }
+      // Retained runs are an audit archive, so older records receive the same
+      // cleanup schema without applying interruption recovery a second time.
+      for (const run of Object.values(this.state.retainedRuns)) initializeRunCleanup(run, { legacy: true });
+      await this.save();
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }

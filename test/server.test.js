@@ -130,6 +130,25 @@ test("GET /api/health and compact run omit artifact content", async () => {
   });
 });
 
+test("public run state preserves actionable process cleanup evidence", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, {
+      cleanup: {
+        outcome: "incomplete",
+        updatedAt: "2026-09-03T10:00:01.000Z",
+        executions: [{
+          executionId: "worker-1", outcome: "incomplete", stepId: "build",
+          unresolved: [{ pid: 81, reason: "force-identity-mismatch" }],
+          diagnostics: ["Identity changed before force termination"], triggers: [{ trigger: "worker-aborted", at: "2026-09-03T10:00:01.000Z" }]
+        }]
+      }
+    });
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(state.json.ticketRuns[id].cleanup.outcome, "incomplete");
+    assert.deepEqual(state.json.ticketRuns[id].cleanup.executions[0].unresolved, [{ pid: 81, reason: "force-identity-mismatch" }]);
+  });
+});
+
 test("ticket selection returns the selected public run without artifact bodies", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, { artifacts: [{ id: "a", name: "proof.md", content: "private body" }] });

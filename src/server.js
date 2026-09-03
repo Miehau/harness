@@ -22,7 +22,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -32,6 +32,7 @@ import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill,
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
 import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
+import { createProcessContainment } from "./process-containment.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -280,8 +281,8 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     if (preview) evidence = await previews.capture(previewId);
   }
   const current = ticketRun(store.read(), ticketId);
-  const checks = await harness.runRepositoryChecks({
-    cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
+  const checks = await runContainedRepositoryChecks({
+    ticketId, stepId, cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
     // Canonical proof must exercise both API and UI code from the worktree.
     environment: required ? liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId) : {}
   });
@@ -306,6 +307,67 @@ async function update(change, { publish: shouldPublish = true } = {}) {
   const state = await store.update(change, { snapshot: false });
   if (shouldPublish) publishState(state);
   return state;
+}
+
+/**
+ * The harness owns signaling, while the daemon owns the run record. Create the
+ * durable record before calling Pi and settle it for every returned or thrown worker outcome.
+ */
+function containmentForExecution(executionId) {
+  const factory = typeof harness.containmentFactory === "function" ? harness.containmentFactory : createProcessContainment;
+  return factory({ executionId });
+}
+
+async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, ...input }) {
+  const executionId = input.executionId || randomUUID();
+  const containment = input.containment || containmentForExecution(executionId);
+  const startedAt = new Date().toISOString();
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    beginRunCleanup(run, { executionId, ownership: containment.ownership, stepId, attemptId, at: startedAt });
+  }, { publish: false });
+  let result;
+  let failure;
+  try {
+    result = await harness.runStep({ ...input, containment, ticketId, signal });
+    return result;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    const trigger = signal?.aborted ? "worker-aborted" : result?.report?.status === "completed" ? "worker-completed" : "worker-exit";
+    const evidence = result?.cleanup || failure?.cleanup || null;
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      // A run may have been retained only after its worker settled. Do not
+      // resurrect it; the active record is the only lifecycle owner here.
+      if (run) completeRunCleanup(run, executionId, evidence, { trigger });
+    }, { publish: false });
+  }
+}
+
+async function runContainedRepositoryChecks({ ticketId, stepId = null, signal, ...input }) {
+  const executionId = randomUUID();
+  const containment = containmentForExecution(executionId);
+  const startedAt = new Date().toISOString();
+  await update((state) => {
+    beginRunCleanup(ticketRun(state, ticketId), { executionId, ownership: containment.ownership, stepId, trigger: "repository-check-launch", at: startedAt });
+  }, { publish: false });
+  let checks;
+  let failure;
+  try {
+    checks = await harness.runRepositoryChecks({ ...input, containment, signal });
+    return checks;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    const trigger = signal?.aborted ? "repository-check-aborted" : "repository-check-exit";
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      if (run) completeRunCleanup(run, executionId, checks?.cleanup || failure?.cleanup || null, { trigger });
+    }, { publish: false });
+  }
 }
 
 function startTicketWork(ticketId, work) {
@@ -936,7 +998,7 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      workflow: initialWorkflow(), createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString()
     };
   });
   return { ticketId: id, state };
@@ -1291,10 +1353,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           forkSessionFile: findForkSession(latest.plan, currentStep),
           feedback: nextFeedback
         });
-        const result = await harness.runStep({
+        const result = await runContainedWorker({
+          ticketId, stepId, attemptId, executionId: workerRunId,
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
-          feedback: nextFeedback, ticketId, runId: latest.runId,
+          feedback: nextFeedback, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
@@ -1602,9 +1665,10 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     plan: current.plan,
     artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
   }).artifacts;
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: step.id,
     cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.handoff,
+    runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
   signal?.throwIfAborted();
@@ -1639,13 +1703,14 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
     permission: "write", writeScope: "src,test,public,scripts", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
     expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: step.id,
     cwd: current.workspace.cwd, plan: current.plan, step, artifacts: compactReviewPacket({
       ticket: current.ticket,
       plan: current.plan,
       artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
     }).artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
+    runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
@@ -1968,10 +2033,11 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
     Object.assign(setStage(run, "verify", "active", `Fixing ${findings.length} actionable review finding${findings.length === 1 ? "" : "s"} · round ${round}`), { activity: activity.snapshot() });
   });
   const beforeFix = await snapshotTree(current.workspace.cwd);
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: fixStep.id,
     cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [], proofMap: projectProofMap(current),
     images: reviewFixImages(sessionFile, findings, reviewImages), forkSessionFile: null, resumeSessionFile: sessionFile,
-    feedback: sessionFile ? finalReviewFixFeedback(findings) : "", ticketId, runId: current.runId,
+    feedback: sessionFile ? finalReviewFixFeedback(findings) : "", runId: current.runId,
     profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "review fixer"),
     onSessionFile: (nextSessionFile) => update((state) => {

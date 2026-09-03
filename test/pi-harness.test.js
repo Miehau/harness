@@ -338,6 +338,21 @@ test("repository checks add only the supplied execution ownership to their curat
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("repository-check discovery settles containment when no command can launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-empty-checks-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "empty-check", ownership: { token: "empty-owner" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "empty-check", outcome: "not-required", actions: [] }; }
+    };
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root, containment });
+    assert.equal(result.status, "skipped");
+    assert.equal(result.cleanup.outcome, "not-required");
+    assert.equal(cleanupTrigger.trigger, "repository-check-exit");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("worker project commands share execution ownership and cleanup on exit", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-owned-worker-"));
   try {
@@ -372,6 +387,29 @@ test("worker project commands share execution ownership and cleanup on exit", as
     assert.equal(result.output.trim(), "own");
     assert.equal(cleanupTrigger.trigger, "worker-completed");
     assert.equal(result.cleanup.outcome, "not-required");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker uses a daemon-supplied containment rather than replacing its ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-supplied-worker-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "persisted-worker", ownership: { executionId: "persisted-worker", token: "persisted-owner", createdAt: "2026-09-03T10:00:00.000Z" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "persisted-worker", outcome: "not-required" }; }
+    };
+    const harness = new PiHarness({ dataDir: root, containmentFactory: () => assert.fail("must use the containment persisted by the daemon") });
+    let customTools;
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] }, resourceLoader: { getSkills: () => ({ skills: [] }) },
+      setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Done", artifact: "ok" }); }
+    };
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ title: "Supplied containment", nodes: [{ id: "owned", title: "Owned", permission: "read", skills: [] }] });
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], containment });
+    assert.equal(result.cleanup.executionId, "persisted-worker");
+    assert.equal(cleanupTrigger.trigger, "worker-completed");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
