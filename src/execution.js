@@ -76,16 +76,17 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
 export function finalReviewFixStep(round, findings, rootCauseClusters = [], restartFeedback = "") {
   const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
   const restartInstruction = restartFeedback ? `\n\nOperator restart directive: ${restartFeedback}\n\nThis fresh conversation inherits the existing worktree. Before editing, inspect its complete current diff. Account for every inherited changed file, revert carried work that the directive does not justify, and name every file remaining in the final diff in the worker report.` : "";
+  const visualInstruction = findingsRequireVisualEvidence(findings) ? " The harness captures required visual proof after your report; do not modify the repository verification contract solely to produce review images." : "";
   return {
     id: `review-fix-${round}`,
     title: `Fix final review findings — round ${round}`,
-    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\n${finalReviewRepositoryBoundary}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}${restartInstruction}`,
+    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\n${finalReviewRepositoryBoundary}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${visualInstruction}${rootCauseInstruction}${restartInstruction}`,
     contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
     permission: "write", writeScope: "**", skills: [], references: [],
     // Review prose belongs in the harness audit store, never in the product repository.
     expectedArtifacts: [],
     acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
-    requiresVisualEvidence: findingsRequireVisualEvidence(findings),
+    requiresVisualEvidence: false,
     status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
   };
 }

@@ -186,7 +186,8 @@ test("numbered visual proof feedback creates distinct visual correction criteria
     "Regenerate ticket-specific desktop screenshots."
   ]);
   const step = finalReviewFixStep(17, findings);
-  assert.equal(step.requiresVisualEvidence, true);
+  assert.equal(step.requiresVisualEvidence, false);
+  assert.match(step.prompt, /harness captures required visual proof/);
   assert.equal(step.acceptanceCriteria.length, 3);
 });
 
