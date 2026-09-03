@@ -341,7 +341,7 @@ test("restarts verification without discarding accepted implementation", () => {
   };
   rewindRun(run, "stage:verify");
   assert.equal(run.plan.nodes[0].status, "accepted");
-  assert.deepEqual(run.reviews, []);
+  assert.deepEqual(run.reviews, [{}]);
   assert.equal(run.stages.find((stage) => stage.id === "verify").status, "pending");
 });
 
@@ -626,7 +626,9 @@ test("public projections preserve legacy compatibility and stored proof eligibil
   assert.equal(compactRun(run).proofMap.compatibility, false);
   assert.equal(compactRun(run).proofMap.eligibility.eligible, false);
   assert.equal(publicState({ ticketRuns: { proof: run }, retainedRuns: {} }).ticketRuns.proof.proofMap.criteria[0].text, "Works");
-  assert.equal(compactRun({ id: "legacy", plan, artifacts: [], stages: [] }).proofMap.compatibility, true);
+  const legacy = compactRun({ id: "legacy", plan, artifacts: [], stages: [] }).proofMap;
+  assert.equal(legacy.compatibility, true);
+  assert.equal(legacy.eligibility.eligible, true, "legacy UI consumes the server-compatible approval gate");
 });
 
 test("compact run and public state omit artifact bodies", () => {

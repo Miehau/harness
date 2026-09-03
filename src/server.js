@@ -32,7 +32,6 @@ import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill,
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
 import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
-import { compactReviewPacket } from "./review-packet.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -115,6 +114,58 @@ export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
   return changes;
 }
 
+function finalReviewSequence(run) {
+  const sequence = (value) => Number(String(value || "").match(/^final-review-(\d+)$/)?.[1]) || 0;
+  return Math.max(
+    Number(run.finalReviewSequence) || 0,
+    ...(run.reviews || []).flatMap((review) => [Number(review.round) || 0, sequence(review.reviewId)]),
+    ...Object.keys(run.finalCheckHistory || {}).map(sequence),
+    ...Object.keys(run.finalDiffHistory || {}).map(sequence),
+    0
+  );
+}
+
+function migrateFinalProofLocators(run) {
+  const reviews = run.reviews || [];
+  let nextSequence = finalReviewSequence(run);
+  const knownIds = new Set([
+    ...Object.keys(run.finalCheckHistory || {}),
+    ...Object.keys(run.finalDiffHistory || {}),
+    ...reviews.map((review) => review.reviewId).filter(Boolean)
+  ]);
+  for (const review of reviews) {
+    const checks = review.finalChecks || review.reviews?.find((item) => item.role === "deterministic")?.checks;
+    if (!checks) continue;
+    const roundId = Number(review.round) ? `final-review-${Number(review.round)}` : null;
+    let reviewId = review.reviewId || (roundId && !knownIds.has(roundId) ? roundId : null);
+    while (!reviewId) reviewId = `final-review-${++nextSequence}`;
+    knownIds.add(reviewId);
+    review.reviewId = reviewId;
+    review.finalChecks ||= structuredClone(checks);
+    run.finalCheckHistory ||= {};
+    run.finalCheckHistory[reviewId] ||= structuredClone(review.finalChecks);
+    if (review.diff) {
+      run.finalDiffHistory ||= {};
+      run.finalDiffHistory[reviewId] ||= structuredClone(review.diff);
+    }
+    run.finalReviewHistory ||= {};
+    run.finalReviewHistory[reviewId] ||= { createdAt: review.createdAt || null };
+  }
+  run.finalReviewSequence = Math.max(nextSequence, finalReviewSequence(run));
+  if (!reviews.length || !run.proofMap?.criteria) return;
+  const reviewFor = (reportedAt) => reviews.filter((review) => review.reviewId && (!reportedAt || !review.createdAt || review.createdAt <= reportedAt)).at(-1) || reviews.find((review) => review.reviewId) || null;
+  const migrateResult = (result) => {
+    if (!result?.evidence) return;
+    const reviewId = reviewFor(result.reportedAt)?.reviewId;
+    if (!reviewId) return;
+    result.evidence = result.evidence.map((locator) => (locator?.scope === "final" && !locator.reviewId ? { ...locator, reviewId } : locator));
+  };
+  for (const criterion of run.proofMap.criteria) {
+    migrateResult(criterion.current);
+    for (const result of criterion.history || []) migrateResult(result);
+  }
+}
+
 export async function createDaemon(options = {}) {
   const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
   const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
@@ -128,6 +179,14 @@ export async function createDaemon(options = {}) {
   const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
   const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
   await store.init();
+  // Stored runs predate proofStorageRoot. Migrate them once so evidence adoption
+  // and every later projection use the daemon's canonical storage boundary.
+  await store.update((state) => {
+    for (const bucket of [state.ticketRuns, state.retainedRuns]) for (const run of Object.values(bucket || {})) {
+      run.proofStorageRoot ||= dataDir;
+      migrateFinalProofLocators(run);
+    }
+  });
 
 const credentialStore = new CredentialStore(join(dataDir, "credentials.json"));
 let savedCredentials = await credentialStore.load();
@@ -349,18 +408,44 @@ function proofGateError(eligibility) {
   return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""} [${reason.code}]: ${reason.message}`).join("; ")}`;
 }
 
-function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = null } = {}) {
-  if (scope === "final") return run.finalChecks || run.checkpoint?.finalChecks || run.reviews?.at(-1)?.reviews?.find((review) => review.role === "deterministic")?.checks || null;
+function archivedAttempt(run, stepId, attemptId) {
+  return [...(run.archivedAttempts || [])].reverse().find((attempt) => attempt.stepId === stepId && attempt.attemptId === attemptId) || null;
+}
+
+function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
+  if (scope === "final") return reviewId
+    ? run.finalCheckHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.finalChecks || null
+    : run.finalChecks || run.checkpoint?.finalChecks || run.reviews?.at(-1)?.reviews?.find((review) => review.role === "deterministic")?.checks || null;
   if (!stepId) throw new Error("Step check output requires a step ID");
   const step = findNode(run.plan, stepId);
   if (!step) throw new Error("Step not found");
   if (scope === "attempt") {
     if (!attemptId) throw new Error("Attempt check output requires an attempt ID");
-    const attempt = (step.attempts || []).find((item) => item.attemptId === attemptId);
+    const attempt = (step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId);
     return attempt?.verification?.checks || attempt?.checks || null;
   }
   if (scope !== "step") throw new Error("Unknown check-output scope");
   return [...(step.attempts || [])].reverse().map((attempt) => attempt.verification?.checks || attempt.checks).find(Boolean) || step.checks || null;
+}
+
+function canonicalDiffOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
+  if (scope === "final") return reviewId
+    ? run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null
+    : run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null;
+  if (!stepId) throw new Error("Step diff requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
+    return ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff || null;
+  }
+  if (scope !== "step") throw new Error("Unknown diff scope");
+  return step.diff || null;
+}
+
+function nextAttemptId(step) {
+  const current = Math.max(Number(step.attemptSequence) || 0, ...(step.attempts || []).map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
+  return `attempt-${current + 1}`;
 }
 
 function applyStepProof(run, stepId, reports) {
@@ -528,7 +613,7 @@ async function beginTicket(ticket, { automaticAdmission = false } = {}) {
 }
 
 function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
-  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId });
+  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId, proofStorageRoot: dataDir });
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {
@@ -713,6 +798,15 @@ async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
         });
       }
     });
+  }
+  // A worker may edit again after this checkpoint, so its prior proof cannot
+  // establish acceptance when the resumed report omits a criterion.
+  if (checkpoint.source === "worker") {
+    await update((state) => {
+      const current = ticketRun(state, ticketId);
+      if (current.proofMap) current.proofMap = invalidateProof(current.proofMap, stepCriterionIds(current, checkpoint.stepId), { reason: "Worker checkpoint resumed with user feedback." });
+    });
+    await persistProofSnapshot(ticketId, { stageId: "implement", stepId: checkpoint.stepId, name: "proof-map-worker-resume-correction.json" });
   }
   await update((state) => {
     const current = ticketRun(state, ticketId);
@@ -1172,7 +1266,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const currentStep = findNode(latest.plan, stepId);
         const workerRunId = randomUUID();
         const startedAt = new Date().toISOString();
-        const attemptId = `attempt-${(currentStep.attempts?.length || 0) + 1}`;
+        const attemptId = nextAttemptId(currentStep);
         attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
         const contextArtifacts = await hydrateArtifacts([
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
@@ -1184,6 +1278,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
+          target.attemptSequence = Number(attemptId.slice("attempt-".length));
           current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
@@ -1313,7 +1408,10 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
-            design, diff, output: result.output, checks, proofMap: projectProofMap(latest), runId: latest.runId, round,
+            design, diff, output: result.output, checks,
+            proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
+            artifacts: ticketRun(store.read(), ticketId).artifacts,
+            runId: latest.runId, round,
             focusFindings: verificationFocusFindings(nextFeedback, previousFindings),
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
@@ -1416,6 +1514,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           });
           return;
         }
+        // The next correction may change any criterion on this step. Invalidate all
+        // of them so an omitted follow-up report cannot retain pre-fix proof.
+        await update((state) => {
+          const current = ticketRun(state, ticketId);
+          if (current.proofMap) current.proofMap = invalidateProof(current.proofMap, stepCriterionIds(current, stepId), { reason: "Automatic correction after verification findings." });
+        });
+        await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-automatic-correction.json" });
         previousFingerprint = decision.fingerprint;
         previousFindings = findings;
         nextFeedback = `Fresh verification found these actionable issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
@@ -1432,7 +1537,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const failedAttempt = {
           ...(attemptEvidence || {}),
           runId: attemptEvidence?.runId || active.runId || null,
-          attemptId: attemptEvidence?.attemptId || active.attemptId || `attempt-${failed.attempts.length + 1}`,
+          attemptId: attemptEvidence?.attemptId || active.attemptId || nextAttemptId(failed),
           startedAt: attemptEvidence?.startedAt || active.startedAt || new Date().toISOString(),
           completedAt: new Date().toISOString(),
           status: providerWait ? "interrupted" : "failed",
@@ -1971,7 +2076,9 @@ async function finalReviewLoop(ticketId, signal) {
     if (!await applyFinalReviewFix({ ticketId, ...pendingFix, restartFeedback, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
   const resumed = ticketRun(store.read(), ticketId);
-  const firstRound = Math.max(0, ...(resumed.reviews || []).map((review) => Number(review.round) || 0)) + 1;
+  // The sequence, unlike the display round list, survives verification restarts
+  // and keeps final evidence locators immutable for the run.
+  const firstRound = finalReviewSequence(resumed) + 1;
   const previousReview = resumed.reviews?.at(-1);
   let previousFingerprint = previousReview?.fix?.report?.status === "completed"
     ? findingsFingerprint(previousReview.actionableFindings || [])
@@ -1997,6 +2104,9 @@ async function finalReviewLoop(ticketId, signal) {
       activity.onEvent({ type: "thinking", label: `Resuming independent reviewers · round ${round}` }, "checks");
     }
     const reviewImages = await harness.evidenceImages(checks.evidence);
+    // runChecksWithPreview adopts captured media first; refresh before constructing
+    // review packets so reviewers receive the canonical media IDs.
+    const reviewRun = ticketRun(store.read(), ticketId);
     signal?.throwIfAborted();
     const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
     const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
@@ -2009,7 +2119,7 @@ async function finalReviewLoop(ticketId, signal) {
       artifacts: reviewArtifacts,
       diff,
       checks,
-      proofMap: projectProofMap(current),
+      proofMap: projectProofMap(reviewRun),
       focusFindings,
       operatorFeedback,
       images: reviewImages,
@@ -2031,17 +2141,26 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
+    const reviewId = `final-review-${round}`;
     const finalChecks = {
-      status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
+      status: checks.status, command: checks.command || null, summary: checks.summary || "", output: checks.output || "", durationMs: checks.durationMs || null,
       evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
     };
     const findings = humanEvidenceFinding.length ? humanEvidenceFinding : actionableFindings(reviews);
     await update((state) => {
       const run = ticketRun(state, ticketId);
+      const createdAt = new Date().toISOString();
       run.artifacts.push(...persisted);
       run.finalChecks = finalChecks;
+      run.finalCheckHistory ||= {};
+      run.finalCheckHistory[reviewId] ||= structuredClone(finalChecks);
+      run.finalDiffHistory ||= {};
+      run.finalDiffHistory[reviewId] ||= structuredClone(diff);
+      run.finalReviewHistory ||= {};
+      run.finalReviewHistory[reviewId] ||= { createdAt };
+      run.finalReviewSequence = Math.max(finalReviewSequence(run), round);
+      run.reviews.push({ round, reviewId, reviews, finalChecks: structuredClone(finalChecks), actionableFindings: findings, diff, createdAt });
       if (run.proofMap) for (const review of reviews) run.proofMap = applyProofReports(run.proofMap, review.criterionResults, run);
-      run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
       delete run.pendingReviewAttempt;
       delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
@@ -2068,6 +2187,13 @@ async function finalReviewLoop(ticketId, signal) {
       return;
     }
     previousFingerprint = decision.fingerprint;
+    // Final findings can affect cross-step integration. Preserve all prior proof as
+    // stale before the fixer edits, requiring the following review to re-establish it.
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      if (run.proofMap) run.proofMap = invalidateProof(run.proofMap, run.proofMap.criteria.map((criterion) => criterion.id), { reason: "Automatic final-review correction." });
+    });
+    await persistProofSnapshot(ticketId, { stageId: "verify", attemptId: `round-${round}`, name: "proof-map-final-automatic-correction.json" });
     const rootCauseClusters = unaddressedReviewClusters(reviewsWithCurrent);
     if (!await applyFinalReviewFix({ ticketId, round, findings, restartFeedback: reviewFixConstraints(current), reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
@@ -2076,7 +2202,7 @@ async function finalReviewLoop(ticketId, signal) {
 async function finishHandoff(ticketId) {
   const current = ticketRun(store.read(), ticketId);
   if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
-  const eligibility = proofGate(current, { requiredOnly: true });
+  const eligibility = proofGate(current);
   if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
   const contextContent = current.ticket.source === "local" ? null : (await hydrateArtifact(proposal, dataDir))?.content;
@@ -2366,6 +2492,10 @@ async function restartFrom(ticketId, target) {
   });
   if (target === "stage:explore") await surfaceImmediateFailure(ticketId, continueAfterRequirements(ticketId, ""));
   else if (target === "stage:design") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)));
+  // Verification is only restartable after every step is accepted. Resume its
+  // final-review loop directly so stale proof is replaced by a new final record
+  // rather than re-entering implementation scheduling.
+  else if (target === "stage:verify") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => finalReviewLoop(ticketId, signal)));
   else await surfaceImmediateFailure(ticketId, runTicket(ticketId));
   return audit;
 }
@@ -2385,10 +2515,23 @@ async function api(request, response, url) {
     const checks = canonicalCheckOutput(run, {
       scope: url.searchParams.get("scope") || "step",
       stepId: url.searchParams.get("stepId"),
-      attemptId: url.searchParams.get("attemptId")
+      attemptId: url.searchParams.get("attemptId"),
+      reviewId: url.searchParams.get("reviewId")
     });
     if (!checks) throw new Error("Check output not found");
     return json(response, 200, checks);
+  }
+  const proofDiff = url.pathname.match(/^\/api\/tickets\/([^/]+)\/proof\/diff$/);
+  if (request.method === "GET" && proofDiff) {
+    const run = ticketRun(store.read(), decodeURIComponent(proofDiff[1]));
+    const diff = canonicalDiffOutput(run, {
+      scope: url.searchParams.get("scope") || "step",
+      stepId: url.searchParams.get("stepId"),
+      attemptId: url.searchParams.get("attemptId"),
+      reviewId: url.searchParams.get("reviewId")
+    });
+    if (!diff) throw new Error("Diff not found");
+    return json(response, 200, diff);
   }
   const reviewPacket = url.pathname.match(/^\/api\/tickets\/([^/]+)\/review-packet$/);
   if (request.method === "GET" && reviewPacket) {
@@ -2785,6 +2928,7 @@ async function api(request, response, url) {
       current.ticketSnapshot = structuredClone(current.ticket);
       current.trackerRevision = current.ticket.updatedAt || null;
       current.planApprovedAt ||= approvedAt;
+      current.proofStorageRoot ||= dataDir;
       current.proofMap ||= proofMap;
       if (proofArtifact) current.artifacts.push(proofArtifact);
       current.lastError = null;

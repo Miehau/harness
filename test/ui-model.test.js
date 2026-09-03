@@ -239,12 +239,16 @@ test("proof presentation preserves ordered history and makes typed evidence acti
   };
   const all = proofMapView(run);
   assert.deepEqual(all.criteria.map((criterion) => [criterion.id, criterion.state, criterion.history.length]), [
-    ["one", "verified", 1], ["two", "stale", 0], ["three", "missing-evidence", 0], ["four", "failed", 0], ["five", "unresolved", 0]
+    ["one", "verified", 1], ["two", "stale", 0], ["three", "missing-evidence", 0], ["four", "failed", 0], ["five", "not_yet_verified", 0]
   ]);
   assert.equal(all.criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=step&stepId=build");
   assert.deepEqual(proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[0], current: { ...run.proofMap.criteria[0].current, evidence: [{ type: "check", scope: "attempt", stepId: "build", attemptId: "attempt-2" }] } }] } }).criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2");
   assert.deepEqual(all.criteria.slice(2).map((criterion) => [criterion.resultLabel, criterion.evidenceLabel]), [["Verified", "Evidence missing"], ["Failed", "Evidence missing"], ["Not yet verified", "Evidence missing"]]);
   assert.equal(all.criteria[1].evidence[0].tab, "diff");
+  assert.equal(all.criteria[1].evidence[0].route, "/api/tickets/ticket%2Fa/proof/diff?scope=step&stepId=build");
+  const attemptDiffRoute = (attemptId) => proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[1], current: { ...run.proofMap.criteria[1].current, evidence: [{ type: "diff", scope: "attempt", stepId: "build", attemptId }] } }] } }).criteria[0].evidence[0].route;
+  assert.equal(attemptDiffRoute("attempt-1"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-1");
+  assert.equal(attemptDiffRoute("attempt-2"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-2");
   assert.equal(all.criteria[2].evidence[0].mediaUrl, "/api/tickets/ticket%2Fa/artifacts/screen/media");
   const missing = proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[2], current: { ...run.proofMap.criteria[2].current, evidence: [{ type: "media", artifactId: "screen", validity: "missing", reason: "missing_evidence" }] } }] } }).criteria[0].evidence[0];
   assert.deepEqual([missing.unavailable, missing.route, missing.mediaUrl, missing.label], [true, undefined, undefined, "Evidence unavailable: missing evidence"]);

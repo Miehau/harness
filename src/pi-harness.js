@@ -294,7 +294,7 @@ export function stepContext({ plan, step, artifacts, proofMap }) {
   const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
     .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
-    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.content || artifact.summary || ""}`).join("\n\n")
+    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.id ? ` [artifactId: ${artifact.id}]` : ""}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.kind === "visual-evidence" ? "Captured visual evidence; use its artifactId as a media locator without copying it." : artifact.content || artifact.summary || ""}`).join("\n\n")
     : "No dependency artifacts.";
   const steps = flattenSteps(plan);
   const summarize = (items) => items.length
@@ -356,7 +356,7 @@ ${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise ru
 ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 
 ## Criterion proof report
-Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt), artifact/media (artifactId), or diff (scope and stepId for step/attempt).
+Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt), artifact/media (artifactId shown in Dependency artifacts), or diff (scope and stepId for step/attempt).
 ${stepCriteria}
 
 Visual evidence: ${step.requiresVideoEvidence ? `required; make ${verificationEntry} write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; make ${verificationEntry} write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
@@ -1008,7 +1008,7 @@ export class PiHarness {
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
@@ -1072,6 +1072,8 @@ Criterion IDs for this step:
 ${(proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id).map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None"}
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 ${images.length ? visualProofIdentityInstruction : ""}
+Eligible captured media IDs (use these as evidence.type=media artifactId values):
+${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifact.stepId || artifact.stepId === step.id)).map((artifact) => `- ${artifact.id}: ${artifact.name}`).join("\n") || "- None"}
 
 Worker artifact:
 ${output}

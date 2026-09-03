@@ -58,15 +58,19 @@ function proofEvidenceNavigation(run, locator = {}) {
       label: locator.type === "media" ? "Open media" : "Open artifact"
     };
   }
-  if (locator.type === "check") {
+  if (locator.type === "check" || locator.type === "diff") {
     const params = new URLSearchParams({ scope: locator.scope || "step" });
     if (locator.stepId) params.set("stepId", locator.stepId);
     if (locator.attemptId) params.set("attemptId", locator.attemptId);
-    return { ...locator, label: "Open check output", route: `/api/tickets/${ticketId}/proof/check-output?${params}`, tab: "run" };
+    if (locator.reviewId) params.set("reviewId", locator.reviewId);
+    const isDiff = locator.type === "diff";
+    return {
+      ...locator,
+      label: isDiff ? (locator.scope === "final" ? "Open final diff" : "Open diff") : "Open check output",
+      route: `/api/tickets/${ticketId}/proof/${isDiff ? "diff" : "check-output"}?${params}`,
+      tab: isDiff ? "diff" : "run"
+    };
   }
-  if (locator.type === "diff") return locator.scope === "final"
-    ? { ...locator, label: "Open final diff", route: `/api/tickets/${ticketId}/review-packet`, tab: "diff" }
-    : { ...locator, label: "Open diff", tab: "diff" };
   return { ...locator, label: "Evidence unavailable" };
 }
 
@@ -86,19 +90,25 @@ export function proofMapView(run, { stepId = null, requiredOnly = false } = {}) 
   const criteria = (proof.criteria || [])
     .filter((criterion) => (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false))
     .map((criterion) => {
-      const current = structuredClone(criterion.current || { status: "unresolved", evidenceValidity: "missing", evidence: [] });
+      const current = structuredClone(criterion.current || { status: "not_yet_verified", evidenceValidity: "missing", evidence: [] });
+      if (current.status === "unresolved") current.status = "not_yet_verified";
       const state = current.status === "verified" && current.evidenceValidity === "stale" ? "stale"
         : current.status === "verified" && current.evidenceValidity !== "valid" ? "missing-evidence"
-          : current.status || "unresolved";
-      const resultLabel = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", unresolved: "Not yet verified" })[current.status] || "Not yet verified";
+          : current.status || "not_yet_verified";
+      const resultLabel = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified" })[current.status] || "Not yet verified";
       const evidenceLabel = ({ valid: "Evidence valid", stale: "Evidence stale", missing: "Evidence missing" })[current.evidenceValidity] || "Evidence missing";
-      const label = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", unresolved: "Not yet verified", stale: "Stale evidence", "missing-evidence": "Missing evidence" })[state] || resultLabel;
+      const label = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified", stale: "Stale evidence", "missing-evidence": "Missing evidence" })[state] || resultLabel;
       return {
         ...structuredClone(criterion), current, state, label, resultLabel, evidenceLabel,
-        evidence: (current.evidence || []).map((locator) => proofEvidenceNavigation(run, locator))
+        evidence: (current.evidence || []).map((locator) => proofEvidenceNavigation(run, locator)),
+        history: (criterion.history || []).map((item) => ({
+          ...structuredClone(item),
+          status: item.status === "unresolved" ? "not_yet_verified" : item.status,
+          evidence: (item.evidence || []).map((locator) => proofEvidenceNavigation(run, locator))
+        }))
       };
     });
-  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: projectedEligibility(criteria) };
+  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: proof.compatibility ? { eligible: true, blockingReasons: [] } : projectedEligibility(criteria) };
 }
 
 export function finalReview(run) {
@@ -108,7 +118,7 @@ export function finalReview(run) {
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
   const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
   return {
-    criteria: proofMapView(run, { requiredOnly: true }),
+    criteria: proofMapView(run),
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,

@@ -8,7 +8,8 @@ const relevantArtifactKinds = new Set([
   "architecture",
   "agent-output",
   "step-verification",
-  "product-context-update"
+  "product-context-update",
+  "visual-evidence"
 ]);
 const essentialArtifactKinds = new Set(["requirements", "feature-brief", "implementation-delta", "architecture"]);
 
@@ -52,21 +53,28 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
 
   artifacts.forEach((artifact, index) => {
     const content = artifact?.content || artifact?.summary;
-    if (!content || !relevantArtifactKinds.has(artifact?.kind)) return;
+    if ((!content && artifact?.kind !== "visual-evidence") || !relevantArtifactKinds.has(artifact?.kind)) return;
     if (artifact.stepId && statuses.has(artifact.stepId) && statuses.get(artifact.stepId) !== "accepted") return;
-    latestArtifacts.set(`${artifact.kind}:${artifact.stepId || "run"}`, { artifact, index });
+    // Media is evidence by immutable artifact ID, not a replaceable step summary.
+    const key = artifact.kind === "visual-evidence" ? `${artifact.kind}:${artifact.id || index}` : `${artifact.kind}:${artifact.stepId || "run"}`;
+    latestArtifacts.set(key, { artifact, index });
   });
 
-  const selectedArtifacts = [...latestArtifacts.values()]
-    .sort((left, right) => Number(essentialArtifactKinds.has(right.artifact.kind)) - Number(essentialArtifactKinds.has(left.artifact.kind)) || right.index - left.index)
-    .slice(0, 8)
-    .map(({ artifact }) => ({
+  const retained = [...latestArtifacts.values()];
+  const selectedArtifacts = [
+    ...retained.filter(({ artifact }) => artifact.kind === "visual-evidence"),
+    ...retained.filter(({ artifact }) => artifact.kind !== "visual-evidence")
+      .sort((left, right) => Number(essentialArtifactKinds.has(right.artifact.kind)) - Number(essentialArtifactKinds.has(left.artifact.kind)) || right.index - left.index)
+      .slice(0, 20)
+  ].map(({ artifact }) => ({
+
+      id: artifact.id || null,
       kind: artifact.kind,
       name: clip(artifact.name, 300),
       stepId: artifact.stepId ? clip(artifact.stepId, 200) : null,
       sourceStepTitle: artifact.sourceStepTitle ? clip(artifact.sourceStepTitle, 300) : null,
       path: artifact.path ? clip(artifact.path, 1_000) : null,
-      content: clip(artifact.content || artifact.summary, 4_000)
+      ...(artifact.kind === "visual-evidence" ? {} : { content: clip(artifact.content || artifact.summary, 4_000) })
     }));
 
   const files = clippedStrings(diff.files, 100, 300);
@@ -91,6 +99,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
       }))
     },
     artifacts: selectedArtifacts,
+    media: selectedArtifacts.filter((artifact) => artifact.kind === "visual-evidence").map(({ id, name, stepId, path }) => ({ id, name, stepId, path })),
     canonicalDiff: {
       reference: diff.reference || diff.path || null,
       files,

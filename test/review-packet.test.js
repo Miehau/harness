@@ -57,6 +57,20 @@ test("keeps only the latest relevant artifact for each accepted step", () => {
   assert.equal(packet.artifacts[1].content, "new result");
 });
 
+test("keeps every visual-evidence artifact ID available to reviewers", () => {
+  const packet = compactReviewPacket({
+    plan,
+    artifacts: [
+      { id: "screen-a", kind: "visual-evidence", stepId: "search", name: "desktop.png", path: "/proof/desktop.png" },
+      { id: "screen-b", kind: "visual-evidence", stepId: "search", name: "mobile.png", path: "/proof/mobile.png" },
+      { id: "video-a", kind: "visual-evidence", stepId: "search", name: "walkthrough.webm", path: "/proof/walkthrough.webm" }
+    ]
+  });
+
+  assert.deepEqual(packet.artifacts.map((artifact) => artifact.id), ["screen-a", "screen-b", "video-a"]);
+  assert.deepEqual(packet.media.map((artifact) => artifact.id), ["screen-a", "screen-b", "video-a"]);
+});
+
 test("preserves every planned outcome and prioritizes essential artifacts", () => {
   const manySteps = { nodes: Array.from({ length: 30 }, (_, index) => ({ id: `step-${index}`, title: `Step ${index}`, acceptanceCriteria: [`Criterion ${index}`] })) };
   const artifacts = [

@@ -306,11 +306,34 @@ function resetStagesFrom(run, stageId) {
   }
 }
 
-function resetStep(step) {
-  const attempts = step.attempts?.length || 0;
+function staleProof(run, stepIds, at, reason) {
+  const selected = new Set(stepIds);
+  if (!run.proofMap?.criteria) return;
+  for (const criterion of run.proofMap.criteria) {
+    if (!selected.has(criterion.stepId)) continue;
+    criterion.history ||= [];
+    criterion.history.push(structuredClone(criterion.current));
+    // Restart invalidation follows the same durable lifecycle as corrections: a
+    // rejected stale report must not erase the identities that remain invalid.
+    criterion.invalidation = { at, evidence: structuredClone(criterion.current?.evidence || []) };
+    criterion.current = { ...criterion.current, evidenceValidity: "stale", invalidatedAt: at, invalidationReason: reason };
+  }
+}
+
+function attemptSequence(step) {
+  return Math.max(Number(step.attemptSequence) || 0, ...(step.attempts || []).map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
+}
+
+function resetStep(run, step) {
+  const discarded = step.attempts || [];
+  if (discarded.length) {
+    run.archivedAttempts ||= [];
+    run.archivedAttempts.push(...discarded.map((attempt) => ({ stepId: step.id, ...structuredClone(attempt) })));
+  }
+  step.attemptSequence = attemptSequence(step);
   Object.assign(step, { status: "ready", attempts: [], artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
   for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
-  return attempts;
+  return discarded.length;
 }
 
 export function rewindRun(run, target, at = new Date().toISOString()) {
@@ -330,11 +353,19 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     if (!restoredTree) throw new Error("This stage has no recorded repository baseline");
     run.plan = null;
     run.sessionFile = null;
+    if (run.proofMap) {
+      run.proofMapHistory ||= [];
+      run.proofMapHistory.push({ archivedAt: at, reason: "Plan redesign restart", proofMap: structuredClone(run.proofMap) });
+      delete run.proofMap;
+    }
     delete run.planApprovedAt;
   } else if (target === "stage:verify") {
     if (!flattenSteps(run.plan).length || flattenSteps(run.plan).some((step) => step.status !== "accepted")) throw new Error("Verification can restart only after every implementation step is accepted");
     stageId = "verify";
-    run.reviews = [];
+    // Review records are immutable evidence: retaining them preserves historical
+    // final-check and final-diff locators while the new review gets a new sequence.
+    run.reviews ||= [];
+    staleProof(run, flattenSteps(run.plan).map((step) => step.id), at, "Verification restart requires fresh final proof.");
   } else {
     const stepId = String(target || "").replace(/^step:/, "");
     const steps = flattenSteps(run.plan);
@@ -346,7 +377,8 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
     const reset = steps.slice(Math.max(0, firstIndex));
     resetStepIds = reset.map((step) => step.id);
-    discardedAttempts = reset.reduce((total, step) => total + resetStep(step), 0);
+    discardedAttempts = reset.reduce((total, step) => total + resetStep(run, step), 0);
+    staleProof(run, resetStepIds, at, "Step restart restored an earlier implementation checkpoint.");
     stageId = "implement";
   }
 

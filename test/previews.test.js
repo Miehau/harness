@@ -36,11 +36,13 @@ test("starts a named preview with isolated port variables and captures desktop a
       selectedTicketId: "ticket-1", ticketRuns: { "ticket-1": { status: "verifying" } }
     });
     const evidence = await manager.capture("ticket-1", { source: { CHROMIUM_PATH: process.execPath } });
+    const recaptured = await manager.capture("ticket-1", { source: { CHROMIUM_PATH: process.execPath } });
     assert.deepEqual(evidence.map(({ viewport }) => viewport), [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
     assert.deepEqual(evidence.map(({ mediaType, mediaKind }) => ({ mediaType, mediaKind })), [{ mediaType: "image/png", mediaKind: "image" }, { mediaType: "image/png", mediaKind: "image" }]);
-    assert.equal(captures.length, 2);
+    assert.equal(new Set([...evidence, ...recaptured].map(({ path }) => path)).size, 4);
+    assert.equal(captures.length, 4);
     assert.equal(captures.every(({ file, args }) => file === process.execPath && args[0].endsWith("/scripts/screenshot.mjs")), true);
-    assert.deepEqual(captures.map(({ args }) => [args[args.indexOf("--width") + 1], args[args.indexOf("--height") + 1]]), [["1440", "900"], ["390", "844"]]);
+    assert.deepEqual(captures.map(({ args }) => [args[args.indexOf("--width") + 1], args[args.indexOf("--height") + 1]]), [["1440", "900"], ["390", "844"], ["1440", "900"], ["390", "844"]]);
     assert.equal(captures.every(({ args }) => args.includes("--click") && args[args.indexOf("--click") + 1].includes("status-running")), true);
     assert.equal(manager.stop("ticket-1"), true);
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
@@ -152,7 +154,7 @@ test("a timed-out Chromium capture cannot reuse stale screenshot evidence", asyn
     const manager = new PreviewManager({ dataDir, captureTimeoutMs: 10, execImpl: async () => { throw new Error("Chromium timed out after 10ms"); } });
     manager.active.set("ticket", { public: { url: "http://127.0.0.1:4317" } });
     await assert.rejects(manager.capture("ticket", { source: { CHROMIUM_PATH: process.execPath } }), /timed out/);
-    await assert.rejects(readFile(join(directory, "desktop.png")), /ENOENT/);
+    assert.equal(await readFile(join(directory, "desktop.png"), "utf8"), "stale");
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
 

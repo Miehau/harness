@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { snapshotTree } from "../src/git.js";
@@ -113,13 +113,13 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     const firstReview = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review");
     assert.equal(firstReview.proofMap.compatibility, false);
     assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.text), ["Persists canonical evidence", "Retains unaffected proof", "Requires re-verification after a correction", "Rejects prose-only claims"]);
-    assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "unresolved", "unresolved"]);
+    assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "not_yet_verified", "not_yet_verified"]);
     assert.equal(new Set(firstReview.proofMap.criteria.map((criterion) => criterion.id)).size, 4);
-    assert.match(firstReview.proofMap.criteria[3].current.explanation.summary, /without resolvable run evidence/);
+    assert.match(firstReview.proofMap.criteria[3].current.explanation.summary, /resolvable run evidence/);
 
     const rejectedStep = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
     assert.equal(rejectedStep.status, 400);
-    assert.match(rejectedStep.json.error, /status_unresolved/);
+    assert.match(rejectedStep.json.error, /status_not_yet_verified/);
 
     const [correctedCriterion, , omittedCriterion, proseCriterion] = firstReview.proofMap.criteria.map((criterion) => criterion.id);
     const unaffectedHistoryLength = firstReview.proofMap.criteria[1].history.length;
@@ -128,7 +128,7 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     });
     assert.equal(correction.status, 202, correction.text);
     const reverified = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.proofMap.criteria[2].current.evidenceValidity === "valid");
-    assert.deepEqual(reverified.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "verified", "unresolved"]);
+    assert.deepEqual(reverified.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "verified", "not_yet_verified"]);
     assert.deepEqual(staleSnapshots[1], [correctedCriterion, omittedCriterion]);
     assert.equal(reverified.proofMap.criteria[1].history.length, unaffectedHistoryLength, "unaffected proof is retained without invalidation");
     assert.equal(reverified.proofMap.criteria[0].history.some((result) => result.evidenceValidity === "stale"), true);
@@ -152,7 +152,7 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     assert.ok(daemon.store.read().ticketRuns[id].artifacts.filter((artifact) => artifact.kind === "proof-map").length >= 6);
     const finalCheck = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final`);
     assert.equal(finalCheck.status, 200);
-    assert.deepEqual(finalCheck.json, { status: "passed", command: "node .agent-plan/verify.mjs", summary: "passed", durationMs: null, evidence: [] });
+    assert.deepEqual(finalCheck.json, { status: "passed", command: "node .agent-plan/verify.mjs", summary: "passed", output: "", durationMs: null, evidence: [] });
 
     await daemon.close({ exit: false });
     await withDaemon(async (restarted) => {
@@ -164,6 +164,69 @@ test("approved proof survives omitted and prose claims, selective correction, fi
       assert.equal(reloaded.json.proofMap.criteria[3].history.some((result) => result.evidenceValidity === "stale"), true);
       assert.equal(reloaded.json.proofMap.criteria.every((criterion) => criterion.current.evidence[0].validity === "valid"), true);
     }, { cwd, dataDir, harness, keep: true });
+  }, { harness });
+});
+
+test("resuming a worker checkpoint invalidates omitted proof before the worker changes code", async () => {
+  let workerRuns = 0;
+  let resumedStaleCriteria = [];
+  const harness = {
+    ...mockHarness(),
+    async runRepositoryChecks() { return passedChecks(); },
+    async evidenceImages() { return []; },
+    async generateCommitMessage() { return "test: require fresh proof"; },
+    async runStep({ cwd, proofMap }) {
+      workerRuns++;
+      if (workerRuns === 1) {
+        return {
+          report: {
+            status: "needs_input", summary: "Choose the correction", request: "Which correction should be applied?",
+            criterionResults: [{
+              criterionId: proofMap.criteria[0].id, status: "verified", explanation: { summary: "Prior artifact verifies the criterion." },
+              evidence: [{ type: "artifact", artifactId: "worker-proof" }]
+            }]
+          },
+          output: "worker paused", prompt: "worker prompt", rawOutput: "worker paused", sessionFile: null
+        };
+      }
+      resumedStaleCriteria = proofMap.criteria.filter((criterion) => criterion.current.evidenceValidity === "stale").map((criterion) => criterion.id);
+      await writeFile(join(cwd, "baseline.txt"), "corrected after feedback\n");
+      return {
+        report: { status: "completed", summary: "worker corrected the implementation", artifact: "result", criterionResults: [] },
+        output: "worker corrected", prompt: "worker correction prompt", rawOutput: "worker corrected", sessionFile: null
+      };
+    },
+    async verifyStep() { return { summary: "verification finished", criterionResults: [], findings: [], rawOutput: "", sessionFile: null }; }
+  };
+
+  await withDaemon(async (daemon, { cwd, dataDir }) => {
+    await initializeRepository(cwd);
+    const ticket = { id: "worker-resume-proof", identifier: "PROOF-RESUME", title: "Worker resume proof", description: "Invalidate proof on feedback", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket, runId: "run-1" });
+    const evidencePath = join(dataDir, "worker-proof.md");
+    await writeFile(evidencePath, "verified before the checkpoint\n");
+    const id = await seedRun(daemon, {
+      ticket, plan: plan(["Correction must be re-verified"]), status: "awaiting_approval", workspace,
+      baselineTree: await snapshotTree(workspace.cwd), proofStorageRoot: dataDir,
+      artifacts: [{ id: "worker-proof", name: "worker-proof.md", kind: "agent-output", path: evidencePath }],
+      checkpoint: { id: "approve-worker-resume", kind: "awaiting_approval", title: "Approve worker-resume plan" }
+    });
+
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } })).status, 202);
+    const paused = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "needs_input");
+    const criterionId = paused.proofMap.criteria[0].id;
+    assert.equal(paused.proofMap.criteria[0].current.evidenceValidity, "valid");
+
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/clarify`, { body: { answers: "Apply the correction" } })).status, 202);
+    const resumed = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review");
+    assert.deepEqual(resumedStaleCriteria, [criterionId]);
+    assert.equal(resumed.proofMap.criteria[0].current.evidenceValidity, "stale");
+    assert.equal(await readFile(join(workspace.cwd, "baseline.txt"), "utf8"), "corrected after feedback\n");
+    assert.ok(daemon.store.read().ticketRuns[id].artifacts.some((artifact) => artifact.name === "proof-map-worker-resume-correction.json"));
+
+    const acceptance = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
+    assert.equal(acceptance.status, 400);
+    assert.match(acceptance.json.error, /evidence_stale/);
   }, { harness });
 });
 
@@ -187,7 +250,7 @@ test("legacy compatibility runs preserve step and final human approval paths", a
     });
     const stepProjection = await invoke(daemon, "GET", `/api/tickets/${stepId}/run`);
     assert.equal(stepProjection.json.proofMap.compatibility, true);
-    assert.equal(stepProjection.json.proofMap.criteria[0].current.status, "unresolved");
+    assert.equal(stepProjection.json.proofMap.criteria[0].current.status, "not_yet_verified");
     const stepApproval = await invoke(daemon, "POST", `/api/tickets/${stepId}/steps/build/accept`, { body: {} });
     assert.equal(stepApproval.status, 202, stepApproval.text);
 
@@ -202,7 +265,7 @@ test("legacy compatibility runs preserve step and final human approval paths", a
     });
     const finalProjection = await invoke(daemon, "GET", `/api/tickets/${finalId}/run`);
     assert.equal(finalProjection.json.proofMap.compatibility, true);
-    assert.equal(finalProjection.json.proofMap.criteria[0].current.status, "unresolved");
+    assert.equal(finalProjection.json.proofMap.criteria[0].current.status, "not_yet_verified");
     const finalApproval = await invoke(daemon, "POST", `/api/tickets/${finalId}/evidence/approve`);
     assert.equal(finalApproval.status, 200, finalApproval.text);
     assert.equal(daemon.store.read().ticketRuns[finalId].status, "completed");
@@ -229,7 +292,7 @@ test("failed, blocked, missing-evidence, legacy, and empty-criterion runs fail c
     });
     const step = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
     assert.equal(step.status, 400);
-    assert.match(step.json.error, /status_unresolved.*status_failed.*status_blocked/);
+    assert.match(step.json.error, /status_not_yet_verified.*status_failed.*status_blocked/);
 
     const finalId = await seedRun(daemon, {
       ticket: { ...ticket, id: "proof-final-failures" }, plan: failurePlan, proofMap, status: "awaiting_evidence_review",
@@ -237,7 +300,7 @@ test("failed, blocked, missing-evidence, legacy, and empty-criterion runs fail c
     });
     const final = await invoke(daemon, "POST", `/api/tickets/${finalId}/evidence/approve`, { body: {} });
     assert.equal(final.status, 400);
-    assert.match(final.json.error, /status_unresolved.*status_failed.*status_blocked/);
+    assert.match(final.json.error, /status_not_yet_verified.*status_failed.*status_blocked/);
 
     const legacyId = await seedRun(daemon, {
       ticket: { ...ticket, id: "proof-legacy" }, plan: failurePlan, status: "completed", finalChecks: passedChecks(),
@@ -245,7 +308,7 @@ test("failed, blocked, missing-evidence, legacy, and empty-criterion runs fail c
     });
     const legacy = await invoke(daemon, "GET", `/api/tickets/${legacyId}/run`);
     assert.equal(legacy.json.proofMap.compatibility, true);
-    assert.deepEqual(legacy.json.proofMap.criteria.map((criterion) => criterion.current.status), ["unresolved", "unresolved", "unresolved"]);
+    assert.deepEqual(legacy.json.proofMap.criteria.map((criterion) => criterion.current.status), ["not_yet_verified", "not_yet_verified", "not_yet_verified"]);
     const packet = await invoke(daemon, "GET", `/api/tickets/${legacyId}/review-packet`);
     assert.equal(packet.json.proofMap.legacy.reviews[0].summary, "Aggregate legacy pass");
 
