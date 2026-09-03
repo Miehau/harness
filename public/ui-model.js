@@ -41,6 +41,66 @@ export function artifactsForStage(artifacts = [], stageId) {
 
 const proofMedia = { png: "image", jpg: "image", jpeg: "image", webp: "image", webm: "video", mp4: "video" };
 
+function proofEvidenceNavigation(run, locator = {}) {
+  const ticketId = encodeURIComponent(run?.id || "");
+  if (locator.validity && locator.validity !== "valid") return {
+    ...locator,
+    unavailable: true,
+    label: locator.reason ? `Evidence unavailable: ${locator.reason.replaceAll("_", " ")}` : "Evidence unavailable"
+  };
+  if (["artifact", "media"].includes(locator.type) && locator.artifactId) {
+    const artifactId = encodeURIComponent(locator.artifactId);
+    return {
+      type: locator.type,
+      artifactId: locator.artifactId,
+      route: `/api/tickets/${ticketId}/artifacts/${artifactId}`,
+      mediaUrl: locator.type === "media" ? `/api/tickets/${ticketId}/artifacts/${artifactId}/media` : null,
+      label: locator.type === "media" ? "Open media" : "Open artifact"
+    };
+  }
+  if (locator.type === "check") {
+    const params = new URLSearchParams({ scope: locator.scope || "step" });
+    if (locator.stepId) params.set("stepId", locator.stepId);
+    if (locator.attemptId) params.set("attemptId", locator.attemptId);
+    return { ...locator, label: "Open check output", route: `/api/tickets/${ticketId}/proof/check-output?${params}`, tab: "run" };
+  }
+  if (locator.type === "diff") return locator.scope === "final"
+    ? { ...locator, label: "Open final diff", route: `/api/tickets/${ticketId}/review-packet`, tab: "diff" }
+    : { ...locator, label: "Open diff", tab: "diff" };
+  return { ...locator, label: "Evidence unavailable" };
+}
+
+function projectedEligibility(criteria) {
+  const blockingReasons = criteria.flatMap((criterion) => {
+    const current = criterion.current || {};
+    if (current.status !== "verified") return [{ criterionId: criterion.id, criterion: criterion.text, code: `status_${current.status || "unresolved"}`, message: current.explanation?.summary || "Criterion is unresolved." }];
+    if (current.evidenceValidity !== "valid") return [{ criterionId: criterion.id, criterion: criterion.text, code: `evidence_${current.evidenceValidity || "missing"}`, message: "Criterion evidence is not currently valid." }];
+    return [];
+  });
+  return { eligible: blockingReasons.length === 0, blockingReasons };
+}
+
+/** Turns the server's proof projection into ordered, actionable presentation data. */
+export function proofMapView(run, { stepId = null, requiredOnly = false } = {}) {
+  const proof = run?.proofMap || { criteria: [], compatibility: true };
+  const criteria = (proof.criteria || [])
+    .filter((criterion) => (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false))
+    .map((criterion) => {
+      const current = structuredClone(criterion.current || { status: "unresolved", evidenceValidity: "missing", evidence: [] });
+      const state = current.status === "verified" && current.evidenceValidity === "stale" ? "stale"
+        : current.status === "verified" && current.evidenceValidity !== "valid" ? "missing-evidence"
+          : current.status || "unresolved";
+      const resultLabel = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", unresolved: "Not yet verified" })[current.status] || "Not yet verified";
+      const evidenceLabel = ({ valid: "Evidence valid", stale: "Evidence stale", missing: "Evidence missing" })[current.evidenceValidity] || "Evidence missing";
+      const label = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", unresolved: "Not yet verified", stale: "Stale evidence", "missing-evidence": "Missing evidence" })[state] || resultLabel;
+      return {
+        ...structuredClone(criterion), current, state, label, resultLabel, evidenceLabel,
+        evidence: (current.evidence || []).map((locator) => proofEvidenceNavigation(run, locator))
+      };
+    });
+  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: projectedEligibility(criteria) };
+}
+
 export function finalReview(run) {
   const extension = (name = "") => String(name).split(".").at(-1).toLowerCase();
   const review = run?.reviews?.at(-1);
@@ -48,6 +108,7 @@ export function finalReview(run) {
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
   const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
   return {
+    criteria: proofMapView(run, { requiredOnly: true }),
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,

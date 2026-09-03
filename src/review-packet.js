@@ -24,7 +24,28 @@ function clippedStrings(values, count, length) {
   return (Array.isArray(values) ? values : []).slice(0, count).map((value) => clip(value, length));
 }
 
-export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {} }) {
+function compactProofMap(proofMap) {
+  if (!proofMap) return null;
+  return {
+    version: proofMap.version || 1,
+    approvedAt: proofMap.approvedAt || null,
+    compatibility: Boolean(proofMap.compatibility),
+    eligibility: structuredClone(proofMap.eligibility || { eligible: false, blockingReasons: [] }),
+    criteria: (proofMap.criteria || []).map((criterion) => ({
+      id: criterion.id,
+      stepId: criterion.stepId,
+      stepTitle: criterion.stepTitle || "",
+      stepRequired: criterion.stepRequired !== false,
+      index: criterion.index,
+      text: criterion.text,
+      current: structuredClone(criterion.current),
+      history: structuredClone(criterion.history || [])
+    })),
+    ...(proofMap.legacy ? { legacy: structuredClone(proofMap.legacy) } : {})
+  };
+}
+
+export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {}, proofMap = null }) {
   const steps = flattenSteps(plan);
   const statuses = new Map(steps.map((step) => [step.id, step.status]));
   const latestArtifacts = new Map();
@@ -77,6 +98,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
       stat: clip(diff.stat, 4_000),
       patch: clip(diff.patch || "No textual diff", 60_000)
     },
+    proofMap: compactProofMap(proofMap),
     checks: {
       status: String(checks.status || "unknown"),
       command: clip(checks.command, 1_000),

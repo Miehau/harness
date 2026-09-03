@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -239,7 +239,7 @@ function checkpointHtml(run) {
     }).join("") || `<div class="run-empty">No supported visual proof was attached.</div>`;
     const checks = review.checks ? `<section class="final-review-summary"><span class="eyebrow">Automated checks</span><strong class="status-${escapeHtml(review.checks.status || "completed")}">${escapeHtml(review.checks.status || "completed")}</strong><p>${escapeHtml(review.checks.summary || review.checks.command || "Completed")}</p></section>` : "";
     const reviews = review.reviews.length ? `<section class="final-review-summary"><span class="eyebrow">Independent review</span>${review.reviews.map((item) => `<p><strong>${escapeHtml(item.role)}</strong> ${escapeHtml(item.summary || "Completed")}</p>`).join("")}</section>` : "";
-    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header><section class="proof-gallery" aria-label="Visual proof">${proof}</section>${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}">Approve &amp; deliver</button></footer></section>`;
+    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header><section class="proof-gallery" aria-label="Visual proof">${proof}</section>${criterionProofHtml(run, { gate: { requiredOnly: true } })}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
   }
   if (checkpoint.kind === "product_context_review") {
     return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Product-context gate</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract"><summary>Review proposed PRD and capability update</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details></div><button class="button success" type="button" data-approve-context="${escapeHtml(run.id)}">Approve & complete</button></div>`;
@@ -528,6 +528,33 @@ function runPanel(step) {
   return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
 }
 
+function proofEvidenceHtml(evidence) {
+  if (evidence.unavailable) return `<span class="proof-control unavailable" title="${escapeHtml(evidence.reason || "Evidence cannot be resolved")}">${escapeHtml(evidence.label)}</span>`;
+  if (evidence.mediaUrl) return `<a class="proof-control" href="${escapeHtml(evidence.mediaUrl)}" target="_blank" rel="noreferrer">${escapeHtml(evidence.label)} ↗</a>`;
+  if (evidence.route) return `<a class="proof-control" href="${escapeHtml(evidence.route)}" target="_blank" rel="noreferrer">${escapeHtml(evidence.label)} ↗</a>`;
+  if (evidence.artifactId) return `<span class="proof-control unavailable">${escapeHtml(evidence.label)}</span>`;
+  if (evidence.stepId) return `<button class="proof-control" type="button" data-proof-step="${escapeHtml(evidence.stepId)}" data-proof-tab="${escapeHtml(evidence.tab || "run")}">${escapeHtml(evidence.label)}</button>`;
+  return `<span class="proof-control unavailable">${escapeHtml(evidence.label)}</span>`;
+}
+
+function criterionProofHtml(run, options = {}) {
+  const proof = proofMapView(run, options);
+  const gate = options.gate ? proofMapView(run, options.gate) : proof;
+  const compatibility = proof.compatibility ? `<p class="proof-compatibility">Legacy run: criteria are shown unresolved until explicit proof is recorded.</p>` : "";
+  const blockers = gate.eligibility.blockingReasons.map((reason) => `<li><code>${escapeHtml(reason.criterionId)}</code> ${escapeHtml(reason.message)}</li>`).join("");
+  const list = proof.criteria.map((criterion) => {
+    const history = criterion.history?.length ? `<details><summary>${criterion.history.length} prior result${criterion.history.length === 1 ? "" : "s"}</summary><ol>${criterion.history.map((item) => `<li><strong>${escapeHtml(item.status || "unresolved")}</strong> · ${escapeHtml(item.evidenceValidity || "missing")} · ${escapeHtml(item.explanation?.summary || "No explanation")}</li>`).join("")}</ol></details>` : "";
+    const evidence = criterion.evidence.length ? `<div class="proof-controls">${criterion.evidence.map(proofEvidenceHtml).join("")}</div>` : `<span class="proof-no-evidence">No evidence reference recorded.</span>`;
+    return `<article class="criterion-proof proof-${escapeHtml(criterion.state)}"><header><span class="proof-statuses"><span class="proof-state">${escapeHtml(criterion.resultLabel)}</span><span class="proof-evidence evidence-${escapeHtml(criterion.current.evidenceValidity || "missing")}">${escapeHtml(criterion.evidenceLabel)}</span></span><code>${escapeHtml(criterion.id)}</code></header><strong>${escapeHtml(criterion.text)}</strong><small>${escapeHtml(criterion.stepTitle || criterion.stepId)}</small><p>${escapeHtml(criterion.current.explanation?.summary || "No structured result was reported.")}</p>${evidence}${history}</article>`;
+  }).join("") || `<div class="run-empty">No approved acceptance criteria were recorded.</div>`;
+  return `<section class="criterion-proof-map"><header><div><span class="eyebrow">Criterion proof</span><strong>${proof.criteria.length} criterion${proof.criteria.length === 1 ? "" : "ia"}</strong></div><span class="proof-eligibility ${gate.eligibility.eligible ? "eligible" : "blocked"}">${gate.eligibility.eligible ? "ready" : "blocked"}</span></header>${compatibility}${!gate.eligibility.eligible ? `<ul class="proof-blockers">${blockers}</ul>` : ""}<div class="criterion-proof-list">${list}</div></section>`;
+}
+
+function correctionCriterionPicker(run, options = {}) {
+  const criteria = proofMapView(run, options).criteria;
+  return criteria.length ? `<fieldset class="criterion-picker"><legend>Affected criteria</legend>${criteria.map((criterion) => `<label><input type="checkbox" name="criterionId" value="${escapeHtml(criterion.id)}">${escapeHtml(criterion.text)}</label>`).join("")}</fieldset>` : "";
+}
+
 function overviewPanel(step) {
   const run = runFor();
   const summary = stepInspectorSummary(step);
@@ -542,7 +569,7 @@ function overviewPanel(step) {
         : ["running", "fixing"].includes(step.status) ? "The worker is actively progressing this step."
           : "The worker is waiting for its dependencies or next action.";
   const attention = summary.needsAttention ? `<section class="attention-summary"><span class="eyebrow">What needs attention</span><strong>${escapeHtml(summary.finding)}</strong><div class="attention-actions"><button class="button attention-action" type="button" data-tab="run">See failure details</button><button class="button primary" type="button" data-resume-ticket="${escapeHtml(run.id)}">Retry worker</button></div></section>` : "";
-  const criteria = `<details class="inspector-disclosure"><summary><span>Acceptance criteria</span><b>${summary.criteria.length}</b></summary><div class="criteria-list">${summary.criteria.map((criterion) => `<div><span>○</span>${escapeHtml(criterion)}</div>`).join("") || `<p>No explicit criteria were recorded.</p>`}</div></details>`;
+  const criteria = criterionProofHtml(run, { stepId: step.id });
   const action = summary.needsAttention ? "Retry this worker" : step.status === "review_ready" ? "Review and accept" : "None";
   return `<section class="worker-overview ${summary.needsAttention ? "needs-attention" : ""}">${attention}<div class="worker-outcome"><span class="eyebrow">Worker outcome</span><p>${escapeHtml(report)}</p><dl><div><dt>Result</dt><dd class="status-${escapeHtml(step.status)}">${escapeHtml(status)}</dd></div><div><dt>Action needed</dt><dd>${action}</dd></div><div><dt>Attempts</dt><dd>${summary.attemptCount || (run.activeRuns?.[step.id] ? "In progress" : "—")}</dd></div>${dependencies.length ? `<div><dt>After</dt><dd>${escapeHtml(dependencies.join(" · "))}</dd></div>` : ""}</dl></div><div class="inspector-disclosures">${summary.findingCount ? `<button type="button" data-tab="run"><span>Findings</span><b>${summary.findingCount}</b><i>›</i></button>` : ""}${criteria}<button type="button" data-tab="artifacts"><span>Artifacts</span><b>${summary.artifactCount}</b><i>›</i></button><button type="button" data-tab="run"><span>Grouped activity</span><i>›</i></button><button type="button" data-tab="prompt"><span>Agent prompt</span><i>›</i></button><button type="button" data-tab="ticket"><span>Ticket context</span><i>›</i></button></div></section>`;
 }
@@ -710,7 +737,7 @@ function renderInspector() {
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
   const reviewActions = step.status === "review_ready" ? run.auto
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
-    : `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted."}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea><button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}">Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}">Accept & auto-run</button></section>` : "";
+    : (() => { const proof = proofMapView(run, { stepId: step.id }); return `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : proof.eligibility.eligible ? "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted." : `Proof gate blocked: ${escapeHtml(proof.eligibility.blockingReasons.map((reason) => reason.message).join(" "))}`}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea>${correctionCriterionPicker(run, { stepId: step.id })}<button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept & auto-run</button></section>`; })() : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
   const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
@@ -1123,6 +1150,8 @@ document.addEventListener("click", async (event) => {
     catch (error) { approveEvidence.disabled = false; approveEvidence.textContent = "Approve & deliver"; notify(error.message); }
     return;
   }
+  const proofStep = event.target.closest("[data-proof-step]");
+  if (proofStep) { selectedStepId = proofStep.dataset.proofStep; selectedStageId = null; activeTab = proofStep.dataset.proofTab || "run"; rememberView(); render(); return; }
   const selectStep = event.target.closest("[data-select-step]");
   if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; rememberView(); render(); return; }
   const autoAcceptStep = event.target.closest("[data-auto-accept-step]");
@@ -1298,14 +1327,19 @@ document.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
     const feedback = form.get("feedback");
-    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(stepId)}/changes`, { method: "POST", body: JSON.stringify({ feedback }) }); notify("Focused correction started"); }
+    const criterionIds = form.getAll("criterionId");
+    if (!criterionIds.length) { notify("Select every criterion affected by this correction"); return; }
+    try { await api(`/api/tickets/${encodeURIComponent(runFor().id)}/steps/${encodeURIComponent(stepId)}/changes`, { method: "POST", body: JSON.stringify({ feedback, criterionIds }) }); notify("Focused correction started"); }
     catch (error) { notify(error.message); }
   }
   const evidenceTicketId = event.target.dataset.requestEvidenceChanges;
   if (evidenceTicketId) {
     event.preventDefault();
-    const feedback = new FormData(event.target).get("feedback");
-    try { await api(`/api/tickets/${encodeURIComponent(evidenceTicketId)}/evidence/changes`, { method: "POST", body: JSON.stringify({ feedback }) }); notify("Proof changes sent; correction and verification restarted"); }
+    const form = new FormData(event.target);
+    const feedback = form.get("feedback");
+    const criterionIds = form.getAll("criterionId");
+    if (!criterionIds.length) { notify("Select every criterion affected by this correction"); return; }
+    try { await api(`/api/tickets/${encodeURIComponent(evidenceTicketId)}/evidence/changes`, { method: "POST", body: JSON.stringify({ feedback, criterionIds }) }); notify("Proof changes sent; correction and verification restarted"); }
     catch (error) { notify(error.message); }
   }
 });

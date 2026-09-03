@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -223,6 +223,33 @@ test("final review keeps supported visual proof and its final check summary", ()
   assert.deepEqual(review.proof.map((item) => item.media), ["image", "video"]);
   assert.deepEqual(review.checks, { status: "passed", summary: "node scripts/test.mjs", command: undefined });
   assert.deepEqual(review.reviews, [{ role: "integration", summary: "No issues found" }]);
+});
+
+test("proof presentation preserves ordered history and makes typed evidence actionable", () => {
+  const run = {
+    id: "ticket/a", proofMap: {
+      compatibility: false, approvedAt: "2026-09-10T10:00:00.000Z", criteria: [
+        { id: "one", stepId: "build", stepTitle: "Build", index: 0, text: "Works", current: { status: "verified", evidenceValidity: "valid", evidence: [{ type: "check", scope: "step", stepId: "build" }] }, history: [{ status: "unresolved", evidenceValidity: "missing" }] },
+        { id: "two", stepId: "build", stepTitle: "Build", index: 1, text: "Still works", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "diff", scope: "step", stepId: "build" }] }, history: [] },
+        { id: "three", stepId: "visual", stepTitle: "Visual", index: 0, text: "Looks right", current: { status: "verified", evidenceValidity: "missing", evidence: [{ type: "media", artifactId: "screen" }] }, history: [] },
+        { id: "four", stepId: "visual", stepTitle: "Visual", index: 1, text: "Explains failure", current: { status: "failed", evidenceValidity: "missing", evidence: [] }, history: [] },
+        { id: "five", stepId: "visual", stepTitle: "Visual", index: 2, text: "Waiting", current: { status: "unresolved", evidenceValidity: "missing", evidence: [] }, history: [] }
+      ]
+    }
+  };
+  const all = proofMapView(run);
+  assert.deepEqual(all.criteria.map((criterion) => [criterion.id, criterion.state, criterion.history.length]), [
+    ["one", "verified", 1], ["two", "stale", 0], ["three", "missing-evidence", 0], ["four", "failed", 0], ["five", "unresolved", 0]
+  ]);
+  assert.equal(all.criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=step&stepId=build");
+  assert.deepEqual(proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[0], current: { ...run.proofMap.criteria[0].current, evidence: [{ type: "check", scope: "attempt", stepId: "build", attemptId: "attempt-2" }] } }] } }).criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2");
+  assert.deepEqual(all.criteria.slice(2).map((criterion) => [criterion.resultLabel, criterion.evidenceLabel]), [["Verified", "Evidence missing"], ["Failed", "Evidence missing"], ["Not yet verified", "Evidence missing"]]);
+  assert.equal(all.criteria[1].evidence[0].tab, "diff");
+  assert.equal(all.criteria[2].evidence[0].mediaUrl, "/api/tickets/ticket%2Fa/artifacts/screen/media");
+  const missing = proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[2], current: { ...run.proofMap.criteria[2].current, evidence: [{ type: "media", artifactId: "screen", validity: "missing", reason: "missing_evidence" }] } }] } }).criteria[0].evidence[0];
+  assert.deepEqual([missing.unavailable, missing.route, missing.mediaUrl, missing.label], [true, undefined, undefined, "Evidence unavailable: missing evidence"]);
+  assert.equal(all.eligibility.blockingReasons[0].criterionId, "two");
+  assert.equal(proofMapView(run, { stepId: "build" }).criteria.length, 2);
 });
 
 test("free text becomes a local ticket without losing the original request", () => {

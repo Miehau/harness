@@ -32,6 +32,7 @@ import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill,
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
 import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
+import { compactReviewPacket } from "./review-packet.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -343,6 +344,20 @@ function proofGate(run, options) {
 
 function proofGateError(eligibility) {
   return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""}: ${reason.message}`).join("; ")}`;
+}
+
+function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = null } = {}) {
+  if (scope === "final") return run.finalChecks || run.checkpoint?.finalChecks || run.reviews?.at(-1)?.reviews?.find((review) => review.role === "deterministic")?.checks || null;
+  if (!stepId) throw new Error("Step check output requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId) throw new Error("Attempt check output requires an attempt ID");
+    const attempt = (step.attempts || []).find((item) => item.attemptId === attemptId);
+    return attempt?.verification?.checks || attempt?.checks || null;
+  }
+  if (scope !== "step") throw new Error("Unknown check-output scope");
+  return [...(step.attempts || [])].reverse().map((attempt) => attempt.verification?.checks || attempt.checks).find(Boolean) || step.checks || null;
 }
 
 function applyStepProof(run, stepId, reports) {
@@ -2360,6 +2375,28 @@ async function api(request, response, url) {
     const state = store.read();
     const run = ticketRun(state, decodeURIComponent(compactTicketRun[1]));
     return json(response, 200, url.searchParams.get("detail") === "1" ? publicRun(run) : compactRun(run, state.revision));
+  }
+  const proofCheckOutput = url.pathname.match(/^\/api\/tickets\/([^/]+)\/proof\/check-output$/);
+  if (request.method === "GET" && proofCheckOutput) {
+    const run = ticketRun(store.read(), decodeURIComponent(proofCheckOutput[1]));
+    const checks = canonicalCheckOutput(run, {
+      scope: url.searchParams.get("scope") || "step",
+      stepId: url.searchParams.get("stepId"),
+      attemptId: url.searchParams.get("attemptId")
+    });
+    if (!checks) throw new Error("Check output not found");
+    return json(response, 200, checks);
+  }
+  const reviewPacket = url.pathname.match(/^\/api\/tickets\/([^/]+)\/review-packet$/);
+  if (request.method === "GET" && reviewPacket) {
+    const run = ticketRun(store.read(), decodeURIComponent(reviewPacket[1]));
+    const latestReview = run.reviews?.at(-1);
+    const checks = latestReview?.reviews?.find((review) => review.role === "deterministic")?.checks || run.finalChecks || {};
+    return json(response, 200, compactReviewPacket({
+      ticket: run.ticket, plan: run.plan, artifacts: run.artifacts,
+      diff: run.deliveredDiff || latestReview?.diff || {}, checks,
+      proofMap: projectProofMap(run)
+    }));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
     const models = await harness.models("openai-codex");

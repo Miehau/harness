@@ -71,6 +71,26 @@ test("preserves every planned outcome and prioritizes essential artifacts", () =
   assert.equal(packet.artifacts[0].name, "requirements.md");
 });
 
+test("keeps the ordered proof projection, locators, and retained history in the packet", () => {
+  const proofMap = {
+    version: 1, approvedAt: "2026-09-10T10:00:00.000Z", compatibility: false,
+    eligibility: { eligible: false, blockingReasons: [{ criterionId: "criterion-2", message: "Criterion evidence is not currently valid." }] },
+    criteria: [
+      { id: "criterion-1", stepId: "search", stepTitle: "Implement search", stepRequired: true, index: 0, text: "Matching tickets are returned", current: { status: "verified", evidenceValidity: "valid", evidence: [{ type: "check", scope: "step", stepId: "search", validity: "valid" }] }, history: [] },
+      { id: "criterion-2", stepId: "search", stepTitle: "Implement search", stepRequired: true, index: 1, text: "Invalid input is rejected", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "diff", scope: "step", stepId: "search", validity: "valid" }] }, history: [{ status: "verified", evidenceValidity: "valid", evidence: [] }] }
+    ]
+  };
+  const packet = compactReviewPacket({ plan, proofMap });
+
+  assert.deepEqual(packet.proofMap.criteria.map((criterion) => [criterion.id, criterion.text, criterion.current.evidence[0]?.type, criterion.history.length]), [
+    ["criterion-1", "Matching tickets are returned", "check", 0],
+    ["criterion-2", "Invalid input is rejected", "diff", 1]
+  ]);
+  assert.equal(packet.proofMap.eligibility.blockingReasons[0].criterionId, "criterion-2");
+  proofMap.criteria[0].current.status = "failed";
+  assert.equal(packet.proofMap.criteria[0].current.status, "verified");
+});
+
 test("bounds canonical diff and deterministic check output", () => {
   const longText = "x".repeat(80_000);
   const packet = compactReviewPacket({

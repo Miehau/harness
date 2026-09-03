@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -18,6 +19,15 @@ function runCheck({ args }) {
 }
 
 let failed = false;
+const capturePath = resolve(repositoryRoot, ".agent-plan", "capture-proof-dashboard.mjs");
+if (await stat(capturePath).then(() => true, () => false)) {
+  process.stdout.write("Capturing criterion-proof dashboard evidence\n");
+  const capture = await runCheck({ args: [".agent-plan/capture-proof-dashboard.mjs"] });
+  if (capture.error || capture.code !== 0) {
+    failed = true;
+    process.stderr.write(`Failed criterion-proof dashboard capture${capture.error ? `: ${capture.error.message}` : ""}\n`);
+  }
+}
 for (const check of checks) {
   process.stdout.write(`Running ${check.name}\n`);
   const result = await runCheck(check);
