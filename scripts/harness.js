@@ -1,4 +1,4 @@
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +26,7 @@ export function mockHarness() {
   };
 }
 
-export async function invoke(daemon, method, path, { body, token } = {}) {
+export async function invoke(daemon, method, path, { body, token, headers: requestHeaders = {} } = {}) {
   const payload = body === undefined ? "" : JSON.stringify(body);
   const request = Readable.from([Buffer.from(payload, "utf8")]);
   request.method = method;
@@ -34,22 +34,19 @@ export async function invoke(daemon, method, path, { body, token } = {}) {
   request.headers = {
     host: "127.0.0.1:4317",
     "content-type": "application/json",
-    ...(token ? { authorization: "Bearer " + token } : {})
+    ...(token ? { authorization: "Bearer " + token } : {}),
+    ...requestHeaders
   };
   let status = 200;
   let headers = {};
   const chunks = [];
-  const response = {
-    headersSent: false,
-    destroyed: false,
-    writableNeedDrain: false,
-    writeHead(code, hdrs) { status = code; headers = hdrs || {}; this.headersSent = true; },
-    write(chunk) { chunks.push(Buffer.from(chunk)); return true; },
-    end(chunk) { if (chunk) chunks.push(Buffer.from(chunk)); this.ended = true; },
-    destroy() { this.destroyed = true; },
-    on() { return this; }
-  };
+  const response = new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } });
+  response.headersSent = false;
+  response.writeHead = function writeHead(code, hdrs) { status = code; headers = hdrs || {}; this.headersSent = true; return this; };
   await daemon.handleRequest(request, response);
+  for (let attempt = 0; !response.writableEnded && !response.destroyed && attempt < 100; attempt++) {
+    await new Promise((resolveWait) => setImmediate(resolveWait));
+  }
   const text = Buffer.concat(chunks).toString();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = null; }

@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, proofCaptureUrl, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -210,11 +210,9 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
   const current = ticketRun(store.read(), ticketId);
   const checks = await harness.runRepositoryChecks({
     cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
-    // Canonical screenshots must render the code under review. The ticket
-    // preview serves worktree assets and a ticket-scoped state snapshot; the
-    // operator daemon serves the main checkout and therefore cannot prove UI
-    // changes made in the isolated ticket worktree.
-    environment: required ? liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId) : {}
+    // The proof route combines authoritative live state from this daemon with
+    // static UI assets from the isolated ticket worktree.
+    environment: required ? liveCaptureEnvironment(proofCaptureUrl(server.address(), ticketId), ticketId, current.runId) : {}
   });
   reconcileVisualChecks(checks, evidence, { required, requiredVideo });
   if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
@@ -2779,7 +2777,21 @@ async function api(request, response, url) {
   json(response, 404, { error: "Not found" });
 }
 
-const handleRequest = createHandleRequest({ publicDir, apiToken, host, port, api });
+function proofStaticContext(request, url) {
+  const cookieName = "agent_plan_proof_ticket";
+  const requestedId = url.searchParams.get("proof-ticket");
+  const cookieId = String(request.headers.cookie || "").split(";").map((item) => item.trim().split("=")).find(([name]) => name === cookieName)?.[1];
+  let ticketId = requestedId;
+  if (!ticketId && cookieId) try { ticketId = decodeURIComponent(cookieId); } catch {}
+  const cwd = store.read().ticketRuns?.[ticketId]?.workspace?.cwd;
+  if (!cwd) return null;
+  return {
+    publicDir: join(cwd, "public"),
+    headers: requestedId ? { "set-cookie": `${cookieName}=${encodeURIComponent(ticketId)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=300` } : {}
+  };
+}
+
+const handleRequest = createHandleRequest({ publicDir, staticContext: proofStaticContext, apiToken, host, port, api });
 const server = createServer(handleRequest);
 const sseHeartbeat = setInterval(() => {
   for (const client of clients) writeSse(client, ":\n\n");
