@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, cleanupLegacyReviewArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -20,6 +20,18 @@ test("isolates step attempts within one ticket run", async () => {
   });
   assert.match(artifact.path, /runs\/run-7\/artifacts\/implement\/api-slice\/attempt-2\/result\.md$/);
   assert.equal(await readFile(artifact.path, "utf8"), "attempt two");
+});
+
+test("hydrates compact artifact metadata only from app storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ticket-hydration-"));
+  const stored = await persistArtifact(root, { identifier: "MM-42" }, { name: "result.md", content: "full result", runId: "run-7" });
+  const compact = { ...stored, content: undefined, bodyStored: true };
+  assert.equal((await hydrateArtifact(compact, root)).content, "full result");
+  assert.equal((await hydrateArtifacts([compact], root))[0].content, "full result");
+  await assert.rejects(
+    hydrateArtifact({ id: "unsafe", name: "unsafe.md", path: join(tmpdir(), "unsafe.md"), bodyStored: true }, root),
+    /outside the data directory/
+  );
 });
 
 test("safeName constrains directory components", () => {

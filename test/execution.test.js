@@ -630,7 +630,7 @@ test("compact run and public state omit artifact bodies", () => {
       { rawOutput: "old", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "historical detail" }] },
       { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], verification: { rawOutput: "review transcript" }, diff: { files: ["a.js"], patch: "attempt patch" }, checkDiff: { patch: "check patch" }, aggregateDiff: { patch: "aggregate patch" } }
     ] }] },
-    reviews: [{ diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" } } }]
+    reviews: [{ diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" }, artifact: { id: "fix", name: "fix.md", kind: "review-fix", bodyStored: true, bodySummary: "private fix" } } }]
   };
   const compact = compactRun(run, 9);
   assert.equal(compact.revision, 9);
@@ -657,6 +657,7 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].checkDiff.patch, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].aggregateDiff.patch, undefined);
   assert.equal(published.ticketRuns.t1.reviews[0].diff.patch, undefined);
+  assert.equal(published.ticketRuns.t1.reviews[0].fix.artifact.bodySummary, undefined);
 });
 
 test("public state fully projects only the selected run", () => {

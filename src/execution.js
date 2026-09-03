@@ -791,7 +791,7 @@ export function workflowResumeStage(run) {
 
 export function artifactMetadata(artifact) {
   if (!artifact || typeof artifact !== "object") return artifact;
-  const { content, ...rest } = artifact;
+  const { content, bodySummary, ...rest } = artifact;
   return rest;
 }
 
@@ -845,7 +845,10 @@ export function publicRun(run) {
   }
   for (const review of clone.reviews || []) {
     review.diff = diffSummary(review.diff);
-    if (review.fix) review.fix.diff = diffSummary(review.fix.diff);
+    if (review.fix) {
+      review.fix.diff = diffSummary(review.fix.diff);
+      review.fix.artifact = artifactMetadata(review.fix.artifact);
+    }
   }
   return clone;
 }

@@ -1,5 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { artifactPathInDataDir } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
 
@@ -17,9 +19,12 @@ function initialState(cwd) {
   };
 }
 
-const STATE_EVENT_DETAIL_LIMIT = 8000;
-const STATE_PROMPT_LIMIT = 200000;
-const STATE_OUTPUT_LIMIT = 100000;
+const STATE_EVENT_DETAIL_LIMIT = 4000;
+const STATE_PROMPT_LIMIT = 50000;
+const STATE_OUTPUT_LIMIT = 50000;
+const STATE_ARTIFACT_SUMMARY_LIMIT = 1000;
+const STATE_EVENT_COUNT_LIMIT = 100;
+const STATE_PROMPT_COUNT_LIMIT = 10;
 
 function boundedAuditText(value, limit) {
   if (typeof value !== "string" || value.length <= limit) return value;
@@ -28,12 +33,12 @@ function boundedAuditText(value, limit) {
 
 function compactActivity(activity) {
   if (!activity) return;
-  activity.events = (activity.events || []).slice(-200).map((event) => {
+  activity.events = (activity.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
     const compact = { ...event };
     for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
     return compact;
   });
-  activity.prompts = (activity.prompts || []).slice(-20).map((prompt) => ({
+  activity.prompts = (activity.prompts || []).slice(-STATE_PROMPT_COUNT_LIMIT).map((prompt) => ({
     ...prompt,
     content: boundedAuditText(prompt.content, STATE_PROMPT_LIMIT),
     prompt: boundedAuditText(prompt.prompt, STATE_PROMPT_LIMIT)
@@ -46,7 +51,24 @@ function compactDiff(diff) {
   if (diff && typeof diff === "object") delete diff.patch;
 }
 
-export function compactPersistedState(state) {
+function compactArtifactBodies(value, dataDir) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) compactArtifactBodies(item, dataDir);
+    return;
+  }
+  const storedPath = typeof value.content === "string" && value.id && value.name && value.kind
+    ? artifactPathInDataDir(value, dataDir)
+    : null;
+  if (storedPath && existsSync(storedPath)) {
+    value.bodyStored = true;
+    value.bodySummary = boundedAuditText(value.content, STATE_ARTIFACT_SUMMARY_LIMIT);
+    delete value.content;
+  }
+  for (const child of Object.values(value)) compactArtifactBodies(child, dataDir);
+}
+
+export function compactPersistedState(state, dataDir = null) {
   for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) {
     for (const stage of run.stages || []) {
       compactActivity(stage.activity);
@@ -56,7 +78,7 @@ export function compactPersistedState(state) {
     for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
       compactDiff(step.diff);
       for (const attempt of step.attempts || []) {
-        attempt.events = (attempt.events || []).slice(-200).map((event) => {
+        attempt.events = (attempt.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
           const compact = { ...event };
           for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
           return compact;
@@ -74,6 +96,7 @@ export function compactPersistedState(state) {
       compactDiff(review.fix?.diff);
     }
   }
+  if (dataDir) compactArtifactBodies(state, dataDir);
   return state;
 }
 
@@ -156,7 +179,7 @@ export class JsonStore {
   }
 
   async save() {
-    compactPersistedState(this.state);
+    compactPersistedState(this.state, dirname(this.file));
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
     await rename(temporary, this.file);

@@ -6,6 +6,7 @@ import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
 import { auditHarnessWriteScopes, closeSseClients, reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
+import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("reports missing visual evidence instead of mislabeling passing checks", () => {
@@ -127,6 +128,19 @@ test("ticket selection returns the selected public run without artifact bodies",
     assert.equal(selected.json.revision > 0, true);
     assert.equal(selected.json.run.id, id);
     assert.equal(selected.json.run.artifacts[0].content, undefined);
+  });
+});
+
+test("artifact endpoint hydrates a compact body from its persisted file", async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const artifact = await persistArtifact(dataDir, { identifier: "MEA-1" }, {
+      name: "proof.md", content: "full persisted proof", runId: "run-1", stageId: "verify"
+    });
+    const id = await seedRun(daemon, { artifacts: [artifact] });
+    assert.equal(daemon.store.read().ticketRuns[id].artifacts[0].content, undefined);
+    const response = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifact.id)}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.json.content, "full persisted proof");
   });
 });
 

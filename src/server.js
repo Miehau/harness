@@ -6,7 +6,7 @@ import { isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { artifactPathForOpen, cleanupLegacyReviewArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
@@ -542,12 +542,13 @@ async function resumeTicketPipeline(ticketId) {
   if (stage === "requirements_review") {
     const draft = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "requirements-draft");
     if (!run.checkpoint && draft) {
+      const prompt = (await hydrateArtifact(draft, dataDir)).content;
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_requirements";
         current.checkpoint = {
           id: randomUUID(), kind: "requirements_review", title: "Approve ticket requirements",
-          prompt: draft.content, questions: [], createdAt: new Date().toISOString()
+          prompt, questions: [], createdAt: new Date().toISOString()
         };
         setStage(current, "requirements", "blocked", "Requirement approval needed before repository access");
       });
@@ -559,11 +560,12 @@ async function resumeTicketPipeline(ticketId) {
   if (stage === "design") return startTicketWork(ticketId, (signal) => designTicket(ticketId, "Continue after the supervisor workflow gate.", signal));
   if (stage === "plan_approval") {
     if (!run.checkpoint) {
+      const design = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "architecture");
+      const prompt = design ? (await hydrateArtifact(design, dataDir)).content : "";
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_approval";
-        const design = [...(current.artifacts || [])].reverse().find((artifact) => artifact.kind === "architecture");
-        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: design?.content || "", createdAt: new Date().toISOString() };
+        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt, createdAt: new Date().toISOString() };
         setStage(current, "design", "blocked", "Plan ready for approval");
       });
     }
@@ -891,7 +893,10 @@ async function continueAfterRequirements(ticketId, answers) {
     const draft = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements-draft");
     const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
     if ((!approved && !draft) || !productContext) throw new Error("Requirements draft or product context snapshot not found");
-    const requirements = approved?.content || `${draft.content}\n\n## User clarification\nApproved without changes.`;
+    const [approvedBody, draftBody, productContextBody] = await Promise.all([
+      hydrateArtifact(approved, dataDir), hydrateArtifact(draft, dataDir), hydrateArtifact(productContext, dataDir)
+    ]);
+    const requirements = approvedBody?.content || `${draftBody.content}\n\n## User clarification\nApproved without changes.`;
     const ticketHorizon = formatTicketHorizon(run.ticket, [
       ...ticketCache.values(),
       ...Object.values(before.ticketRuns).map((ticketRun) => ticketRun.ticket)
@@ -927,13 +932,13 @@ async function continueAfterRequirements(ticketId, answers) {
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
-        productContext: productContext.content, requirements, profile: run.stageProfiles.exploration,
+        productContext: productContextBody.content, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"),
         onSessionFile: saveRunSession(ticketId), signal
       }),
       harness.lookAheadTickets({
         cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
-        productContext: productContext.content, requirements, ticketHorizon, profile: run.stageProfiles.exploration,
+        productContext: productContextBody.content, requirements, ticketHorizon, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "ticket look-ahead"), signal
       })
     ]);
@@ -993,8 +998,12 @@ async function designTicket(ticketId, answers, signal) {
   const requirements = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements");
   const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
   const exploration = [...run.artifacts].reverse().find((artifact) => artifact.kind === "implementation-delta");
-  const ticketLookAhead = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead")?.content || "No nearby ticket implications were found.";
+  const ticketLookAheadArtifact = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead");
   if (!requirements || !productContext || !exploration) throw new Error("Approved requirements, product context, and implementation delta are required before design");
+  const [requirementsBody, productContextBody, explorationBody, ticketLookAheadBody] = await Promise.all([
+    hydrateArtifact(requirements, dataDir), hydrateArtifact(productContext, dataDir), hydrateArtifact(exploration, dataDir), hydrateArtifact(ticketLookAheadArtifact, dataDir)
+  ]);
+  const ticketLookAhead = ticketLookAheadBody?.content || "No nearby ticket implications were found.";
   if (executionBlockedByWorkflow(run)) {
     await update((draft) => { pauseIfWorkflowBlocked(ticketRun(draft, ticketId)); });
     await mirrorCheckpoint(ticketId);
@@ -1015,7 +1024,7 @@ async function designTicket(ticketId, answers, signal) {
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
-      productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, ticketLookAhead, answers,
+      productContext: productContextBody.content, requirements: requirementsBody.content, exploration: explorationBody.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
       onSessionFile: saveRunSession(ticketId), signal
     });
@@ -1096,10 +1105,10 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const startedAt = new Date().toISOString();
         const attemptId = `attempt-${(currentStep.attempts?.length || 0) + 1}`;
         attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
-        const contextArtifacts = [
+        const contextArtifacts = await hydrateArtifacts([
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
           ...dependencyArtifacts(latest.plan, currentStep)
-        ];
+        ], dataDir);
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
@@ -1216,7 +1225,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           current.activeRuns[stepId].warning = false;
           setStage(current, "implement", "active", `Fresh verification: ${currentStep.title}`);
         });
-        const design = [...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture")?.content || "";
+        const designArtifact = [...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture");
+        const design = designArtifact ? (await hydrateArtifact(designArtifact, dataDir)).content : "";
         activity.onEvent({ type: "phase", label: `Verifying ${currentStep.title}` });
         const deterministicReview = repositoryCheckReview(checks);
         const verification = deterministicReview.findings.length ? {
@@ -1402,7 +1412,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
-    cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd, plan: current.plan, step, artifacts: await hydrateArtifacts(current.artifacts, dataDir), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
@@ -1438,7 +1448,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
     expectedArtifacts: ["remote-review-fix.md"], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
-    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: await hydrateArtifacts(current.artifacts, dataDir), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
@@ -1757,11 +1767,13 @@ async function completeCleanReview({ ticketId, current, round, checks, diff, act
   let contextContent = null;
   let handoffActivity = null;
   if (current.ticket.source !== "local") {
-    const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
+    const currentContextArtifact = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
+    const currentContext = currentContextArtifact ? (await hydrateArtifact(currentContextArtifact, dataDir)).content : "";
+    const contextArtifacts = await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)), dataDir);
     handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
     contextContent = await harness.updateProductContext({
       cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
-      artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
+      artifacts: contextArtifacts,
       diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
     });
     signal?.throwIfAborted();
@@ -1880,11 +1892,12 @@ async function finalReviewLoop(ticketId, signal) {
     const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
     const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
     const operatorFeedback = [reviewFixConstraints(current), current.pendingEvidenceFeedback || ""].filter(Boolean).join("\n");
+    const reviewArtifacts = await hydrateArtifacts(current.artifacts, dataDir);
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
       plan: current.plan,
-      artifacts: current.artifacts,
+      artifacts: reviewArtifacts,
       diff,
       checks,
       focusFindings,
@@ -1947,7 +1960,7 @@ async function finishHandoff(ticketId) {
   const current = ticketRun(store.read(), ticketId);
   if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
-  const contextContent = current.ticket.source === "local" ? null : proposal?.content;
+  const contextContent = current.ticket.source === "local" ? null : (await hydrateArtifact(proposal, dataDir))?.content;
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
   const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent });
   queued.promise.catch(() => {});
@@ -2335,7 +2348,7 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), decodeURIComponent(artifactGet[1]));
     const artifact = (run.artifacts || []).find((item) => item.id === decodeURIComponent(artifactGet[2]));
     if (!artifact) throw new Error("Artifact not found");
-    return json(response, 200, artifact);
+    return json(response, 200, await hydrateArtifact(artifact, dataDir));
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
   if (request.method === "GET" && sessionTrace) {
@@ -2507,7 +2520,8 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     if (run.recovery?.kind === "delivery") {
       if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
-      const contextContent = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")?.content || null;
+      const contextArtifact = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update");
+      const contextContent = (await hydrateArtifact(contextArtifact, dataDir))?.content || null;
       const diff = run.reviews?.at(-1)?.diff || null;
       scheduleTicketIntegration(id, { diff, contextContent }).catch(() => {});
       return json(response, 202, { accepted: true, ticketId: id, recovery: "delivery" });

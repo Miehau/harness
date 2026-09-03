@@ -34,9 +34,24 @@ export async function cleanupLegacyReviewArtifacts(cwd) {
 }
 
 export function artifactPathForOpen(artifacts, id, dataDir) {
-  const path = artifacts?.find((artifact) => artifact.id === id)?.path;
+  return artifactPathInDataDir(artifacts?.find((artifact) => artifact.id === id), dataDir);
+}
+
+export function artifactPathInDataDir(artifact, dataDir) {
+  const path = artifact?.path;
   const root = `${resolve(dataDir)}${sep}`;
   return path && resolve(path).startsWith(root) ? resolve(path) : null;
+}
+
+export async function hydrateArtifact(artifact, dataDir) {
+  if (!artifact || typeof artifact !== "object" || typeof artifact.content === "string" || !artifact.bodyStored) return artifact;
+  const path = artifactPathInDataDir(artifact, dataDir);
+  if (!path) throw new Error(`Artifact body is outside the data directory: ${artifact.name || artifact.id || "unknown"}`);
+  return { ...artifact, content: await readFile(path, "utf8") };
+}
+
+export async function hydrateArtifacts(artifacts = [], dataDir) {
+  return Promise.all((artifacts || []).map((artifact) => hydrateArtifact(artifact, dataDir)));
 }
 
 export function visualEvidenceArtifacts(artifacts = []) {
