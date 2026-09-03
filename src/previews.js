@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
 import { visualEvidenceMedia } from "./artifacts.js";
 import { execFileTree, signalProcessTree } from "./process-tree.js";
+
+const screenshotScript = fileURLToPath(new URL("../scripts/screenshot.mjs", import.meta.url));
+const activeStepSelector = ".step.status-running[data-step], .step.status-fixing[data-step], .step.status-verifying[data-step], .step.status-interrupted[data-step], .step.status-needs_attention[data-step], .step.status-review_ready[data-step]";
 
 export function availablePort(host = "127.0.0.1") {
   return new Promise((resolvePort, reject) => {
@@ -106,20 +110,20 @@ export class PreviewManager {
   async capture(id, { source = process.env } = {}) {
     const preview = this.active.get(id);
     if (!preview) throw new Error("Preview is not running");
-    const browser = await chromiumPath(source);
     const directory = join(this.dataDir, "visual-evidence", id.replace(/[^a-z0-9._-]+/gi, "-"));
     await mkdir(directory, { recursive: true });
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
-      const browserProfile = await mkdtemp(join(directory, `.chromium-${name}-`));
       await unlink(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
       try {
-        await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", `--user-data-dir=${browserProfile}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+        await this.exec(process.execPath, [screenshotScript, "--url", preview.public.url, "--out", path, "--width", String(width), "--height", String(height), "--wait-ms", "1200", "--click", activeStepSelector], {
+          env: { ...process.env, ...source }, timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
+        });
       } catch (error) {
         if (!/timed out/i.test(error.message)) throw error;
         try { await access(path); } catch { throw error; }
-      } finally { await rm(browserProfile, { recursive: true, force: true }); }
+      }
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
     return evidence;

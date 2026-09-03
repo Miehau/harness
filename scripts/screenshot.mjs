@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { previewChromiumPath } from "../src/previews.js";
+import { signalProcessTree } from "../src/process-tree.js";
 
 async function waitFor(url, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
@@ -28,14 +29,14 @@ function sendCdp(socket) {
   });
 }
 
-export async function capturePage({ url, out, click = null, eval: script = null, waitMs = 600 }) {
+export async function capturePage({ url, out, click = null, eval: script = null, waitMs = 600, width = 1440, height = 900 }) {
   await waitFor(url);
   const profile = await mkdtemp(join(tmpdir(), "agent-plan-chrome-"));
   const chrome = spawn(await previewChromiumPath(), [
     "--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--window-size=1440,900", url
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+    `--window-size=${width},${height}`, url
+  ], { detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
   let debugPort;
   try {
     debugPort = await new Promise((resolve, reject) => {
@@ -76,7 +77,14 @@ export async function capturePage({ url, out, click = null, eval: script = null,
     await writeFile(out, Buffer.from(shot.data, "base64"));
     socket.close();
   } finally {
-    chrome.kill("SIGTERM");
+    signalProcessTree(chrome);
+    await new Promise((resolve) => {
+      if (chrome.exitCode !== null) return resolve();
+      const timer = setTimeout(resolve, 1000);
+      chrome.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+    if (chrome.exitCode === null) signalProcessTree(chrome, "SIGKILL");
+    await rm(profile, { recursive: true, force: true });
   }
   return out;
 }
@@ -88,7 +96,15 @@ if (isMain) {
     const index = args.indexOf(name);
     return index >= 0 ? args[index + 1] : null;
   };
-  capturePage({ url: option("--url"), out: option("--out"), click: option("--click") }).then((path) => {
+  const numberOption = (name, fallback) => Number(option(name)) || fallback;
+  capturePage({
+    url: option("--url"),
+    out: option("--out"),
+    click: option("--click"),
+    waitMs: numberOption("--wait-ms", 600),
+    width: numberOption("--width", 1440),
+    height: numberOption("--height", 900)
+  }).then((path) => {
     process.stdout.write(`${path}\n`);
   }, (error) => {
     process.stderr.write(`${error.message}\n`);

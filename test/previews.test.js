@@ -39,10 +39,9 @@ test("starts a named preview with isolated port variables and captures desktop a
     assert.deepEqual(evidence.map(({ viewport }) => viewport), [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
     assert.deepEqual(evidence.map(({ mediaType, mediaKind }) => ({ mediaType, mediaKind })), [{ mediaType: "image/png", mediaKind: "image" }, { mediaType: "image/png", mediaKind: "image" }]);
     assert.equal(captures.length, 2);
-    const profiles = captures.map(({ args }) => args.find((arg) => arg.startsWith("--user-data-dir=")).slice("--user-data-dir=".length));
-    assert.equal(captures.every(({ args }) => !args.some((arg) => arg.startsWith("--virtual-time-budget=")) && args.includes("--run-all-compositor-stages-before-draw")), true);
-    assert.notEqual(profiles[0], profiles[1]);
-    await Promise.all(profiles.map((profile) => assert.rejects(readFile(profile), /ENOENT|EISDIR/)));
+    assert.equal(captures.every(({ file, args }) => file === process.execPath && args[0].endsWith("/scripts/screenshot.mjs")), true);
+    assert.deepEqual(captures.map(({ args }) => [args[args.indexOf("--width") + 1], args[args.indexOf("--height") + 1]]), [["1440", "900"], ["390", "844"]]);
+    assert.equal(captures.every(({ args }) => args.includes("--click") && args[args.indexOf("--click") + 1].includes("status-running")), true);
     assert.equal(manager.stop("ticket-1"), true);
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
@@ -73,7 +72,7 @@ test("a timed-out Chromium capture is usable when its screenshot was written", a
   const dataDir = await mkdtemp(join(tmpdir(), "preview-timeout-"));
   try {
     const manager = new PreviewManager({ dataDir, captureTimeoutMs: 10, execImpl: async (_file, args) => {
-      const output = args.find((arg) => arg.startsWith("--screenshot=")).slice("--screenshot=".length);
+      const output = args[args.indexOf("--out") + 1];
       await writeFile(output, "png");
       throw new Error("Chromium timed out after 10ms");
     } });
