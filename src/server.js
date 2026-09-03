@@ -1913,7 +1913,7 @@ async function finalReviewLoop(ticketId, signal) {
       return;
     }
     const reviewsWithCurrent = [...(current.reviews || []), { round, actionableFindings: findings }];
-    const decision = shouldPauseCorrection({ round: correctionWindowRound(round, reviewsWithCurrent), findings, previousFingerprint });
+    const decision = shouldPauseCorrection({ round: correctionWindowRound(round, reviewsWithCurrent, current.correctionWindowStartRound), findings, previousFingerprint });
     if (decision.pause) {
       const pauseReason = correctionPauseReason(decision.reason, findings);
       await update((state) => {

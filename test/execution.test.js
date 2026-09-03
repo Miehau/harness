@@ -222,6 +222,21 @@ test("failed and paused workflows can resume from their persisted stage", () => 
   assert.ok(paused.pauseHistory[0].resumedAt);
 });
 
+test("operator resume opens a fresh audited correction window after the cap", () => {
+  const run = {
+    status: "needs_attention",
+    lastError: "Paused after 12 verification attempts without a passing result.",
+    checkpoint: { title: "Correction stalled", prompt: "Latest high finding" },
+    reviews: [{ round: 12, actionableFindings: [{ severity: "high", claim: "Latest high finding" }] }],
+    plan: normalizePlan({ nodes: [{ id: "done", title: "Done", status: "accepted" }] })
+  };
+  assert.equal(prepareRunResume(run), true);
+  assert.equal(run.correctionWindowStartRound, 13);
+  assert.equal(run.correctionResumes.length, 1);
+  assert.equal(run.correctionResumes[0].afterRound, 12);
+  assert.equal(correctionWindowRound(13, run.reviews, run.correctionWindowStartRound), 1);
+});
+
 test("clearing the queue preserves active runs", () => {
   const state = { selectedTicketId: "old", ticketRuns: { old: { status: "cancelled" }, stale: { status: "awaiting_approval" }, active: { status: "running" }, merge: { status: "merging" } } };
   assert.equal(clearInactiveRuns(state, new Set(["stale", "active", "merge"])), 2);

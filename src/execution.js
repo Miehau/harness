@@ -435,6 +435,11 @@ export function resumeStage(run) {
 
 export function prepareRunResume(run) {
   if (!["cancelled", "needs_attention", "failed", "paused"].includes(run?.status)) return false;
+  if (run.status === "needs_attention" && run.checkpoint?.title === "Correction stalled") {
+    const afterRound = Math.max(0, ...(run.reviews || []).map((review) => Number(review.round) || 0));
+    run.correctionWindowStartRound = afterRound + 1;
+    (run.correctionResumes ||= []).push({ afterRound, at: new Date().toISOString(), reason: run.lastError || run.checkpoint.prompt || "Correction stalled" });
+  }
   if (run.status === "paused") {
     const pause = run.pauseHistory?.at(-1);
     if (pause && !pause.resumedAt) pause.resumedAt = new Date().toISOString();
@@ -613,11 +618,12 @@ export function shouldPauseCorrection({ round, findings, previousFingerprint, ma
   return { pause: false, fingerprint };
 }
 
-export function correctionWindowRound(round, reviews = []) {
+export function correctionWindowRound(round, reviews = [], resumedAtRound = null) {
   const latestHumanRound = [...reviews].reverse().find((review) =>
     (review.actionableFindings || review.findings || []).some((finding) => finding.category === "human-proof-review")
   )?.round;
-  return latestHumanRound ? Math.max(1, Number(round) - Number(latestHumanRound) + 1) : Number(round);
+  const windowStart = Math.max(Number(latestHumanRound) || 0, Number(resumedAtRound) || 0);
+  return windowStart ? Math.max(1, Number(round) - windowStart + 1) : Number(round);
 }
 
 export function pendingReviewFix(reviews = []) {
