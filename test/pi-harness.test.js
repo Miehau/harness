@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 
@@ -98,6 +98,13 @@ test("configured guidance is emitted once per stage in a session", () => {
   assert.match(harness.configuredPrompt(session, profile, "Hard contract."), /Ask only consequential questions[\s\S]*Hard contract/);
   assert.equal(harness.configuredPrompt(session, profile, "Follow-up contract."), "Follow-up contract.");
   assert.match(harness.configuredPrompt(session, { ...profile, id: "exploration" }, "Explore."), /Ask only consequential questions[\s\S]*Explore/);
+});
+
+test("worker project commands defer canonical verification to the framework", async () => {
+  const result = await projectCommandTool("/unused").execute("call-1", { name: "verify" });
+  assert.equal(result.isError, false);
+  assert.equal(result.details.status, "deferred");
+  assert.match(result.content[0].text, /once after worker_report/);
 });
 
 test("architecture workers see completed and future plan outcomes without unrelated verification ownership", () => {
