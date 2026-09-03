@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1818,7 +1818,7 @@ async function finalReviewLoop(ticketId, signal) {
     const latestReview = run.reviews.at(-1);
     if (latestReview) {
       const refreshed = refreshedReviewFindings(latestReview);
-      if (findingsFingerprint(refreshed) !== findingsFingerprint(latestReview.actionableFindings || [])) {
+      if (storedFindingsFingerprint(refreshed) !== storedFindingsFingerprint(latestReview.actionableFindings || [])) {
         latestReview.actionableFindings = refreshed;
         latestReview.findingsRefreshedAt = new Date().toISOString();
         if (latestReview.fix?.report?.status === "completed") delete latestReview.fix.report;

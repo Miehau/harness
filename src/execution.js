@@ -558,6 +558,16 @@ export function findingsFingerprint(findings = []) {
     .join("|");
 }
 
+export function storedFindingsFingerprint(findings = []) {
+  return findings
+    .map((finding) => {
+      const evidence = finding.evidence?.[0] || {};
+      return `${finding.severity || ""}:${finding.category || ""}:${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
+    })
+    .sort()
+    .join("|");
+}
+
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
   const counts = new Map();
   for (const review of reviews) {

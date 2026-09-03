@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -119,6 +119,15 @@ test("resuming review refreshes canonical findings from durable raw reviewer out
   ];
   const review = { reviews: [{ role: "verification", findings: distinct }], actionableFindings: [distinct[0]] };
   assert.deepEqual(refreshedReviewFindings(review), distinct);
+});
+
+test("review refresh detects findings removed by canonicalization", () => {
+  const generic = { severity: "high", category: "tests", claim: "The required suite is not green: the gate reports failures", evidence: [{ file: ".agent-plan/verify.mjs", line: 8 }] };
+  const concrete = { severity: "medium", category: "tests", claim: "The producedAt assertion is stale", evidence: [{ file: "test/proof-map.test.js", line: 85 }] };
+  const stored = [generic, concrete];
+  const refreshed = actionableFindings([{ findings: stored }]);
+  assert.equal(findingsFingerprint(stored), findingsFingerprint(refreshed));
+  assert.notEqual(storedFindingsFingerprint(stored), storedFindingsFingerprint(refreshed));
 });
 
 test("automatic corrections ignore findings below medium severity", () => {
