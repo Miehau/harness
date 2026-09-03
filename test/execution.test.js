@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -154,6 +154,14 @@ test("an interrupted review round reuses its persisted deterministic attempt", (
   const attempt = { round: 12, checks: { status: "passed" }, diff: { available: true }, verificationDiff: { available: true } };
   assert.equal(pendingReviewAttempt({ pendingReviewAttempt: attempt }, 12), attempt);
   assert.equal(pendingReviewAttempt({ pendingReviewAttempt: attempt }, 13), null);
+});
+
+test("final proof feedback becomes a durable actionable review finding", () => {
+  const [finding] = humanProofFindings("Fix the clipped mobile worker row");
+  assert.equal(finding.category, "human-proof-review");
+  assert.equal(finding.severity, "blocking");
+  assert.match(finding.claim, /clipped mobile worker row/);
+  assert.deepEqual(humanProofFindings("  "), []);
 });
 
 test("automatic corrections ignore findings below medium severity", () => {

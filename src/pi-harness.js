@@ -1171,7 +1171,7 @@ ${diff.patch || "No textual diff"}`;
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, focusFindings = [], images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -1232,7 +1232,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     try {
       signal?.throwIfAborted();
       const turnPrompt = existingFile
-        ? "Continue the interrupted independent review from the existing conversation. Do not restart repository inspection. Return only the required review JSON."
+        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
       await session.prompt(turnPrompt, { images: existingFile ? [] : images });

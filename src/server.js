@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1867,7 +1867,8 @@ async function finalReviewLoop(ticketId, signal) {
     }
     const reviewImages = await harness.evidenceImages(checks.evidence);
     signal?.throwIfAborted();
-    const focusFindings = actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] })));
+    const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
+    const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
@@ -1876,6 +1877,7 @@ async function finalReviewLoop(ticketId, signal) {
       diff,
       checks,
       focusFindings,
+      operatorFeedback: current.pendingEvidenceFeedback || "",
       images: reviewImages,
       role,
       round,
@@ -1895,10 +1897,6 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
-    const humanEvidenceFinding = current.pendingEvidenceFeedback ? [{
-      severity: "blocking", category: "human-proof-review", claim: current.pendingEvidenceFeedback,
-      evidence: [], suggestedFix: current.pendingEvidenceFeedback, confidence: "high"
-    }] : [];
     const findings = [...actionableFindings(reviews), ...humanEvidenceFinding];
     await update((state) => {
       const run = ticketRun(state, ticketId);
@@ -2615,9 +2613,16 @@ async function api(request, response, url) {
     if (!feedback) throw new Error("Describe the final-proof changes required before continuing");
     const run = ticketRun(store.read(), id);
     if (run.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting changes");
+    const checkpoint = run.checkpoint;
     await update((state) => {
       const current = ticketRun(state, id);
       current.pendingEvidenceFeedback = feedback;
+      (current.evidenceFeedbackHistory ||= []).push({
+        feedback,
+        checkpointId: checkpoint.id,
+        evidenceArtifactIds: checkpoint.evidenceArtifactIds || [],
+        createdAt: new Date().toISOString()
+      });
       current.checkpoint = null;
       current.status = "reviewing";
       setStage(current, "verify", "active", "Addressing final proof review feedback");

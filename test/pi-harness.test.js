@@ -530,10 +530,12 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     await harness.reviewTicket({
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
       plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }), artifacts: [], diff: { files: [], patch: "" },
-      checks: { status: "passed", summary: "Passed" }, images: [{ data: "large" }], role: "integration", round: 2, runId: "run"
+      checks: { status: "passed", summary: "Passed" }, operatorFeedback: "Fix the blank status pill and clipped mobile worker row.", images: [{ data: "large" }], role: "integration", round: 2, runId: "run"
     });
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
+    assert.match(prompt, /New operator final-proof feedback/);
+    assert.match(prompt, /blank status pill and clipped mobile worker row/);
     assert.deepEqual(promptImages, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

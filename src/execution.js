@@ -587,6 +587,14 @@ export function pendingReviewAttempt(run, round) {
   return Number(attempt?.round) === Number(round) && attempt?.checks && attempt?.diff ? attempt : null;
 }
 
+export function humanProofFindings(feedback) {
+  const claim = String(feedback || "").trim();
+  return claim ? [{
+    severity: "blocking", category: "human-proof-review", claim,
+    evidence: [], suggestedFix: claim, confidence: "high"
+  }] : [];
+}
+
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
   const counts = new Map();
   for (const review of reviews) {
