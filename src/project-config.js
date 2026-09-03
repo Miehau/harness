@@ -109,7 +109,7 @@ async function ignored(cwd, path, execImpl) {
   catch { return false; }
 }
 
-export async function projectEnvironment(cwd, config, { source = process.env, execImpl = execFileTree } = {}) {
+export async function projectEnvironment(cwd, config, { source = process.env, execImpl = exec } = {}) {
   const available = {};
   for (const file of config.environment.files) {
     const absolute = safeRelative(cwd, file);
