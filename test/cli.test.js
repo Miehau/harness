@@ -100,6 +100,19 @@ test("timeline follows an active verification stage instead of an accepted step"
   });
 });
 
+test("timeline hydrates an explicitly targeted unselected run", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "target-step", title: "Target", status: "running", attempts: [{ events: [{ type: "tool_start", tool: "read", at: "1" }] }] }] });
+    const targetId = await seedRun(daemon, { ticket: { id: "target", identifier: "TARGET", title: "Target" }, status: "running", plan });
+    await seedRun(daemon, { ticket: { id: "selected", identifier: "SELECTED", title: "Selected" } });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", targetId]);
+    assert.equal(timeline.json.ticketId, targetId);
+    assert.equal(timeline.json.stepId, "target-step");
+    assert.equal(timeline.json.events[0].tool, "read");
+  });
+});
+
 test("timeline keeps a paused verification stage instead of falling back to old step activity", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });

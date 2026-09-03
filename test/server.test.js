@@ -65,6 +65,10 @@ test("GET /api/health and compact run omit artifact content", async () => {
     assert.equal(compact.json.revision > 0, true);
     assert.equal("artifacts" in compact.json, false);
     assert.equal(JSON.stringify(compact.json).includes("# secret"), false);
+    const detailed = await invoke(daemon, "GET", "/api/tickets/" + encodeURIComponent(id) + "/run?detail=1");
+    assert.equal(detailed.status, 200);
+    assert.equal(detailed.json.artifacts[0].name, "design.md");
+    assert.equal(detailed.json.artifacts[0].content, undefined);
     const state = await invoke(daemon, "GET", "/api/state");
     assert.equal(state.status, 200);
     assert.equal(state.json.ticketRuns[id].artifacts[0].name, "design.md");

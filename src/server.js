@@ -2180,7 +2180,8 @@ async function api(request, response, url) {
   const compactTicketRun = url.pathname.match(/^\/api\/tickets\/([^/]+)\/run$/);
   if (request.method === "GET" && compactTicketRun) {
     const state = store.read();
-    return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
+    const run = ticketRun(state, decodeURIComponent(compactTicketRun[1]));
+    return json(response, 200, url.searchParams.get("detail") === "1" ? publicRun(run) : compactRun(run, state.revision));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
     const models = await harness.models("openai-codex");
