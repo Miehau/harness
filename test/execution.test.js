@@ -788,7 +788,7 @@ test("preview state contains only the selected public run", () => {
 });
 
 test("public state keeps retained audits compact", () => {
-  const retained = { id: "old", runId: "run-old", status: "completed", artifacts: [{ content: "x".repeat(10000) }] };
+  const retained = { id: "old", runId: "run-old", status: "completed", createdAt: "2026-01-01T00:00:00.000Z", artifacts: [{ content: "x".repeat(10000) }] };
   const published = publicState({ revision: 4, ticketRuns: {}, retainedRuns: { "old:run-old": retained } });
   assert.deepEqual(published.retainedRuns["old:run-old"], compactRun(retained, 4));
 });

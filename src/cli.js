@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { parseModelRef } from "./profiles.js";
 import { eventTimeline, freeTextTicket, preferredStepId } from "../public/ui-model.js";
 
 const DEFAULT_URL = "http://127.0.0.1:4317";
@@ -23,6 +24,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
+  preview start|stop [ticketId]     Start or stop the ticket live preview
   answer <ticketId> <text|--approve> Approve or answer an open question
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
@@ -112,7 +114,19 @@ async function handleCommand(command, rest, ctx) {
     const [profileId, model, thinking, explicitId] = rest;
     if (!profileId || !model || !thinking) throw new Error("Usage: agent-plan profile <stage> <model> <thinking> [ticketId]");
     const id = await resolveTicketId(explicitId, ctx);
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/stage-profiles/" + encodeURIComponent(profileId), { body: { model, thinking }, env, fetchImpl });
+    const parsed = parseModelRef(model);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/stage-profiles/" + encodeURIComponent(profileId), {
+      body: { model: parsed.model, thinking, ...(parsed.provider ? { provider: parsed.provider } : {}) },
+      env, fetchImpl
+    });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "preview") {
+    const action = rest[0];
+    if (!["start", "stop"].includes(action)) throw new Error("Usage: agent-plan preview start|stop [ticketId]");
+    const id = await resolveTicketId(rest[1], ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/preview", { body: { action }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

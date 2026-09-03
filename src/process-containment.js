@@ -223,6 +223,7 @@ export class ProcessContainment {
     this.launches = 0;
     this.cleanedLaunches = 0;
     this.scheduledLaunches = null;
+    this.knownChildren = [];
   }
 
   environment(environment = {}) { return environmentForOwnership(this.ownership, environment); }
@@ -231,6 +232,13 @@ export class ProcessContainment {
   beginLaunch() {
     this.launches++;
     return this.launches;
+  }
+
+  /** Remember the spawned child so unsupported platforms can still stop it. */
+  trackChild(child) {
+    if (!child || this.knownChildren.includes(child)) return child;
+    this.knownChildren.push(child);
+    return child;
   }
 
   cleanup(trigger = "unspecified") {
@@ -319,13 +327,54 @@ export class ProcessContainment {
     return { safe: true };
   }
 
+  async #signalKnownChildren(deadlineAt) {
+    const live = this.knownChildren.filter((child) => child && child.exitCode == null && Number.isInteger(child.pid) && child.pid > 0);
+    for (const child of live) {
+      const action = { pid: child.pid, signal: gracefulSignal, at: iso(this.now()), status: "sent" };
+      this.record.actions.push(action);
+      try { child.kill(gracefulSignal); }
+      catch (error) {
+        if (error?.code === "ESRCH") { action.status = "already-exited"; continue; }
+        action.status = "failed";
+        action.error = message(error);
+        this.#unresolved({ pid: child.pid }, "known-child-signal-failed", error);
+      }
+    }
+    const awaiting = live.filter((child) => child.exitCode == null);
+    if (awaiting.length && this.graceMs) {
+      try { await this.#bounded(() => this.sleep(Math.min(this.graceMs, this.timeoutMs)), "known-child grace period", deadlineAt); }
+      catch (error) {
+        for (const child of awaiting) this.#unresolved({ pid: child.pid }, "known-child-grace-wait-failed", error);
+        return;
+      }
+    }
+    for (const child of awaiting) {
+      if (child.exitCode != null) continue;
+      const action = { pid: child.pid, signal: forceSignal, at: iso(this.now()), status: "sent" };
+      this.record.actions.push(action);
+      try { child.kill(forceSignal); }
+      catch (error) {
+        if (error?.code === "ESRCH") { action.status = "already-exited"; continue; }
+        action.status = "failed";
+        action.error = message(error);
+        this.#unresolved({ pid: child.pid }, "known-child-force-failed", error);
+      }
+    }
+  }
+
   async #run(launches) {
     const deadlineAt = this.now() + this.timeoutMs;
     this.record.outcome = "running";
     this.record.completedAt = null;
     if (!this.adapter.supported) {
-      this.record.outcome = "unsupported";
       this.record.platform.reason = this.adapter.reason || "Platform adapter cannot safely identify owned processes";
+      this.record.diagnostics.push("Descendant discovery is unavailable; signaling only the spawned child.");
+      try { await this.#signalKnownChildren(deadlineAt); }
+      catch (error) {
+        this.record.diagnostics.push(`Known-child cleanup failed: ${message(error)}`);
+        this.#unresolved(null, "known-child-cleanup-failed", error);
+      }
+      this.record.outcome = this.record.unresolved.length ? "incomplete" : this.record.actions.length ? "complete" : "not-required";
       return this.#finish(launches);
     }
 

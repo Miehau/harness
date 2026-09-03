@@ -73,7 +73,8 @@ test("starts a conventional package preview when a legacy contract omits one", a
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { verify: ["node", "verify.mjs"] } }));
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "node server.js", dev: "node --watch server.js" } }));
     const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.pid = 4242;
+    child.kill = (signal) => { child.exitCode = 0; child.signal = signal; };
     const spawns = [];
     const manager = new PreviewManager({
       portImpl: async () => 47821,
@@ -102,7 +103,8 @@ test("restarts a seeded preview so recurring gates cannot reuse stale run state"
       spawnImpl: () => {
         const child = new EventEmitter();
         child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
-        child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
+        child.pid = 4242;
+        child.kill = (signal) => { child.exitCode = 0; child.signal = signal; };
         children.push(child);
         return child;
       }
@@ -130,7 +132,8 @@ test("self-preview launches worktree server code with an immutable live-state re
     await writeFile(join(root, "src", "server.js"), "export async function createDaemon() {}\n");
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "start"] } }));
     const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.pid = 4242;
+    child.kill = (signal) => { child.exitCode = 0; child.signal = signal; };
     let spawned;
     const manager = new PreviewManager({
       dataDir, portImpl: async () => 47821, fetchImpl: async () => ({ ok: true }),
@@ -327,7 +330,7 @@ test("routes a later preview stop through the daemon cleanup observer", async ()
   assert.equal(manager.list().length, 0);
 });
 
-test("keeps unsupported preview cleanup visibly unresolved", async () => {
+test("unsupported preview cleanup does not look like a failed stop", async () => {
   const manager = new PreviewManager({});
   manager.active.set("unsupported", {
     child: { exitCode: null }, public: { port: 47821, status: "running", cleanup: null }, cleanup: null,
@@ -337,7 +340,7 @@ test("keeps unsupported preview cleanup visibly unresolved", async () => {
   assert.equal(manager.stop("unsupported"), true);
   await manager.settleMatching("unsupported", 50);
   const preview = manager.previewState("unsupported");
-  assert.equal(preview.status, "cleanup_unsupported");
+  assert.equal(preview.status, "stopped");
   assert.equal(preview.cleanup.outcome, "unsupported");
 });
 
@@ -364,10 +367,10 @@ test("persists a late cleanup result through the settlement observer", async () 
   resolveCleanup({ outcome: "unsupported", diagnostics: ["Safe cleanup is unavailable"] });
   await observed;
 
-  assert.equal(manager.previewState("late").status, "cleanup_unsupported");
+  assert.equal(manager.previewState("late").status, "stopped");
   assert.deepEqual(persisted, [{
     record: { outcome: "unsupported", diagnostics: ["Safe cleanup is unavailable"] },
-    status: "cleanup_unsupported"
+    status: "stopped"
   }]);
 });
 

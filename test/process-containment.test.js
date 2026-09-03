@@ -348,7 +348,7 @@ test("unsupported and discovery failures do not speculate with signals", async (
     adapter: { platform: "mystery", supported: false, reason: "no safe observer", signal: () => { signals++; } }
   });
   const unsupportedResult = await unsupported.cleanup("shutdown");
-  assert.equal(unsupportedResult.outcome, "unsupported");
+  assert.equal(unsupportedResult.outcome, "not-required");
   assert.match(unsupportedResult.platform.reason, /safe observer/);
 
   const failed = await containment({
@@ -358,6 +358,35 @@ test("unsupported and discovery failures do not speculate with signals", async (
   assert.equal(failed.outcome, "incomplete");
   assert.equal(failed.unresolved[0].reason, "discovery-failed");
   assert.equal(signals, 0);
+});
+
+test("unsupported platforms still stop the spawned child", async () => {
+  const signals = [];
+  const child = {
+    pid: 4242,
+    exitCode: null,
+    kill(signal) {
+      signals.push(signal);
+      if (signal === "SIGKILL") this.exitCode = 0;
+    }
+  };
+  const service = new ProcessContainment({
+    executionId: "execution-1",
+    ownership: ownership(),
+    adapter: { platform: "darwin", supported: false, reason: "no /proc", signal: () => { throw new Error("must not discover"); } },
+    graceMs: 1,
+    forceWaitMs: 1,
+    timeoutMs: 50,
+    now: () => 0,
+    sleep: async () => {}
+  });
+  service.beginLaunch();
+  service.trackChild(child);
+  const result = await service.cleanup("preview-stop");
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.outcome, "complete");
+  assert.equal(result.platform.supported, false);
+  assert.equal(result.unresolved.length, 0);
 });
 
 test("a descendant found after force receives its own bounded cleanup cycle", async () => {

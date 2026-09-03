@@ -277,6 +277,36 @@ test("profile overrides one stage on a stopped run", async () => {
   assert.deepEqual(called.body, { model: "gpt-5.6-terra", thinking: "high" });
 });
 
+test("profile accepts a provider/model ref", async () => {
+  let called;
+  await runCli(["profile", "handoff", "xai/grok-build-0.1", "medium", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ ticketId: "ticket-1" }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/stage-profiles/handoff");
+  assert.deepEqual(called.body, { model: "grok-build-0.1", thinking: "medium", provider: "xai" });
+});
+
+test("preview start talks to the ticket preview route", async () => {
+  let called;
+  await runCli(["preview", "start", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ preview: { url: "http://127.0.0.1:9" } }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/preview");
+  assert.deepEqual(called.body, { action: "start" });
+});
+
 test("revise sends focused feedback to a review-ready step", async () => {
   let called;
   await runCli(["revise", "build", "ticket-1", "Match the installed SDK interface"], {

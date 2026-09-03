@@ -23,7 +23,7 @@ import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
-import { normalizeStageProfiles } from "./profiles.js";
+import { dashboardModelProviders, normalizeStageProfiles, parseModelRef } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
@@ -392,7 +392,7 @@ async function persistPreviewCleanup(ticketId, runId, previewId, record) {
     const preview = run?.previews?.[previewId];
     if (!preview) return;
     preview.cleanup = record;
-    preview.status = ["incomplete", "unsupported"].includes(record.outcome) ? `cleanup_${record.outcome}` : "stopped";
+    preview.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
   }, { publish: false });
 }
 
@@ -593,6 +593,56 @@ function saveStepSession(ticketId, stepId, runId) {
   };
 }
 
+async function startOperatorPreview(ticketId) {
+  const state = store.read();
+  const run = ticketRun(state, ticketId);
+  const cwd = run.workspace?.cwd || state.workspace?.cwd;
+  if (!cwd) throw new Error("Worktree is not ready");
+  const previewId = `${ticketId}:operator`;
+  const executionId = randomUUID();
+  const containment = containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { trigger: "preview-launch" });
+  try {
+    const preview = await previews.ensure({
+      id: previewId,
+      cwd,
+      seedState: publicPreviewState(store.read(), ticketId),
+      containment,
+      onCleanup: (trigger) => settleContainment(ticketId, executionId, containment, trigger, runId),
+      onCleanupSettled: (record) => persistPreviewCleanup(ticketId, runId, previewId, record)
+    });
+    if (!preview) throw new Error("No preview or start command is configured for this repository");
+    await update((draft) => {
+      const current = ticketRun(draft, ticketId);
+      current.previews ||= {};
+      current.previews[previewId] = preview;
+    });
+    return preview;
+  } catch (error) {
+    await settleContainment(ticketId, executionId, containment, "preview-launch-failed", runId);
+    finishContainmentExecution(executionId, containment);
+    throw error;
+  }
+}
+
+async function stopOperatorPreview(ticketId) {
+  const previewId = `${ticketId}:operator`;
+  previews.stop(previewId, { trigger: "preview-stop", reason: "operator-stop" });
+  await previews.settleMatching(previewId, lifecycleCleanupTimeoutMs);
+  await update((draft) => {
+    const run = ticketRun(draft, ticketId);
+    const preview = run?.previews?.[previewId];
+    const observed = previews.previewState(previewId);
+    if (!preview) return;
+    Object.assign(preview, {
+      ...(observed?.cleanup ? { cleanup: observed.cleanup } : {}),
+      status: observed?.status === "cleanup_incomplete" ? "cleanup_incomplete" : "stopped",
+      stoppedReason: "operator-stop",
+      stoppedAt: new Date().toISOString()
+    });
+  });
+}
+
 async function stopTicketPreviews(ticketId, reason) {
   previews.stopMatching(`${ticketId}:`, { trigger: "preview-stop", reason });
   await previews.settleMatching(`${ticketId}:`, lifecycleCleanupTimeoutMs);
@@ -612,7 +662,7 @@ async function stopTicketPreviews(ticketId, reason) {
         } : {}),
         // A bounded wait may expire before containment reports a terminal
         // outcome. Keep that state visible rather than falsely reporting stop.
-        status: cleanupPending || ["cleanup_incomplete", "cleanup_unsupported"].includes(status) ? status : "stopped",
+        status: cleanupPending || status === "cleanup_incomplete" ? status : "stopped",
         stoppedReason: reason,
         stoppedAt: new Date().toISOString()
       });
@@ -2820,7 +2870,9 @@ async function api(request, response, url) {
     }));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
-    const models = await harness.models("openai-codex");
+    const catalog = await harness.models();
+    const preferred = catalog.filter((model) => dashboardModelProviders.includes(model.provider));
+    const models = preferred.length ? preferred : catalog;
     const providers = [...new Set(models.map((model) => model.provider).filter(Boolean))];
     return json(response, 200, {
       models,
@@ -2973,9 +3025,15 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), ticketId);
     if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing its stage profile");
     if (!run.stageProfiles?.[profileId]) throw new Error("Unknown stage profile");
+    const parsed = parseModelRef(input.model, input.provider || run.stageProfiles[profileId].provider);
     const profiles = normalizeStageProfiles({
       ...run.stageProfiles,
-      [profileId]: { ...run.stageProfiles[profileId], model: input.model, thinking: input.thinking }
+      [profileId]: {
+        ...run.stageProfiles[profileId],
+        provider: parsed.provider || input.provider || run.stageProfiles[profileId].provider,
+        model: parsed.model,
+        thinking: input.thinking
+      }
     });
     await harness.validateProfiles({ [profileId]: profiles[profileId] });
     await update((draft) => {
@@ -2983,6 +3041,19 @@ async function api(request, response, url) {
       ticketRun(draft, ticketId).stageProfiles[profileId] = profiles[profileId];
     });
     return json(response, 200, { ticketId, profile: profiles[profileId] });
+  }
+  const ticketPreview = url.pathname.match(/^\/api\/tickets\/([^/]+)\/preview$/);
+  if (request.method === "POST" && ticketPreview) {
+    const ticketId = decodeURIComponent(ticketPreview[1]);
+    ticketRun(store.read(), ticketId);
+    const action = (await body(request)).action || "start";
+    if (action === "stop") {
+      await stopOperatorPreview(ticketId);
+      return json(response, 200, { ticketId, preview: store.read().ticketRuns[ticketId]?.previews?.[`${ticketId}:operator`] || null });
+    }
+    if (action !== "start") throw new Error("Preview action must be start or stop");
+    const preview = await startOperatorPreview(ticketId);
+    return json(response, 200, { ticketId, preview });
   }
   if (request.method === "GET" && url.pathname === "/api/tickets") {
     return json(response, 200, await refreshTrackers());

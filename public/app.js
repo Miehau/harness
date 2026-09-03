@@ -25,6 +25,8 @@ let clearArmed = false;
 let forgetTimer;
 let forgetArmed = null;
 let cleanupArmed = false;
+let previewBusy = null;
+let resumeBusy = false;
 let retention = { items: [], totalBytes: 0 };
 let trackerSettings = null;
 let pendingTicketSelections = 0;
@@ -60,12 +62,22 @@ function notify(message) {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 3600);
 }
 
+function modelOptionValue(model, fallbackProvider = "") {
+  return `${model.provider || fallbackProvider}/${model.id}`.replace(/^\/+/, "");
+}
+
 function renderProfiles() {
   const cards = profileIds.map((id) => {
     const profile = state.stageProfiles[id];
     const label = escapeHtml(profile.label);
-    const models = piModels.some((model) => model.id === profile.model) ? piModels : [{ id: profile.model, name: profile.model }, ...piModels];
-    return `<fieldset class="profile-card" data-profile="${id}"><legend>${label}</legend><label for="${id}-model">Model<select id="${id}-model" name="${id}-model" required>${models.map((model) => `<option value="${escapeHtml(model.id)}" ${profile.model === model.id ? "selected" : ""}>${escapeHtml(model.name || model.id)}</option>`).join("")}</select></label><label for="${id}-thinking">Reasoning<select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></label><label class="profile-prompt" for="${id}-prompt">Agent instructions<textarea id="${id}-prompt" name="${id}-prompt" rows="5">${escapeHtml(profile.prompt)}</textarea></label></fieldset>`;
+    const selected = `${profile.provider || ""}/${profile.model}`;
+    const models = piModels.some((model) => modelOptionValue(model) === selected || model.id === profile.model)
+      ? piModels
+      : [{ id: profile.model, name: profile.model, provider: profile.provider }, ...piModels];
+    return `<fieldset class="profile-card" data-profile="${id}"><legend>${label}</legend><label for="${id}-model">Model<select id="${id}-model" name="${id}-model" required>${models.map((model) => {
+      const value = modelOptionValue(model, profile.provider);
+      return `<option value="${escapeHtml(value)}" ${value === selected || (!profile.provider && model.id === profile.model) ? "selected" : ""}>${escapeHtml(model.provider ? `${model.provider} · ${model.name || model.id}` : (model.name || model.id))}</option>`;
+    }).join("")}</select></label><label for="${id}-thinking">Reasoning<select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></label><label class="profile-prompt" for="${id}-prompt">Agent instructions<textarea id="${id}-prompt" name="${id}-prompt" rows="5">${escapeHtml(profile.prompt)}</textarea></label></fieldset>`;
   }).join("");
   $("#profile-fields").innerHTML = cards;
   $("#project-mode").value = state.settings?.projectMode || "manual";
@@ -264,6 +276,33 @@ function checkpointUsesWorkspace(run) {
     || Boolean(run?.clarificationHistory?.length && run.status === "clarifying");
 }
 
+function busyButton(label, attrs, extraClass = "") {
+  return `<button class="button busy ${extraClass}" type="button" disabled aria-busy="true" ${attrs}><span class="button-spinner" aria-hidden="true"></span><span class="button-label">${escapeHtml(label)}</span></button>`;
+}
+
+function runNoticesHtml(run) {
+  const notes = [];
+  const pauseAudit = run?.pauseHistory?.at(-1);
+  if (pauseAudit) {
+    notes.push({
+      title: run.status === "paused" ? "Run paused" : "Resumed from pause",
+      detail: `${new Date(pauseAudit.at).toLocaleString()} · ${pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`}`
+    });
+  }
+  const restartAudit = run?.restartHistory?.at(-1);
+  if (restartAudit) notes.push({ title: `Restarted from ${restartAudit.target.replace(":", " · ")}`, detail: `${new Date(restartAudit.at).toLocaleString()} · audit ${restartAudit.id}` });
+  else if (run?.startedFreshFrom) notes.push({ title: "Fresh run", detail: `Previous run ${run.startedFreshFrom.runId} was archived.` });
+  if (run?.recovery?.message) notes.push({ title: "Restart recovery", detail: run.recovery.message });
+  const errors = [run?.trackerSyncError, run?.lastError].filter(Boolean);
+  const cleanup = cleanupAdvisoryHtml(run);
+  if (!notes.length && !errors.length && !cleanup) return "";
+  const history = notes.length
+    ? `<details class="run-history"><summary>${notes.length} recovery note${notes.length === 1 ? "" : "s"}</summary>${notes.map((note) => `<p><strong>${escapeHtml(note.title)}</strong> ${escapeHtml(note.detail)}</p>`).join("")}</details>`
+    : "";
+  const errorHtml = errors.map((error) => `<p class="error-banner">${escapeHtml(error)}</p>`).join("");
+  return `<div class="run-notices">${history}${errorHtml}${cleanup}</div>`;
+}
+
 function renderHeader() {
   const target = $("#ticket-header");
   const ticket = selectedTicket();
@@ -272,24 +311,28 @@ function renderHeader() {
     target.innerHTML = `<div class="plan-heading"><div><span class="eyebrow">No ticket selected</span><h2>Load a local fixture or choose tracker work</h2><p>Local fixtures start from an empty repository and use their authored ticket graph.</p></div></div>`;
     return;
   }
-  const preview = Object.values(run?.previews || {}).at(-1);
+  const previews = Object.values(run?.previews || {});
+  const preview = previews.find((item) => item.status === "running") || previews.find((item) => String(item.id || "").endsWith(":operator")) || previews.at(-1);
   const metrics = runMetrics(run);
   const restartPoints = restartOptions(run);
   const restartable = run && !["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge", "completed"].includes(run.status) && !run.merge && !run.integration;
   const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
+  const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
+  const previewControls = preview?.status === "running" && preview.url
+    ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>${previewBusy === "stop" ? busyButton("Stopping preview", `data-stop-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-stop-preview="${escapeHtml(run.id)}">Stop preview</button>`}`
+    : run.workspace?.cwd || state.workspace?.cwd
+      ? previewBusy === "start" ? busyButton("Starting preview", `data-start-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-start-preview="${escapeHtml(run.id)}">Start preview</button>`
+      : "";
+  const resumeControl = canResume
+    ? resumeBusy ? busyButton("Resuming…", `data-resume-ticket="${escapeHtml(run.id)}"`, "primary") : `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>`
+    : "";
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${resumeControl}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${previewControls}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
-  const restartAudit = run?.restartHistory?.at(-1);
-  const restartBanner = restartAudit
-    ? `<div class="recovery-banner"><strong>Restarted from ${escapeHtml(restartAudit.target.replace(":", " · "))}</strong><span>${escapeHtml(new Date(restartAudit.at).toLocaleString())} · audit ${escapeHtml(restartAudit.id)}</span></div>`
-    : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
-  const pauseAudit = run?.pauseHistory?.at(-1);
-  const pauseBanner = pauseAudit ? `<div class="recovery-banner"><strong>${run.status === "paused" ? "Run paused" : "Resumed from pause"}</strong><span>${escapeHtml(new Date(pauseAudit.at).toLocaleString())} · ${escapeHtml(pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`)} · audit ${escapeHtml(pauseAudit.id)}</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${cleanupAdvisoryHtml(run)}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${runNoticesHtml(run)}`;
 }
 
 function openRestartDialog(target = null) {
@@ -1121,11 +1164,33 @@ document.addEventListener("click", async (event) => {
   const resume = event.target.closest("[data-resume-ticket]");
   if (resume) {
     try {
+      resumeBusy = true; renderHeader();
       activeTab = "run"; rememberView(); renderInspector();
       await api(`/api/tickets/${encodeURIComponent(resume.dataset.resumeTicket)}/resume`, { method: "POST", body: "{}" });
       notify("Worker retry started");
     }
     catch (error) { notify(error.message); }
+    finally { resumeBusy = false; renderHeader(); }
+    return;
+  }
+  const startPreview = event.target.closest("[data-start-preview]");
+  if (startPreview) {
+    try {
+      previewBusy = "start"; renderHeader();
+      await api(`/api/tickets/${encodeURIComponent(startPreview.dataset.startPreview)}/preview`, { method: "POST", body: JSON.stringify({ action: "start" }) });
+      notify("Preview started");
+    } catch (error) { notify(error.message); }
+    finally { previewBusy = null; renderHeader(); }
+    return;
+  }
+  const stopPreview = event.target.closest("[data-stop-preview]");
+  if (stopPreview) {
+    try {
+      previewBusy = "stop"; renderHeader();
+      await api(`/api/tickets/${encodeURIComponent(stopPreview.dataset.stopPreview)}/preview`, { method: "POST", body: JSON.stringify({ action: "stop" }) });
+      notify("Preview stopped");
+    } catch (error) { notify(error.message); }
+    finally { previewBusy = null; renderHeader(); }
     return;
   }
   const restart = event.target.closest("[data-restart-ticket]");
@@ -1284,9 +1349,13 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "profiles-form") {
     event.preventDefault();
     const data = new FormData(event.target);
-    const profiles = Object.fromEntries(profileIds.map((id) => [id, {
-      model: data.get(`${id}-model`), thinking: data.get(`${id}-thinking`), prompt: data.get(`${id}-prompt`)
-    }]));
+    const profiles = Object.fromEntries(profileIds.map((id) => {
+      const raw = String(data.get(`${id}-model`) || "");
+      const slash = raw.indexOf("/");
+      const provider = slash > 0 ? raw.slice(0, slash) : "";
+      const model = slash > 0 ? raw.slice(slash + 1) : raw;
+      return [id, { provider, model, thinking: data.get(`${id}-thinking`), prompt: data.get(`${id}-prompt`) }];
+    }));
     try {
       const settings = {
         projectMode: data.get("projectMode"),

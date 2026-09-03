@@ -323,12 +323,18 @@ test("cleanup inspector keeps every durable outcome and marks only advisories as
   for (const [outcome, execution] of Object.entries(executions)) {
     const model = cleanupInspectorModel({ cleanup: { outcome, updatedAt: "2026-09-03T10:00:02.000Z", executions: [execution] } });
     assert.equal(model.outcome, outcome);
-    assert.equal(model.advisory, ["incomplete", "unsupported"].includes(outcome));
+    assert.equal(model.advisory, outcome === "incomplete");
     assert.deepEqual(model.executions[0].discovered, execution.discovered);
     assert.deepEqual(model.executions[0].unresolved, execution.unresolved);
     assert.deepEqual(model.executions[0].diagnostics, execution.diagnostics);
   }
   const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.equal(cleanupInspectorModel({
+    cleanup: {
+      outcome: "incomplete",
+      executions: [{ executionId: "legacy-unrecorded", outcome: "incomplete", unresolved: [], actions: [] }]
+    }
+  }).advisory, false);
   assert.match(app, /cleanup-advisory/);
   assert.match(app, /cleanup-inspector \$\{cleanup\.advisory \? "advisory" : "neutral"\}/);
 });

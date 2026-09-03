@@ -130,9 +130,10 @@ export function redactCommandOutput(value, environment, { truncate = true } = {}
   return truncate ? output.slice(-100000) : output;
 }
 
-export function runManagedCommand(executable, args, { cwd, env, signal, timeout, maxBuffer }) {
+export function runManagedCommand(executable, args, { cwd, env, signal, timeout, maxBuffer, containment }) {
   return new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(executable, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    containment?.trackChild?.(child);
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -194,7 +195,7 @@ export async function runProjectCommand(cwd, name, { signal, execImpl = exec, so
   containment?.beginLaunch?.();
   try {
     const runner = execImpl === exec ? runManagedCommand : execImpl;
-    const { stdout, stderr } = await runner(executable, [...argv.slice(1), ...args], { cwd, env: environment, signal, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout, stderr } = await runner(executable, [...argv.slice(1), ...args], { cwd, env: environment, signal, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, containment });
     return { status: "passed", command: name, output: redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment) };
   } catch (error) {
     const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM");

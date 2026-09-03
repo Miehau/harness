@@ -772,7 +772,7 @@ export class PiHarness {
         // shared containment. Mark this launch before invoking the runner so
         // descendants require a fresh worker-exit containment cycle.
         executionContainment.beginLaunch?.();
-        const { stdout, stderr } = await runner(executable, args, { cwd, signal, timeout: this.repositoryCheckTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: environment });
+        const { stdout, stderr } = await runner(executable, args, { cwd, signal, timeout: this.repositoryCheckTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: environment, containment: executionContainment });
         const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
           .filter((entry) => entry.isFile())
           .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))

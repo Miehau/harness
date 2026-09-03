@@ -439,20 +439,33 @@ test("API token rejects unauthenticated /api calls", async () => {
   }, { apiToken: "secret" });
 });
 
-test("GET /api/models lists OpenAI subscription models", async () => {
+test("GET /api/models lists xAI and OpenAI subscription models", async () => {
   const harness = {
     ...mockHarness(),
     async models(provider) {
-      assert.equal(provider, "openai-codex");
-      return [{ id: "gpt-test", name: "Test", provider }];
+      assert.equal(provider, undefined);
+      return [
+        { id: "grok-build-0.1", name: "Grok Build", provider: "xai" },
+        { id: "gpt-test", name: "Test", provider: "openai-codex" },
+        { id: "other", name: "Other", provider: "anthropic" }
+      ];
     }
   };
   await withDaemon(async (daemon) => {
     const result = await invoke(daemon, "GET", "/api/models");
     assert.equal(result.status, 200);
-    assert.equal(result.json.provider, "openai-codex");
-    assert.equal(result.json.models[0].provider, "openai-codex");
+    assert.deepEqual(result.json.providers, ["xai", "openai-codex"]);
+    assert.deepEqual(result.json.models.map((model) => model.id), ["grok-build-0.1", "gpt-test"]);
   }, { harness });
+});
+
+test("POST preview start fails when the repository has no preview command", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "needs_attention" });
+    const result = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/preview`, { body: { action: "start" } });
+    assert.equal(result.status >= 400, true);
+    assert.match(String(result.json?.error || result.text), /preview or start command/i);
+  });
 });
 
 test("binding a skill creates run.checkpoint and continue resumes the ticket", async () => {

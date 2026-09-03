@@ -845,9 +845,11 @@ test("fresh verification stops after its repository inspection budget", async ()
   }
 });
 
-test("lists every configured Codex model used by stage profiles", async () => {
-  const ids = new Set((await new PiHarness({ dataDir: tmpdir() }).models()).map((model) => model.id));
-  for (const profile of Object.values(defaultStageProfiles())) assert.equal(ids.has(profile.model), true);
+test("lists every configured model used by stage profiles", async () => {
+  const models = await new PiHarness({ dataDir: tmpdir() }).models();
+  for (const profile of Object.values(defaultStageProfiles())) {
+    assert.equal(models.some((model) => model.id === profile.model && model.provider === profile.provider), true);
+  }
 });
 
 test("recovers a chronological, detailed trace from a persisted Pi session", async () => {

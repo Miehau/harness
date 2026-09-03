@@ -41,12 +41,16 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.cli.includes("approve-proof"));
   assert.ok(app.cli.includes("scope-add"));
   assert.ok(app.cli.includes("waive"));
+  assert.ok(app.cli.includes("preview"));
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
   const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
   const dashboard = await readFile(join(repoRoot, "public/app.js"), "utf8");
   const server = await readFile(join(repoRoot, "src/server.js"), "utf8");
   assert.equal(html.includes("Provider: openai-codex"), false);
   assert.match(dashboard, /Open \/ zoom/);
+  assert.match(dashboard, /run-history/);
+  assert.match(dashboard, /button-spinner/);
+  assert.match(dashboard, /Starting preview/);
   assert.match(dashboard, /Default app/);
   assert.doesNotMatch(dashboard, /Zed/);
   assert.match(server, /runFile\("open", \[path\]\)/);

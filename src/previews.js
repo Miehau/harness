@@ -90,7 +90,7 @@ function cleanupPreview(preview, trigger) {
     .catch((error) => cleanupFailure(preview.containment, error))
     .then(async (record) => {
       preview.public.cleanup = record;
-      preview.public.status = ["incomplete", "unsupported"].includes(record.outcome) ? `cleanup_${record.outcome}` : "stopped";
+      preview.public.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
       // The public object is only in-memory; let the owning daemon make the
       // settled result durable after the status has been derived.
       await preview.onCleanupSettled?.(record);
@@ -181,6 +181,7 @@ export class PreviewManager {
       child = this.spawn(commandExecutable(cwd, previewCommand), previewCommand.slice(1), {
         cwd, env: launchEnvironment, stdio: ["ignore", "pipe", "pipe"]
       });
+      previewContainment.trackChild?.(child);
       for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
       await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs);
     } catch (error) {
@@ -223,7 +224,7 @@ export class PreviewManager {
       containment.beginLaunch?.();
       try {
         await this.exec(process.execPath, [screenshotScript, "--url", preview.public.url, "--out", path, "--width", String(width), "--height", String(height), "--wait-ms", "1200", "--click", activeStepSelector], {
-          signal, env: containment.environment(source), timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
+          signal, env: containment.environment(source), timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024, containment
         });
       } catch (error) {
         const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM") || /timed out/i.test(error.message);

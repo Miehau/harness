@@ -205,10 +205,15 @@ export function cleanupInspectorModel(run) {
     unsupported: "Cleanup unsupported",
     "not-required": "No cleanup required"
   };
+  const actionableIncomplete = executions.some((execution) => (
+    execution.outcome === "incomplete"
+    && execution.executionId !== "legacy-unrecorded"
+    && ((execution.unresolved || []).length > 0 || (execution.actions || []).some((action) => action.status === "failed"))
+  ));
   return {
     outcome,
     label: labels[outcome],
-    advisory: outcome === "incomplete" || outcome === "unsupported",
+    advisory: actionableIncomplete,
     updatedAt: cleanup.updatedAt || null,
     executionCount: executions.length,
     executions
