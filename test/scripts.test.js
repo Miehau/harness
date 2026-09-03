@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectApp, repoRoot } from "../scripts/inspect.js";
 import { runNav } from "../scripts/nav.mjs";
+import { captureObservability } from "../scripts/capture-observability.mjs";
 import { runSeed } from "../scripts/seed.mjs";
 import { runNode, runTests } from "../scripts/test.mjs";
 import { JsonStore } from "../src/store.js";
@@ -101,6 +102,54 @@ test("seed writes JsonStore state the daemon can reload", async () => {
   } finally {
     await rm(dataDir, { recursive: true, force: true });
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("observability seed retains deterministic parallel, failed, corrected, handoff, truncated, and unavailable records", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-observability-data-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-observability-cwd-"));
+  try {
+    const result = await writeSeed({ dataDir, cwd, scenario: "observability" });
+    const run = JSON.parse(await readFile(join(dataDir, "state-v3.json"), "utf8")).ticketRuns[result.ticketId];
+    const [foundation, parallel] = run.plan.nodes;
+    assert.equal(run.status, "running");
+    assert.deepEqual(parallel.children.map((step) => step.status), ["running", "running"]);
+    assert.deepEqual(foundation.attempts.map((attempt) => [attempt.attemptId, attempt.status]), [
+      ["foundation-original", "failed"], ["foundation-correction", "verified"]
+    ]);
+    assert.equal(foundation.attempts[0].rawOutput.length, 100000);
+    assert.equal(foundation.attempts[1].verification.checks.status, "passed");
+    assert.equal(run.stages.find((stage) => stage.id === "verify").status, "completed");
+    assert.equal(run.artifacts.some((artifact) => artifact.kind === "handoff"), true);
+    assert.equal(run.activeRuns.api.lastEvent, "Waiting for first API event");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("observability capture writes desktop and mobile PNGs and its repository-owned reports", async () => {
+  const evidenceDir = await mkdtemp(join(tmpdir(), "agent-plan-observability-evidence-"));
+  try {
+    const result = await captureObservability({
+      evidenceDir,
+      withServer: async (fn) => fn("http://127.0.0.1:4317/"),
+      capture: async ({ path, width, height }) => {
+        await writeFile(path, `PNG ${width}x${height}`);
+        return path;
+      }
+    });
+    assert.deepEqual(result.captures.map(({ name, width, height }) => [name, width, height]), [
+      ["desktop", 1440, 900], ["mobile", 390, 844]
+    ]);
+    assert.match(await readFile(join(evidenceDir, "screenshot-capture-report.txt"), "utf8"), /mobile: 390x844/);
+    assert.match(await readFile(join(evidenceDir, "observable-workflow-regression-report.txt"), "utf8"), /truncated output/);
+    const manifest = JSON.parse(await readFile(join(evidenceDir, "seeded-observability-scenarios.json"), "utf8"));
+    assert.equal(manifest.scenario, "observability");
+    assert.equal((await readFile(join(evidenceDir, "observability-desktop.png"), "utf8")), "PNG 1440x900");
+    assert.equal((await readFile(join(evidenceDir, "observability-mobile.png"), "utf8")), "PNG 390x844");
+  } finally {
+    await rm(evidenceDir, { recursive: true, force: true });
   }
 });
 

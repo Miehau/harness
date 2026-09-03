@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { createDaemon } from "../src/server.js";
+import { seedScenario } from "../scripts/seed-state.js";
 import { mockHarness, runAgainstDaemon, seedRun, withDaemon } from "./helpers.js";
 
 test("plan approval selects and approves without a live model", async () => {
@@ -31,6 +32,35 @@ test("plan approval selects and approves without a live model", async () => {
     assert.ok(status.json.status);
     assert.notEqual(status.json.status, "awaiting_approval");
   });
+});
+
+test("observable seed exposes active parallel resources and immutable correction history across restart", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-e2e-observable-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-e2e-observable-cwd-"));
+  let daemon;
+  try {
+    daemon = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness() });
+    const seeded = await seedScenario(daemon.store, { dataDir, cwd, scenario: "observability" });
+    const active = await runAgainstDaemon(daemon, ["list", "timeline", seeded.ticketId]);
+    assert.equal(active.code, 0);
+    assert.deepEqual(active.json.workers.filter((worker) => ["worker:api", "worker:ui"].includes(worker.id)).map((worker) => worker.lifecycle), ["active", "active"]);
+    assert.deepEqual(active.json.attempts.filter((attempt) => ["worker:api", "worker:ui"].includes(attempt.workerId)).map((attempt) => attempt.resources.output.state), ["not_yet_available", "not_yet_available"]);
+    const foundationBeforeRestart = daemon.store.read().ticketRuns[seeded.ticketId].plan.nodes[0];
+    assert.equal(foundationBeforeRestart.attempts[0].rawOutput.length, 100000);
+    await daemon.close({ exit: false });
+    daemon = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness() });
+    const stored = daemon.store.read().ticketRuns[seeded.ticketId];
+    const foundation = stored.plan.nodes[0];
+    assert.equal(stored.status, "interrupted");
+    assert.deepEqual(foundation.attempts.map((attempt) => [attempt.attemptId, attempt.status]), [
+      ["foundation-original", "failed"], ["foundation-correction", "verified"]
+    ]);
+    assert.deepEqual(stored.plan.nodes[1].children.map((step) => step.status), ["interrupted", "interrupted"]);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("needs-attention wait exits 1 and in-flight runs recover as interrupted", async () => {
