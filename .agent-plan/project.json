@@ -2,6 +2,7 @@
   "version": 1,
   "commands": {
     "verify": ["node", ".agent-plan/verify.mjs"],
+    "nav": ["node", "scripts/nav.mjs", "--json"],
     "nav-json": ["node", "scripts/nav.mjs", "--json"],
     "test-map": ["node", "scripts/test.mjs", "--map"],
     "seed-list": ["node", "scripts/seed.mjs", "--list"]
