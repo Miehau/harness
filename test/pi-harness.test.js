@@ -248,7 +248,9 @@ test("prefers the repository verification contract and discovers image and video
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), "// no screenshot\n");
-    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true })).status, "failed");
+    const missingEvidence = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(missingEvidence.status, "failed");
+    assert.equal(missingEvidence.failureKind, "visual-evidence");
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });

@@ -667,8 +667,8 @@ export class PiHarness {
           .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
           .filter((item) => item.mediaType);
         const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-        if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
         return { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
       } catch (error) {
         if (signal?.aborted) throw error;

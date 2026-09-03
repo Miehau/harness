@@ -59,6 +59,25 @@ export function repositoryCheckReview(checks) {
   };
 }
 
+export function reconcileVisualChecks(checks, evidence = [], { required = false, requiredVideo = false } = {}) {
+  checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
+  const hasImage = checks.evidence.some((item) => item.mediaKind === "image");
+  const hasVideo = checks.evidence.some((item) => item.mediaKind === "video");
+  if (checks.failureKind === "visual-evidence" && hasImage && (!requiredVideo || hasVideo)) {
+    checks.status = "passed";
+    checks.summary = `${checks.command} passed with ${checks.evidence.length} visual artifact${checks.evidence.length === 1 ? "" : "s"}.`;
+    delete checks.failureKind;
+  }
+  if (required && (!hasImage || (requiredVideo && !hasVideo))) Object.assign(checks, {
+    status: "failed",
+    failureKind: "visual-evidence",
+    summary: requiredVideo && hasImage
+      ? "Visual verification produced no video evidence."
+      : "Visual verification produced no desktop or mobile evidence."
+  });
+  return checks;
+}
+
 export async function createDaemon(options = {}) {
   const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
   const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
@@ -165,12 +184,7 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     if (preview) evidence = await previews.capture(previewId);
   }
   const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
-  checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
-  if (required && !checks.evidence.length) Object.assign(checks, {
-    status: "failed",
-    failureKind: "visual-evidence",
-    summary: "Visual verification produced no desktop or mobile evidence."
-  });
+  reconcileVisualChecks(checks, evidence, { required, requiredVideo });
   if (preview || checks.evidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
