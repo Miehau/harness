@@ -75,6 +75,17 @@ test("final review collapses nearby paraphrases of the same defect across criter
   assert.match(findings[1].claim, /newly launched/);
 });
 
+test("final review collapses independently worded findings on the same code defect", () => {
+  const findings = actionableFindings([
+    { findings: [{ severity: "high", category: "correctness", claim: "Restarting an approved run does not reset or invalidate its proof map, so a rerun can inherit verified records for superseded code.", suggestedFix: "Discard prior proof on design restart and invalidate affected criteria on step restart.", evidence: [{ file: "src/execution.js", line: 300 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Run rewind does not reconcile the proof map with restored code or redesigned plans, retaining obsolete proof after restarts.", suggestedFix: "Make rewind proof-aware and archive prior approved proof before redesign.", evidence: [{ file: "src/execution.js", line: 302 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Media evidence remains valid when an unrelated cache entry changes.", suggestedFix: "Scope cache identity to the run.", evidence: [{ file: "src/execution.js", line: 302 }] }] }
+  ]);
+  assert.equal(findings.length, 2);
+  assert.match(findings[0].claim, /Restarting|rewind/);
+  assert.match(findings[1].claim, /Media evidence/);
+});
+
 test("automatic corrections ignore findings below medium severity", () => {
   const findings = actionableFindings([{ findings: [
     { severity: "low", claim: "Could rename this helper" },

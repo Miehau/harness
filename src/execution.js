@@ -471,12 +471,18 @@ function similarFinding(left, right) {
     && (!leftEvidence.line || !rightEvidence.line || Math.abs(leftEvidence.line - rightEvidence.line) <= 5)
   ));
   if (!sharesSurface) return false;
-  const words = (value) => new Set(String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []);
+  const words = (value) => new Set((String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []).map((word) => {
+    if (word.length > 7 && word.endsWith("ing")) return word.slice(0, -3);
+    if (word.length > 6 && word.endsWith("ed")) return word.slice(0, -2);
+    if (word.length > 6 && word.endsWith("es")) return word.slice(0, -2);
+    if (word.length > 5 && word.endsWith("s")) return word.slice(0, -1);
+    return word;
+  }));
   const leftWords = words(`${left.claim || ""} ${left.suggestedFix || left.suggested_fix || ""}`);
   const rightWords = words(`${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`);
   if (Math.min(leftWords.size, rightWords.size) < 4) return false;
   const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  return overlap >= 6 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.4;
+  return overlap >= 4 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.25;
 }
 
 export function actionableFindings(reviews) {
