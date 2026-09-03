@@ -28,6 +28,17 @@ test("GET /api/health and compact run omit artifact content", async () => {
   });
 });
 
+test("dashboard assets are served through the daemon", async () => {
+  await withDaemon(async (daemon) => {
+    const app = await invoke(daemon, "GET", "/app.js");
+    const styles = await invoke(daemon, "GET", "/styles.css");
+    assert.equal(app.status, 200);
+    assert.match(app.headers["content-type"], /text\/javascript/);
+    assert.equal(styles.status, 200);
+    assert.match(styles.headers["content-type"], /text\/css/);
+  });
+});
+
 test("ticket inspection API returns the canonical compact projection and state only adds focus metadata", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{

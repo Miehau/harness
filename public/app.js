@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -9,18 +9,24 @@ const escapeHtml = (value = "") => String(value)
 let state = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
 let piModels = [];
-const viewVersion = 3;
+const viewVersion = 4;
 let savedView = {};
 try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); } catch {}
 const currentView = savedView.version === viewVersion;
-let selectedStepId = currentView ? savedView.selectedStepId || null : null;
-let selectedStageId = currentView ? savedView.selectedStageId || null : null;
-let selectedStageKey = currentView ? savedView.selectedStageKey || null : null;
-let selectedWorkerId = currentView ? savedView.selectedWorkerId || null : null;
-let selectedAttemptId = currentView ? savedView.selectedAttemptId || null : null;
-let selectedRunId = currentView ? savedView.selectedRunId || null : null;
+// Saved selection is intentionally not restored: the first inspection must follow
+// current work, not a potentially stale accepted or blocked record from a past visit.
+let selectedStepId = null;
+let selectedStageId = null;
+let selectedStageKey = null;
+let selectedWorkerId = null;
+let selectedAttemptId = null;
+let selectedRunId = null;
 let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
+let deliberateSelection = false;
+let transportState = "connected";
+let transportTimer = null;
+let hasConnected = false;
 let diffExpanded = false;
 let toastTimer;
 let clearTimer;
@@ -106,21 +112,40 @@ function inspectionWorker(id, projection = inspectionFor()) {
   return projection?.workers?.find((item) => item.id === id) || null;
 }
 
-function syncInspectionSelection(projection = inspectionFor()) {
-  const selected = inspectionSelection(projection, { stageId: selectedStageId && `stage:${selectedStageId}`, workerId: selectedWorkerId, attemptId: selectedAttemptId });
+function canonicalSelection() {
+  return {
+    stageId: selectedStageKey || (selectedStageId && `stage:${selectedStageId}`),
+    workerId: selectedWorkerId || (selectedStepId && `worker:${selectedStepId}`),
+    attemptId: selectedAttemptId
+  };
+}
+
+function syncInspectionSelection(projection = inspectionFor(), previous = null) {
+  const before = canonicalSelection();
+  const restored = restoreInspectionSelection(projection, deliberateSelection ? before : {});
+  const selected = restored.selection;
   selectedWorkerId = selected.workerId;
   selectedAttemptId = selected.attemptId;
   selectedRunId = projection?.runId || null;
-  if (selected.workerId) selectedStepId = inspectionWorker(selected.workerId, projection)?.stepId || selectedStepId;
+  if (selected.workerId) selectedStepId = inspectionWorker(selected.workerId, projection)?.stepId || null;
+  else selectedStepId = null;
   if (selected.stageId) { selectedStageKey = selected.stageId; selectedStageId = selected.stageId.replace(/^stage:/, ""); }
+  else { selectedStageKey = null; selectedStageId = null; }
+  if (restored.disappeared) {
+    deliberateSelection = false;
+    notify("The selected record is no longer available; showing current work.");
+  }
+  const announcement = inspectionTransitionAnnouncement(previous, projection, before);
+  if (announcement && !restored.disappeared) notify(announcement);
 }
 
 function loadInspection(run = runFor()) {
   if (!run || pendingInspections.has(run.id) || inspections.get(run.id)?.revision === state?.revision) return;
   pendingInspections.add(run.id);
   api(`/api/tickets/${encodeURIComponent(run.id)}/inspection`).then((projection) => {
+    const previous = inspections.get(run.id)?.projection || null;
     inspections.set(run.id, { revision: projection.revision, projection });
-    if (run.id === runFor()?.id) { syncInspectionSelection(projection); rememberView(); render(); }
+    if (run.id === runFor()?.id) { syncInspectionSelection(projection, previous); rememberView(); render(); }
   }).catch((error) => {
     inspections.set(run.id, { revision: state?.revision, error: error.message, projection: null });
     if (run.id === runFor()?.id) renderInspector();
@@ -143,6 +168,19 @@ function statusIcon(status) {
 function statusLabel(run) {
   if (!run) return "not started";
   return run.status.replaceAll("_", " ");
+}
+
+function transportLabel() {
+  return transportState === "connected" ? "Live updates connected" : transportState === "stale"
+    ? "Live updates stale — reconnecting; workflow is not failed" : "Live updates disconnected — reconnecting; workflow is not failed";
+}
+
+function inspectorTabs(tabs, selected) {
+  return `<nav class="tabs inspector-tabs" role="tablist" aria-label="Inspector sections">${tabs.map(([id, label]) => `<button class="tab ${selected === id ? "active" : ""}" type="button" role="tab" aria-selected="${selected === id}" aria-controls="inspector-panel" tabindex="${selected === id ? "0" : "-1"}" data-tab="${id}">${label}</button>`).join("")}</nav>`;
+}
+
+function inspectorPanel(content) {
+  return `<div id="inspector-panel" class="tab-panel" role="tabpanel" tabindex="0">${content}</div>`;
 }
 
 function compactNumber(value) { return Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value || 0); }
@@ -246,7 +284,9 @@ function stagesHtml(run) {
   if (!run) return "";
   const projected = inspectionFor(run)?.stages;
   const stages = projected?.map((stage) => ({ ...stage, id: stage.stageId, displayStatus: stage.lifecycle })) || run.stages;
-  return `<section class="workflow-stages"><header><span class="eyebrow">Workflow map</span><span class="stage-count">${stages.filter((stage) => (stage.displayStatus || stage.status) === "completed").length}/${stages.length} complete</span></header><ol>${stages.map((stage, index) => { const status = stage.displayStatus || stage.status; return `<li class="stage-${escapeHtml(status)} ${stage.id === selectedStageId ? "selected" : ""}"><button class="workflow-stage" type="button" data-stage="${escapeHtml(stage.id)}" aria-pressed="${stage.id === selectedStageId}" title="${escapeHtml(stage.title)}"><span class="stage-marker" aria-hidden="true">${statusIcon(status)}</span><span class="stage-copy"><strong><em>${index + 1}.</em>${escapeHtml(workflowStageName(stage))}</strong><small>${escapeHtml(workflowStateLabel(status))}</small></span></button></li>`; }).join("")}</ol></section>`;
+  const selectedStage = selectedStageKey || (selectedStageId && `stage:${selectedStageId}`);
+  const hasSelectedStage = stages.some((stage) => `stage:${stage.id}` === selectedStage);
+  return `<section class="workflow-stages"><header><span class="eyebrow">Workflow map</span><span class="stage-count">${stages.filter((stage) => (stage.displayStatus || stage.status) === "completed").length}/${stages.length} complete</span></header><ol role="tablist" aria-label="Workflow stages">${stages.map((stage, index) => { const status = stage.displayStatus || stage.status; const selected = `stage:${stage.id}` === selectedStage; return `<li class="stage-${escapeHtml(status)} ${selected ? "selected" : ""}"><button class="workflow-stage" type="button" role="tab" aria-selected="${selected}" aria-controls="inspector" tabindex="${selected || (!hasSelectedStage && index === 0) ? "0" : "-1"}" data-stage="${escapeHtml(stage.id)}" title="${escapeHtml(stage.title)}"><span class="stage-marker" aria-hidden="true">${statusIcon(status)}</span><span class="stage-copy"><strong><em>${index + 1}.</em>${escapeHtml(workflowStageName(stage))}</strong><small>${escapeHtml(workflowStateLabel(status))}</small></span></button></li>`; }).join("")}</ol></section>`;
 }
 
 function clarificationHistoryHtml(run) {
@@ -338,7 +378,7 @@ function renderHeader() {
     : run?.startedFreshFrom ? `<div class="recovery-banner"><strong>Fresh run</strong><span>Previous run ${escapeHtml(run.startedFreshFrom.runId)} was archived with a restart audit.</span></div>` : "";
   const pauseAudit = run?.pauseHistory?.at(-1);
   const pauseBanner = pauseAudit ? `<div class="recovery-banner"><strong>${run.status === "paused" ? "Run paused" : "Resumed from pause"}</strong><span>${escapeHtml(new Date(pauseAudit.at).toLocaleString())} · ${escapeHtml(pauseAudit.steps.length ? `${pauseAudit.steps.length} worker session${pauseAudit.steps.length === 1 ? "" : "s"} saved` : `${pauseAudit.stageId || "workflow"} session saved`)} · audit ${escapeHtml(pauseAudit.id)}</span></div>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}</div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}</div><div class="plan-actions">${action}${reviewAction}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}${pauseBanner}${restartBanner}${run?.recovery?.message ? `<div class="recovery-banner"><strong>Restart recovery</strong><span>${escapeHtml(run.recovery.message)}</span></div>` : ""}${run?.trackerSyncError ? `<div class="error-banner">${escapeHtml(run.trackerSyncError)}</div>` : ""}${run?.lastError ? `<div class="error-banner">${escapeHtml(run.lastError)}</div>` : ""}`;
 }
 
 function openRestartDialog(target = null) {
@@ -368,24 +408,26 @@ function attemptIndexHtml(step) {
   const worker = projection?.workers?.find((item) => item.stepId === step.id);
   const attempts = (worker?.attemptIds || []).map((id) => inspectionAttempt(id, projection)).filter(Boolean);
   if (!attempts.length) return "";
-  return `<div class="attempt-index" role="group" aria-label="${escapeHtml(step.title)} attempts">${attempts.map((attempt, index) => `<button type="button" class="attempt-chip status-${escapeHtml(attempt.status)} ${attempt.id === selectedAttemptId ? "selected" : ""}" data-attempt="${escapeHtml(attempt.id)}" data-worker="${escapeHtml(worker.id)}" title="Select retained attempt ${index + 1}">Attempt ${index + 1} · ${escapeHtml(attempt.lifecycle)}</button>`).join("")}</div>`;
+  const hasSelectedAttempt = attempts.some((attempt) => attempt.id === selectedAttemptId);
+  return `<div class="attempt-index" role="tablist" aria-label="${escapeHtml(step.title)} attempts">${attempts.map((attempt, index) => { const selected = attempt.id === selectedAttemptId; return `<button type="button" role="tab" aria-selected="${selected}" aria-controls="inspector-panel" tabindex="${selected || (!hasSelectedAttempt && index === 0) ? "0" : "-1"}" class="attempt-chip status-${escapeHtml(attempt.status)} ${selected ? "selected" : ""}" data-attempt="${escapeHtml(attempt.id)}" data-worker="${escapeHtml(worker.id)}" title="Select retained attempt ${index + 1}">Attempt ${index + 1} · ${escapeHtml(attempt.lifecycle)}</button>`; }).join("")}</div>`;
 }
 
-function stepHtml(step) {
+function stepHtml(step, tabbable = true, fallbackTabbable = false) {
   const selected = step.id === selectedStepId ? "selected" : "";
+  const tabAttributes = tabbable ? `role="tab" aria-selected="${selected === "selected"}" aria-controls="inspector-panel" tabindex="${selected || fallbackTabbable ? "0" : "-1"}"` : "";
   const profile = runFor()?.stageProfiles?.[step.role || "implementation"];
   const budget = step.permission === "write" && step.reviewBudget ? ` · ≤${step.reviewBudget.maxFiles} files/${step.reviewBudget.maxChangedLines} lines` : "";
   const dependencies = (step.dependsOn || []).map((id) => nodeById(id, runFor()?.plan)?.title || id);
   const dependency = dependencies.length ? `<span class="step-dependency">After ${escapeHtml(dependencies.join(" · "))}</span>` : "";
-  return `<div class="step-with-attempts"><button class="step status-${escapeHtml(step.status)} ${selected}" data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}${escapeHtml(budget)}</span>${dependency}</span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>${attemptIndexHtml(step)}</div>`;
+  return `<div class="step-with-attempts"><button class="step status-${escapeHtml(step.status)} ${selected}" type="button" ${tabAttributes} data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}${escapeHtml(budget)}</span>${dependency}</span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>${attemptIndexHtml(step)}</div>`;
 }
 
 function graphUnitHtml(unit) {
   const node = unit.node;
-  if (node.type !== "group") return `<div class="graph-node" data-graph-node="${escapeHtml(node.id)}">${stepHtml(node)}</div>`;
+  if (node.type !== "group") return `<div class="graph-node" data-graph-node="${escapeHtml(node.id)}">${stepHtml(node, false)}</div>`;
   const childIds = new Set(node.children.map((child) => child.id));
   const parallel = !node.children.some((child) => child.dependsOn.some((id) => childIds.has(id)));
-  return `<section class="graph-node graph-group" data-graph-node="${escapeHtml(node.id)}"><header><div><span class="graph-group-kicker">${parallel ? "parallel" : "sequence"}</span><strong>${escapeHtml(node.title)}</strong></div><span class="stage-count">${node.children.length} agents</span></header><div class="graph-group-children">${node.children.map(stepHtml).join("")}</div></section>`;
+  return `<section class="graph-node graph-group" data-graph-node="${escapeHtml(node.id)}"><header><div><span class="graph-group-kicker">${parallel ? "parallel" : "sequence"}</span><strong>${escapeHtml(node.title)}</strong></div><span class="stage-count">${node.children.length} agents</span></header><div class="graph-group-children">${node.children.map((step) => stepHtml(step, false)).join("")}</div></section>`;
 }
 
 function stageSteps(run, stage) {
@@ -422,7 +464,7 @@ function stageWorkerMapHtml(run, stage) {
     ? `<section class="execution-focus attention"><span class="eyebrow">Current focus</span><strong>Resolve ${attention.length === 1 ? "the worker" : `${attention.length} workers`} that need${attention.length === 1 ? "s" : ""} attention</strong><small>Select a highlighted worker to review the blocker and evidence.</small></section>`
     : reviews.length ? `<section class="execution-focus"><span class="eyebrow">Current focus</span><strong>Review ${reviews.length === 1 ? "the verified worker" : `${reviews.length} verified workers`}</strong><small>Accept or request a focused correction before the next batch starts.</small></section>` : "";
   const columns = graph.columns.map((column, index) => `<section class="graph-column"><span class="graph-stage-label">Batch ${index + 1}</span>${column.map(graphUnitHtml).join("")}</section>`).join("");
-  return `<section class="stage-work-surface">${focus}<header><span class="eyebrow">Steps in this stage</span><span class="stage-count">${steps.length} workers</span></header><div class="stage-worker-map">${steps.map(stepHtml).join("")}</div><details class="execution-graph-secondary"><summary>View dependency batches <span>${graph.columns.length} batches</span></summary><div class="execution-graph-scroll"><div id="execution-graph" class="execution-graph"><div class="graph-columns">${columns}</div></div></div></details></section>`;
+  return `<section class="stage-work-surface">${focus}<header><span class="eyebrow">Steps in this stage</span><span class="stage-count">${steps.length} workers</span></header><div class="stage-worker-map" role="tablist" aria-label="Workers in ${escapeHtml(stage.title)}">${steps.map((step, index) => stepHtml(step, true, !steps.some((item) => item.id === selectedStepId) && index === 0)).join("")}</div><details class="execution-graph-secondary"><summary>View dependency batches <span>${graph.columns.length} batches</span></summary><div class="execution-graph-scroll"><div id="execution-graph" class="execution-graph"><div class="graph-columns">${columns}</div></div></div></details></section>`;
 }
 
 function stageStepIndexHtml(run, stage) {
@@ -750,7 +792,7 @@ function canonicalAttemptInspector(run, step, projection, worker, attempt) {
   const attempts = worker.attemptIds.map((id) => inspectionAttempt(id, projection)).filter(Boolean);
   const evidence = summary.evidence;
   const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(detail?.terminationReason || publicAttempt?.terminationReason || "not recorded")}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : attemptDetailContent(detail, tab);
-  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section><nav class="tabs inspector-tabs">${[["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]].map(([id, label]) => `<button class="tab ${tab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div></div>`;
+  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}</div>`;
 }
 
 function renderInspector() {
@@ -778,7 +820,7 @@ function renderInspector() {
     const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
     const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header>${inspectorTabs([["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]], stageTab)}${inspectorPanel(panel)}<footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
@@ -809,7 +851,7 @@ function renderInspector() {
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
   const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
-  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${workerTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(workerTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panel}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel}${run.workspace?.cwd ? "" : " pending approval"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
+  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header>${inspectorTabs(auxiliary ? [...tabs, [workerTab, auxiliary]] : tabs, workerTab)}${inspectorPanel(panel)}${reviewActions}<footer class="inspector-footer"><span>${outputLabel}${run.workspace?.cwd ? "" : " pending approval"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
@@ -826,7 +868,7 @@ async function loadSessionTrace(run, step) {
     sessionTraces.set(key, { sessionFile, trace });
     if (run.id === runFor()?.id && step.id === selectedStepId) {
       if (activeTab === "run") refreshLiveRun({ events: true });
-      else if (activeTab === "prompt") renderInspector();
+      else if (activeTab === "prompt") renderInspectorPreservingContext();
     }
   } catch (error) {
     sessionTraces.set(key, { sessionFile, trace: { prompt: "", rawOutput: "", events: [] } });
@@ -844,7 +886,7 @@ async function loadStagePrompts(run, stage) {
   try {
     const result = await api(`/api/tickets/${encodeURIComponent(run.id)}/stages/${encodeURIComponent(stage.id)}/prompts`);
     stagePromptTraces.set(key, { signature, prompts: result.prompts || [] });
-    if (run.id === runFor()?.id && stage.id === selectedStageId && activeTab === "prompt") renderInspector();
+    if (run.id === runFor()?.id && stage.id === selectedStageId && activeTab === "prompt") renderInspectorPreservingContext();
   } catch (error) {
     stagePromptTraces.set(key, { signature, prompts: [] });
     notify(error.message);
@@ -920,32 +962,69 @@ function restoreClarificationDraft(draft) {
   if (focused) { focused.focus(); focused.setSelectionRange(draft.focus.start, draft.focus.end); }
 }
 
+function disclosureKey(item, index) {
+  return JSON.stringify([item.className, item.dataset.groupKey, item.dataset.eventKey, item.dataset.diffView, item.dataset.diffFileIndex, item.dataset.diffHunkIndex, index]);
+}
+
+function renderContext() {
+  const headerActionKeys = ["startTicket", "resumeTicket", "restartTicket", "startFresh", "pauseTicket", "cancelTicket", "selectStep", "approveTicket", "autoTicket"];
+  const focus = document.activeElement?.closest?.("[data-rail-step], [data-ticket], [data-attempt-select], [data-stage], [data-step], [data-attempt], [data-tab], button[data-start-ticket], button[data-resume-ticket], button[data-restart-ticket], button[data-start-fresh], button[data-pause-ticket], button[data-cancel-ticket], button[data-select-step], button[data-approve-ticket], button[data-auto-ticket]");
+  const focusData = focus?.dataset;
+  const headerAction = Object.entries(focusData || {}).find(([key]) => headerActionKeys.includes(key));
+  const headerSelector = headerAction && `[data-${headerAction[0].replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}="${CSS.escape(headerAction[1])}"]`;
+  const focusSelector = headerSelector || (focusData?.railStep ? `[data-rail-step="${CSS.escape(focusData.railStep)}"][data-ticket="${CSS.escape(focusData.ticket)}"]`
+    : focusData?.ticket ? `[data-ticket="${CSS.escape(focusData.ticket)}"]`
+      : focusData && "attemptSelect" in focusData ? "[data-attempt-select]"
+        : focusData?.stage ? `[data-stage="${CSS.escape(focusData.stage)}"]`
+          : focusData?.step ? `[data-step="${CSS.escape(focusData.step)}"]`
+            : focusData?.attempt ? `[data-attempt="${CSS.escape(focusData.attempt)}"]`
+              : focusData?.tab ? `[role="tab"][data-tab="${CSS.escape(focusData.tab)}"]` : null);
+  const details = (root) => [...root.querySelectorAll("details[open]")].map(disclosureKey);
+  return {
+    planScroll: $("#plan-tree")?.scrollTop || 0,
+    inspectorScroll: $("#inspector")?.scrollTop || 0,
+    planDetails: details($("#plan-tree")), inspectorDetails: details($("#inspector")), focusSelector
+  };
+}
+
+function restoreRenderContext(context) {
+  const restoreDetails = (root, keys) => [...root.querySelectorAll("details")].forEach((item, index) => { item.open = keys.includes(disclosureKey(item, index)); });
+  const plan = $("#plan-tree");
+  const inspector = $("#inspector");
+  restoreDetails(plan, context.planDetails);
+  restoreDetails(inspector, context.inspectorDetails);
+  plan.scrollTop = context.planScroll;
+  inspector.scrollTop = context.inspectorScroll;
+  context.focusSelector && document.querySelector(context.focusSelector)?.focus({ preventScroll: true });
+}
+
+function renderInspectorPreservingContext() {
+  const context = renderContext();
+  renderInspector();
+  restoreRenderContext(context);
+}
+
 function render() {
   if (!state) return;
+  const context = renderContext();
   const draft = clarificationDraft();
   $("#workspace-path").value = state.workspace.cwd;
   $("#workspace-path-display").textContent = state.workspace.cwd;
   $("#workspace-settings").title = state.workspace.cwd;
   const run = runFor();
   loadInspection(run);
-  if (selectedStageId && !run?.stages?.some((stage) => stage.id === selectedStageId)) { selectedStageId = null; rememberView(); }
-  if (!selectedStageId && activeTab === "overview") {
-    selectedStepId = null;
-    selectedStageId = preferredStageId(run?.stages);
-    activeTab = "activity";
-    rememberView();
-  }
+  if (!deliberateSelection && !inspectionFor(run) && !selectedStageId && !selectedStepId) selectedStageId = preferredStageId(run?.stages);
   if (checkpointUsesWorkspace(run) && !selectedStageId) {
     selectedStepId = null;
     selectedStageId = run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.id || run.stages?.[0]?.id || null;
-    rememberView();
   }
-  if (!selectedStageId && !selectedStepId) selectedStageId = preferredStageId(run?.stages);
-  if (!selectedStageId) selectedStepId = preferredStepId(run?.plan, selectedStepId);
+  if (!selectedStageId && !selectedStepId && !inspectionFor(run)) selectedStageId = preferredStageId(run?.stages);
+  if (!selectedStageId && !selectedStepId && !inspectionFor(run)) selectedStepId = preferredStepId(run?.plan, selectedStepId);
   renderTickets();
   renderHeader();
   renderPlanTree();
   renderInspector();
+  restoreRenderContext(context);
   restoreClarificationDraft(draft);
 }
 
@@ -959,14 +1038,19 @@ function renderSelection() {
 
 function selectTicket(ticketId, stepId = null, persist = true) {
   state.selectedTicketId = ticketId;
+  deliberateSelection = Boolean(stepId);
   selectedStepId = stepId;
   selectedStageId = null;
   selectedStageKey = null;
-  selectedWorkerId = null;
+  selectedWorkerId = stepId ? `worker:${stepId}` : null;
   selectedAttemptId = null;
   selectedRunId = null;
   selectedArtifactId = null;
   activeTab = stepId ? "run" : "activity";
+  // A previously inspected ticket has no network refresh to trigger selection sync.
+  // Resolve its cached projection now so a rail worker opens its own latest attempt.
+  const cachedProjection = inspectionFor(runFor(ticketId));
+  if (cachedProjection) syncInspectionSelection(cachedProjection);
   rememberView();
   render();
   if (!persist) return;
@@ -1135,6 +1219,7 @@ document.addEventListener("click", async (event) => {
       selectTicket(railStep.dataset.ticket, railStep.dataset.railStep);
       return;
     }
+    deliberateSelection = true;
     selectedStepId = railStep.dataset.railStep;
     selectedStageId = null;
     selectedWorkerId = `worker:${selectedStepId}`;
@@ -1219,7 +1304,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const selectStep = event.target.closest("[data-select-step]");
-  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; selectedWorkerId = `worker:${selectedStepId}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; activeTab = "overview"; rememberView(); render(); return; }
+  if (selectStep) { deliberateSelection = true; selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; selectedWorkerId = `worker:${selectedStepId}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; activeTab = "overview"; rememberView(); render(); return; }
   const autoAcceptStep = event.target.closest("[data-auto-accept-step]");
   if (autoAcceptStep) {
     autoAcceptStep.disabled = true;
@@ -1237,11 +1322,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const stage = event.target.closest("[data-stage]");
-  if (stage) { selectedStageId = stage.dataset.stage; selectedStageKey = `stage:${selectedStageId}`; selectedStepId = null; selectedWorkerId = null; selectedAttemptId = null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "activity"; rememberView(); renderSelection(); return; }
+  if (stage) { deliberateSelection = true; selectedStageId = stage.dataset.stage; selectedStageKey = `stage:${selectedStageId}`; selectedStepId = null; selectedWorkerId = null; selectedAttemptId = null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "activity"; rememberView(); renderSelection(); return; }
   const attemptButton = event.target.closest("[data-attempt]");
-  if (attemptButton) { selectedAttemptId = attemptButton.dataset.attempt; selectedWorkerId = attemptButton.dataset.worker; selectedStepId = inspectionWorker(selectedWorkerId)?.stepId || selectedStepId; selectedStageId = null; selectedStageKey = inspectionAttempt(selectedAttemptId)?.stageId || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
+  if (attemptButton) { deliberateSelection = true; selectedAttemptId = attemptButton.dataset.attempt; selectedWorkerId = attemptButton.dataset.worker; selectedStepId = inspectionWorker(selectedWorkerId)?.stepId || selectedStepId; selectedStageId = null; selectedStageKey = inspectionAttempt(selectedAttemptId)?.stageId || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
   const step = event.target.closest("[data-step]");
-  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; selectedWorkerId = `worker:${step.dataset.step}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
+  if (step) { deliberateSelection = true; selectedStepId = step.dataset.step; selectedStageId = null; selectedWorkerId = `worker:${step.dataset.step}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
   const artifact = event.target.closest("[data-select-artifact]");
   if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; renderInspector(); return; }
   const tab = event.target.closest("[data-tab]");
@@ -1273,6 +1358,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("change", (event) => {
   const selector = event.target.closest("[data-attempt-select]");
   if (!selector) return;
+  deliberateSelection = true;
   const projection = inspectionFor();
   const attempt = inspectionAttempt(selector.value, projection);
   selectedAttemptId = attempt?.id || null;
@@ -1284,6 +1370,22 @@ document.addEventListener("change", (event) => {
   activeTab = "overview";
   rememberView();
   renderSelection();
+});
+
+document.addEventListener("keydown", (event) => {
+  const tab = event.target.closest?.('[role="tab"]');
+  const tablist = tab?.closest?.('[role="tablist"]');
+  if (!tab || !tablist || event.altKey || event.ctrlKey || event.metaKey) return;
+  const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1, Home: "first", End: "last" };
+  if (!(event.key in keys)) return;
+  event.preventDefault();
+  const tabs = [...tablist.querySelectorAll(':scope > [role="tab"], :scope > * > [role="tab"]')];
+  const index = tabs.indexOf(tab);
+  const nextIndex = keys[event.key] === "first" ? 0 : keys[event.key] === "last" ? tabs.length - 1 : (index + keys[event.key] + tabs.length) % tabs.length;
+  const next = tabs[nextIndex];
+  const label = tablist.getAttribute("aria-label");
+  next?.click();
+  requestAnimationFrame(() => document.querySelector(`[role="tablist"][aria-label="${CSS.escape(label)}"] [role="tab"][aria-selected="true"]`)?.focus({ preventScroll: true }));
 });
 
 document.addEventListener("submit", async (event) => {
@@ -1435,7 +1537,24 @@ document.addEventListener("keydown", (event) => {
   $("#free-text-dialog").showModal();
 });
 
+function setTransportState(next, announcement = null) {
+  if (transportState === next) return;
+  transportState = next;
+  const status = $(".transport-status");
+  if (status) {
+    status.className = `transport-status ${transportState}`;
+    status.textContent = transportLabel();
+  }
+  if (announcement) notify(announcement);
+}
+
 const events = new EventSource("/api/events");
+events.onopen = () => {
+  clearTimeout(transportTimer);
+  const reconnected = hasConnected && transportState !== "connected";
+  hasConnected = true;
+  setTransportState("connected", reconnected ? "Live updates reconnected." : null);
+};
 events.onmessage = ({ data }) => {
   const event = JSON.parse(data);
   if (event.type === "state") { state = event.state; render(); return; }
@@ -1459,7 +1578,7 @@ events.onmessage = ({ data }) => {
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveRuns.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
-      if (event.type === "prompt" && activeTab === "prompt") renderInspector();
+      if (event.type === "prompt" && activeTab === "prompt") renderInspectorPreservingContext();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
     }
   }
@@ -1478,11 +1597,17 @@ events.onmessage = ({ data }) => {
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveStages.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId) {
-      if (event.type !== "text_delta") renderInspector();
+      if (event.type !== "text_delta") renderInspectorPreservingContext();
     }
   }
 };
-events.onerror = () => notify("Live connection lost; reconnecting…");
+events.onerror = () => {
+  // EventSource may emit repeated errors while reconnecting. Keep the first
+  // disconnect deadline so transport can become visibly stale after 15 seconds.
+  if (transportState !== "connected") return;
+  setTransportState("disconnected", "Live updates disconnected; reconnecting. Workflow state is retained and is not failed.");
+  transportTimer = setTimeout(() => setTransportState("stale", "Live updates are stale; reconnecting. Workflow state is retained and is not failed."), 15000);
+};
 
 state = await api("/api/state");
 try { piModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }

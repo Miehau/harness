@@ -52,6 +52,35 @@ test("nav CLI prints a map and json", async () => {
   assert.ok(JSON.parse(json.text()).some((route) => route.path === "/api/state"));
 });
 
+test("dashboard source keeps supervision controls semantic and visibly focusable", async () => {
+  const [app, styles] = await Promise.all([
+    readFile(join(repoRoot, "public/app.js"), "utf8"),
+    readFile(join(repoRoot, "public/styles.css"), "utf8")
+  ]);
+  assert.match(app, /role="tablist"/);
+  assert.match(app, /ArrowRight/);
+  assert.match(app, /restoreInspectionSelection/);
+  assert.match(app, /let deliberateSelection = false/);
+  assert.match(app, /Saved selection is intentionally not restored/);
+  assert.match(app, /selectedWorkerId = stepId \? `worker:\$\{stepId\}` : null/);
+  assert.match(app, /const cachedProjection = inspectionFor\(runFor\(ticketId\)\)/);
+  assert.match(app, /hasSelectedStage/);
+  assert.match(app, /hasSelectedAttempt/);
+  assert.match(app, /\[data-rail-step\], \[data-ticket\], \[data-attempt-select\]/);
+  assert.match(app, /focusData && "attemptSelect" in focusData/);
+  assert.match(app, /const headerActionKeys = \["startTicket", "resumeTicket"/);
+  assert.match(app, /const headerSelector = headerAction/);
+  assert.match(app, /function renderInspectorPreservingContext\(\)/);
+  assert.match(app, /event\.type === "prompt" && activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
+  assert.match(app, /event\.type !== "text_delta"\) renderInspectorPreservingContext\(\)/);
+  assert.match(app, /activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
+  assert.match(app, /workflow is not failed/);
+  assert.match(app, /const status = \$\("\.transport-status"\)/);
+  assert.match(app, /if \(transportState !== "connected"\) return/);
+  assert.match(styles, /button:focus-visible/);
+  assert.match(styles, /transport-status/);
+});
+
 test("seed writes JsonStore state the daemon can reload", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-seed-data-"));
   const cwd = await mkdtemp(join(tmpdir(), "agent-plan-seed-cwd-"));

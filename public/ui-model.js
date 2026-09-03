@@ -4,7 +4,7 @@ export function inspectionSelection(projection, selection = {}) {
   const attempts = projection?.attempts || [];
   const explicitStage = stages.find((item) => item.id === selection.stageId) || null;
   const attempt = attempts.find((item) => item.id === selection.attemptId)
-    || attempts.find((item) => item.workerId === selection.workerId)
+    || attempts.filter((item) => item.workerId === selection.workerId).at(-1)
     || (!selection.stageId && attempts.find((item) => item.id === projection?.focus?.attemptId))
     || null;
   const worker = workers.find((item) => item.id === (attempt?.workerId || selection.workerId))
@@ -14,6 +14,43 @@ export function inspectionSelection(projection, selection = {}) {
     || (!selection.stageId && stages.find((item) => item.id === projection?.focus?.stageId))
     || explicitStage;
   return { stageId: stage?.id || null, workerId: worker?.id || null, attemptId: attempt?.id || null };
+}
+
+// A durable selection wins while it still exists. Only a missing record follows the
+// server-provided focus order (active, actionable, then latest completion).
+export function restoreInspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const hasSelection = Boolean(selection.stageId || selection.workerId || selection.attemptId);
+  const retainedAttempt = attempts.find((item) => item.id === selection.attemptId);
+  const retainedWorker = workers.find((item) => item.id === selection.workerId);
+  const retainedStage = stages.find((item) => item.id === selection.stageId);
+  const retained = selection.attemptId ? retainedAttempt : selection.workerId ? retainedWorker : retainedStage;
+  const resolved = inspectionSelection(projection, retained ? selection : {});
+  return {
+    selection: resolved,
+    preserved: Boolean(retained),
+    disappeared: hasSelection && !retained,
+    reason: retained ? "preserved" : projection?.focus?.reason || "empty"
+  };
+}
+
+export function inspectionTransitionAnnouncement(previous, projection, selection = {}) {
+  if (!previous || !projection) return null;
+  const previousAttempt = (previous.attempts || []).find((item) => item.id === selection.attemptId);
+  const currentAttempt = (projection.attempts || []).find((item) => item.id === selection.attemptId);
+  if (previousAttempt && !currentAttempt) return "The selected record is no longer available; the inspector moved to current work.";
+  if (previousAttempt && currentAttempt && previousAttempt.lifecycle === "active" && currentAttempt.lifecycle !== "active") {
+    return `The selected attempt ${currentAttempt.lifecycle === "completed" ? "completed" : "stopped"}. Retained history is still available.`;
+  }
+  const previousWorker = (previous.workers || []).find((item) => item.id === selection.workerId);
+  const worker = (projection.workers || []).find((item) => item.id === selection.workerId);
+  if (previousWorker && worker && previousWorker.attemptIds.at(-1) !== worker.attemptIds.at(-1)) {
+    const latest = (projection.attempts || []).find((item) => item.id === worker.attemptIds.at(-1));
+    if (latest?.lifecycle === "active") return "A correction attempt started for the selected worker. Earlier attempts remain available.";
+  }
+  return null;
 }
 
 export function inspectionResourceLabel(resource = {}) {

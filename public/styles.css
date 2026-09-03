@@ -1577,6 +1577,26 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .attempt-index { display: flex; flex-wrap: wrap; gap: 4px; padding-left: 8px; }
 .attempt-chip { border: 1px solid var(--stroke); border-radius: 6px; padding: 3px 6px; background: rgb(255 255 255 / .025); color: #9ca6b7; cursor: pointer; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .attempt-chip:hover, .attempt-chip.selected { border-color: rgb(139 124 246 / .65); color: #ddd8ff; background: rgb(139 124 246 / .12); }
+
+/* Keyboard focus is intentionally stronger than selected-state color so supervision
+   controls remain discoverable while live updates redraw the inspector. */
+button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:focus-visible {
+  outline: 3px solid #b4a9ff;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px rgb(139 124 246 / .2);
+}
+.transport-status {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  border: 1px solid rgb(110 159 238 / .35);
+  border-radius: 99px;
+  padding: 0 9px;
+  color: #a9c9f6;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.25;
+}
+.transport-status.disconnected, .transport-status.stale { border-color: rgb(228 193 111 / .45); color: #ecd18e; }
 .attempt-selector { display: flex; align-items: center; gap: 9px; padding: 0 20px 13px; border-bottom: 1px solid var(--stroke); }
 .attempt-selector label { color: #7f899a; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
 .attempt-selector select { min-width: 0; flex: 1; padding: 7px 8px; font-size: 11px; }
@@ -1604,4 +1624,7 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
   .attempt-selector, .attempt-answer { margin-inline: 16px; }
   .attempt-selector { padding-inline: 0; }
   .attempt-overview dd, .attempt-checks dd { max-width: 60%; }
+  .attempt-index { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+  .attempt-chip { flex: none; min-height: 30px; }
+  .transport-status { width: 100%; white-space: normal; }
 }

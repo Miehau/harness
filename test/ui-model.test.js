@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("resolves canonical attempt selection without replacing a retained choice", () => {
   const projection = {
@@ -19,6 +19,36 @@ test("resolves canonical attempt selection without replacing a retained choice",
   });
   assert.equal(inspectionResourceLabel({ state: "not_retained" }), "Not retained");
   assert.equal(inspectionResourceLabel({ state: "truncated" }), "Truncated");
+});
+
+test("restores deliberate inspection selection and announces only meaningful attempt changes", () => {
+  const previous = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one", reason: "active" },
+    stages: [{ id: "stage:implement" }], workers: [{ id: "worker:build", stageId: "stage:implement", attemptIds: ["attempt:build:one"] }],
+    attempts: [{ id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  const completed = {
+    ...previous,
+    attempts: [{ ...previous.attempts[0], lifecycle: "completed" }]
+  };
+  assert.deepEqual(restoreInspectionSelection(completed, { attemptId: "attempt:build:one" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.match(inspectionTransitionAnnouncement(previous, completed, { attemptId: "attempt:build:one" }), /completed.*Retained history/i);
+
+  const corrected = {
+    ...completed,
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two", reason: "active" },
+    workers: [{ ...completed.workers[0], attemptIds: ["attempt:build:one", "attempt:build:two"] }],
+    attempts: [...completed.attempts, { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  assert.match(inspectionTransitionAnnouncement(completed, corrected, { workerId: "worker:build" }), /correction attempt started/i);
+  assert.deepEqual(restoreInspectionSelection(corrected, { workerId: "worker:build" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.deepEqual(restoreInspectionSelection(corrected, { attemptId: "attempt:missing" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: false, disappeared: true, reason: "active"
+  });
 });
 
 test("summarizes subscription usage without imposing a budget", () => {
