@@ -1039,8 +1039,19 @@ ${findingRubric}
 Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       if (budgetError) throw budgetError;
       signal?.throwIfAborted();
-      const rawOutput = lastAssistantText(session);
-      const parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
+      let rawOutput = lastAssistantText(session);
+      let parsed;
+      try {
+        parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
+      } catch (error) {
+        if (!/^(?:Model output|Verification output)/.test(error.message)) throw error;
+        onEvent?.({ type: "phase", label: "Retrying incomplete verification output" });
+        await session.prompt("Your previous verification response was empty or invalid. Return only the required JSON object with a non-empty summary and a findings array; do not repeat repository inspection.");
+        if (budgetError) throw budgetError;
+        signal?.throwIfAborted();
+        rawOutput = lastAssistantText(session);
+        parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
+      }
       return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
     } finally {
       clearTimeout(budgetTimer);

@@ -362,6 +362,39 @@ test("fresh verification receives the completed deterministic gate", async () =>
   }
 });
 
+test("fresh verification retries one empty model response without repeating inspection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-retry-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    const prompts = [];
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) {
+        prompts.push(value);
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: prompts.length === 1 ? " " : '{"summary":"Verified after retry","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    const result = await harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done",
+      checks: { status: "passed", command: "verify", summary: "Passed", output: "10 tests passed" }, runId: "run", round: 1
+    });
+
+    assert.equal(result.summary, "Verified after retry");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /do not repeat repository inspection/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("fresh verification stops after its repository inspection budget", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-verification-budget-"));
   try {
