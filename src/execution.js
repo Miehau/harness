@@ -6,6 +6,10 @@ import { initialWorkflow, workflowBlockers } from "./workflow.js";
 export const visualEvidencePolicy = "contract-only-v1";
 export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. The harness removes its legacy copies; do not create or restore them in the repository.";
 
+export function finalReviewFixFeedback(findings) {
+  return `${finalReviewRepositoryBoundary}\n\nCanonical current findings (this list supersedes any earlier duplicated or stale finding list in the session):\n${JSON.stringify(findings, null, 2)}`;
+}
+
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],
   ["explore", "Explore code & ticket horizon"],
