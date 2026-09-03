@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadProjectConfig, normalizeProjectConfig, projectEnvironment, runProjectCommand } from "../src/project-config.js";
-import { PROCESS_OWNERSHIP_ENV } from "../src/process-containment.js";
+import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("detects conventional package commands when no contract exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "project-config-"));
@@ -85,6 +85,104 @@ test("runs a named argv command without a shell or unlisted daemon secrets", asy
     });
     assert.equal(result.status, "passed");
     assert.equal(result.output.trim(), "isolated:cmd");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("classifies a command timeout while retaining its normal failed result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-timeout-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: ["node", "check.mjs"] } }));
+    const timeout = new Error("timed out");
+    timeout.code = "ETIMEDOUT";
+    const result = await runProjectCommand(root, "check", {
+      ownership: { token: "timeout-owner" }, execImpl: async () => { throw timeout; }
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(result.timedOut, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("returns at the timeout even when a fixture descendant holds command pipes open", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-pipe-timeout-"));
+  let parent;
+  let descendant;
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: [process.execPath, "parent.mjs", "pids"] } }));
+    await writeFile(join(root, "held.mjs"), "setInterval(() => {}, 1000);\n");
+    await writeFile(join(root, "parent.mjs"), `import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+const child = spawn(process.execPath, [new URL("./held.mjs", import.meta.url).pathname], { stdio: "inherit" });
+await writeFile(process.argv[2], [process.pid, child.pid].join(":"));
+setInterval(() => {}, 1000);
+`);
+    let cleanupTrigger;
+    const started = Date.now();
+    const result = await runProjectCommand(root, "check", {
+      source: { PATH: process.env.PATH }, ownership: { token: "timeout-owner" }, timeoutMs: 500,
+      containment: { executionId: "timeout-command", cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "complete" }; } }
+    });
+    assert.ok(Date.now() - started < 1_500, "timeout must not wait for inherited stdio to close");
+    assert.equal(result.timedOut, true);
+    assert.strictEqual(result.cleanupTrigger, cleanupTrigger);
+    assert.equal(cleanupTrigger.trigger, "repository-command-timeout");
+    assert.equal(cleanupTrigger.command, "check");
+    assert.match(cleanupTrigger.at, /^\d{4}-\d{2}-\d{2}T/);
+    [parent, descendant] = (await readFile(join(root, "pids"), "utf8")).split(":").map(Number);
+    assert.doesNotThrow(() => process.kill(parent, 0), "the managed runner must leave signaling to containment");
+  } finally {
+    for (const pid of [parent, descendant]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a command launched after timeout cleanup receives a later worker-exit containment cycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-late-launch-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { timeout: ["node", "timeout.mjs"], later: ["node", "later.mjs"] }
+    }));
+    const ownership = createExecutionOwnership("late-launch", { randomUUIDImpl: () => "late-owner", now: () => 0 });
+    const targets = new Map();
+    const signals = [];
+    const containment = new ProcessContainment({
+      executionId: ownership.executionId, ownership, graceMs: 0, forceWaitMs: 0, timeoutMs: 100,
+      adapter: {
+        platform: "test", supported: true,
+        discover: async () => ({ processes: [...targets.values()], unresolved: [] }),
+        observe: async (pid) => targets.get(pid) || null,
+        signal: async (pid, signal) => { signals.push([pid, signal]); targets.delete(pid); }
+      }
+    });
+    let calls = 0;
+    const execImpl = async () => {
+      if (calls++ === 0) {
+        targets.set(41, { pid: 41, ppid: 7, startTime: "100", ownershipToken: ownership.token });
+        const error = new Error("timed out");
+        error.code = "ETIMEDOUT";
+        throw error;
+      }
+      targets.set(42, { pid: 42, ppid: 7, startTime: "101", ownershipToken: ownership.token });
+      return { stdout: "later command completed", stderr: "" };
+    };
+
+    const timedOut = await runProjectCommand(root, "timeout", { ownership, containment, execImpl });
+    assert.equal(timedOut.timedOut, true);
+    const later = await runProjectCommand(root, "later", { ownership, containment, execImpl });
+    assert.equal(later.status, "passed");
+    const completed = await containment.cleanup("worker-completed");
+
+    assert.deepEqual(signals, [[41, "SIGTERM"], [42, "SIGTERM"]]);
+    assert.deepEqual(completed.discovered, [
+      { pid: 41, ppid: 7, startTime: "100" },
+      { pid: 42, ppid: 7, startTime: "101" }
+    ]);
+    assert.deepEqual(completed.triggers.map(({ trigger }) => trigger), ["repository-command-timeout", "worker-completed"]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

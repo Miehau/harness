@@ -655,6 +655,70 @@ test("cleanup evidence remains pessimistic through cancellation, serialization, 
   assert.equal(retained.cleanup.executions[0].ownership.executionId, "worker-1");
 });
 
+test("cleanup settlement retains timestamp-distinct lifecycle triggers while deduplicating redelivery", () => {
+  const run = createTicketRun({ id: "trigger-dedupe", identifier: "TRIGGER" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "worker-1", { outcome: "complete", triggers: [] }, {
+    trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z"
+  });
+  completeRunCleanup(run, "worker-1", { outcome: "complete", triggers: [] }, {
+    trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z"
+  });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "complete",
+    triggers: [{ trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z" }]
+  }, { trigger: "daemon-shutdown", at: "2026-09-03T10:00:03.000Z" });
+  assert.deepEqual(run.cleanup.executions[0].triggers, [
+    { trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" },
+    { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z" },
+    { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z" },
+    { trigger: "daemon-shutdown", at: "2026-09-03T10:00:03.000Z" }
+  ]);
+});
+
+test("late cleanup success cannot erase timeout uncertainty", () => {
+  const run = createTicketRun({ id: "timeout", identifier: "TIMEOUT" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "incomplete", unresolved: [{ reason: "cleanup-wait-timeout" }], diagnostics: ["Cleanup wait timed out"], actions: []
+  }, { trigger: "worker-exit", at: "2026-09-03T10:00:01.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "complete", unresolved: [], diagnostics: [], actions: [{ pid: 41, signal: "SIGKILL", status: "sent" }]
+  }, { trigger: "daemon-shutdown", at: "2026-09-03T10:00:02.000Z" });
+  const execution = run.cleanup.executions[0];
+  assert.equal(execution.outcome, "incomplete");
+  assert.deepEqual(execution.unresolved, [{ reason: "cleanup-wait-timeout" }]);
+  assert.deepEqual(execution.diagnostics, ["Cleanup wait timed out"]);
+  assert.deepEqual(execution.actions, [{ pid: 41, signal: "SIGKILL", status: "sent" }]);
+});
+
+test("repeated incomplete settlement deduplicates shared containment evidence", () => {
+  const run = createTicketRun({ id: "duplicate-cleanup", identifier: "DEDUP" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", at: "2026-09-03T10:00:00.000Z" });
+  const sharedEvidence = {
+    outcome: "incomplete",
+    discovered: [{ pid: 41, ppid: 7, startTime: "100" }],
+    actions: [{ pid: 41, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }],
+    unresolved: [{ pid: 41, identity: { ppid: 7, startTime: "100" }, reason: "still-running-after-force" }],
+    diagnostics: ["Fixture process did not exit"]
+  };
+  completeRunCleanup(run, "worker-1", sharedEvidence, { trigger: "repository-command-timeout", at: "2026-09-03T10:00:01.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    ...sharedEvidence,
+    discovered: [...sharedEvidence.discovered, { pid: 42, ppid: 7, startTime: "101" }],
+    actions: [...sharedEvidence.actions, { pid: 42, signal: "SIGKILL", status: "sent", at: "2026-09-03T10:00:02.000Z" }],
+    unresolved: [...sharedEvidence.unresolved, { pid: 42, identity: { ppid: 7, startTime: "101" }, reason: "still-running-after-force" }],
+    diagnostics: [...sharedEvidence.diagnostics, "Late owned process remained"]
+  }, { trigger: "worker-exit", at: "2026-09-03T10:00:02.000Z" });
+
+  const execution = run.cleanup.executions[0];
+  assert.equal(execution.outcome, "incomplete");
+  assert.equal(execution.discovered.length, 2);
+  assert.equal(execution.actions.length, 2);
+  assert.equal(execution.unresolved.length, 2);
+  assert.deepEqual(execution.diagnostics, ["Fixture process did not exit", "Late owned process remained"]);
+});
+
 test("compact run and public state omit artifact bodies", () => {
   const run = {
     id: "t1", runId: "r1", status: "awaiting_approval", lastError: null,

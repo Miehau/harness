@@ -127,6 +127,40 @@ test("daemon cancellation cleans an owned descendant once and exposes durable cl
   }
 });
 
+test("daemon shutdown bounds and cleans a stubborn owned descendant", { skip: linuxOnly }, async () => {
+  const eventFile = join(tmpdir(), `agent-plan-fixture-shutdown-${randomUUID()}.log`);
+  const containments = [];
+  let pid;
+  const harness = fixtureHarness({ launcher: fixtureLauncher, mode: "stubborn", eventFile, onLaunch: (value) => { pid = value.pid; } });
+  harness.containmentFactory = containmentFactory(containments);
+  try {
+    await withDaemon(async (daemon, { cwd }) => {
+      const id = await seedRun(daemon, {
+        ticket: fixtureTicket("fixture-shutdown"), status: "awaiting_approval", workspace: { cwd }, plan: fixturePlan(),
+        checkpoint: { id: "approve", kind: "awaiting_approval", title: "Approve fixture" }
+      });
+      assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: {} })).status, 202);
+      await waitFor(async () => {
+        assert.ok(pid);
+        assert.match((await events(eventFile)).join("\n"), /started/);
+      });
+
+      const started = Date.now();
+      await daemon.close({ exit: false });
+      assert.ok(Date.now() - started < 2_000, "shutdown must remain bounded while the fixture ignores SIGTERM");
+      await waitFor(() => assertExited(pid), { timeoutMs: 2_000 });
+
+      const execution = daemon.store.read().ticketRuns[id].cleanup.executions[0];
+      assert.ok(execution.triggers.some(({ trigger }) => trigger === "daemon-shutdown"));
+      assert.deepEqual(execution.actions.map(({ signal }) => signal), ["SIGTERM", "SIGKILL"]);
+      assert.match((await events(eventFile)).join("\n"), /graceful/);
+    }, { harness });
+  } finally {
+    await stopFixtureProcess(pid);
+    await removeEventFile(eventFile);
+  }
+});
+
 test("identity mismatch leaves the fixture process unsignaled", { skip: linuxOnly }, async () => {
   const eventFile = join(tmpdir(), `agent-plan-fixture-identity-${randomUUID()}.log`);
   const ownership = createExecutionOwnership("identity-fixture");
@@ -183,6 +217,34 @@ test("stubborn fixture receives graceful termination before renewed validation a
     await waitFor(() => assertExited(pid));
   } finally {
     await stopFixtureProcess(pid);
+    await removeEventFile(eventFile);
+  }
+});
+
+test("a fixture descendant forked during graceful cleanup receives a second cleanup cycle", { skip: linuxOnly }, async () => {
+  const eventFile = join(tmpdir(), `agent-plan-fixture-fork-${randomUUID()}.log`);
+  const ownership = createExecutionOwnership("fork-fixture");
+  const adapter = createPlatformAdapter();
+  let parentPid;
+  let childPid;
+  try {
+    ({ pid: parentPid } = await launchOwnedFixture("fork-on-graceful", eventFile, ownership));
+    const containment = new ProcessContainment({
+      executionId: ownership.executionId, ownership, adapter, graceMs: 80, forceWaitMs: 20, timeoutMs: 750
+    });
+    const result = await containment.cleanup("fork-fixture-test");
+    await waitFor(async () => {
+      const pids = (await events(eventFile)).filter((line) => / started /.test(line)).map((line) => Number(line.split(" ").at(-1)));
+      assert.equal(pids.length, 2);
+      childPid = pids.find((pid) => pid !== parentPid);
+      assert.ok(childPid);
+    });
+    assert.equal(result.outcome, "complete");
+    assert.deepEqual(result.actions.filter((action) => action.pid === childPid).map((action) => action.signal), ["SIGTERM"]);
+    await waitFor(() => assertExited(childPid));
+  } finally {
+    await stopFixtureProcess(childPid);
+    await stopFixtureProcess(parentPid);
     await removeEventFile(eventFile);
   }
 });

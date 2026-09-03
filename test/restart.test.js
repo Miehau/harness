@@ -34,6 +34,81 @@ test("startup recovery records interrupted ownership as incomplete rather than s
   }
 });
 
+test("fresh restart settles preview cleanup before archiving its owning run", async () => {
+  await withDaemon(async (daemon) => {
+    const ticket = {
+      id: "restart-preview-owner", identifier: "PREVIEW-1", title: "Retain preview cleanup",
+      description: "Keep cleanup on the archived run.", source: "local",
+      state: { name: "Free text", type: "local" }, team: { name: "Local" }
+    };
+    const id = await seedRun(daemon, { ticket, status: "awaiting_requirements" });
+    const previewId = `${id}:verification`;
+    daemon.previews.active.set(previewId, {
+      child: { exitCode: null }, cleanup: null,
+      public: { id: previewId, port: 47821, status: "running", cleanup: null },
+      containment: { cleanup: async () => assert.fail("the run-bound observer must own persistence") },
+      onCleanup: async () => {
+        await daemon.store.update((state) => {
+          state.ticketRuns[id].cleanup = {
+            outcome: "incomplete",
+            executions: [{ executionId: "preview-owner", outcome: "incomplete", diagnostics: ["preview cleanup observed before archive"], unresolved: [{ pid: 71, reason: "still-running-after-force" }] }]
+          };
+        });
+        return { executionId: "preview-owner", outcome: "incomplete" };
+      }
+    });
+    daemon.previews.ports.add(47821);
+
+    const response = await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { target: "fresh", confirmed: true } });
+    assert.equal(response.status, 202);
+    const state = daemon.store.read();
+    const archived = state.retainedRuns[`${id}:run-1`];
+    assert.equal(archived.cleanup.outcome, "incomplete");
+    assert.deepEqual(archived.cleanup.executions[0].unresolved, [{ pid: 71, reason: "still-running-after-force" }]);
+    assert.notEqual(state.ticketRuns[id].cleanup.executions[0]?.executionId, "preview-owner");
+  });
+});
+
+test("fresh restart preserves a timed-out preview cleanup as pending", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-pending-preview-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-pending-preview-cwd-"));
+  let resolveCleanup = () => {};
+  const daemon = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness(), lifecycleCleanupTimeoutMs: 5 });
+  try {
+    const ticket = {
+      id: "restart-preview-pending", identifier: "PREVIEW-2", title: "Keep pending preview cleanup",
+      description: "Do not claim an unsettled cleanup stopped.", source: "local",
+      state: { name: "Free text", type: "local" }, team: { name: "Local" }
+    };
+    const id = await seedRun(daemon, { ticket, status: "awaiting_requirements" });
+    const previewId = `${id}:verification`;
+    const cleanup = new Promise((resolve) => { resolveCleanup = resolve; });
+    const publicPreview = { id: previewId, port: 47821, status: "running", cleanup: null };
+    await daemon.store.update((state) => { state.ticketRuns[id].previews = { [previewId]: publicPreview }; });
+    daemon.previews.active.set(previewId, {
+      child: { exitCode: null }, cleanup: null, public: publicPreview,
+      containment: { cleanup: async () => assert.fail("the preview observer owns cleanup") },
+      onCleanup: async () => cleanup
+    });
+    daemon.previews.ports.add(47821);
+
+    const response = await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { target: "fresh", confirmed: true } });
+    assert.equal(response.status, 202);
+    const preview = daemon.store.read().retainedRuns[`${id}:run-1`].previews[previewId];
+    assert.equal(preview.status, "stopping");
+    assert.equal(preview.cleanup.outcome, "running");
+    assert.match(preview.cleanup.diagnostics[0], /containment remains pending/);
+
+    resolveCleanup({ outcome: "incomplete", diagnostics: ["Process remained after force termination"] });
+    await daemon.previews.settleMatching(previewId, 50);
+  } finally {
+    resolveCleanup({ outcome: "complete" });
+    await daemon.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("fresh restart keeps a free-text local ticket out of the fixture path", async () => {
   await withDaemon(async (daemon) => {
     const ticket = {

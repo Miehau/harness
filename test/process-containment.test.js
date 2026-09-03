@@ -8,6 +8,7 @@ import {
   environmentForOwnership,
   sameProcessIdentity
 } from "../src/process-containment.js";
+import { beginRunCleanup, completeRunCleanup, createTicketRun } from "../src/execution.js";
 
 function ownership() {
   return createExecutionOwnership("execution-1", { randomUUIDImpl: () => "owner-token", now: () => 0 });
@@ -165,7 +166,7 @@ test("identity is renewed before force and a changed target is never force signa
   assert.equal(result.unresolved[0].reason, "force-identity-mismatch");
 });
 
-test("concurrent and repeated cleanup calls share signaling and retain triggers", async () => {
+test("concurrent cleanup shares signaling while timestamp-distinct triggers survive durable settlement", async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   let signals = 0;
@@ -175,14 +176,74 @@ test("concurrent and repeated cleanup calls share signaling and retain triggers"
     observe: async () => ++observations === 1 ? identity() : null,
     signal: async () => { signals++; }
   });
-  const first = service.cleanup("cancel");
-  const second = service.cleanup({ trigger: "shutdown", source: "daemon" });
+  const firstTrigger = { trigger: "shutdown", source: "daemon", at: "2026-09-03T10:00:01.000Z" };
+  const secondTrigger = { trigger: "shutdown", source: "daemon", at: "2026-09-03T10:00:02.000Z" };
+  const first = service.cleanup(firstTrigger);
+  const second = service.cleanup(secondTrigger);
   assert.equal(first, second);
   release();
   const result = await first;
-  assert.equal(service.cleanup("worker-exit"), first);
   assert.equal(signals, 1);
-  assert.deepEqual(result.triggers.map(({ trigger }) => trigger), ["cancel", "shutdown", "worker-exit"]);
+  assert.deepEqual(result.triggers, [firstTrigger, secondTrigger]);
+
+  const run = createTicketRun({ id: "containment-triggers", identifier: "CONTAIN" }, {}, {});
+  beginRunCleanup(run, { executionId: "execution-1", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "execution-1", result, { trigger: "worker-exit", at: "2026-09-03T10:00:03.000Z" });
+  assert.deepEqual(run.cleanup.executions[0].triggers, [
+    { trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" },
+    { trigger: "worker-exit", at: "2026-09-03T10:00:03.000Z" },
+    firstTrigger,
+    secondTrigger
+  ]);
+});
+
+test("durable cleanup preserves timestamp-distinct lifecycle requests", () => {
+  const run = createTicketRun({ id: "durable-triggers", identifier: "DURABLE" }, {}, {});
+  const earlier = { trigger: "run-cancelled", source: "daemon", at: "2026-09-03T10:00:01.000Z" };
+  const later = { trigger: "run-cancelled", source: "daemon", at: "2026-09-03T10:00:02.000Z" };
+  const evidence = { executionId: "execution-1", outcome: "not-required", triggers: [later], discovered: [], actions: [], unresolved: [], diagnostics: [] };
+  beginRunCleanup(run, { executionId: "execution-1", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "execution-1", evidence, earlier);
+  completeRunCleanup(run, "execution-1", evidence, later);
+  assert.deepEqual(run.cleanup.executions[0].triggers, [
+    { trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" },
+    earlier,
+    later
+  ]);
+});
+
+test("a launch during cleanup queues its own cycle after the active cycle", async () => {
+  let release;
+  let started;
+  const firstDiscovery = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  let discoveries = 0;
+  const signals = [];
+  const service = containment({
+    discover: async () => {
+      discoveries++;
+      if (discoveries === 1) {
+        started();
+        await gate;
+        return [];
+      }
+      return discoveries === 2 ? [identity()] : [];
+    },
+    observe: async () => signals.length ? null : identity(),
+    signal: async (_pid, signal) => { signals.push(signal); }
+  }, { graceMs: 0, forceWaitMs: 0 });
+
+  const first = service.cleanup("preview-exit");
+  await firstDiscovery;
+  service.beginLaunch();
+  const later = service.cleanup("repository-check-exit");
+  assert.notEqual(later, first);
+  assert.equal(discoveries, 1, "the follow-up cycle must wait for the active cycle");
+  release();
+
+  await later;
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.deepEqual(service.record.triggers.map(({ trigger }) => trigger), ["preview-exit", "repository-check-exit"]);
 });
 
 test("one cleanup deadline leaves every unscheduled target unresolved", async () => {
@@ -198,8 +259,9 @@ test("one cleanup deadline leaves every unscheduled target unresolved", async ()
   assert.equal(observations, 0);
   assert.equal(signals, 0);
   assert.equal(result.outcome, "incomplete");
-  assert.deepEqual(result.unresolved.map(({ pid }) => pid), [41, 42, 43]);
-  assert.ok(result.unresolved.every(({ error }) => /deadline exceeded/i.test(error)));
+  assert.deepEqual(result.unresolved.filter(({ pid }) => pid).map(({ pid }) => pid), [41, 42, 43]);
+  assert.ok(result.unresolved.filter(({ pid }) => pid).every(({ error }) => /deadline exceeded/i.test(error)));
+  assert.ok(result.unresolved.some(({ reason }) => reason === "post-graceful-discovery-failed"));
 });
 
 test("an unreadable Linux process owned by another user is irrelevant", async () => {
@@ -224,6 +286,24 @@ test("an unreadable Linux process owned by another user is irrelevant", async ()
   assert.equal(signals, 0);
   assert.equal(result.outcome, "not-required");
   assert.deepEqual(result.unresolved, []);
+});
+
+test("an unreadable Linux ownership status remains durable uncertainty", async () => {
+  let environmentReads = 0;
+  const denied = new Error("status permission denied");
+  denied.code = "EACCES";
+  const adapter = createPlatformAdapter({
+    platform: "linux", currentUid: 1000, procRoot: "/simulated-proc", readDirectory: async () => ["51"],
+    readFileImpl: async (path) => {
+      if (path.endsWith("/status")) throw denied;
+      environmentReads++;
+      throw new Error("status should establish ownership before environment access");
+    }
+  });
+  const result = await containment(adapter).cleanup("shutdown");
+  assert.equal(environmentReads, 0);
+  assert.equal(result.outcome, "incomplete");
+  assert.deepEqual(result.unresolved, [{ pid: 51, reason: "discovery-ownership-observation-failed", error: "status permission denied" }]);
 });
 
 test("an unreadable plausible-owned Linux process remains durable uncertainty", async () => {
@@ -266,6 +346,46 @@ test("unsupported and discovery failures do not speculate with signals", async (
   assert.equal(failed.outcome, "incomplete");
   assert.equal(failed.unresolved[0].reason, "discovery-failed");
   assert.equal(signals, 0);
+});
+
+test("a descendant found in the post-graceful snapshot receives its own bounded cleanup cycle", async () => {
+  const parent = identity();
+  const child = identity({ pid: 42, ppid: 41, startTime: "101" });
+  let discoveries = 0;
+  const signals = [];
+  const result = await containment({
+    // The child appears from the parent's graceful handler; the first
+    // post-force snapshot is empty, so only a new discovery phase can find it.
+    discover: async () => [ [parent], [child], [], [], [] ][discoveries++] || [],
+    observe: async (pid) => {
+      if (pid === parent.pid) return signals.includes("parent") ? null : parent;
+      return signals.includes("child") ? null : child;
+    },
+    signal: async (pid, signal) => { if (signal === "SIGTERM") signals.push(pid === parent.pid ? "parent" : "child"); }
+  }).cleanup("cancelled");
+  assert.equal(result.outcome, "complete");
+  assert.equal(discoveries, 5, "cleanup must observe after graceful and force for each discovered identity");
+  assert.deepEqual(result.actions.map(({ pid, signal }) => [pid, signal]), [[41, "SIGTERM"], [42, "SIGTERM"]]);
+  assert.deepEqual(result.discovered, [{ pid: 41, ppid: 7, startTime: "100" }, { pid: 42, ppid: 41, startTime: "101" }]);
+});
+
+test("a new descendant present in both follow-up snapshots is signaled once", async () => {
+  const parent = identity();
+  const child = identity({ pid: 42, ppid: 41, startTime: "101" });
+  const forced = new Set();
+  let discoveries = 0;
+  const signals = [];
+  const result = await containment({
+    discover: async () => [[parent], [child], [child], [], []][discoveries++] || [],
+    observe: async (pid) => forced.has(pid) ? null : pid === parent.pid ? parent : child,
+    signal: async (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === "SIGKILL") forced.add(pid);
+    }
+  }).cleanup("cancelled");
+  assert.equal(result.outcome, "complete");
+  assert.deepEqual(signals, [[41, "SIGTERM"], [41, "SIGKILL"], [42, "SIGTERM"], [42, "SIGKILL"]]);
+  assert.deepEqual(result.discovered, [{ pid: 41, ppid: 7, startTime: "100" }, { pid: 42, ppid: 41, startTime: "101" }]);
 });
 
 test("disappearance and ESRCH are safe absence rather than unresolved ownership", async () => {

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -130,7 +130,52 @@ export function redactCommandOutput(value, environment, { truncate = true } = {}
   return truncate ? output.slice(-100000) : output;
 }
 
-export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership } = {}) {
+export function runManagedCommand(executable, args, { cwd, env, signal, timeout, maxBuffer }) {
+  return new Promise((resolveCommand, rejectCommand) => {
+    const child = spawn(executable, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timer;
+    const append = (key, chunk) => {
+      const value = `${key === "stdout" ? stdout : stderr}${chunk}`;
+      if (key === "stdout") stdout = value.slice(-maxBuffer);
+      else stderr = value.slice(-maxBuffer);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const failed = (message, properties = {}) => {
+      const error = Object.assign(new Error(message), { stdout, stderr, ...properties });
+      finish(rejectCommand, error);
+    };
+    // PID-only signaling is unsafe: by the time a deadline callback runs, the
+    // ChildProcess PID could identify an unrelated process. Settle promptly
+    // and let the execution containment coordinator re-observe token-owned
+    // identities before it signals anything.
+    const interrupt = (message, properties) => failed(message, properties);
+    const abort = () => interrupt(signal?.reason?.message || "Project command aborted", { code: "ABORT_ERR", name: "AbortError" });
+    child.stdout?.on("data", (chunk) => append("stdout", chunk));
+    child.stderr?.on("data", (chunk) => append("stderr", chunk));
+    child.once("error", (error) => finish(rejectCommand, error));
+    // `exit`, unlike `close`, does not wait for a descendant holding inherited
+    // stdout/stderr open. That lets the caller request token-based cleanup as
+    // soon as the command deadline expires.
+    child.once("exit", (code, childSignal) => {
+      if (code === 0 && !childSignal) finish(resolveCommand, { stdout, stderr });
+      else failed(`Command failed with ${childSignal || `exit code ${code}`}`, { code, signal: childSignal, killed: Boolean(childSignal) });
+    });
+    timer = setTimeout(() => interrupt(`Command timed out after ${timeout}ms`, { code: "ETIMEDOUT", signal: "SIGTERM", killed: true }), timeout);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership, containment, timeoutMs = 10 * 60 * 1000 } = {}) {
   const config = await loadProjectConfig(cwd);
   if (config.commandErrors?.[name]) throw new Error(config.commandErrors[name]);
   const argv = config.commands[name];
@@ -142,11 +187,33 @@ export async function runProjectCommand(cwd, name, { signal, execImpl = exec, so
   // substitutes process.env or grants a command access to ambient secrets.
   const environment = ownership ? environmentForOwnership(ownership, baseEnvironment) : baseEnvironment;
   const executable = argv[0].startsWith("./") ? resolve(cwd, argv[0]) : argv[0];
+  // Record the launch before spawn, rather than at timeout cleanup: if a
+  // prior timeout already settled this execution, worker completion must open
+  // a fresh containment cycle for this command's inherited descendants.
+  containment?.beginLaunch?.();
   try {
-    const { stdout, stderr } = await execImpl(executable, [...argv.slice(1), ...args], { cwd, env: environment, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+    const runner = execImpl === exec ? runManagedCommand : execImpl;
+    const { stdout, stderr } = await runner(executable, [...argv.slice(1), ...args], { cwd, env: environment, signal, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return { status: "passed", command: name, output: redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment) };
   } catch (error) {
-    if (signal?.aborted) throw error;
-    return { status: "failed", command: name, output: redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment) };
+    const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM");
+    const interrupted = timedOut || signal?.aborted;
+    let cleanup;
+    let cleanupTrigger;
+    if (interrupted && containment) {
+      // The tool callback persists this same record after cleanup settles.
+      // Timestamp it once here so persistence redelivery deduplicates the
+      // containment evidence instead of recording a second timeout request.
+      cleanupTrigger = { trigger: signal?.aborted ? "repository-command-aborted" : "repository-command-timeout", command: name, at: new Date().toISOString() };
+      try { cleanup = await containment.cleanup(cleanupTrigger); }
+      catch (cleanupError) {
+        cleanup = { executionId: containment.executionId, outcome: "incomplete", diagnostics: [`Repository-command cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`] };
+      }
+    }
+    if (signal?.aborted) {
+      if (cleanup && error && typeof error === "object") error.cleanup = cleanup;
+      throw error;
+    }
+    return { status: "failed", command: name, timedOut, output: redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment), ...(cleanup ? { cleanup } : {}), ...(cleanupTrigger ? { cleanupTrigger } : {}) };
   }
 }

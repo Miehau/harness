@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { visualEvidenceMedia } from "./artifacts.js";
 import { createProcessContainment } from "./process-containment.js";
-import { detectPreviewCommand, loadProjectConfig, projectEnvironment, redactCommandOutput } from "./project-config.js";
+import { detectPreviewCommand, loadProjectConfig, projectEnvironment, redactCommandOutput, runManagedCommand } from "./project-config.js";
 
 const exec = promisify(execFile);
 
@@ -84,9 +84,12 @@ function cleanupPreview(preview, trigger) {
   const observed = Promise.resolve()
     .then(() => preview.onCleanup ? preview.onCleanup(trigger) : preview.containment.cleanup(trigger))
     .catch((error) => cleanupFailure(preview.containment, error))
-    .then((record) => {
+    .then(async (record) => {
       preview.public.cleanup = record;
-      preview.public.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
+      preview.public.status = ["incomplete", "unsupported"].includes(record.outcome) ? `cleanup_${record.outcome}` : "stopped";
+      // The public object is only in-memory; let the owning daemon make the
+      // settled result durable after the status has been derived.
+      await preview.onCleanupSettled?.(record);
       return record;
     });
   // Containment deduplicates signaling; callers still need their own observed
@@ -104,7 +107,7 @@ function settledWithin(promise, timeoutMs) {
 }
 
 export class PreviewManager {
-  constructor({ dataDir, spawnImpl = spawn, execImpl = exec, fetchImpl = fetch, portImpl = availablePort, containmentFactory = createProcessContainment, readyTimeoutMs = 60000, probeTimeoutMs = 2000, captureTimeoutMs = 15000 } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, execImpl = runManagedCommand, fetchImpl = fetch, portImpl = availablePort, containmentFactory = createProcessContainment, readyTimeoutMs = 60000, probeTimeoutMs = 2000, captureTimeoutMs = 60_000 } = {}) {
     this.dataDir = dataDir;
     this.spawn = spawnImpl;
     this.exec = execImpl;
@@ -116,6 +119,7 @@ export class PreviewManager {
     this.captureTimeoutMs = captureTimeoutMs;
     this.active = new Map();
     this.pending = new Map();
+    this.stopped = new Map();
     this.ports = new Set();
   }
 
@@ -127,13 +131,14 @@ export class PreviewManager {
     throw new Error("Could not allocate a unique preview port");
   }
 
-  async ensure({ id, cwd, seedState = null, containment, onCleanup = null } = {}) {
+  async ensure({ id, cwd, seedState = null, containment, onCleanup = null, onCleanupSettled = null } = {}) {
     const existing = this.active.get(id);
     if (existing?.child.exitCode === null && existing.cwd === cwd && !seedState) return existing.public;
     // A seeded preview is a proof fixture for one exact run snapshot. Restart
     // it for the next gate instead of rendering new worktree code against old
     // status, selection, or inspector state.
     if (existing) this.stop(id);
+    this.stopped.delete(id);
     const config = await loadProjectConfig(cwd);
     const configuredName = config.commands.preview ? "preview" : config.commands.dev ? "dev" : null;
     const conventional = configuredName ? null : await detectPreviewCommand(cwd);
@@ -166,6 +171,9 @@ export class PreviewManager {
     try {
       // Apply the marker after all repository-controlled values are assembled,
       // preserving the allow-list and avoiding any ambient environment merge.
+      // A previous shared cleanup may have settled, so register this launch
+      // before the child can inherit the ownership marker.
+      previewContainment.beginLaunch?.();
       child = this.spawn(commandExecutable(cwd, previewCommand), previewCommand.slice(1), {
         cwd, env: launchEnvironment, stdio: ["ignore", "pipe", "pipe"]
       });
@@ -180,19 +188,23 @@ export class PreviewManager {
       throw new Error(detail);
     }
     const publicPreview = { id, cwd, command: commandName, port, url, status: "running", cleanup: null, startedAt: new Date().toISOString() };
-    const preview = { child, cwd, containment: previewContainment, onCleanup, get output() { return output; }, public: publicPreview, cleanup: null };
+    const preview = { child, cwd, containment: previewContainment, onCleanup, onCleanupSettled, get output() { return output; }, public: publicPreview, cleanup: null };
     this.active.set(id, preview);
     child.once("exit", () => {
-      if (this.active.get(id) === preview) this.active.delete(id);
+      if (this.active.get(id) === preview) {
+        this.active.delete(id);
+        this.stopped.set(id, preview.public);
+      } else if (!this.active.has(id)) this.stopped.set(id, preview.public);
       this.ports.delete(port);
       this.trackCleanup(id, cleanupPreview(preview, { trigger: "preview-exit", previewId: id }));
     });
     return publicPreview;
   }
 
-  async capture(id, { source = process.env } = {}) {
+  async capture(id, { source = process.env, signal } = {}) {
     const preview = this.active.get(id);
     if (!preview) throw new Error("Preview is not running");
+    const containment = preview.containment || this.containmentFactory({ executionId: `preview:${id}` });
     const directory = join(this.dataDir, "visual-evidence", id.replace(/[^a-z0-9._-]+/gi, "-"));
     // Each capture owns its files so artifacts saved by prior review rounds remain
     // immutable even after a correction triggers re-verification.
@@ -201,13 +213,32 @@ export class PreviewManager {
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(captureDirectory, `${name}.png`);
+      // Chromium inherits the preview's ownership token through the screenshot
+      // helper; each invocation must open a fresh containment cycle if an
+      // earlier cleanup already settled.
+      containment.beginLaunch?.();
       try {
         await this.exec(process.execPath, [screenshotScript, "--url", preview.public.url, "--out", path, "--width", String(width), "--height", String(height), "--wait-ms", "1200", "--click", activeStepSelector], {
-          env: preview.containment.environment(source), timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
+          signal, env: containment.environment(source), timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
         });
       } catch (error) {
-        if (!/timed out/i.test(error.message)) throw error;
-        try { await access(path); } catch { throw error; }
+        const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM") || /timed out/i.test(error.message);
+        if (timedOut || signal?.aborted) {
+          // The managed runner only reports the deadline; containment must
+          // rediscover the inherited token before any process is signaled.
+          try {
+            await containment.cleanup({
+              trigger: signal?.aborted ? "chromium-capture-aborted" : "chromium-capture-timeout",
+              previewId: id,
+              capture: name
+            });
+          } catch { /* The enclosing preview lifecycle persists incomplete cleanup evidence. */ }
+        }
+        // A completed screenshot remains useful even when only helper teardown
+        // exceeded its bound; otherwise surface the capture failure.
+        if (timedOut && !signal?.aborted) {
+          try { await access(path); } catch { throw error; }
+        } else throw error;
       }
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
@@ -226,6 +257,7 @@ export class PreviewManager {
     const preview = this.active.get(id);
     if (!preview) return false;
     this.active.delete(id);
+    this.stopped.set(id, preview.public);
     this.ports.delete(preview.public.port);
     preview.public.status = "stopping";
     // PID-only child.kill is unsafe after process replacement or descendant
@@ -245,6 +277,8 @@ export class PreviewManager {
     for (const id of [...this.active.keys()]) if (this.stop(id, trigger)) stopped++;
     return stopped;
   }
+
+  previewState(id) { return this.active.get(id)?.public || this.stopped.get(id) || null; }
 
   async settleMatching(prefix, timeoutMs) {
     const pending = [...this.pending.entries()]

@@ -1,5 +1,7 @@
+import { spawn } from "node:child_process";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const [mode = "long-lived", eventFile = ""] = process.argv.slice(2);
 
@@ -17,6 +19,10 @@ if (mode === "normal-exit") {
 
 process.on("SIGTERM", () => {
   record("graceful").then(() => {
+    if (mode === "fork-on-graceful") {
+      const replacement = spawn(process.execPath, [fileURLToPath(import.meta.url), "long-lived", eventFile], { stdio: "ignore" });
+      replacement.unref();
+    }
     if (mode !== "stubborn") process.exit(0);
   });
 });

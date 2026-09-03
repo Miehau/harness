@@ -51,15 +51,16 @@ async function linuxOwnerUid(pid, procRoot, readFileImpl) {
   let status;
   try { status = await readFileImpl(`${procRoot}/${pid}/status`, "utf8"); }
   catch (error) {
-    // Permission to inspect an arbitrary process is not evidence that it could
-    // belong to this daemon. Disappearance and protected foreign entries are
-    // both excluded until positive same-user evidence is available.
-    if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(error.code)) return null;
+    if (["ENOENT", "ESRCH"].includes(error.code)) return null;
+    // A protected status file is not positive evidence of foreign ownership.
+    // Keep the PID as unresolved rather than allowing cleanup to claim that no
+    // token-owned process exists without ever observing its ownership.
+    if (["EACCES", "EPERM"].includes(error.code)) return { unresolved: { pid, reason: "discovery-ownership-observation-failed", error: message(error) } };
     throw error;
   }
   const match = String(status).match(/^Uid:\s+(\d+)(?:\s+\d+){3}\s*$/m);
   if (!match) throw new Error(`Malformed process ownership for PID ${pid}`);
-  return Number(match[1]);
+  return { uid: Number(match[1]) };
 }
 
 async function linuxIdentity(pid, token, procRoot, readFileImpl) {
@@ -123,11 +124,15 @@ export function createPlatformAdapter({
       for (const entry of entries) {
         if (!/^\d+$/.test(entry)) continue;
         const pid = Number(entry);
-        // Token-bearing children inherit the daemon's real UID. Establish that
-        // relationship before treating an unreadable environment as relevant;
-        // protected processes owned by other users are not cleanup uncertainty.
-        const ownerUid = await linuxOwnerUid(pid, procRoot, readFileImpl);
-        if (ownerUid !== currentUid) continue;
+        // Token-bearing children inherit the daemon's real UID. A readable
+        // foreign UID is irrelevant, but an unreadable status cannot establish
+        // foreign ownership and must remain durable cleanup uncertainty.
+        const owner = await linuxOwnerUid(pid, procRoot, readFileImpl);
+        if (owner?.unresolved) {
+          unresolved.push(owner.unresolved);
+          continue;
+        }
+        if (owner?.uid !== currentUid) continue;
         let identity;
         try { identity = await linuxIdentity(pid, token, procRoot, readFileImpl); }
         catch (error) {
@@ -157,12 +162,13 @@ function normalizeDiscovery(value) {
 
 function triggerEntry(trigger, at) {
   if (typeof trigger === "string") return { trigger, at };
-  return { ...(trigger || { trigger: "unspecified" }), at };
+  return { ...(trigger || { trigger: "unspecified" }), at: trigger?.at ?? at };
 }
 
 /**
- * One instance belongs to one execution. cleanup() is idempotent: all callers
- * share the same promise, while later lifecycle triggers remain in the record.
+ * One instance belongs to one execution. cleanup() is idempotent for each set
+ * of controlled launches: all callers share its promise, while a command begun
+ * after that promise settles opens one later, serialized containment cycle.
  */
 export class ProcessContainment {
   constructor({
@@ -188,10 +194,18 @@ export class ProcessContainment {
     this.sleep = sleep;
     this.promise = null;
     this.record = null;
-    this.deadlineAt = null;
+    this.launches = 0;
+    this.cleanedLaunches = 0;
+    this.scheduledLaunches = null;
   }
 
   environment(environment = {}) { return environmentForOwnership(this.ownership, environment); }
+
+  /** Mark a controlled command before it can inherit this execution's token. */
+  beginLaunch() {
+    this.launches++;
+    return this.launches;
+  }
 
   cleanup(trigger = "unspecified") {
     const at = iso(this.now());
@@ -210,12 +224,26 @@ export class ProcessContainment {
         diagnostics: []
       };
     }
-    if (!this.promise) this.promise = this.#run();
+    // A settled cleanup cannot cover a command launched afterwards. Chain any
+    // later cycle behind the current promise: concurrent lifecycle callers
+    // still share one signaling sequence, and each queued cycle gets its own
+    // deadline instead of mutating the active cycle's deadline.
+    if (!this.promise) {
+      this.scheduledLaunches = this.launches;
+      this.promise = this.#run(this.scheduledLaunches);
+    } else if (this.scheduledLaunches < this.launches) {
+      const launches = this.launches;
+      this.scheduledLaunches = launches;
+      this.promise = this.promise.then(
+        () => this.#run(launches),
+        () => this.#run(launches)
+      );
+    }
     return this.promise;
   }
 
-  async #bounded(operation, label) {
-    const remaining = this.deadlineAt - this.now();
+  async #bounded(operation, label, deadlineAt) {
+    const remaining = deadlineAt - this.now();
     if (remaining <= 0) throw new Error(`Cleanup deadline exceeded before ${label}`);
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -226,16 +254,20 @@ export class ProcessContainment {
   }
 
   #unresolved(identity, reason, error) {
+    const hasCompleteIdentity = Number.isInteger(identity?.pid) && identity.pid > 0
+      && Number.isInteger(identity.ppid) && identity.ppid >= 0
+      && typeof identity.startTime === "string" && identity.startTime.trim().length > 0;
     this.record.unresolved.push({
-      ...(identity?.pid ? { pid: identity.pid, identity: { ppid: identity.ppid, startTime: identity.startTime } } : {}),
+      ...(identity?.pid ? { pid: identity.pid } : {}),
+      ...(hasCompleteIdentity ? { identity: { ppid: identity.ppid, startTime: identity.startTime } } : {}),
       reason,
       ...(error ? { error: message(error) } : {})
     });
   }
 
-  async #observe(identity, phase) {
+  async #observe(identity, phase, deadlineAt) {
     let observed;
-    try { observed = await this.#bounded(() => this.adapter.observe(identity.pid, this.ownership.token), `${phase} observation`); }
+    try { observed = await this.#bounded(() => this.adapter.observe(identity.pid, this.ownership.token), `${phase} observation`, deadlineAt); }
     catch (error) { this.#unresolved(identity, `${phase}-observation-failed`, error); return { safe: false }; }
     if (!observed) return { safe: false, gone: true };
     if (!sameProcessIdentity(identity, observed, this.ownership.token)) {
@@ -245,12 +277,12 @@ export class ProcessContainment {
     return { safe: true, observed };
   }
 
-  async #send(identity, signal, phase) {
-    const checked = await this.#observe(identity, phase);
+  async #send(identity, signal, phase, deadlineAt) {
+    const checked = await this.#observe(identity, phase, deadlineAt);
     if (!checked.safe) return checked;
     const action = { pid: identity.pid, signal, at: iso(this.now()), status: "sent" };
     this.record.actions.push(action);
-    try { await this.#bounded(() => this.adapter.signal(identity.pid, signal), `${phase} signal`); }
+    try { await this.#bounded(() => this.adapter.signal(identity.pid, signal), `${phase} signal`, deadlineAt); }
     catch (error) {
       if (error?.code === "ESRCH") { action.status = "already-exited"; return { safe: false, gone: true }; }
       action.status = "failed";
@@ -261,95 +293,128 @@ export class ProcessContainment {
     return { safe: true };
   }
 
-  async #run() {
-    this.deadlineAt = this.now() + this.timeoutMs;
+  async #run(launches) {
+    const deadlineAt = this.now() + this.timeoutMs;
+    this.record.outcome = "running";
+    this.record.completedAt = null;
     if (!this.adapter.supported) {
       this.record.outcome = "unsupported";
       this.record.platform.reason = this.adapter.reason || "Platform adapter cannot safely identify owned processes";
-      return this.#finish();
+      return this.#finish(launches);
     }
 
-    const processed = new Set();
-    let cycles = 0;
-    while (true) {
-      let discovery;
-      try { discovery = normalizeDiscovery(await this.#bounded(() => this.adapter.discover(this.ownership.token), "process discovery")); }
+    const discovery = async (phase) => {
+      let found;
+      try { found = normalizeDiscovery(await this.#bounded(() => this.adapter.discover(this.ownership.token), `${phase} process discovery`, deadlineAt)); }
       catch (error) {
-        this.#unresolved(null, "discovery-failed", error);
-        this.record.diagnostics.push(`Process discovery failed: ${message(error)}`);
-        this.record.outcome = "incomplete";
-        return this.#finish();
+        this.#unresolved(null, phase === "initial" ? "discovery-failed" : `${phase}-discovery-failed`, error);
+        this.record.diagnostics.push(`${phase === "initial" ? "Process" : phase} discovery failed: ${message(error)}`);
+        return null;
       }
-      this.record.diagnostics.push(...discovery.diagnostics.map(String));
-      for (const unresolved of discovery.unresolved) {
-        this.record.unresolved.push({
-          ...(Number.isInteger(unresolved?.pid) && unresolved.pid > 0 ? { pid: unresolved.pid } : {}),
-          reason: unresolved?.reason || "discovery-observation-failed",
-          ...(unresolved?.error ? { error: String(unresolved.error) } : {})
-        });
-      }
-      if (discovery.unresolved.length) this.record.diagnostics.push(`Process discovery could not inspect ${discovery.unresolved.length} process(es)`);
-
-      // Copy adapter values once: the evidence used for later PID-reuse checks
-      // must not be mutable while the graceful wait is in progress. A process
-      // born during the graceful wait is handled in a fresh, bounded cycle.
-      const targets = discovery.processes.map(({ pid, ppid, startTime, ownershipToken }) => Object.freeze({
-        pid, ppid, startTime, ownershipToken
-      })).filter((identity) => !processed.has(`${identity.pid}:${identity.startTime}`));
-      for (const { pid, ppid, startTime } of targets) {
-        if (!this.record.discovered.some((known) => known.pid === pid && known.startTime === startTime)) {
-          this.record.discovered.push({ pid, ppid, startTime });
-        }
-      }
-      if (!targets.length) {
-        // A process that disappeared before a signal was necessary is the same
-        // success-path state as an empty discovery: no cleanup was required.
-        this.record.outcome = this.record.unresolved.length ? "incomplete" : this.record.actions.length ? "complete" : "not-required";
-        return this.#finish();
-      }
-      if (cycles >= this.maxCycles) {
-        for (const identity of targets) this.#unresolved(identity, "additional-owned-process-after-bounded-cycles");
-        this.record.outcome = "incomplete";
-        return this.#finish();
-      }
-      cycles++;
-      for (const identity of targets) processed.add(`${identity.pid}:${identity.startTime}`);
-
+      this.record.diagnostics.push(...found.diagnostics.map(String));
+      for (const unresolved of found.unresolved) this.#unresolved(
+        Number.isInteger(unresolved?.pid) && unresolved.pid > 0 ? { pid: unresolved.pid } : null,
+        unresolved?.reason || "discovery-observation-failed",
+        unresolved?.error
+      );
+      if (found.unresolved.length) this.record.diagnostics.push(`Process discovery could not inspect ${found.unresolved.length} process(es)`);
+      return found.processes.map(({ pid, ppid, startTime, ownershipToken }) => Object.freeze({ pid, ppid, startTime, ownershipToken }));
+    };
+    const keyFor = (identity) => `${identity?.pid}:${identity?.ppid}:${identity?.startTime}`;
+    const terminate = async (targets) => {
       const awaiting = [];
       for (const identity of targets) {
-        const sent = await this.#send(identity, gracefulSignal, "graceful");
+        const sent = await this.#send(identity, gracefulSignal, "graceful", deadlineAt);
         if (sent.safe) awaiting.push(identity);
       }
       if (awaiting.length && this.graceMs) {
-        try { await this.#bounded(() => this.sleep(Math.min(this.graceMs, this.timeoutMs)), "grace period"); }
+        try { await this.#bounded(() => this.sleep(Math.min(this.graceMs, this.timeoutMs)), "grace period", deadlineAt); }
         catch (error) {
           for (const identity of awaiting) this.#unresolved(identity, "grace-wait-failed", error);
-          this.record.outcome = "incomplete";
-          return this.#finish();
+          return null;
         }
       }
-
+      // SIGTERM handlers can create a token-inheriting process. Observe that
+      // boundary before escalating the original targets, then give every new
+      // identity its own graceful/force cycle below.
+      const afterGraceful = await discovery("post-graceful");
+      if (!afterGraceful) return null;
       const forced = [];
       for (const identity of awaiting) {
-        const sent = await this.#send(identity, forceSignal, "force");
+        const sent = await this.#send(identity, forceSignal, "force", deadlineAt);
         if (sent.safe) forced.push(identity);
       }
       if (forced.length && this.forceWaitMs) {
-        try { await this.#bounded(() => this.sleep(Math.min(this.forceWaitMs, this.timeoutMs)), "force period"); }
+        try { await this.#bounded(() => this.sleep(Math.min(this.forceWaitMs, this.timeoutMs)), "force period", deadlineAt); }
         catch (error) {
           for (const identity of forced) this.#unresolved(identity, "force-wait-failed", error);
-          this.record.outcome = "incomplete";
-          return this.#finish();
+          return null;
         }
       }
       for (const identity of forced) {
-        const final = await this.#observe(identity, "final");
+        const final = await this.#observe(identity, "final", deadlineAt);
         if (final.safe) this.#unresolved(identity, "still-running-after-force");
       }
+      // A second snapshot is the quiescence check: it covers descendants that
+      // appeared while force escalation was in progress as well as stale PIDs.
+      const afterForce = await discovery("post-force");
+      if (!afterForce) return null;
+      return [...afterGraceful, ...afterForce];
+    };
+    let pending = await discovery("initial");
+    if (!pending) {
+      this.record.outcome = "incomplete";
+      return this.#finish(launches);
     }
+    const remembered = new Set(this.record.discovered.map(({ pid, ppid, startTime }) => `${pid}:${ppid}:${startTime}`));
+    const remember = ({ pid, ppid, startTime }) => {
+      const key = `${pid}:${ppid}:${startTime}`;
+      if (!remembered.has(key)) {
+        remembered.add(key);
+        this.record.discovered.push({ pid, ppid, startTime });
+      }
+    };
+    for (const identity of pending) remember(identity);
+    if (!pending.length) {
+      this.record.outcome = this.record.unresolved.length ? "incomplete" : "not-required";
+      return this.#finish(launches);
+    }
+
+    // A SIGTERM handler can fork an inheriting child after any snapshot. Each
+    // newly observed identity therefore receives a full graceful/force cycle;
+    // completion requires a post-force snapshot with no unhandled identities.
+    const handled = new Set(pending.map(keyFor));
+    let quiescent = false;
+    while (pending.length) {
+      const observed = await terminate(pending);
+      if (!observed) break;
+      // The post-graceful and post-force snapshots can contain the same new
+      // identity. Collapse both immutable keys before scheduling so one cleanup
+      // cycle can never issue duplicate graceful or force signals.
+      const newlyObserved = new Map();
+      for (const identity of observed) {
+        const key = keyFor(identity);
+        if (!handled.has(key)) newlyObserved.set(key, identity);
+      }
+      pending = [...newlyObserved.values()];
+      for (const identity of pending) {
+        handled.add(keyFor(identity));
+        remember(identity);
+      }
+      if (!pending.length) quiescent = true;
+    }
+    if (!quiescent && !this.record.unresolved.length) {
+      this.#unresolved(null, "quiescence-not-observed-before-deadline");
+      this.record.diagnostics.push("Process cleanup ended without a bounded quiescent discovery");
+    }
+
+    this.record.outcome = this.record.unresolved.length ? "incomplete" : "complete";
+    return this.#finish(launches);
+
   }
 
-  #finish() {
+  #finish(launches) {
+    this.cleanedLaunches = Math.max(this.cleanedLaunches, launches);
     this.record.completedAt = iso(this.now());
     return this.record;
   }

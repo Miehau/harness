@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PreviewManager } from "../src/previews.js";
-import { PROCESS_OWNERSHIP_ENV } from "../src/process-containment.js";
+import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("does not reuse a port held by another ticket preview", async () => {
   const ports = [47821, 47821, 47822];
@@ -195,6 +195,70 @@ test("a hanging preview probe cannot bypass the readiness deadline", async () =>
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Chromium capture timeouts delegate signaling to containment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-capture-timeout-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-capture-timeout-evidence-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] } }));
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+    const cleanup = [];
+    const containment = {
+      executionId: "capture-timeout", ownership: { token: "capture-owner" },
+      environment: (environment) => ({ ...environment, [PROCESS_OWNERSHIP_ENV]: "capture-owner" }),
+      cleanup: async (trigger) => { cleanup.push(trigger); return { outcome: "complete" }; }
+    };
+    const manager = new PreviewManager({
+      dataDir, captureTimeoutMs: 5, portImpl: async () => 47821,
+      spawnImpl: () => child, fetchImpl: async () => ({ ok: true }),
+      execImpl: async () => { throw Object.assign(new Error("Command timed out after 5ms"), { code: "ETIMEDOUT", signal: "SIGTERM", killed: true }); }
+    });
+    await manager.ensure({ id: "capture-timeout", cwd: root, containment });
+    await assert.rejects(manager.capture("capture-timeout"), (error) => error?.code === "ETIMEDOUT");
+    assert.deepEqual(cleanup, [{ trigger: "chromium-capture-timeout", previewId: "capture-timeout", capture: "desktop" }]);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test("a preview or capture launch after settled cleanup opens a fresh containment cycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-containment-cycle-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-containment-evidence-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] } }));
+    const ownership = createExecutionOwnership("shared-preview", { randomUUIDImpl: () => "shared-preview-owner" });
+    const target = { pid: 41, ppid: 7, startTime: "100", ownershipToken: ownership.token };
+    let targetLaunched = false;
+    const signals = [];
+    const containment = new ProcessContainment({
+      executionId: "shared-preview", ownership, graceMs: 0, forceWaitMs: 0,
+      adapter: {
+        platform: "test", supported: true,
+        discover: async () => targetLaunched ? [target] : [],
+        observe: async () => signals.length ? null : target,
+        signal: async (_pid, signal) => { signals.push(signal); }
+      }
+    });
+    await containment.cleanup("earlier-preview-exit");
+
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+    const manager = new PreviewManager({
+      dataDir, portImpl: async () => 47821,
+      spawnImpl: () => { targetLaunched = true; return child; },
+      fetchImpl: async () => ({ ok: true }),
+      execImpl: async () => ({ stdout: "", stderr: "" })
+    });
+    await manager.ensure({ id: "shared", cwd: root, containment });
+    await manager.capture("shared", { source: { CHROMIUM_PATH: process.execPath } });
+
+    const result = await containment.cleanup("run-cancelled");
+    assert.equal(containment.launches, 3, "the preview server and both Chromium captures are owned launches");
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(result.outcome, "complete");
+  } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("records launch failures through containment without claiming a preview PID", async () => {
   const root = await mkdtemp(join(tmpdir(), "preview-launch-failure-"));
   try {
@@ -256,6 +320,50 @@ test("routes a later preview stop through the daemon cleanup observer", async ()
   await manager.settleMatching("ticket:", 50);
   assert.deepEqual(triggers, [{ trigger: "preview-stop", reason: "run-cancelled", previewId: "ticket:step" }]);
   assert.equal(manager.list().length, 0);
+});
+
+test("keeps unsupported preview cleanup visibly unresolved", async () => {
+  const manager = new PreviewManager({});
+  manager.active.set("unsupported", {
+    child: { exitCode: null }, public: { port: 47821, status: "running", cleanup: null }, cleanup: null,
+    containment: { cleanup: async () => ({ outcome: "unsupported", platform: { supported: false } }) }
+  });
+  manager.ports.add(47821);
+  assert.equal(manager.stop("unsupported"), true);
+  await manager.settleMatching("unsupported", 50);
+  const preview = manager.previewState("unsupported");
+  assert.equal(preview.status, "cleanup_unsupported");
+  assert.equal(preview.cleanup.outcome, "unsupported");
+});
+
+test("persists a late cleanup result through the settlement observer", async () => {
+  const manager = new PreviewManager({});
+  let resolveCleanup;
+  let resolveObserved;
+  const observed = new Promise((resolve) => { resolveObserved = resolve; });
+  const cleanup = new Promise((resolve) => { resolveCleanup = resolve; });
+  const persisted = [];
+  manager.active.set("late", {
+    child: { exitCode: null }, public: { port: 47821, status: "running", cleanup: null }, cleanup: null,
+    containment: { cleanup: async () => cleanup },
+    onCleanupSettled: async (record) => {
+      persisted.push({ record, status: manager.previewState("late").status });
+      resolveObserved();
+    }
+  });
+  manager.ports.add(47821);
+
+  assert.equal(manager.stop("late"), true);
+  await manager.settleMatching("late", 5);
+  assert.equal(manager.previewState("late").status, "stopping");
+  resolveCleanup({ outcome: "unsupported", diagnostics: ["Safe cleanup is unavailable"] });
+  await observed;
+
+  assert.equal(manager.previewState("late").status, "cleanup_unsupported");
+  assert.deepEqual(persisted, [{
+    record: { outcome: "unsupported", diagnostics: ["Safe cleanup is unavailable"] },
+    status: "cleanup_unsupported"
+  }]);
 });
 
 test("stopAll delegates every preview process to containment", async () => {
