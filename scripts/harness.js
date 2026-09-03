@@ -60,7 +60,7 @@ async function removeTemporaryDirectory(path) {
   // Daemon shutdown can settle a final queued state write after its worker
   // promise has completed. Retry transient ENOTEMPTY while removing test-only
   // directories so that write cannot make an otherwise successful fixture fail.
-  await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  await rm(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 export async function withDaemon(fn, opts = {}) {
