@@ -259,6 +259,25 @@ test("agent-plan CLI wait is non-zero on needs_attention", async () => {
   });
 });
 
+test("operator can auditably expand one blocked step to a directly affected test", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", status: "needs_attention", writeScope: "src/app.js", expectedFiles: ["src/app.js"] }] });
+    const id = await seedRun(daemon, { status: "needs_attention", lastError: "Regression failed", checkpoint: { kind: "needs_attention", stepId: "build", prompt: "Regression failed" }, plan });
+    const expanded = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, {
+      body: { paths: ["test/e2e.test.js"], reason: "The canonical failure directly exercises this changed contract." }
+    });
+    assert.equal(expanded.status, 200, expanded.text);
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.plan.nodes[0].writeScope, "src/app.js,test/e2e.test.js");
+    assert.deepEqual(run.plan.nodes[0].expectedFiles, ["src/app.js", "test/e2e.test.js"]);
+    assert.deepEqual(run.plan.nodes[0].scopeChanges.at(-1).paths, ["test/e2e.test.js"]);
+    assert.match(run.checkpoint.prompt, /Approved scope expansion/);
+
+    const rejected = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, { body: { paths: ["../outside"], reason: "No" } });
+    assert.equal(rejected.status, 400);
+  });
+});
+
 test("step execution failures persist an actionable run checkpoint", async () => {
   const harness = {
     ...mockHarness(),

@@ -16,6 +16,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   approve-proof [ticketId]          Approve final proof and continue delivery
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
+  scope-add <stepId> <ticketId> <path> <reason> Approve one audited file-scope expansion
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -126,6 +127,14 @@ async function handleCommand(command, rest, ctx) {
     const feedback = words.join(" ").trim();
     if (!stepId || !id || !feedback) throw new Error("Usage: agent-plan revise <stepId> <ticketId> <feedback>");
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/changes", { body: { feedback }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "scope-add") {
+    const [stepId, id, path, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!stepId || !id || !path || !reason) throw new Error("Usage: agent-plan scope-add <stepId> <ticketId> <path> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/scope", { body: { paths: [path], reason }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

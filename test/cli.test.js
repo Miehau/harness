@@ -198,3 +198,18 @@ test("revise sends focused feedback to a review-ready step", async () => {
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/changes");
   assert.deepEqual(called.body, { feedback: "Match the installed SDK interface" });
 });
+
+test("scope-add sends one explicit operator-approved path and reason", async () => {
+  let called;
+  await runCli(["scope-add", "build", "ticket-1", "test/e2e.test.js", "Canonical failure requires its regression update"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ ticketId: "ticket-1" }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/scope");
+  assert.deepEqual(called.body, { paths: ["test/e2e.test.js"], reason: "Canonical failure requires its regression update" });
+});

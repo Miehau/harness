@@ -1867,6 +1867,17 @@ async function acceptStep(ticketId, stepId) {
   });
 }
 
+function approvedScopePaths(values) {
+  const paths = [...new Set((Array.isArray(values) ? values : []).map((value) => normalize(String(value).replaceAll("\\", "/")).replace(/^\.\//, "")))];
+  if (!paths.length || paths.length > 10) throw new Error("Approve between one and ten explicit repository paths");
+  for (const path of paths) {
+    if (!path || path === "." || path === ".." || path.startsWith("../") || isAbsolute(path) || path.includes(",") || /[*?[\]{}]/.test(path)) {
+      throw new Error(`Scope expansion must name an explicit repository-relative path: ${path}`);
+    }
+  }
+  return paths;
+}
+
 async function advanceTicket(ticketId, signal) {
   signal?.throwIfAborted();
   const currentRun = ticketRun(store.read(), ticketId);
@@ -2480,6 +2491,34 @@ async function api(request, response, url) {
     const id = decodeURIComponent(approveContext[1]);
     await finishHandoff(id);
     return json(response, 200, { accepted: true, ticketId: id });
+  }
+
+  const stepScope = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/scope$/);
+  if (request.method === "POST" && stepScope) {
+    const ticketId = decodeURIComponent(stepScope[1]);
+    const stepId = decodeURIComponent(stepScope[2]);
+    const input = await body(request);
+    const paths = approvedScopePaths(input.paths);
+    const reason = String(input.reason || "").trim();
+    if (!reason) throw new Error("Explain why the approved scope must expand");
+    if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing a step scope");
+    const state = await update((draft) => {
+      const run = ticketRun(draft, ticketId);
+      const step = findNode(run.plan, stepId);
+      if (!step || !["needs_attention", "failed", "interrupted"].includes(step.status)) throw new Error("Only a stopped blocked step can receive a scope expansion");
+      const existing = step.writeScope.split(",").map((path) => path.trim()).filter(Boolean);
+      step.writeScope = [...new Set([...existing, ...paths])].join(",");
+      step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
+      step.scopeChanges ||= [];
+      const change = { at: new Date().toISOString(), paths, reason, source: "operator" };
+      step.scopeChanges.push(change);
+      const note = `Approved scope expansion: ${paths.join(", ")} — ${reason}`;
+      step.lastError = [step.lastError, note].filter(Boolean).join("\n\n");
+      run.lastError = [run.lastError, note].filter(Boolean).join("\n\n");
+      if (run.checkpoint?.stepId === stepId) run.checkpoint.prompt = [run.checkpoint.prompt, note].filter(Boolean).join("\n\n");
+    });
+    const step = findNode(ticketRun(state, ticketId).plan, stepId);
+    return json(response, 200, { ticketId, stepId, writeScope: step.writeScope, expectedFiles: step.expectedFiles, scopeChange: step.scopeChanges.at(-1) });
   }
 
   const stepDecision = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/(accept|changes)$/);
