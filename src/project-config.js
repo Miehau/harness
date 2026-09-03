@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import { execFileTree } from "./process-tree.js";
+import { promisify } from "node:util";
+import { environmentForOwnership } from "./process-containment.js";
+
+const exec = promisify(execFile);
 
 export const projectConfigPath = ".agent-plan/project.json";
 const inheritedEnvironment = ["HOME", "LANG", "PATH", "SHELL", "TMPDIR", "USER"];
@@ -126,14 +130,17 @@ export function redactCommandOutput(value, environment, { truncate = true } = {}
   return truncate ? output.slice(-100000) : output;
 }
 
-export async function runProjectCommand(cwd, name, { signal, execImpl = execFileTree, source = process.env, args = [] } = {}) {
+export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership } = {}) {
   const config = await loadProjectConfig(cwd);
   if (config.commandErrors?.[name]) throw new Error(config.commandErrors[name]);
   const argv = config.commands[name];
   if (!argv) throw new Error(`Unknown project command “${name}”; add it to ${projectConfigPath}`);
   validateCommand(name, argv);
   if (!Array.isArray(args) || args.length > 8 || args.some((argument) => !/^[a-z0-9][a-z0-9._-]*$/i.test(argument))) throw new Error(`Project command “${name}” received unsafe arguments`);
-  const environment = await projectEnvironment(cwd, config, { source, execImpl });
+  const baseEnvironment = await projectEnvironment(cwd, config, { source, execImpl });
+  // Ownership augments the deliberately curated command environment; it never
+  // substitutes process.env or grants a command access to ambient secrets.
+  const environment = ownership ? environmentForOwnership(ownership, baseEnvironment) : baseEnvironment;
   const executable = argv[0].startsWith("./") ? resolve(cwd, argv[0]) : argv[0];
   try {
     const { stdout, stderr } = await execImpl(executable, [...argv.slice(1), ...args], { cwd, env: environment, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PreviewManager } from "../src/previews.js";
+import { PROCESS_OWNERSHIP_ENV } from "../src/process-containment.js";
 
 test("does not reuse a port held by another ticket preview", async () => {
   const ports = [47821, 47821, 47822];
@@ -20,18 +21,26 @@ test("starts a named preview with isolated port variables and captures desktop a
     await mkdir(join(root, ".agent-plan"));
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] }, ports: { variables: ["APP_PORT"] } }));
     const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => { child.exitCode = 0; child.emit("exit", 0); };
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+    child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
     const spawns = [];
     const captures = [];
+    const cleanupTriggers = [];
+    const containment = {
+      executionId: "preview-execution", ownership: { token: "preview-owner" },
+      environment: (environment) => ({ ...environment, [PROCESS_OWNERSHIP_ENV]: "preview-owner" }),
+      cleanup: async (trigger) => { cleanupTriggers.push(trigger); return { outcome: "complete" }; }
+    };
     const manager = new PreviewManager({ dataDir, portImpl: async () => 47821,
       spawnImpl: (file, args, options) => { spawns.push({ file, args, options }); return child; },
       fetchImpl: async () => ({ ok: true }),
-      execImpl: async (file, args) => { captures.push({ file, args }); return { stdout: "", stderr: "" }; }
+      execImpl: async (file, args, options) => { captures.push({ file, args, options }); return { stdout: "", stderr: "" }; }
     });
-    const preview = await manager.ensure({ id: "ticket-1", cwd: root, seedState: { selectedTicketId: "ticket-1", ticketRuns: { "ticket-1": { status: "verifying" } } } });
+    const preview = await manager.ensure({ id: "ticket-1", cwd: root, seedState: { selectedTicketId: "ticket-1", ticketRuns: { "ticket-1": { status: "verifying" } } }, containment });
     assert.equal(preview.url, "http://127.0.0.1:47821");
     assert.equal(spawns[0].options.env.APP_PORT, "47821");
     assert.equal(spawns[0].options.env.AGENT_PLAN_DATA_DIR, join(dataDir, "preview-state", "ticket-1"));
+    assert.equal(spawns[0].options.env[PROCESS_OWNERSHIP_ENV], "preview-owner");
     assert.deepEqual(JSON.parse(await readFile(join(spawns[0].options.env.AGENT_PLAN_DATA_DIR, "state-v3.json"), "utf8")), {
       selectedTicketId: "ticket-1", ticketRuns: { "ticket-1": { status: "verifying" } }
     });
@@ -44,7 +53,11 @@ test("starts a named preview with isolated port variables and captures desktop a
     assert.equal(captures.every(({ file, args }) => file === process.execPath && args[0].endsWith("/scripts/screenshot.mjs")), true);
     assert.deepEqual(captures.map(({ args }) => [args[args.indexOf("--width") + 1], args[args.indexOf("--height") + 1]]), [["1440", "900"], ["390", "844"], ["1440", "900"], ["390", "844"]]);
     assert.equal(captures.every(({ args }) => args.includes("--click") && args[args.indexOf("--click") + 1].includes("status-running")), true);
+    assert.ok(captures.every(({ options }) => options.env[PROCESS_OWNERSHIP_ENV] === "preview-owner"));
     assert.equal(manager.stop("ticket-1"), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(cleanupTriggers, [{ trigger: "preview-stop", previewId: "ticket-1" }]);
+    assert.equal(preview.status, "stopped");
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
 
@@ -55,7 +68,7 @@ test("starts a conventional package preview when a legacy contract omits one", a
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { verify: ["node", "verify.mjs"] } }));
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "node server.js", dev: "node --watch server.js" } }));
     const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => {};
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
     const spawns = [];
     const manager = new PreviewManager({
       portImpl: async () => 47821,
@@ -84,7 +97,7 @@ test("restarts a seeded preview so recurring gates cannot reuse stale run state"
       spawnImpl: () => {
         const child = new EventEmitter();
         child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
-        child.kill = () => { child.exitCode = 0; setImmediate(() => child.emit("exit", 0)); };
+        child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
         children.push(child);
         return child;
       }
@@ -112,7 +125,7 @@ test("self-preview launches worktree server code with an immutable live-state re
     await writeFile(join(root, "src", "server.js"), "export async function createDaemon() {}\n");
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "start"] } }));
     const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => {};
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
     let spawned;
     const manager = new PreviewManager({
       dataDir, portImpl: async () => 47821, fetchImpl: async () => ({ ok: true }),
@@ -164,8 +177,12 @@ test("a hanging preview probe cannot bypass the readiness deadline", async () =>
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "node server.js" } }));
     const child = new EventEmitter();
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
-    let killed = false;
-    child.kill = () => { killed = true; child.exitCode = 0; child.emit("exit", 0); };
+    child.kill = () => assert.fail("preview teardown must use containment rather than child.kill");
+    const cleanupTriggers = [];
+    const containment = {
+      executionId: "hanging-preview", environment: (environment) => environment,
+      cleanup: async (trigger) => { cleanupTriggers.push(trigger); return { outcome: "complete" }; }
+    };
     const manager = new PreviewManager({
       portImpl: async () => 47821,
       spawnImpl: () => child,
@@ -173,25 +190,69 @@ test("a hanging preview probe cannot bypass the readiness deadline", async () =>
       probeTimeoutMs: 5,
       fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))
     });
-    await assert.rejects(manager.ensure({ id: "hanging-preview", cwd: root }), /Preview did not become ready/);
-    assert.equal(killed, true);
+    await assert.rejects(manager.ensure({ id: "hanging-preview", cwd: root, containment }), /Preview did not become ready/);
+    assert.deepEqual(cleanupTriggers, [{ trigger: "preview-launch-failed", previewId: "hanging-preview", error: "Preview did not become ready within 0 seconds" }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("stopAll terminates every preview process", () => {
+test("records launch failures through containment without claiming a preview PID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-launch-failure-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] } }));
+    let trigger;
+    const containment = {
+      executionId: "failed-preview", environment: (environment) => environment,
+      cleanup: async (value) => { trigger = value; return { outcome: "incomplete" }; }
+    };
+    const manager = new PreviewManager({ portImpl: async () => 47821, spawnImpl: () => { throw new Error("spawn unavailable"); } });
+    await assert.rejects(manager.ensure({ id: "ticket-failed", cwd: root, containment }), /spawn unavailable[\s\S]*Preview cleanup: incomplete/);
+    assert.equal(trigger.trigger, "preview-launch-failed");
+    assert.match(trigger.error, /spawn unavailable/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("redacts ownership tokens from failed preview output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-redaction-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { preview: ["npm", "run", "preview"] } }));
+    const token = "89f609e7-128e-40b7-a21a-59a09768b6dd";
+    const child = new EventEmitter();
+    child.exitCode = 1;
+    child.stdout = new EventEmitter();
+    const on = child.stdout.on.bind(child.stdout);
+    child.stdout.on = (event, listener) => {
+      on(event, listener);
+      if (event === "data") listener(Buffer.from(`owner=${token}`));
+      return child.stdout;
+    };
+    const containment = {
+      executionId: "redacted-preview", environment: (environment) => ({ ...environment, [PROCESS_OWNERSHIP_ENV]: token }),
+      cleanup: async () => ({ outcome: "not-required" })
+    };
+    const manager = new PreviewManager({ portImpl: async () => 47821, spawnImpl: () => child });
+    await assert.rejects(manager.ensure({ id: "ticket-redacted", cwd: root, containment }), (error) => {
+      assert.doesNotMatch(error.message, new RegExp(token));
+      assert.match(error.message, /owner=\[REDACTED\]/);
+      return true;
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("stopAll delegates every preview process to containment", async () => {
   const manager = new PreviewManager({});
-  const killed = [];
-  const child = (id) => {
-    const process = new EventEmitter();
-    process.exitCode = null;
-    process.kill = (signal) => { killed.push(id + ":" + signal); process.exitCode = 0; process.emit("exit", 0); };
-    return process;
-  };
-  manager.active.set("a", { child: child("a"), public: { port: 1 } });
-  manager.active.set("b", { child: child("b"), public: { port: 2 } });
-  manager.ports.add(1);
-  manager.ports.add(2);
+  const cleanup = [];
+  const preview = (id) => ({
+    child: { exitCode: null }, public: { port: id, status: "running", cleanup: null },
+    containment: { executionId: `preview-${id}`, cleanup: async (trigger) => { cleanup.push(trigger); return { outcome: "complete" }; } }, cleanup: null
+  });
+  manager.active.set("a", preview("a"));
+  manager.active.set("b", preview("b"));
+  manager.ports.add("a");
+  manager.ports.add("b");
   assert.equal(manager.stopAll(), 2);
-  assert.deepEqual(killed, ["a:SIGTERM", "b:SIGTERM"]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(cleanup, [{ trigger: "preview-stop", previewId: "a" }, { trigger: "preview-stop", previewId: "b" }]);
   assert.equal(manager.list().length, 0);
 });

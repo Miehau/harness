@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
 import { join, relative, resolve, sep } from "node:path";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -11,7 +13,9 @@ import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommand
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
-import { execFileTree } from "./process-tree.js";
+import { createExecutionOwnership, createProcessContainment, environmentForOwnership } from "./process-containment.js";
+
+const exec = promisify(execFile);
 
 const verificationEntry = ".agent-plan/verify.mjs";
 export const MAX_VERIFICATION_ACTIONS = 30;
@@ -411,7 +415,7 @@ function includeVisualVerificationScope(plan) {
   return normalizePlan(scoped);
 }
 
-export function projectCommandTool(cwd, signal) {
+export function projectCommandTool(cwd, signal, ownership) {
   return defineTool({
     name: "project_command",
     label: "Project command",
@@ -424,7 +428,7 @@ export function projectCommandTool(cwd, signal) {
         content: [{ type: "text", text: `The framework runs ${verificationEntry} once after worker_report; continue without rerunning it.` }],
         details: { status: "deferred", command: name }, isError: false
       };
-      const result = await runProjectCommand(cwd, name, { signal, args });
+      const result = await runProjectCommand(cwd, name, { signal, args, ownership });
       return { content: [{ type: "text", text: result.output || `${name} ${result.status}` }], details: result, isError: result.status === "failed" };
     }
   });
@@ -594,9 +598,11 @@ export function scopedWorkerTools(cwd, writeScope) {
 }
 
 export class PiHarness {
-  constructor({ dataDir, publish }) {
+  constructor({ dataDir, publish, containmentFactory = createProcessContainment, execImpl = exec }) {
     this.dataDir = dataDir;
     this.publish = publish;
+    this.containmentFactory = containmentFactory;
+    this.exec = execImpl;
     this.sdkPromise = null;
     this.modelRuntimePromise = null;
     this.planning = new Map();
@@ -687,8 +693,14 @@ export class PiHarness {
       .sort((left, right) => left.id.localeCompare(right.id) || String(left.provider || "").localeCompare(String(right.provider || "")));
   }
 
-  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false, environment: captureEnvironment = {} }) {
+  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false, environment: captureEnvironment = {}, ownership, containment } = {}) {
     requireVisualEvidence ||= requireVideoEvidence;
+    const executionId = `repository-check:${randomUUID()}`;
+    const executionContainment = containment || this.containmentFactory({
+      executionId,
+      ownership: ownership || createExecutionOwnership(executionId)
+    });
+    const executionOwnership = executionContainment.ownership;
     let command = `node ${verificationEntry}`;
     let args = [join(cwd, verificationEntry)];
     try { await access(args[0]); }
@@ -715,22 +727,28 @@ export class PiHarness {
     }
     const startedAt = Date.now();
     const config = await loadProjectConfig(cwd);
-    const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment, ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
-    const executable = command === "npm test" ? "npm" : process.execPath;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const { stdout, stderr } = await execFileTree(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
+    const environment = environmentForOwnership(executionOwnership, {
+      ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment,
+      ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {})
+    });
+    let result;
+    let failure;
+    try {
+      const executable = command === "npm test" ? "npm" : process.execPath;
+      for (let attempt = 0; attempt < 2; attempt++) try {
+        const { stdout, stderr } = await this.exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
         const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
           .filter((entry) => entry.isFile())
           .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
           .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
           .filter((item) => item.mediaType);
         const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-        if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-        return { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        else if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        else result = { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+        return result;
       } catch (error) {
-        if (signal?.aborted) throw error;
+        if (signal?.aborted) { failure = error; throw error; }
         // Bound each process channel before combining them. A noisy stderr tail
         // must not evict the causal stdout line (or the process error itself).
         const channels = [error.stdout, error.stderr, error.message].filter(Boolean);
@@ -738,8 +756,20 @@ export class PiHarness {
         const highlights = failureHighlights(redactCommandOutput(channels.join("\n"), environment, { truncate: false }));
         const output = eventText(`${rawOutput}${highlights ? `\n\nFailure highlights:\n${highlights}` : ""}`);
         if (!attempt && transientRepositoryCheckFailure(output)) continue;
-        return { status: "failed", command, summary: `${command} failed.`, output, failureHighlights: highlights, evidence: [], durationMs: Date.now() - startedAt };
+        result = { status: "failed", command, summary: `${command} failed.`, output, failureHighlights: highlights, evidence: [], durationMs: Date.now() - startedAt };
+        return result;
       }
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      let cleanup;
+      try { cleanup = await executionContainment.cleanup({ trigger: signal?.aborted ? "repository-check-aborted" : "repository-check-exit", command }); }
+      catch (error) {
+        cleanup = { executionId: executionContainment.executionId, outcome: "incomplete", diagnostics: [`Repository-check cleanup failed: ${error instanceof Error ? error.message : String(error)}`] };
+      }
+      if (result) result.cleanup = cleanup;
+      else if (failure && typeof failure === "object") failure.cleanup = cleanup;
     }
   }
 
@@ -1320,62 +1350,70 @@ Every reported finding triggers an automatic correction round. Report concrete d
   }
 
   async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
-    const { createAgentSession, SessionManager } = await this.sdk();
-    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
-    await mkdir(sessionDir, { recursive: true });
-    let manager;
+    const containment = this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
+    let session;
+    let unsubscribe = () => {};
+    let unbindAbort = async () => {};
+    let result;
+    let failure;
     try {
-      manager = resumeSessionFile
-        ? SessionManager.open(resumeSessionFile, sessionDir, cwd)
-        : step.contextPolicy === "fork" && forkSessionFile
-          ? SessionManager.forkFrom(forkSessionFile, cwd, sessionDir)
-          : SessionManager.create(cwd, sessionDir);
-    } catch {
-      manager = SessionManager.create(cwd, sessionDir);
-    }
-    const tools = step.permission === "write"
-      ? ["read", "grep", "find", "ls", "edit", "write"]
-      : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
-    let report = null;
-    const reviewNotes = [];
-    tools.push("worker_report");
-    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
-    if (step.permission === "write") tools.push("project_command", "review_note", "delete");
-    const { session } = await createAgentSession({
-      ...(await this.sessionOptions(profile)),
-      cwd,
-      tools,
-      customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
-      sessionManager: manager
-    });
-    session.setSessionName(step.agentId);
-    await onSessionFile?.(session.sessionFile);
-    const unbindAbort = bindAbort(session, signal);
-    const availableSkills = session.resourceLoader.getSkills().skills;
-    const skillBlocks = [];
-    for (const name of step.skills) {
-      const skill = availableSkills.find((item) => item.name === name);
-      if (!skill) throw new Error(`Pi skill not found: ${name}`);
-      const content = await readFile(skill.filePath, "utf8");
-      skillBlocks.push(`<skill name="${skill.name}" location="${skill.filePath}">
+      const { createAgentSession, SessionManager } = await this.sdk();
+      const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
+      await mkdir(sessionDir, { recursive: true });
+      let manager;
+      try {
+        manager = resumeSessionFile
+          ? SessionManager.open(resumeSessionFile, sessionDir, cwd)
+          : step.contextPolicy === "fork" && forkSessionFile
+            ? SessionManager.forkFrom(forkSessionFile, cwd, sessionDir)
+            : SessionManager.create(cwd, sessionDir);
+      } catch {
+        manager = SessionManager.create(cwd, sessionDir);
+      }
+      const tools = step.permission === "write"
+        ? ["read", "grep", "find", "ls", "edit", "write"]
+        : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
+      let report = null;
+      const reviewNotes = [];
+      tools.push("worker_report");
+      const scopedTools = step.permission === "write"
+        ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal, containment.ownership), reviewNoteTool((note) => reviewNotes.push(note))]
+        : [];
+      if (step.permission === "write") tools.push("project_command", "review_note", "delete");
+      ({ session } = await createAgentSession({
+        ...(await this.sessionOptions(profile)),
+        cwd,
+        tools,
+        customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
+        sessionManager: manager
+      }));
+      session.setSessionName(step.agentId);
+      await onSessionFile?.(session.sessionFile);
+      unbindAbort = bindAbort(session, signal);
+      const availableSkills = session.resourceLoader.getSkills().skills;
+      const skillBlocks = [];
+      for (const name of step.skills) {
+        const skill = availableSkills.find((item) => item.name === name);
+        if (!skill) throw new Error(`Pi skill not found: ${name}`);
+        const content = await readFile(skill.filePath, "utf8");
+        skillBlocks.push(`<skill name="${skill.name}" location="${skill.filePath}">
 References are relative to ${skill.baseDir}.
 
 ${stripFrontmatter(content).trim()}
 </skill>`);
-    }
-    let output = "";
-    const events = [];
-    let lastThinkingAt = 0;
-    const unsubscribe = session.subscribe((event) => {
-      const safe = safeEvent(event);
-      if (!safe) return;
-      if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
-      if (safe.type === "thinking") lastThinkingAt = Date.now();
-      if (safe.type === "text_delta") output += safe.delta;
-      else pushBounded(events, { ...safe, at: new Date().toISOString() }, 100);
-      onEvent?.(safe);
-    });
-    try {
+      }
+      let output = "";
+      const events = [];
+      let lastThinkingAt = 0;
+      unsubscribe = session.subscribe((event) => {
+        const safe = safeEvent(event);
+        if (!safe) return;
+        if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
+        if (safe.type === "thinking") lastThinkingAt = Date.now();
+        if (safe.type === "text_delta") output += safe.delta;
+        else pushBounded(events, { ...safe, at: new Date().toISOString() }, 100);
+        onEvent?.(safe);
+      });
       signal?.throwIfAborted();
       const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
       const resumedContext = resumeSessionFile
@@ -1396,7 +1434,7 @@ ${stripFrontmatter(content).trim()}
       signal?.throwIfAborted();
       const rawOutput = output || lastAssistantText(session);
       if (!report) throw new Error("Worker did not finish with the required worker_report tool");
-      return {
+      result = {
         prompt,
         rawOutput,
         output: report.artifact,
@@ -1405,10 +1443,26 @@ ${stripFrontmatter(content).trim()}
         sessionFile: session.sessionFile,
         events
       };
+      return result;
+    } catch (error) {
+      failure = error;
+      throw error;
     } finally {
       unsubscribe();
       await unbindAbort();
-      session.dispose();
+      session?.dispose();
+      let cleanup;
+      try {
+        cleanup = await containment.cleanup({ trigger: signal?.aborted ? "worker-aborted" : result?.report?.status === "completed" ? "worker-completed" : "worker-exit", stepId: step.id });
+      } catch (error) {
+        cleanup = {
+          executionId: containment.executionId,
+          outcome: "incomplete",
+          diagnostics: [`Worker cleanup failed: ${error instanceof Error ? error.message : String(error)}`]
+        };
+      }
+      if (result) result.cleanup = cleanup;
+      else if (failure && typeof failure === "object") failure.cleanup = cleanup;
     }
   }
 }

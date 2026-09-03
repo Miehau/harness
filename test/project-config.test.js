@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadProjectConfig, normalizeProjectConfig, projectEnvironment, runProjectCommand } from "../src/project-config.js";
+import { PROCESS_OWNERSHIP_ENV } from "../src/process-containment.js";
 
 test("detects conventional package commands when no contract exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "project-config-"));
@@ -64,9 +65,12 @@ test("passes only explicit environment values and redacts them from command outp
     const env = await projectEnvironment(root, config, { source: { PATH: "/bin", API_TOKEN: "daemon-secret-value", UNLISTED: "hidden" }, execImpl });
     assert.equal(env.UNLISTED, undefined);
     assert.equal(env.LOCAL_TOKEN, "local-secret-value");
-    const result = await runProjectCommand(root, "test", { source: { PATH: "/bin", API_TOKEN: "daemon-secret-value" }, execImpl });
+    const result = await runProjectCommand(root, "test", {
+      source: { PATH: "/bin", API_TOKEN: "daemon-secret-value" }, execImpl, ownership: { token: "worker-owner" }
+    });
     assert.equal(result.output, "[REDACTED] [REDACTED]");
     assert.equal(calls.at(-1).options.env.UNLISTED, undefined);
+    assert.equal(calls.at(-1).options.env[PROCESS_OWNERSHIP_ENV], "worker-owner");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -74,11 +78,32 @@ test("runs a named argv command without a shell or unlisted daemon secrets", asy
   const root = await mkdtemp(join(tmpdir(), "project-command-"));
   try {
     await mkdir(join(root, ".agent-plan"));
-    await writeFile(join(root, "check.mjs"), "console.log(process.env.UNLISTED || 'isolated')\n");
+    await writeFile(join(root, "check.mjs"), "console.log([process.env.UNLISTED || 'isolated', process.env.AGENT_PLAN_EXECUTION_OWNER].join(':'))\n");
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: [process.execPath, "check.mjs"] } }));
-    const result = await runProjectCommand(root, "check", { source: { PATH: process.env.PATH, UNLISTED: "must-not-leak" } });
+    const result = await runProjectCommand(root, "check", {
+      source: { PATH: process.env.PATH, UNLISTED: "must-not-leak" }, ownership: { token: "cmd" }
+    });
     assert.equal(result.status, "passed");
-    assert.equal(result.output.trim(), "isolated");
+    assert.equal(result.output.trim(), "isolated:cmd");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("preserves abort errors after applying an ownership marker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-abort-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: ["node", "check.mjs"] } }));
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    let environment;
+    await assert.rejects(runProjectCommand(root, "check", {
+      signal: controller.signal, ownership: { token: "aborted-owner" },
+      execImpl: async (_file, _args, options) => {
+        environment = options.env;
+        throw new Error("cancelled");
+      }
+    }), /cancelled/);
+    assert.equal(environment[PROCESS_OWNERSHIP_ENV], "aborted-owner");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

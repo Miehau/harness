@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { visualEvidenceMedia } from "./artifacts.js";
-import { execFileTree, signalProcessTree } from "./process-tree.js";
+import { createProcessContainment } from "./process-containment.js";
+import { detectPreviewCommand, loadProjectConfig, projectEnvironment, redactCommandOutput } from "./project-config.js";
+
+const exec = promisify(execFile);
 
 const screenshotScript = fileURLToPath(new URL("../scripts/screenshot.mjs", import.meta.url));
 const snapshotServerScript = fileURLToPath(new URL("../scripts/preview-snapshot-server.mjs", import.meta.url));
@@ -47,25 +50,54 @@ async function isAgentPlanWorkspace(cwd) {
 }
 
 async function waitUntilReady(url, child, fetchImpl, timeoutMs = 60000, probeTimeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Preview process exited with code ${child.exitCode}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now())));
-    try { if ((await fetchImpl(url, { signal: controller.signal })).ok) return; } catch {}
-    finally { clearTimeout(timer); }
-    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500, Math.max(0, deadline - Date.now()))));
+  let launchError = null;
+  const onError = (error) => { launchError = error; };
+  child.once?.("error", onError);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (launchError) throw launchError;
+      if (child.exitCode !== null) throw new Error(`Preview process exited with code ${child.exitCode}`);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now())));
+      try { if ((await fetchImpl(url, { signal: controller.signal })).ok) return; } catch {}
+      finally { clearTimeout(timer); }
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500, Math.max(0, deadline - Date.now()))));
+    }
+    throw new Error(`Preview did not become ready within ${Math.round(timeoutMs / 1000)} seconds`);
+  } finally {
+    child.removeListener?.("error", onError);
   }
-  throw new Error(`Preview did not become ready within ${Math.round(timeoutMs / 1000)} seconds`);
+}
+
+function cleanupFailure(containment, error) {
+  return {
+    executionId: containment.executionId,
+    outcome: "incomplete",
+    diagnostics: [`Preview cleanup failed: ${error instanceof Error ? error.message : String(error)}`]
+  };
+}
+
+function cleanupPreview(preview, trigger) {
+  preview.cleanup ||= Promise.resolve()
+    .then(() => preview.containment.cleanup(trigger))
+    .catch((error) => cleanupFailure(preview.containment, error))
+    .then((record) => {
+      preview.public.cleanup = record;
+      preview.public.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
+      return record;
+    });
+  return preview.cleanup;
 }
 
 export class PreviewManager {
-  constructor({ dataDir, spawnImpl = spawn, execImpl = execFileTree, fetchImpl = fetch, portImpl = availablePort, readyTimeoutMs = 60000, probeTimeoutMs = 2000, captureTimeoutMs = 15000 } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, execImpl = exec, fetchImpl = fetch, portImpl = availablePort, containmentFactory = createProcessContainment, readyTimeoutMs = 60000, probeTimeoutMs = 2000, captureTimeoutMs = 15000 } = {}) {
     this.dataDir = dataDir;
     this.spawn = spawnImpl;
     this.exec = execImpl;
     this.fetch = fetchImpl;
     this.port = portImpl;
+    this.containmentFactory = containmentFactory;
     this.readyTimeoutMs = readyTimeoutMs;
     this.probeTimeoutMs = probeTimeoutMs;
     this.captureTimeoutMs = captureTimeoutMs;
@@ -81,7 +113,7 @@ export class PreviewManager {
     throw new Error("Could not allocate a unique preview port");
   }
 
-  async ensure({ id, cwd, seedState = null }) {
+  async ensure({ id, cwd, seedState = null, containment } = {}) {
     const existing = this.active.get(id);
     if (existing?.child.exitCode === null && existing.cwd === cwd && !seedState) return existing.public;
     // A seeded preview is a proof fixture for one exact run snapshot. Restart
@@ -95,6 +127,7 @@ export class PreviewManager {
     if (!commandName) return null;
     const command = configuredName ? config.commands[configuredName] : conventional.command;
     const port = await this.reservePort();
+    const previewContainment = containment || this.containmentFactory({ executionId: `preview:${id}` });
     const portVariables = config.ports.variables.length ? config.ports.variables : ["PORT"];
     const environment = await projectEnvironment(cwd, config);
     for (const name of portVariables) environment[name] = String(port);
@@ -112,18 +145,33 @@ export class PreviewManager {
       await writeFile(seedFile, JSON.stringify(seedState, null, 2));
       previewCommand = [process.execPath, snapshotServerScript, join(cwd, "src/server.js"), cwd, environment.AGENT_PLAN_DATA_DIR, "127.0.0.1", String(port), seedFile];
     }
-    const child = this.spawn(commandExecutable(cwd, previewCommand), previewCommand.slice(1), { cwd, env: environment, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    const launchEnvironment = previewContainment.environment(environment);
+    let child;
     let output = "";
-    for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
     const url = `http://127.0.0.1:${port}`;
-    try { await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs); }
-    catch (error) { this.ports.delete(port); signalProcessTree(child); throw new Error(`${error.message}\n${output}`.trim()); }
-    const publicPreview = { id, cwd, command: commandName, port, url, startedAt: new Date().toISOString() };
-    const activePreview = { child, cwd, get output() { return output; }, public: publicPreview };
-    this.active.set(id, activePreview);
-    child.once("exit", () => {
-      if (this.active.get(id) === activePreview) this.active.delete(id);
+    try {
+      // Apply the marker after all repository-controlled values are assembled,
+      // preserving the allow-list and avoiding any ambient environment merge.
+      child = this.spawn(commandExecutable(cwd, previewCommand), previewCommand.slice(1), {
+        cwd, env: launchEnvironment, stdio: ["ignore", "pipe", "pipe"]
+      });
+      for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
+      await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs);
+    } catch (error) {
       this.ports.delete(port);
+      let cleanup;
+      try { cleanup = await previewContainment.cleanup({ trigger: "preview-launch-failed", previewId: id, error: error instanceof Error ? error.message : String(error) }); }
+      catch (cleanupError) { cleanup = cleanupFailure(previewContainment, cleanupError); }
+      const detail = `${error.message}\n${redactCommandOutput(output, launchEnvironment)}\nPreview cleanup: ${cleanup.outcome}`.trim();
+      throw new Error(detail);
+    }
+    const publicPreview = { id, cwd, command: commandName, port, url, status: "running", cleanup: null, startedAt: new Date().toISOString() };
+    const preview = { child, cwd, containment: previewContainment, get output() { return output; }, public: publicPreview, cleanup: null };
+    this.active.set(id, preview);
+    child.once("exit", () => {
+      if (this.active.get(id) === preview) this.active.delete(id);
+      this.ports.delete(port);
+      void cleanupPreview(preview, { trigger: "preview-exit", previewId: id });
     });
     return publicPreview;
   }
@@ -141,7 +189,7 @@ export class PreviewManager {
       const path = join(captureDirectory, `${name}.png`);
       try {
         await this.exec(process.execPath, [screenshotScript, "--url", preview.public.url, "--out", path, "--width", String(width), "--height", String(height), "--wait-ms", "1200", "--click", activeStepSelector], {
-          env: { ...process.env, ...source }, timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
+          env: preview.containment.environment(source), timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024
         });
       } catch (error) {
         if (!/timed out/i.test(error.message)) throw error;
@@ -155,9 +203,12 @@ export class PreviewManager {
   stop(id) {
     const preview = this.active.get(id);
     if (!preview) return false;
-    signalProcessTree(preview.child);
     this.active.delete(id);
     this.ports.delete(preview.public.port);
+    preview.public.status = "stopping";
+    // PID-only child.kill is unsafe after process replacement or descendant
+    // forks. The containment service rediscoveres the exact owned identities.
+    void cleanupPreview(preview, { trigger: "preview-stop", previewId: id });
     return true;
   }
 
