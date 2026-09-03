@@ -42,11 +42,19 @@ function compactActivity(activity) {
   delete activity.groups;
 }
 
+function compactDiff(diff) {
+  if (diff && typeof diff === "object") delete diff.patch;
+}
+
 export function compactPersistedState(state) {
   for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) {
-    for (const stage of run.stages || []) compactActivity(stage.activity);
+    for (const stage of run.stages || []) {
+      compactActivity(stage.activity);
+      compactDiff(stage.diff);
+    }
     for (const active of Object.values(run.activeRuns || {})) compactActivity(active.activity);
     for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
+      compactDiff(step.diff);
       for (const attempt of step.attempts || []) {
         attempt.events = (attempt.events || []).slice(-200).map((event) => {
           const compact = { ...event };
@@ -55,8 +63,15 @@ export function compactPersistedState(state) {
         });
         attempt.rawOutput = boundedAuditText(attempt.rawOutput, STATE_OUTPUT_LIMIT);
         if (attempt.verification) attempt.verification.rawOutput = boundedAuditText(attempt.verification.rawOutput, STATE_OUTPUT_LIMIT);
+        compactDiff(attempt.diff);
+        compactDiff(attempt.checkDiff);
+        compactDiff(attempt.aggregateDiff);
         delete attempt.activityGroups;
       }
+    }
+    for (const review of run.reviews || []) {
+      compactDiff(review.diff);
+      compactDiff(review.fix?.diff);
     }
   }
   return state;
@@ -129,12 +144,12 @@ export class JsonStore {
 
   read() { return structuredClone(this.state); }
 
-  async update(change) {
+  async update(change, { snapshot = true } = {}) {
     const work = this.queue.then(async () => {
       await change(this.state);
       this.state.revision = (this.state.revision || 0) + 1;
       await this.save();
-      return this.read();
+      return snapshot ? this.read() : this.state;
     });
     this.queue = work.catch(() => {});
     return work;

@@ -225,7 +225,7 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
-  const state = await store.update(change);
+  const state = await store.update(change, { snapshot: false });
   if (shouldPublish) publishState(state);
   return state;
 }

@@ -432,7 +432,7 @@ test("compact run and public state omit artifact bodies", () => {
     artifacts: [{ id: "a", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret body" }],
     plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }], attempts: [
       { rawOutput: "old", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "historical detail" }] },
-      { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], verification: { rawOutput: "review transcript" } }
+      { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], verification: { rawOutput: "review transcript" }, diff: { files: ["a.js"], patch: "attempt patch" }, checkDiff: { patch: "check patch" }, aggregateDiff: { patch: "aggregate patch" } }
     ] }] },
     reviews: [{ diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" } } }]
   };
@@ -457,6 +457,9 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].rawOutput, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].activityGroups, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].verification.rawOutput, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].diff.patch, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].checkDiff.patch, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].aggregateDiff.patch, undefined);
   assert.equal(published.ticketRuns.t1.reviews[0].diff.patch, undefined);
 });
 

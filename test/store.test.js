@@ -8,8 +8,8 @@ import { compactPersistedState, JsonStore } from "../src/store.js";
 test("persisted audit detail stays bounded without losing prompts and event summaries", () => {
   const huge = "x".repeat(300000);
   const activity = { events: [{ type: "tool_end", tool: "test", result: huge }], prompts: [{ actor: "reviewer", content: huge }], rawOutput: huge, groups: [{ events: [] }] };
-  const attempt = { events: [{ type: "tool_end", result: huge }], rawOutput: huge, activityGroups: [{ events: [] }], verification: { rawOutput: huge } };
-  const state = { ticketRuns: { one: { stages: [{ activity }], activeRuns: { step: { activity: structuredClone(activity) } }, plan: { nodes: [{ id: "step", attempts: [attempt] }] } } }, retainedRuns: {} };
+  const attempt = { events: [{ type: "tool_end", result: huge }], rawOutput: huge, activityGroups: [{ events: [] }], verification: { rawOutput: huge }, diff: { stat: "1 file", patch: huge }, checkDiff: { patch: huge }, aggregateDiff: { patch: huge } };
+  const state = { ticketRuns: { one: { stages: [{ activity, diff: { patch: huge } }], activeRuns: { step: { activity: structuredClone(activity) } }, plan: { nodes: [{ id: "step", diff: { patch: huge }, attempts: [attempt] }] }, reviews: [{ diff: { patch: huge }, fix: { diff: { patch: huge } } }] } }, retainedRuns: {} };
   compactPersistedState(state);
   assert.match(activity.prompts[0].content, /state detail truncated/);
   assert.equal(activity.events[0].tool, "test");
@@ -18,6 +18,14 @@ test("persisted audit detail stays bounded without losing prompts and event summ
   assert.match(attempt.rawOutput, /state detail truncated/);
   assert.equal("activityGroups" in attempt, false);
   assert.match(attempt.verification.rawOutput, /state detail truncated/);
+  assert.equal(attempt.diff.patch, undefined);
+  assert.equal(attempt.diff.stat, "1 file");
+  assert.equal(attempt.checkDiff.patch, undefined);
+  assert.equal(attempt.aggregateDiff.patch, undefined);
+  assert.equal(state.ticketRuns.one.stages[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.plan.nodes[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.reviews[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.reviews[0].fix.diff.patch, undefined);
 });
 
 test("server restart marks active work as interrupted and clears dead runs", async () => {

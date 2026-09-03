@@ -699,6 +699,7 @@ export function publicRun(run) {
     stage.diff = diffSummary(stage.diff);
   }
   for (const step of flattenSteps(clone.plan)) {
+    step.diff = diffSummary(step.diff);
     if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
     for (const [index, attempt] of (step.attempts || []).entries()) {
       const detailed = index === step.attempts.length - 1;
@@ -706,6 +707,9 @@ export function publicRun(run) {
       delete attempt.activityGroups;
       delete attempt.rawOutput;
       if (attempt.verification) delete attempt.verification.rawOutput;
+      attempt.diff = diffSummary(attempt.diff);
+      attempt.checkDiff = diffSummary(attempt.checkDiff);
+      attempt.aggregateDiff = diffSummary(attempt.aggregateDiff);
       if (Array.isArray(attempt.artifacts)) attempt.artifacts = attempt.artifacts.map(artifactMetadata);
     }
   }
@@ -718,12 +722,13 @@ export function publicRun(run) {
 
 export function publicState(state) {
   if (!state) return state;
-  const clone = structuredClone(state);
-  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
-    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
-  }
-  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
-  return clone;
+  return {
+    ...state,
+    ticketRuns: Object.fromEntries(Object.entries(state.ticketRuns || {}).map(([id, run]) => [
+      id, id === state.selectedTicketId ? publicRun(run) : compactRun(run, state.revision)
+    ])),
+    retainedRuns: Object.fromEntries(Object.entries(state.retainedRuns || {}).map(([id, run]) => [id, compactRun(run, state.revision)]))
+  };
 }
 
 export function publicPreviewState(state, ticketId) {
