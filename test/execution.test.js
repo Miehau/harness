@@ -98,8 +98,8 @@ test("final review retains distinct failures on the same criterion and code surf
 test("final review keeps separate stale-evidence bypass mechanisms", () => {
   const shared = { severity: "high", category: "correctness", acceptanceCriterion: "Re-verification requires fresh evidence" };
   const findings = actionableFindings([{ findings: [
-    { ...shared, claim: "Submitting the same stale locator twice drops invalidatedAt after the first rejection", evidence: [{ file: "src/proof-map.js", line: 202 }] },
-    { ...shared, claim: "A different pre-existing locator without producedAt bypasses freshness after invalidation", evidence: [{ file: "src/proof-map.js", line: 198 }] }
+    { ...shared, claim: "Submitting the same stale locator twice drops invalidatedAt after the first rejection", evidence: [{ file: "src/proof-map.js", line: 202 }, { file: "test/proof-map.test.js", line: 184 }] },
+    { ...shared, claim: "A different pre-existing locator without producedAt bypasses freshness after invalidation", evidence: [{ file: "src/proof-map.js", line: 198 }, { file: "test/proof-map.test.js", line: 188 }] }
   ] }]);
   assert.equal(findings.length, 2);
 });

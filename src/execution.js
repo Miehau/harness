@@ -475,6 +475,16 @@ function similarFinding(left, right) {
     && (!leftEvidence.line || !rightEvidence.line || Math.abs(leftEvidence.line - rightEvidence.line) <= 5)
   )).length;
   if (!sharedSurfaces) return false;
+  const leftMechanism = `${left.claim || ""} ${left.suggestedFix || left.suggested_fix || ""}`;
+  const rightMechanism = `${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`;
+  const sameLocator = (value) => /\b(?:same|identical)\b/i.test(value);
+  const differentLocator = (value) => /\b(?:different|distinct|another|pre-existing)\b/i.test(value);
+  if ((sameLocator(leftMechanism) && differentLocator(rightMechanism))
+    || (differentLocator(leftMechanism) && sameLocator(rightMechanism))) return false;
+  const technicalIds = (value) => new Set(value.match(/\b[a-z][a-z0-9_]*(?:At|Id|ID)\b/g) || []);
+  const leftIds = technicalIds(leftMechanism);
+  const rightIds = technicalIds(rightMechanism);
+  if (leftIds.size && rightIds.size && ![...leftIds].some((id) => rightIds.has(id))) return false;
   const words = (value) => new Set((String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []).map((word) => {
     if (word.length > 7 && word.endsWith("ing")) return word.slice(0, -3);
     if (word.length > 6 && word.endsWith("ed")) return word.slice(0, -2);
@@ -482,8 +492,8 @@ function similarFinding(left, right) {
     if (word.length > 5 && word.endsWith("s")) return word.slice(0, -1);
     return word;
   }));
-  const leftWords = words(`${left.claim || ""} ${left.suggestedFix || left.suggested_fix || ""}`);
-  const rightWords = words(`${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`);
+  const leftWords = words(leftMechanism);
+  const rightWords = words(rightMechanism);
   if (Math.min(leftWords.size, rightWords.size) < 4) return false;
   const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
   const ratio = overlap / Math.min(leftWords.size, rightWords.size);
