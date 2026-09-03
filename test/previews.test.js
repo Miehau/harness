@@ -39,6 +39,28 @@ test("starts a named preview with isolated port variables and captures desktop a
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
 
+test("starts a conventional package preview when a legacy contract omits one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { verify: ["node", "verify.mjs"] } }));
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "node server.js", dev: "node --watch server.js" } }));
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => {};
+    const spawns = [];
+    const manager = new PreviewManager({
+      portImpl: async () => 47821,
+      spawnImpl: (file, args, options) => { spawns.push({ file, args, options }); return child; },
+      fetchImpl: async () => ({ ok: true })
+    });
+    const preview = await manager.ensure({ id: "legacy-ticket", cwd: root });
+    assert.equal(preview.command, "start");
+    assert.deepEqual([spawns[0].file, spawns[0].args], ["npm", ["run", "start"]]);
+    assert.equal(spawns[0].options.env.PORT, "47821");
+    manager.stop("legacy-ticket");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("stopAll terminates every preview process", () => {
   const manager = new PreviewManager({});
   const killed = [];

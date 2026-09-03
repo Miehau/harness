@@ -3,7 +3,7 @@ import { access, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { loadProjectConfig, projectEnvironment } from "./project-config.js";
+import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
 import { visualEvidenceMedia } from "./artifacts.js";
 
 const exec = promisify(execFile);
@@ -70,9 +70,11 @@ export class PreviewManager {
     const existing = this.active.get(id);
     if (existing?.child.exitCode === null && existing.cwd === cwd) return existing.public;
     const config = await loadProjectConfig(cwd);
-    const commandName = config.commands.preview ? "preview" : config.commands.dev ? "dev" : null;
+    const configuredName = config.commands.preview ? "preview" : config.commands.dev ? "dev" : null;
+    const conventional = configuredName ? null : await detectPreviewCommand(cwd);
+    const commandName = configuredName || conventional?.name;
     if (!commandName) return null;
-    const command = config.commands[commandName];
+    const command = configuredName ? config.commands[configuredName] : conventional.command;
     const port = await this.reservePort();
     const portVariables = config.ports.variables.length ? config.ports.variables : ["PORT"];
     const environment = await projectEnvironment(cwd, config);

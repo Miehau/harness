@@ -59,6 +59,14 @@ async function detectedCommands(cwd) {
   } catch { return {}; }
 }
 
+export async function detectPreviewCommand(cwd) {
+  try {
+    const scripts = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).scripts || {};
+    const name = ["preview", "start", "dev"].find((candidate) => scripts[candidate]);
+    return name ? { name, command: ["npm", "run", name] } : null;
+  } catch { return null; }
+}
+
 export async function loadProjectConfig(cwd) {
   try { return normalizeProjectConfig(JSON.parse(await readFile(join(cwd, projectConfigPath), "utf8"))); }
   catch (error) {
