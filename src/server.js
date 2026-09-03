@@ -2692,10 +2692,10 @@ async function close({ exit = false } = {}) {
   clearInterval(pollTimer);
   clearInterval(sseHeartbeat);
   closeSseClients(clients);
+  previews.stopAll();
   for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
   await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
   try { harness.reset(); } catch {}
-  previews.stopAll();
   await new Promise((resolve) => {
     if (!server.listening) return resolve();
     server.close(() => resolve());
