@@ -383,7 +383,10 @@ async function surfaceImmediateFailure(ticketId, work) {
   await new Promise((resolve) => setImmediate(resolve));
   const run = store.read().ticketRuns?.[ticketId];
   if (run && ["failed", "needs_attention"].includes(run.status) && run.lastError) throw new Error(run.lastError);
-  return tracked;
+  // The caller only waits through the first event-loop turn so an immediate
+  // launch failure can reach the HTTP response. Returning `tracked` here would
+  // make async promise adoption wait for the entire ticket run.
+  void tracked;
 }
 
 function setStage(run, id, status, summary = "") {

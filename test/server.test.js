@@ -174,6 +174,8 @@ test("accepting a step can enable auto mode at an existing review checkpoint", a
 test("pausing persists a checkpoint artifact and resumes the saved requirements session", async () => {
   let releaseStarted;
   const started = new Promise((resolve) => { releaseStarted = resolve; });
+  let releaseResume;
+  const resumeGate = new Promise((resolve) => { releaseResume = resolve; });
   let calls = 0;
   const harness = {
     ...mockHarness(),
@@ -187,7 +189,7 @@ test("pausing persists a checkpoint artifact and resumes the saved requirements 
           if (signal.aborted) reject(signal.reason);
           else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
         });
-      }
+      } else await resumeGate;
       return { artifact: "# Requirements", questions: [], sessionFile: "/tmp/requirements-session.jsonl" };
     }
   };
@@ -211,9 +213,19 @@ test("pausing persists a checkpoint artifact and resumes the saved requirements 
     assert.equal(saved.pauseHistory[0].sessionFile, "/tmp/requirements-session.jsonl");
     assert.equal(saved.artifacts.find((artifact) => artifact.kind === "pause-checkpoint").id, paused.json.artifactId);
 
-    const resumed = await invoke(daemon, "POST", `/api/tickets/${ticket.id}/resume`, { body: {} });
+    const resumed = await Promise.race([
+      invoke(daemon, "POST", `/api/tickets/${ticket.id}/resume`, { body: {} }),
+      new Promise((resolve) => setTimeout(() => resolve({ status: 599, text: "Resume waited for the background model run" }), 500))
+    ]);
     assert.equal(resumed.status, 202);
-    const after = daemon.store.read().ticketRuns[ticket.id];
+    releaseResume();
+    const deadline = Date.now() + 3000;
+    let after;
+    while (Date.now() < deadline) {
+      after = daemon.store.read().ticketRuns[ticket.id];
+      if (after.status === "awaiting_requirements") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.equal(after.status, "awaiting_requirements");
     assert.equal(calls, 2);
     assert.ok(after.pauseHistory[0].resumedAt);
@@ -274,7 +286,13 @@ test("requirements answers remain in chat history when the agent replies", async
     });
     const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/clarify`, { body: { answers: "1. Operators" } });
     assert.equal(response.status, 202);
-    const state = await invoke(daemon, "GET", "/api/state");
+    const deadline = Date.now() + 3000;
+    let state;
+    while (Date.now() < deadline) {
+      state = await invoke(daemon, "GET", "/api/state");
+      if (state.json.ticketRuns[id].checkpoint?.questions?.[0] === "Should completed tickets stay visible?") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.deepEqual(state.json.ticketRuns[id].clarificationHistory, [{
       checkpointId: "requirements-1",
       kind: "requirements_review",
