@@ -87,6 +87,12 @@ async function removeEventFile(file) {
   await rm(file, { force: true });
 }
 
+async function waitForFixtureStart(file, pid) {
+  await waitFor(async () => {
+    assert.match((await events(file)).join("\n"), new RegExp(`\\bstarted ${pid}\\b`));
+  });
+}
+
 test("daemon cancellation cleans an owned descendant once and exposes durable cleanup evidence", { skip: linuxOnly }, async () => {
   const eventFile = join(tmpdir(), `agent-plan-fixture-cancel-${randomUUID()}.log`);
   const containments = [];
@@ -168,6 +174,7 @@ test("identity mismatch leaves the fixture process unsignaled", { skip: linuxOnl
   let pid;
   try {
     ({ pid } = await launchOwnedFixture("identity-change", eventFile, ownership));
+    await waitForFixtureStart(eventFile, pid);
     const target = await ownedTarget(adapter, ownership, pid);
     const containment = new ProcessContainment({
       executionId: ownership.executionId, ownership, graceMs: 30, forceWaitMs: 10, timeoutMs: 500,
@@ -196,6 +203,7 @@ test("stubborn fixture receives graceful termination before renewed validation a
   let pid;
   try {
     ({ pid } = await launchOwnedFixture("stubborn", eventFile, ownership));
+    await waitForFixtureStart(eventFile, pid);
     const target = await ownedTarget(adapter, ownership, pid);
     let observations = 0;
     const containment = new ProcessContainment({
@@ -233,17 +241,14 @@ test("a fixture descendant forked during graceful cleanup receives a second clea
     // reaches exec. Establish token-backed identity before asking cleanup to
     // take its initial snapshot, so this test exercises the graceful fork
     // rather than a launch race that correctly yields not-required.
+    await waitForFixtureStart(eventFile, parentPid);
     await ownedTarget(adapter, ownership, parentPid);
     const containment = new ProcessContainment({
       executionId: ownership.executionId, ownership, adapter, graceMs: 80, forceWaitMs: 20, timeoutMs: 750
     });
     const result = await containment.cleanup("fork-fixture-test");
-    await waitFor(async () => {
-      const pids = (await events(eventFile)).filter((line) => / started /.test(line)).map((line) => Number(line.split(" ").at(-1)));
-      assert.equal(pids.length, 2);
-      childPid = pids.find((pid) => pid !== parentPid);
-      assert.ok(childPid);
-    });
+    childPid = result.discovered.find(({ pid }) => pid !== parentPid)?.pid;
+    assert.ok(childPid, "the post-force snapshot must discover the token-inheriting child");
     assert.equal(result.outcome, "complete");
     assert.deepEqual(result.actions.filter((action) => action.pid === childPid).map((action) => action.signal), ["SIGTERM"]);
     await waitFor(() => assertExited(childPid));

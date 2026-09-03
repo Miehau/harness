@@ -48,6 +48,15 @@ export function fixtureHarness({ launcher, mode = "long-lived", eventFile, onLau
       onLaunch(launchedProcess);
       if (mode === "normal-exit") {
         await exited;
+        // A launcher exit can precede the descendant's final reaping by one
+        // event-loop turn. Wait for the same token-backed adapter that
+        // containment uses, so the normal-completion fixture cannot turn a
+        // no-owned-process assertion into an accidental grace-period test.
+        await waitFor(async () => {
+          const found = await containment.adapter.discover(containment.ownership.token);
+          const processes = Array.isArray(found) ? found : found.processes;
+          if (processes.length) throw new Error("Normal fixture descendant is still owned");
+        });
         return completedFixtureReport();
       }
       await new Promise((_, reject) => {
