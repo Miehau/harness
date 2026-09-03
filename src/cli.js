@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { eventTimeline, freeTextTicket, preferredStepId } from "../public/ui-model.js";
+import { freeTextTicket } from "../public/ui-model.js";
 
 const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
@@ -62,7 +62,7 @@ async function handleCommand(command, rest, ctx) {
       return 0;
     }
     if (what === "timeline" || what === "execution-timeline") {
-      print(stdout, await timeline(args[0], ctx));
+      print(stdout, sanitizeTimeline(await timeline(args[0], ctx)));
       return 0;
     }
     throw new Error("Usage: agent-plan list backlog|timeline [ticketId]\n" + usage);
@@ -232,33 +232,12 @@ function backlogRow(ticket, run, selectedTicketId) {
 
 async function timeline(explicitId, ctx) {
   const { env, fetchImpl } = ctx;
-  const state = await request("GET", "/api/state", { env, fetchImpl });
+  const state = explicitId ? null : await request("GET", "/api/state", { env, fetchImpl });
   const id = explicitId || state.selectedTicketId;
   if (!id) throw new Error("Pass a ticket id (no selected run)");
-  const run = state.ticketRuns?.[id];
-  if (!run) throw new Error("Ticket run not found");
-  const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const stage = (run.stages || []).find((item) => item.status === "active");
-  const activeStep = steps.find((item) => ["running", "fixing"].includes(item.status));
-  const step = activeStep
-    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan)) : null)
-    || null;
-  const events = step
-    ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]
-    : stage?.activity?.events || [];
-  return {
-    ticketId: id,
-    stepId: step?.id || null,
-    stepStatus: step?.status || null,
-    stageId: stage?.id || null,
-    events: eventTimeline(events).map((item) => ({
-      at: item.at || null,
-      title: item.title,
-      tool: item.tool || null,
-      status: item.status,
-      isError: Boolean(item.isError)
-    }))
-  };
+  // The inspector owns focus, lifecycle, redaction, and retention semantics. Keep
+  // this command a transport-only view so its JSON cannot drift from the dashboard.
+  return request("GET", "/api/tickets/" + encodeURIComponent(id) + "/inspection", { env, fetchImpl });
 }
 
 function aliasAction(value) {
@@ -274,6 +253,21 @@ async function resolveTicketId(explicit, ctx) {
   const id = state.selectedTicketId || Object.keys(state.ticketRuns || {})[0];
   if (!id) throw new Error("Pass a ticket id (no selected run)");
   return id;
+}
+
+const timelineSecretKey = /(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)/i;
+const timelineAuthorization = /\b(?:authorization|proxy-authorization)\s*[=:]\s*[^\r\n]+/gi;
+const timelineSecret = /\b(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const timelinePath = /(^|[^A-Za-z0-9_.@-])(?:~\/|\/[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*|[A-Za-z]:\\[^\s"'`),;]+)/g;
+
+function sanitizeTimeline(value) {
+  if (typeof value === "string") return value
+    .replace(timelineAuthorization, "[redacted]")
+    .replace(timelineSecret, (match) => match.replace(/(?:"[^"]*"|'[^']*'|[^\s,;]+)$/, "[redacted]"))
+    .replace(timelinePath, (_, prefix) => `${prefix}[path]`);
+  if (Array.isArray(value)) return value.map(sanitizeTimeline);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, timelineSecretKey.test(key) ? "[redacted]" : sanitizeTimeline(item)]));
 }
 
 function print(stdout, payload) {

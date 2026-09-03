@@ -2,7 +2,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizePlan } from "../src/plan.js";
 import { runCli } from "../src/cli.js";
-import { runAgainstDaemon, seedRun, withDaemon } from "./helpers.js";
+import { invoke, runAgainstDaemon, seedRun, withDaemon } from "./helpers.js";
+
+function stableTimeline(projection) {
+  const stable = structuredClone(projection);
+  for (const item of [...stable.stages, ...stable.attempts]) {
+    if (item.timing) item.timing.elapsedMs = null;
+  }
+  return stable;
+}
+
+async function assertCanonicalTimeline(daemon, id, argv = ["list", "timeline", id]) {
+  const api = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/inspection`);
+  assert.equal(api.status, 200);
+  const cli = await runAgainstDaemon(daemon, argv);
+  assert.equal(cli.code, 0);
+  assert.deepEqual(stableTimeline(cli.json), stableTimeline(api.json));
+  return cli.json;
+}
+
+function testTicket(id) {
+  return {
+    id, identifier: id.toUpperCase(), title: `Ticket ${id}`, description: "Inspect this ticket",
+    source: "local", state: { name: "Local", type: "local" }, team: { name: "Local" }
+  };
+}
 
 test("new text creates a queue item the UI would start", async () => {
   await withDaemon(async (daemon) => {
@@ -19,33 +43,65 @@ test("new text creates a queue item the UI would start", async () => {
   });
 });
 
-test("select, timeline, resume, and queue clear talk to the same routes as the inspector", async () => {
+test("timeline requests the canonical endpoint without reading a run record", async () => {
+  const requests = [];
+  const output = [];
+  const projection = { version: 1, ticketId: "ticket-1", focus: { reason: "empty" }, stages: [], workers: [], attempts: [], blockers: [] };
+  const code = await runCli(["timeline", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url) => {
+      requests.push(url);
+      return { ok: true, status: 200, async text() { return JSON.stringify(projection); } };
+    },
+    stdout: { write(value) { output.push(value); } }, stderr: { write() {} }
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(requests, ["http://127.0.0.1:4317/api/tickets/ticket-1/inspection"]);
+  assert.deepEqual(JSON.parse(output.join("")), projection);
+});
+
+test("timeline redacts key-value secrets and paths missed by an unsafe inspection response", async () => {
+  const output = [];
+  const code = await runCli(["timeline", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async () => ({
+      ok: true, status: 200,
+      async text() { return JSON.stringify({
+        ticketId: "ticket-1", blockers: [{ summary: "Provider error: password=hunter2 path=/private/run\nAuthorization: Bearer bearer-credential\nAuthorization: Negotiate negotiate-credential\nProxy-Authorization: Negotiate proxy-credential" }],
+        diagnostics: { password: "object-secret" }, stages: [], workers: [], attempts: []
+      }); }
+    }),
+    stdout: { write(value) { output.push(value); } }, stderr: { write() {} }
+  });
+  assert.equal(code, 0);
+  const timeline = output.join("");
+  assert.equal(timeline.includes("hunter2"), false);
+  assert.equal(timeline.includes("object-secret"), false);
+  assert.equal(timeline.includes("/private/run"), false);
+  assert.equal(timeline.includes("Bearer"), false);
+  assert.equal(timeline.includes("bearer-credential"), false);
+  assert.equal(timeline.includes("Negotiate"), false);
+  assert.equal(timeline.includes("negotiate-credential"), false);
+  assert.equal(timeline.includes("proxy-credential"), false);
+  assert.match(timeline, /\[redacted\]/);
+  assert.match(timeline, /\[path\]/);
+});
+
+test("timeline aliases select the canonical inspection projection and preserve existing commands", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({
       title: "Seeded",
       nodes: [{
-        id: "build",
-        title: "Build",
-        status: "running",
-        permission: "write",
-        writeScope: "src",
-        expectedFiles: ["src/app.js"],
-        estimatedChangedLines: 20,
-        acceptanceCriteria: ["Works"],
-        attempts: [{ events: [
-          { type: "tool_start", tool: "edit", callId: "c1", args: "{\"path\":\"src/app.js\"}", at: "2026-09-01T12:00:00.000Z" },
-          { type: "tool_end", tool: "edit", callId: "c1", result: "ok", at: "2026-09-01T12:00:01.000Z" }
-        ] }]
+        id: "build", title: "Build", status: "running", permission: "write", writeScope: "src",
+        expectedFiles: ["src/app.js"], estimatedChangedLines: 20, acceptanceCriteria: ["Works"]
       }]
     });
     const id = await seedRun(daemon, { status: "interrupted", plan });
     const selected = await runAgainstDaemon(daemon, ["select", id]);
     assert.equal(selected.json.selectedTicketId, id);
-    const timeline = await runAgainstDaemon(daemon, ["list", "execution-timeline"]);
-    assert.equal(timeline.json.ticketId, id);
-    assert.equal(timeline.json.stepId, "build");
-    assert.equal(timeline.json.events[0].tool, "edit");
-    assert.equal(timeline.json.events[0].isError, false);
+    const timeline = await assertCanonicalTimeline(daemon, id, ["list", "execution-timeline"]);
+    assert.equal(timeline.workers[0].id, "worker:build");
+    assert.equal("events" in timeline, false);
     const resumed = await runAgainstDaemon(daemon, ["select", id, "resume-run"]);
     assert.equal(resumed.json.accepted, true);
     const cleared = await runAgainstDaemon(daemon, ["queue", "clear"]);
@@ -53,33 +109,106 @@ test("select, timeline, resume, and queue clear talk to the same routes as the i
   });
 });
 
-test("timeline includes the active worker before its attempt is persisted", async () => {
+test("timeline preserves canonical active focus, parallel workers, and live resource availability", async () => {
   await withDaemon(async (daemon) => {
-    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "running" }] });
+    const plan = normalizePlan({ nodes: [{
+      id: "parallel", type: "group", children: [
+        { id: "api", title: "API", status: "running", permission: "write", writeScope: "src/api.js" },
+        { id: "ui", title: "UI", status: "running", permission: "write", writeScope: "src/ui.js" }
+      ]
+    }] });
     const id = await seedRun(daemon, {
       status: "running", plan,
-      activeRuns: { build: { activity: { events: [{ type: "tool_start", tool: "read", args: '{"path":"src/app.js"}', at: "2026-09-03T00:00:00.000Z" }] } } }
+      stages: [{ id: "implement", title: "Implement", status: "active", summary: "Parallel implementation" }],
+      activeRuns: {
+        api: { runId: "active-api", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing API" },
+        ui: { runId: "active-ui", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing UI" }
+      }
     });
-
-    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
-    assert.equal(timeline.json.events.length, 1);
-    assert.equal(timeline.json.events[0].tool, "read");
+    const timeline = await assertCanonicalTimeline(daemon, id);
+    assert.deepEqual(timeline.focus, {
+      stageId: "stage:implement", workerId: "worker:api", attemptId: "attempt:api:active-active-api", reason: "active"
+    });
+    assert.deepEqual(timeline.workers.map((worker) => worker.id), ["worker:api", "worker:ui"]);
+    assert.deepEqual(timeline.attempts.map((attempt) => attempt.runId), ["active-api", "active-ui"]);
+    assert.equal(timeline.attempts[0].resources.output.state, "not_yet_available");
+    assert.equal(timeline.attempts[1].resources.checks.state, "not_yet_available");
   });
 });
 
-test("timeline follows an active verification stage instead of an accepted step", async () => {
+test("timeline keeps failed corrections, completed verification, and handoff as independent canonical attempts", async () => {
   await withDaemon(async (daemon) => {
-    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });
-    const stages = [
-      { id: "implement", status: "completed" },
-      { id: "verify", status: "active", activity: { events: [{ type: "phase", label: "Final review", at: "2" }] } }
-    ];
-    const id = await seedRun(daemon, { status: "reviewing", plan, stages });
+    const plan = normalizePlan({ nodes: [{
+      id: "build", title: "Build", status: "accepted", permission: "write", writeScope: "src/build.js",
+      expectedArtifacts: ["build.md"], acceptedAt: "2026-09-03T10:04:00.000Z", attempts: [
+        {
+          attemptId: "attempt-1", runId: "worker-original", status: "failed", startedAt: "2026-09-03T10:00:00.000Z",
+          completedAt: "2026-09-03T10:01:00.000Z", error: "Provider request failed"
+        },
+        {
+          attemptId: "attempt-2", runId: "worker-correction", status: "verified", startedAt: "2026-09-03T10:02:00.000Z",
+          completedAt: "2026-09-03T10:03:00.000Z", report: { status: "completed" },
+          verification: { checks: { status: "passed", command: "node test", summary: "Passed" } },
+          diff: { available: true, files: ["src/build.js"] }
+        }
+      ]
+    }] });
+    // Plan normalization deliberately excludes lifecycle timestamps; retained runs carry them.
+    plan.nodes[0].acceptedAt = "2026-09-03T10:04:00.000Z";
+    const id = await seedRun(daemon, {
+      status: "completed", plan,
+      stages: [
+        { id: "implement", title: "Implement", status: "completed", updatedAt: "2026-09-03T10:04:00.000Z" },
+        { id: "verify", title: "Verify", status: "completed", updatedAt: "2026-09-03T10:05:00.000Z" },
+        { id: "handoff", title: "Handoff", status: "completed", updatedAt: "2026-09-03T10:06:00.000Z" }
+      ],
+      artifacts: [
+        { id: "output", stepId: "build", attemptId: "attempt-2", kind: "agent-output", name: "build.md" },
+        { id: "handoff", stageId: "handoff", kind: "handoff", name: "handoff.md" }
+      ],
+      reviews: [{ reviews: [{ role: "deterministic", checks: { status: "passed" } }] }],
+      integration: { integratedAt: "2026-09-03T10:06:00.000Z" }
+    });
+    const timeline = await assertCanonicalTimeline(daemon, id);
+    assert.deepEqual(timeline.attempts.map((attempt) => [attempt.id, attempt.runId, attempt.lifecycle]), [
+      ["attempt:build:attempt-1", "worker-original", "failed"],
+      ["attempt:build:attempt-2", "worker-correction", "completed"]
+    ]);
+    assert.equal(timeline.attempts[0].blocker.type, "provider");
+    assert.equal(timeline.attempts[1].resources.checks.status, "passed");
+    assert.equal(timeline.evidence.state, "complete");
+    assert.equal(timeline.workers[0].lifecycle, "completed");
+    assert.equal(JSON.stringify(timeline).includes("rawOutput"), false);
+  });
+});
 
-    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
-    assert.equal(timeline.json.stepId, null);
-    assert.equal(timeline.json.stageId, "verify");
-    assert.match(timeline.json.events[0].title, /Final review/);
+test("timeline carries every canonical blocker class without reinterpreting it", async () => {
+  const cases = [
+    ["repository-check", { status: "needs_attention", stepStatus: "verification_failed", attempt: { status: "verification_failed", verification: { checks: { status: "failed" } } } }],
+    ["provider", { status: "needs_attention", stepStatus: "needs_attention", error: "Provider rate limit" }],
+    ["review", { status: "needs_attention", stepStatus: "needs_attention", checkpoint: { kind: "review_blocked", title: "Review found an issue", stepId: "build" } }],
+    ["scope", { status: "needs_attention", stepStatus: "needs_attention", attempt: { status: "needs_attention", violations: ["outside scope"] } }],
+    ["merge", { status: "needs_attention", stepStatus: "needs_attention", error: "Merge conflict", merge: { status: "failed" } }],
+    ["preview", { status: "needs_attention", stepStatus: "needs_attention", error: "Preview port bind failed" }],
+    ["evidence", { status: "needs_attention", stepStatus: "needs_attention", checkpoint: { kind: "evidence_review", title: "Review final proof", stepId: "build" } }],
+    ["cancellation", { status: "cancelled", stepStatus: "cancelled" }],
+    ["interruption", { status: "interrupted", stepStatus: "interrupted" }]
+  ];
+  await withDaemon(async (daemon) => {
+    for (const [expected, fixture] of cases) {
+      const id = `blocker-${expected}`;
+      const attempt = fixture.attempt && { attemptId: "attempt-1", runId: "worker-1", ...fixture.attempt };
+      const plan = normalizePlan({ nodes: [{
+        id: "build", title: "Build", status: fixture.stepStatus, permission: "write", writeScope: "src",
+        lastError: fixture.error, attempts: attempt ? [attempt] : []
+      }] });
+      await seedRun(daemon, {
+        ticket: testTicket(id), status: fixture.status, lastError: fixture.error,
+        checkpoint: fixture.checkpoint, merge: fixture.merge, plan
+      });
+      const timeline = await assertCanonicalTimeline(daemon, id);
+      assert.equal(timeline.workers[0].blocker.type, expected);
+    }
   });
 });
 
