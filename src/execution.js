@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
+import { createSteeringLedger } from "./steering.js";
 
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],
@@ -33,6 +34,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     plan = null,
     artifacts = [],
     activeRuns = {},
+    steering = createSteeringLedger(),
     trackerEvents = {},
     sessionFile = null,
     auto = false,
@@ -54,6 +56,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     plan,
     artifacts,
     activeRuns,
+    steering: createSteeringLedger(steering),
     trackerEvents,
     sessionFile,
     auto,
@@ -207,6 +210,7 @@ export function markRunPaused(run, at = new Date().toISOString()) {
     steps: Object.entries(activeRuns).map(([stepId, active]) => ({
       stepId,
       runId: active.runId || null,
+      attemptId: active.attemptId || steps.find((step) => step.id === stepId)?.activeAttempt?.id || null,
       sessionFile: active.sessionFile || steps.find((step) => step.id === stepId)?.sessionFile || null,
       startedAt: active.startedAt || null,
       lastEventAt: active.activity?.lastEventAt || active.lastEventAt || null,
@@ -218,9 +222,10 @@ export function markRunPaused(run, at = new Date().toISOString()) {
     const active = activeRuns[step.id] || {};
     const activity = active.activity || {};
     step.attempts ||= [];
+    const attemptId = active.attemptId || step.activeAttempt?.id || `legacy-attempt-${step.attempts.length + 1}`;
     step.attempts.push({
       runId: active.runId || null,
-      attemptId: `attempt-${step.attempts.length + 1}`,
+      attemptId,
       startedAt: active.startedAt || at,
       completedAt: at,
       status: "paused",
@@ -230,6 +235,10 @@ export function markRunPaused(run, at = new Date().toISOString()) {
       sessionFile: active.sessionFile || step.sessionFile || null
     });
     if (active.sessionFile) step.sessionFile = active.sessionFile;
+    step.activeAttempt = {
+      ...(step.activeAttempt || {}), id: attemptId, status: "interrupted", workerRunId: null,
+      startedAt: step.activeAttempt?.startedAt || active.startedAt || at, interruptedAt: at
+    };
     step.status = "interrupted";
   }
   run.status = "paused";

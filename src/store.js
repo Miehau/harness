@@ -2,10 +2,11 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { ensureSteeringLedger, preserveAttemptMetadata, recoverSteeringClaims } from "./steering.js";
 
 function initialState(cwd) {
   return {
-    version: 6,
+    version: 7,
     revision: 0,
     workspace: { cwd },
     settings: normalizeSettings(),
@@ -39,8 +40,8 @@ export class JsonStore {
     await mkdir(dirname(this.file), { recursive: true });
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
-      if ([3, 4, 5, 6].includes(saved.version)) this.state = saved;
-      this.state.version = 6;
+      if ([3, 4, 5, 6, 7].includes(saved.version)) this.state = saved;
+      this.state.version = 7;
       this.state.workspace ||= { cwd: this.cwd };
       this.state.workspace.cwd ||= this.cwd;
       this.state.settings = normalizeSettings(this.state.settings);
@@ -50,6 +51,9 @@ export class JsonStore {
       for (const run of Object.values(this.state.ticketRuns)) {
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
         run.auto ||= false;
+        ensureSteeringLedger(run);
+        preserveAttemptMetadata(run);
+        recoverSteeringClaims(run);
         run.activeRuns = {};
         for (const node of run.plan?.nodes || []) {
           for (const step of node.type === "group" ? node.children : [node]) {
