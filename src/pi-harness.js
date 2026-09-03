@@ -324,7 +324,7 @@ Role: ${step.role}
 Harness: ${step.harness}
 Context policy: ${step.contextPolicy}
 Permission: ${step.permission}
-Write scope: ${step.writeScope || "none"}
+Write scope: ${workerWriteScope(step) || "none"}
 Expected files: ${step.expectedFiles?.join(", ") || "none specified"}
 Estimated changed lines: ${step.estimatedChangedLines || "not estimated"}
 Review budget: ${step.reviewBudget ? `${step.reviewBudget.maxFiles} files / ${step.reviewBudget.maxChangedLines} changed lines${step.reviewBudget.justification ? ` (${step.reviewBudget.justification})` : ""}` : "default"}
@@ -358,6 +358,7 @@ Work only within the stated permission and write scope. Expected files are a pla
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
+  plan = includeVisualVerificationScope(plan);
   if ((contractExists && projectConfigExists) || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(projectConfigPath)))) return plan;
   const id = findContractId(plan);
   const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
@@ -381,6 +382,21 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
     expectedArtifacts: [projectConfigPath, verificationEntry],
     dependsOn: []
   }, ...nodes] });
+}
+
+export function workerWriteScope(step) {
+  const scope = String(step?.writeScope || "").split(",").map((item) => item.trim()).filter(Boolean);
+  // Visual proof is produced by the repository contract, so a visual slice must
+  // be able to correct that contract without gaining access to unrelated code.
+  if (step?.permission === "write" && step.requiresVisualEvidence && outsideContractScope(scope.join(","))) scope.push(".agent-plan");
+  return [...new Set(scope)].join(",");
+}
+
+function includeVisualVerificationScope(plan) {
+  if (!flattenSteps(plan).some((step) => workerWriteScope(step) !== String(step.writeScope || ""))) return plan;
+  const scoped = structuredClone(plan);
+  for (const step of flattenSteps(scoped)) step.writeScope = workerWriteScope(step);
+  return normalizePlan(scoped);
 }
 
 export function projectCommandTool(cwd, signal) {
@@ -1004,7 +1020,7 @@ ${design}
 
 Slice: ${step.title}
 Step permission: ${step.permission}
-Write scope: ${step.writeScope || "none"}
+Write scope: ${workerWriteScope(step) || "none"}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
@@ -1240,7 +1256,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     let report = null;
     const reviewNotes = [];
     tools.push("worker_report");
-    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, step.writeScope), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
+    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
     if (step.permission === "write") tools.push("project_command", "review_note");
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
@@ -1280,7 +1296,7 @@ ${stripFrontmatter(content).trim()}
       signal?.throwIfAborted();
       const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
       const resumedContext = resumeSessionFile
-        ? `\n\nCurrent slice boundary:\n- Acceptance criteria: ${step.acceptanceCriteria.join("; ") || "none"}\n- Permission: ${step.permission}\n- Effective write scope: ${step.writeScope || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\n- Deferred slices: ${deferredSlices.map((candidate) => `${candidate.title} (${candidate.acceptanceCriteria.join("; ")})`).join("; ") || "none"}\nDo not request access to a path already included in this effective write scope. Do not implement behavior assigned exclusively to a deferred slice; report completed without that change when the current criteria are already met.`
+        ? `\n\nCurrent slice boundary:\n- Acceptance criteria: ${step.acceptanceCriteria.join("; ") || "none"}\n- Permission: ${step.permission}\n- Effective write scope: ${workerWriteScope(step) || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\n- Deferred slices: ${deferredSlices.map((candidate) => `${candidate.title} (${candidate.acceptanceCriteria.join("; ")})`).join("; ") || "none"}\nDo not request access to a path already included in this effective write scope. Do not implement behavior assigned exclusively to a deferred slice; report completed without that change when the current criteria are already met.`
         : "";
       const continuation = feedback
         ? resumeSessionFile

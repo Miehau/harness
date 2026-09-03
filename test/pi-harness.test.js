@@ -129,12 +129,24 @@ test("existing projects get one focused verification contract before feature wor
   ] }), false);
   assert.equal(plan.nodes[0].role, "architecture");
   assert.equal(plan.nodes[0].writeScope, ".agent-plan");
+  assert.equal(plan.nodes[1].writeScope, "src,test,.agent-plan");
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
   assert.match(plan.nodes[0].prompt, /project\.json/);
   assert.deepEqual(plan.nodes[0].expectedArtifacts, [".agent-plan/project.json", ".agent-plan/verify.mjs"]);
   assert.doesNotMatch(plan.nodes[0].prompt, /docs\/architecture\.md|AGENTS\.md/);
   assert.equal(ensureVerificationContractStep(plan, true), plan);
+});
+
+test("existing verification contracts remain correctable by visual steps", () => {
+  const original = normalizePlan({ nodes: [
+    { id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test", requiresVisualEvidence: true }
+  ] });
+  const plan = ensureVerificationContractStep(original, true, true);
+  assert.equal(plan.nodes.length, 1);
+  assert.equal(plan.nodes[0].writeScope, "public,test,.agent-plan");
+  assert.match(stepContext({ plan: original, step: original.nodes[0], artifacts: [] }), /Write scope: public,test,.agent-plan/);
+  assert.equal(ensureVerificationContractStep(plan, true, true), plan);
 });
 
 test("synthetic review steps can omit optional planning arrays", () => {

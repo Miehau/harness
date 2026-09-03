@@ -15,7 +15,7 @@ import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, 
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { ensureVerificationContractStep, formatTicketHorizon, PiHarness } from "./pi-harness.js";
+import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
@@ -1114,7 +1114,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
         const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
-        const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, currentStep.writeScope);
+        const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, workerWriteScope(currentStep));
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
