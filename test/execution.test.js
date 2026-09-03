@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -258,6 +258,14 @@ test("correction pause output retains the latest actionable evidence", () => {
   assert.match(reason, /\[HIGH\] Sentence-final root paths evade scope checks/);
   assert.match(reason, /src\/scope\.js:42/);
   assert.match(reason, /table-driven regression/);
+});
+
+test("an interrupted final-review fix resumes from persisted findings", () => {
+  const findings = [{ severity: "high", claim: "Cleanup can miss a late child", evidence: [{ file: "src/process.js", line: 42 }] }];
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings }]), { round: 2, findings });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings });
+  assert.equal(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "completed" } } }]), null);
+  assert.equal(pendingReviewFix([{ round: 2, actionableFindings: [] }]), null);
 });
 
 test("an audited scope expansion starts a fresh bounded correction window", () => {

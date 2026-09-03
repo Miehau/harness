@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1665,6 +1665,54 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
   return { position: queued.position, promise: tracked };
 }
 
+async function applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal }) {
+  const current = ticketRun(store.read(), ticketId);
+  const fixStep = {
+    id: `review-fix-${round}`,
+    title: `Fix final review findings — round ${round}`,
+    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.`,
+    contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
+    permission: "write", writeScope: "**", skills: [], references: [],
+    expectedArtifacts: [`review-fixes-round-${round}.md`],
+    acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
+    status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
+  };
+  const beforeFix = await snapshotTree(current.workspace.cwd);
+  const result = await harness.runStep({
+    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
+    images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
+    profile: current.stageProfiles.implementation,
+    onEvent: (event) => activity.onEvent(event, "review fixer"),
+    signal
+  });
+  signal?.throwIfAborted();
+  const afterFix = await snapshotTree(current.workspace.cwd);
+  const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
+  const verificationDiffAfterFix = await diffTrees(current.workspace.cwd, verificationBaseTree, afterFix);
+  if (result.report.status !== "completed") {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+      Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
+      review.fix = { report: result.report, diff: fixDiff, createdAt: new Date().toISOString() };
+      run.status = "needs_attention";
+      run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
+    });
+    return false;
+  }
+  const fixArtifact = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: fixStep.expectedArtifacts[0], content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
+  });
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+    run.artifacts.push(fixArtifact);
+    review.fix = { report: result.report, diff: fixDiff, artifact: fixArtifact };
+    Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
+  });
+  return true;
+}
+
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
@@ -1680,8 +1728,18 @@ async function finalReviewLoop(ticketId, signal) {
     run.checkpoint = null;
     run.reviews ||= [];
   });
-  const firstRound = Math.max(0, ...(started.reviews || []).map((review) => Number(review.round) || 0)) + 1;
-  let previousFingerprint = findingsFingerprint(started.reviews?.at(-1)?.actionableFindings || []);
+  const pendingFix = pendingReviewFix(started.reviews);
+  if (pendingFix) {
+    const current = ticketRun(store.read(), ticketId);
+    const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));
+    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, reviewImages: savedImages, verificationBaseTree, activity, signal })) return;
+  }
+  const resumed = ticketRun(store.read(), ticketId);
+  const firstRound = Math.max(0, ...(resumed.reviews || []).map((review) => Number(review.round) || 0)) + 1;
+  const previousReview = resumed.reviews?.at(-1);
+  let previousFingerprint = previousReview?.fix?.report?.status === "completed"
+    ? findingsFingerprint(previousReview.actionableFindings || [])
+    : "";
   for (let round = firstRound; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
@@ -1801,47 +1859,7 @@ async function finalReviewLoop(ticketId, signal) {
       return;
     }
     previousFingerprint = decision.fingerprint;
-    const fixStep = {
-      id: `review-fix-${round}`,
-      title: `Fix final review findings — round ${round}`,
-      prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.`,
-      contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
-      permission: "write", writeScope: "**", skills: [], references: [],
-      expectedArtifacts: [`review-fixes-round-${round}.md`],
-      acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
-      status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
-    };
-    const beforeFix = await snapshotTree(current.workspace.cwd);
-    const result = await harness.runStep({
-      cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
-      images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
-      profile: current.stageProfiles.implementation,
-      onEvent: (event) => activity.onEvent(event, "review fixer"),
-      signal
-    });
-    signal?.throwIfAborted();
-    const afterFix = await snapshotTree(current.workspace.cwd);
-    const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
-    const verificationDiffAfterFix = await diffTrees(current.workspace.cwd, verificationBaseTree, afterFix);
-    if (result.report.status !== "completed") {
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
-        run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, createdAt: new Date().toISOString() };
-        run.status = "needs_attention";
-        run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
-      });
-      return;
-    }
-    const fixArtifact = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: fixStep.expectedArtifacts[0], content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
-    });
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.artifacts.push(fixArtifact);
-      run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, artifact: fixArtifact };
-      Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
-    });
+    if (!await applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal })) return;
   }
 }
 

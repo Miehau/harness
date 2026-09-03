@@ -478,6 +478,13 @@ export function shouldPauseCorrection({ round, findings, previousFingerprint, ma
   return { pause: false, fingerprint };
 }
 
+export function pendingReviewFix(reviews = []) {
+  const review = reviews.at(-1);
+  const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
+  if (!review || !findings.length || review.fix?.report?.status === "completed") return null;
+  return { round: Number(review.round) || reviews.length, findings };
+}
+
 export function correctionPauseReason(reason, findings = []) {
   const details = actionableFindings([{ findings }]).map((finding) => {
     const evidence = finding.evidence?.[0] || {};
