@@ -656,6 +656,14 @@ export function pendingReviewFix(reviews = []) {
   return { round: Number(review.round) || reviews.length, findings, sessionFile: review.fix?.sessionFile || null, restartFeedback: review.fix?.restartFeedback || "" };
 }
 
+export function reviewFixConstraints(run = {}) {
+  return [...new Set((run.reviewFixSessionRestarts || [])
+    .map((item) => String(item.reason || "").trim())
+    .filter(Boolean))]
+    .map((reason) => `- ${reason}`)
+    .join("\n");
+}
+
 export function restartReviewFixSession(run, reason) {
   const feedback = String(reason || "").trim();
   if (!feedback) throw new Error("Describe why the fixer session must restart");

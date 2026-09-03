@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1844,7 +1844,7 @@ async function finalReviewLoop(ticketId, signal) {
     const current = ticketRun(store.read(), ticketId);
     const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));
     const rootCauseClusters = unaddressedReviewClusters(current.reviews);
-    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
+    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, restartFeedback: reviewFixConstraints(current) || pendingFix.restartFeedback, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
   const resumed = ticketRun(store.read(), ticketId);
   const firstRound = Math.max(0, ...(resumed.reviews || []).map((review) => Number(review.round) || 0)) + 1;
@@ -1935,7 +1935,7 @@ async function finalReviewLoop(ticketId, signal) {
     }
     previousFingerprint = decision.fingerprint;
     const rootCauseClusters = unaddressedReviewClusters(reviewsWithCurrent);
-    if (!await applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
+    if (!await applyFinalReviewFix({ ticketId, round, findings, restartFeedback: reviewFixConstraints(current), reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
 }
 

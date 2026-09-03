@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -509,6 +509,18 @@ test("a contaminated fixer session restarts fresh without discarding its worktre
   assert.match(run.reviews[0].fix.restartFeedback, /synthetic fallback/);
   assert.equal(run.reviewFixSessionRestarts[0].previousSessionFile, "/audit/old.jsonl");
   assert.match(finalReviewFixStep(18, run.reviews[0].actionableFindings, [], run.reviews[0].fix.restartFeedback).prompt, /Operator restart directive/);
+  assert.equal(reviewFixConstraints(run), "- Remove the queued synthetic fallback");
+});
+
+test("operator fixer constraints survive into later correction rounds", () => {
+  const run = { reviewFixSessionRestarts: [
+    { reason: "Never replace live ticket capture with a seeded fallback" },
+    { reason: "Never replace live ticket capture with a seeded fallback" },
+    { reason: "Validate the rendered ticket identity before saving proof" }
+  ] };
+  const constraints = reviewFixConstraints(run);
+  assert.match(finalReviewFixStep(19, [{ severity: "high", claim: "Wrong ticket is visible" }], [], constraints).prompt, /Never replace live ticket capture/);
+  assert.equal(constraints.split("\n").length, 2);
 });
 
 test("a persisted clean review resumes at final proof without rerunning reviewers", () => {
