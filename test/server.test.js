@@ -59,6 +59,22 @@ test("ticket inspection API returns the canonical compact projection and state o
   });
 });
 
+test("ticket inspection keeps every retained worker attempt individually addressable", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "parallel-a", title: "Parallel A", permission: "write", writeScope: "src/a.js" }, { id: "parallel-b", title: "Parallel B", permission: "write", writeScope: "src/b.js" }] });
+    plan.nodes[0].attempts = [
+      { attemptId: "first", runId: "a-1", status: "failed", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z", terminationReason: "worker_failure", rawOutput: "old result" },
+      { attemptId: "second", runId: "a-2", status: "verified", startedAt: "2026-09-03T10:02:00.000Z", completedAt: "2026-09-03T10:03:00.000Z", rawOutput: "new result" }
+    ];
+    plan.nodes[1].attempts = [{ attemptId: "only", runId: "b-1", status: "verified", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:03:00.000Z", rawOutput: "sibling result" }];
+    const id = await seedRun(daemon, { plan, stages: [{ id: "implement", title: "Implement", status: "completed" }] });
+    const inspection = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/inspection`);
+    assert.deepEqual(inspection.json.attempts.map((attempt) => attempt.id), ["attempt:parallel-a:first", "attempt:parallel-a:second", "attempt:parallel-b:only"]);
+    assert.deepEqual(inspection.json.workers.find((worker) => worker.stepId === "parallel-a").attemptIds, ["attempt:parallel-a:first", "attempt:parallel-a:second"]);
+    assert.deepEqual(inspection.json.attempts.map((attempt) => attempt.workerId), ["worker:parallel-a", "worker:parallel-a", "worker:parallel-b"]);
+  });
+});
+
 test("attempt details are bounded, redacted, and require the exact retained identity", async () => {
   const harness = {
     ...mockHarness(),

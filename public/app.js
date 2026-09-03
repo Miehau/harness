@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, parseDiff, preferredStageId, preferredStepId, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -9,13 +9,17 @@ const escapeHtml = (value = "") => String(value)
 let state = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
 let piModels = [];
-const viewVersion = 2;
+const viewVersion = 3;
 let savedView = {};
 try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); } catch {}
 const currentView = savedView.version === viewVersion;
 let selectedStepId = currentView ? savedView.selectedStepId || null : null;
 let selectedStageId = currentView ? savedView.selectedStageId || null : null;
-let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
+let selectedStageKey = currentView ? savedView.selectedStageKey || null : null;
+let selectedWorkerId = currentView ? savedView.selectedWorkerId || null : null;
+let selectedAttemptId = currentView ? savedView.selectedAttemptId || null : null;
+let selectedRunId = currentView ? savedView.selectedRunId || null : null;
+let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
 let diffExpanded = false;
 let toastTimer;
@@ -37,11 +41,15 @@ const appendLiveOutput = (value, delta) => `${value || ""}${delta || ""}`.slice(
 const pendingSessionTraces = new Set();
 const pendingStagePromptTraces = new Set();
 const diffModels = new Map();
+const inspections = new Map();
+const pendingInspections = new Set();
+const attemptDetails = new Map();
+const pendingAttemptDetails = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function rememberView() {
-  localStorage.setItem("agent-plan-view", JSON.stringify({ version: viewVersion, selectedStepId, selectedStageId, activeTab }));
+  localStorage.setItem("agent-plan-view", JSON.stringify({ version: viewVersion, selectedStepId, selectedStageId, selectedStageKey, selectedWorkerId, selectedAttemptId, selectedRunId, activeTab }));
 }
 
 async function api(path, options = {}) {
@@ -84,6 +92,48 @@ function nodeById(id, plan = runFor()?.plan) {
     if (child) return child;
   }
   return null;
+}
+
+function inspectionFor(run = runFor()) {
+  return run ? inspections.get(run.id)?.projection || null : null;
+}
+
+function inspectionAttempt(id, projection = inspectionFor()) {
+  return projection?.attempts?.find((item) => item.id === id) || null;
+}
+
+function inspectionWorker(id, projection = inspectionFor()) {
+  return projection?.workers?.find((item) => item.id === id) || null;
+}
+
+function syncInspectionSelection(projection = inspectionFor()) {
+  const selected = inspectionSelection(projection, { stageId: selectedStageId && `stage:${selectedStageId}`, workerId: selectedWorkerId, attemptId: selectedAttemptId });
+  selectedWorkerId = selected.workerId;
+  selectedAttemptId = selected.attemptId;
+  selectedRunId = projection?.runId || null;
+  if (selected.workerId) selectedStepId = inspectionWorker(selected.workerId, projection)?.stepId || selectedStepId;
+  if (selected.stageId) { selectedStageKey = selected.stageId; selectedStageId = selected.stageId.replace(/^stage:/, ""); }
+}
+
+function loadInspection(run = runFor()) {
+  if (!run || pendingInspections.has(run.id) || inspections.get(run.id)?.revision === state?.revision) return;
+  pendingInspections.add(run.id);
+  api(`/api/tickets/${encodeURIComponent(run.id)}/inspection`).then((projection) => {
+    inspections.set(run.id, { revision: projection.revision, projection });
+    if (run.id === runFor()?.id) { syncInspectionSelection(projection); rememberView(); render(); }
+  }).catch((error) => {
+    inspections.set(run.id, { revision: state?.revision, error: error.message, projection: null });
+    if (run.id === runFor()?.id) renderInspector();
+  }).finally(() => pendingInspections.delete(run.id));
+}
+
+function loadAttemptDetails(run, attempt) {
+  if (!run || !attempt?.attemptId || !attempt.runId || pendingAttemptDetails.has(attempt.id) || attemptDetails.has(attempt.id)) return;
+  pendingAttemptDetails.add(attempt.id);
+  api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/steps/${encodeURIComponent(attempt.workerId.replace(/^worker:/, ""))}/attempts/${encodeURIComponent(attempt.attemptId)}/details`)
+    .then((detail) => { attemptDetails.set(attempt.id, { detail }); if (attempt.id === selectedAttemptId) renderInspector(); })
+    .catch((error) => { attemptDetails.set(attempt.id, { error: error.message }); if (attempt.id === selectedAttemptId) renderInspector(); })
+    .finally(() => pendingAttemptDetails.delete(attempt.id));
 }
 
 function statusIcon(status) {
@@ -194,7 +244,9 @@ function workflowStateLabel(status) {
 
 function stagesHtml(run) {
   if (!run) return "";
-  return `<section class="workflow-stages"><header><span class="eyebrow">Workflow map</span><span class="stage-count">${run.stages.filter((stage) => stage.status === "completed").length}/${run.stages.length} complete</span></header><ol>${run.stages.map((stage, index) => `<li class="stage-${escapeHtml(stage.status)} ${stage.id === selectedStageId ? "selected" : ""}"><button class="workflow-stage" type="button" data-stage="${escapeHtml(stage.id)}" aria-pressed="${stage.id === selectedStageId}" title="${escapeHtml(stage.title)}"><span class="stage-marker" aria-hidden="true">${statusIcon(stage.status)}</span><span class="stage-copy"><strong><em>${index + 1}.</em>${escapeHtml(workflowStageName(stage))}</strong><small>${escapeHtml(workflowStateLabel(stage.status))}</small></span></button></li>`).join("")}</ol></section>`;
+  const projected = inspectionFor(run)?.stages;
+  const stages = projected?.map((stage) => ({ ...stage, id: stage.stageId, displayStatus: stage.lifecycle })) || run.stages;
+  return `<section class="workflow-stages"><header><span class="eyebrow">Workflow map</span><span class="stage-count">${stages.filter((stage) => (stage.displayStatus || stage.status) === "completed").length}/${stages.length} complete</span></header><ol>${stages.map((stage, index) => { const status = stage.displayStatus || stage.status; return `<li class="stage-${escapeHtml(status)} ${stage.id === selectedStageId ? "selected" : ""}"><button class="workflow-stage" type="button" data-stage="${escapeHtml(stage.id)}" aria-pressed="${stage.id === selectedStageId}" title="${escapeHtml(stage.title)}"><span class="stage-marker" aria-hidden="true">${statusIcon(status)}</span><span class="stage-copy"><strong><em>${index + 1}.</em>${escapeHtml(workflowStageName(stage))}</strong><small>${escapeHtml(workflowStateLabel(status))}</small></span></button></li>`; }).join("")}</ol></section>`;
 }
 
 function clarificationHistoryHtml(run) {
@@ -311,13 +363,21 @@ function renderRestartImpact() {
   $("#restart-impact").textContent = `${option?.detail || ""} Existing artifacts and a machine-readable restart audit are retained.`;
 }
 
+function attemptIndexHtml(step) {
+  const projection = inspectionFor();
+  const worker = projection?.workers?.find((item) => item.stepId === step.id);
+  const attempts = (worker?.attemptIds || []).map((id) => inspectionAttempt(id, projection)).filter(Boolean);
+  if (!attempts.length) return "";
+  return `<div class="attempt-index" role="group" aria-label="${escapeHtml(step.title)} attempts">${attempts.map((attempt, index) => `<button type="button" class="attempt-chip status-${escapeHtml(attempt.status)} ${attempt.id === selectedAttemptId ? "selected" : ""}" data-attempt="${escapeHtml(attempt.id)}" data-worker="${escapeHtml(worker.id)}" title="Select retained attempt ${index + 1}">Attempt ${index + 1} · ${escapeHtml(attempt.lifecycle)}</button>`).join("")}</div>`;
+}
+
 function stepHtml(step) {
   const selected = step.id === selectedStepId ? "selected" : "";
   const profile = runFor()?.stageProfiles?.[step.role || "implementation"];
   const budget = step.permission === "write" && step.reviewBudget ? ` · ≤${step.reviewBudget.maxFiles} files/${step.reviewBudget.maxChangedLines} lines` : "";
   const dependencies = (step.dependsOn || []).map((id) => nodeById(id, runFor()?.plan)?.title || id);
   const dependency = dependencies.length ? `<span class="step-dependency">After ${escapeHtml(dependencies.join(" · "))}</span>` : "";
-  return `<button class="step status-${escapeHtml(step.status)} ${selected}" data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}${escapeHtml(budget)}</span>${dependency}</span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>`;
+  return `<div class="step-with-attempts"><button class="step status-${escapeHtml(step.status)} ${selected}" data-step="${escapeHtml(step.id)}"><span class="state-icon">${statusIcon(step.status)}</span><span class="step-copy"><span class="step-title">${escapeHtml(step.title)}</span><span class="step-meta">${escapeHtml(profile ? `${profile.model}/${profile.thinking}` : step.agentId)} · ${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}${escapeHtml(budget)}</span>${dependency}</span><span class="status-label">${escapeHtml(step.status.replaceAll("_", " "))}</span></button>${attemptIndexHtml(step)}</div>`;
 }
 
 function graphUnitHtml(unit) {
@@ -652,7 +712,7 @@ function artifactsPanel(step, artifacts = step ? step.artifacts || [] : runFor()
   if (!artifacts.some((artifact) => artifact.id === selectedArtifactId)) selectedArtifactId = artifacts[0].id;
   const selected = artifacts.find((artifact) => artifact.id === selectedArtifactId) || artifacts[0];
   if (selected.kind !== "visual-evidence" && artifactBody(selected) == null) hydrateArtifact(ticketId, selected);
-  return `<div class="artifact-browser"><nav class="artifact-index" aria-label="Persisted artifacts">${artifacts.map((artifact) => `<button type="button" data-select-artifact="${escapeHtml(artifact.id)}" aria-pressed="${artifact.id === selected.id}"><span><strong>${escapeHtml(artifact.name)}</strong><small>${escapeHtml(artifact.kind)}</small></span><i>${artifact.id === selected.id ? "●" : ""}</i></button>`).join("")}</nav><article class="artifact artifact-preview"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(selected.id)}" title="Open in Zed">${escapeHtml(selected.name)} ↗</button><span class="artifact-source">${escapeHtml(selected.kind)}</span></header><code class="artifact-path">${escapeHtml(selected.path || "")}</code><div class="artifact-body">${artifactPreview(selected)}</div></article></div>`;
+  return `<div class="artifact-browser"><nav class="artifact-index" aria-label="Persisted artifacts">${artifacts.map((artifact) => `<button type="button" data-select-artifact="${escapeHtml(artifact.id)}" aria-pressed="${artifact.id === selected.id}"><span><strong>${escapeHtml(artifact.name)}</strong><small>${escapeHtml(artifact.kind)}</small></span><i>${artifact.id === selected.id ? "●" : ""}</i></button>`).join("")}</nav><article class="artifact artifact-preview"><header><button class="artifact-name artifact-open" type="button" data-open-artifact="${escapeHtml(selected.id)}" title="Open in Zed">${escapeHtml(selected.name)} ↗</button><span class="artifact-source">${escapeHtml(selected.kind)}</span></header><div class="artifact-body">${artifactPreview(selected)}</div></article></div>`;
 }
 
 function stageDetailsPanel(run, stage, profile, artifacts) {
@@ -660,6 +720,37 @@ function stageDetailsPanel(run, stage, profile, artifacts) {
   const next = run.stages[index + 1];
   const milestones = stageMilestones(run, stage);
   return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stageStepIndexHtml(run, stage)}${stageDependencyMapHtml(run, stage)}${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
+}
+
+function resourceStateHtml(resource, label) {
+  const state = resource?.state || "unavailable";
+  return `<div class="attempt-resource-state state-${escapeHtml(state)}"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(inspectionResourceLabel({ state }))}</span></div>`;
+}
+
+function attemptDetailContent(detail, tab) {
+  if (!detail) return resourceStateHtml({ state: "loading" }, "Attempt details");
+  if (detail.error) return resourceStateHtml({ state: "unavailable" }, detail.error);
+  const resource = detail[tab] || { state: "unavailable" };
+  if (resource.state !== "available" && resource.state !== "truncated") return resourceStateHtml(resource, tab);
+  if (tab === "activity") return `<section class="run-events"><span class="eyebrow">Recorded activity · ${resource.total || resource.items?.length || 0} events</span><div>${(resource.items || []).map((item) => `<article class="attempt-event ${item.isError ? "warning" : ""}"><strong>${escapeHtml(item.label || item.type || "Activity")}</strong><small>${escapeHtml(item.at || "time not recorded")}</small>${item.detail || item.result ? `<pre>${escapeHtml(formatOutput(item.detail || item.result))}</pre>` : ""}</article>`).join("") || resourceStateHtml({ state: "not_retained" }, "Activity")}</div></section>`;
+  if (tab === "artifacts") return `<div class="artifact-list">${(resource.items || []).map((item) => `<article class="artifact"><header><span class="artifact-name">${escapeHtml(item.name || "Artifact")}</span><span class="artifact-source">${escapeHtml(item.kind || item.state)}</span></header>${item.content ? `<div class="artifact-body">${renderMarkdown(item.content)}</div>` : resourceStateHtml(item, "Artifact content")}</article>`).join("") || resourceStateHtml(resource, "Artifacts")}</div>`;
+  if (tab === "diff") return diffPanel({ available: true, patch: resource.content || "", files: resource.files || [], stat: resource.stat || "", truncated: resource.state === "truncated" }, { id: `attempt-${selectedAttemptId}`, actions: false });
+  if (tab === "checks") return `<section class="attempt-checks"><dl><div><dt>Status</dt><dd>${escapeHtml(resource.status || "not recorded")}</dd></div><div><dt>Command</dt><dd>${escapeHtml(resource.command || "not retained")}</dd></div><div><dt>Summary</dt><dd>${escapeHtml(resource.summary || "No check summary retained")}</dd></div></dl>${resource.output ? `<pre>${escapeHtml(formatOutput(resource.output))}</pre>` : resourceStateHtml(resource, "Check output")}</section>`;
+  if (tab === "trace") return `<section class="attempt-trace"><span class="eyebrow">Trace availability</span>${resource.content?.rawOutput ? `<pre>${escapeHtml(formatOutput(resource.content.rawOutput))}</pre>` : resourceStateHtml(resource, "Trace")}</section>`;
+  return `<article class="artifact"><div class="artifact-body">${renderMarkdown(resource.content || "")}</div></article>`;
+}
+
+function canonicalAttemptInspector(run, step, projection, worker, attempt) {
+  const summary = inspectionSummary({ worker, attempt });
+  const stored = attemptDetails.get(attempt.id);
+  const publicAttempt = step?.attempts?.find((item) => item.attemptId === attempt.attemptId);
+  if (attempt.runId && attempt.lifecycle !== "active") loadAttemptDetails(run, attempt);
+  const detail = stored?.detail || (stored?.error ? { error: stored.error } : null);
+  const tab = ["overview", "activity", "prompt", "output", "checks", "diff", "artifacts", "trace"].includes(activeTab) ? activeTab : "overview";
+  const attempts = worker.attemptIds.map((id) => inspectionAttempt(id, projection)).filter(Boolean);
+  const evidence = summary.evidence;
+  const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(detail?.terminationReason || publicAttempt?.terminationReason || "not recorded")}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : attemptDetailContent(detail, tab);
+  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section><nav class="tabs inspector-tabs">${[["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]].map(([id, label]) => `<button class="tab ${tab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div></div>`;
 }
 
 function renderInspector() {
@@ -671,6 +762,14 @@ function renderInspector() {
   const stage = run?.stages?.find((item) => item.id === selectedStageId);
   const step = nodeById(selectedStepId);
   if (!run) { target.innerHTML = `<div class="empty"><div><strong>Ticket details</strong>Select a tracker ticket, then start its workflow.</div></div>`; return; }
+  const projection = inspectionFor(run);
+  if (!projection) {
+    loadInspection(run);
+  } else {
+    const attempt = inspectionAttempt(selectedAttemptId, projection);
+    const worker = inspectionWorker(selectedWorkerId || attempt?.workerId, projection);
+    if (attempt && worker && (!selectedStageId || selectedStepId)) { target.innerHTML = canonicalAttemptInspector(run, nodeById(worker.stepId), projection, worker, attempt); return; }
+  }
   if (stage) {
     const profileId = ({ explore: "exploration", design: "architecture", implement: "implementation", verify: "verification" })[stage.id] || stage.id;
     const profile = run.stageProfiles?.[profileId];
@@ -679,13 +778,13 @@ function renderInspector() {
     const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
     const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header><nav class="tabs inspector-tabs">${[["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]].map(([id, label]) => `<button class="tab ${stageTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav><div class="tab-panel">${panel}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
   }
   if (!step) {
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>${escapeHtml(run.workspace?.cwd || "worktree pending")}</span><span>sessions stored separately</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
   const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
@@ -703,7 +802,6 @@ function renderInspector() {
           : workerTab === "prompt" ? `<div class="artifact"><header><span class="artifact-name">Rendered agent prompt</span></header><div class="artifact-body">${renderMarkdown(renderedPrompt)}</div></div>`
             : runPanel(step);
   const isolated = Boolean(step.workspace?.isolated);
-  const outputCwd = step.workspace?.cwd || run.workspace?.cwd || state.workspace.cwd;
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
   const reviewActions = step.status === "review_ready" ? run.auto
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
@@ -711,7 +809,7 @@ function renderInspector() {
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
   const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
-  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${workerTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(workerTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panel}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel} · ${escapeHtml(outputCwd)}${run.workspace?.cwd ? "" : " (after approval)"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
+  target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header><nav class="tabs inspector-tabs">${tabs.map(([id,label]) => `<button class="tab ${workerTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}${auxiliary ? `<button class="tab active auxiliary" data-tab="${escapeHtml(workerTab)}">${escapeHtml(auxiliary)}</button>` : ""}</nav><div class="tab-panel">${panel}</div>${reviewActions}<footer class="inspector-footer"><span>${outputLabel}${run.workspace?.cwd ? "" : " pending approval"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
   for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
 }
@@ -829,6 +927,7 @@ function render() {
   $("#workspace-path-display").textContent = state.workspace.cwd;
   $("#workspace-settings").title = state.workspace.cwd;
   const run = runFor();
+  loadInspection(run);
   if (selectedStageId && !run?.stages?.some((stage) => stage.id === selectedStageId)) { selectedStageId = null; rememberView(); }
   if (!selectedStageId && activeTab === "overview") {
     selectedStepId = null;
@@ -862,6 +961,10 @@ function selectTicket(ticketId, stepId = null, persist = true) {
   state.selectedTicketId = ticketId;
   selectedStepId = stepId;
   selectedStageId = null;
+  selectedStageKey = null;
+  selectedWorkerId = null;
+  selectedAttemptId = null;
+  selectedRunId = null;
   selectedArtifactId = null;
   activeTab = stepId ? "run" : "activity";
   rememberView();
@@ -1034,8 +1137,12 @@ document.addEventListener("click", async (event) => {
     }
     selectedStepId = railStep.dataset.railStep;
     selectedStageId = null;
+    selectedWorkerId = `worker:${selectedStepId}`;
+    selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null;
+    selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null;
+    selectedRunId = inspectionFor()?.runId || null;
     selectedArtifactId = null;
-    activeTab = "run";
+    activeTab = "overview";
     rememberView();
     renderSelection();
     return;
@@ -1112,7 +1219,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const selectStep = event.target.closest("[data-select-step]");
-  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; activeTab = "diff"; rememberView(); render(); return; }
+  if (selectStep) { selectedStepId = selectStep.dataset.selectStep; selectedStageId = null; selectedWorkerId = `worker:${selectedStepId}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; activeTab = "overview"; rememberView(); render(); return; }
   const autoAcceptStep = event.target.closest("[data-auto-accept-step]");
   if (autoAcceptStep) {
     autoAcceptStep.disabled = true;
@@ -1130,9 +1237,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const stage = event.target.closest("[data-stage]");
-  if (stage) { selectedStageId = stage.dataset.stage; selectedStepId = null; selectedArtifactId = null; activeTab = "activity"; rememberView(); renderSelection(); return; }
+  if (stage) { selectedStageId = stage.dataset.stage; selectedStageKey = `stage:${selectedStageId}`; selectedStepId = null; selectedWorkerId = null; selectedAttemptId = null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "activity"; rememberView(); renderSelection(); return; }
+  const attemptButton = event.target.closest("[data-attempt]");
+  if (attemptButton) { selectedAttemptId = attemptButton.dataset.attempt; selectedWorkerId = attemptButton.dataset.worker; selectedStepId = inspectionWorker(selectedWorkerId)?.stepId || selectedStepId; selectedStageId = null; selectedStageKey = inspectionAttempt(selectedAttemptId)?.stageId || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
   const step = event.target.closest("[data-step]");
-  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; selectedArtifactId = null; activeTab = "run"; rememberView(); renderSelection(); return; }
+  if (step) { selectedStepId = step.dataset.step; selectedStageId = null; selectedWorkerId = `worker:${step.dataset.step}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
   const artifact = event.target.closest("[data-select-artifact]");
   if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; renderInspector(); return; }
   const tab = event.target.closest("[data-tab]");
@@ -1159,6 +1268,22 @@ document.addEventListener("click", async (event) => {
     queueToggle.textContent = collapsed ? "›" : "‹";
     requestAnimationFrame(() => runFor()?.plan && renderPlanTree());
   }
+});
+
+document.addEventListener("change", (event) => {
+  const selector = event.target.closest("[data-attempt-select]");
+  if (!selector) return;
+  const projection = inspectionFor();
+  const attempt = inspectionAttempt(selector.value, projection);
+  selectedAttemptId = attempt?.id || null;
+  selectedWorkerId = attempt?.workerId || null;
+  selectedStepId = inspectionWorker(selectedWorkerId, projection)?.stepId || selectedStepId;
+  selectedStageId = null;
+  selectedStageKey = attempt?.stageId || null;
+  selectedRunId = projection?.runId || null;
+  activeTab = "overview";
+  rememberView();
+  renderSelection();
 });
 
 document.addEventListener("submit", async (event) => {

@@ -1,6 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+
+test("resolves canonical attempt selection without replacing a retained choice", () => {
+  const projection = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" },
+    stages: [{ id: "stage:implement" }],
+    workers: [{ id: "worker:build", stepId: "build", stageId: "stage:implement" }],
+    attempts: [
+      { id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", status: "failed", latestAction: "Tests failed", evidence: { state: "incomplete" }, blocker: { type: "repository-check", summary: "Tests failed" } },
+      { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", status: "verified", latestAction: "Checks passed", evidence: { state: "complete" } }
+    ]
+  };
+  assert.deepEqual(inspectionSelection(projection, { attemptId: "attempt:build:one" }), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" });
+  assert.deepEqual(inspectionSelection(projection), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" });
+  assert.deepEqual(inspectionSummary({ attempt: projection.attempts[0] }), {
+    status: "failed", latestAction: "Tests failed", blocker: { type: "repository-check", summary: "Tests failed" }, evidence: { state: "incomplete" }, nextAction: { kind: "none", label: "No action available" }
+  });
+  assert.equal(inspectionResourceLabel({ state: "not_retained" }), "Not retained");
+  assert.equal(inspectionResourceLabel({ state: "truncated" }), "Truncated");
+});
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {

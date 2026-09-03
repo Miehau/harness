@@ -1571,3 +1571,37 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 @media (max-width: 800px) {
   .plan-tree { --plan-tree-gutter: 16px; }
 }
+
+/* Canonical attempt inspection keeps durable history compact and explicit. */
+.step-with-attempts { display: grid; gap: 5px; }
+.attempt-index { display: flex; flex-wrap: wrap; gap: 4px; padding-left: 8px; }
+.attempt-chip { border: 1px solid var(--stroke); border-radius: 6px; padding: 3px 6px; background: rgb(255 255 255 / .025); color: #9ca6b7; cursor: pointer; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.attempt-chip:hover, .attempt-chip.selected { border-color: rgb(139 124 246 / .65); color: #ddd8ff; background: rgb(139 124 246 / .12); }
+.attempt-selector { display: flex; align-items: center; gap: 9px; padding: 0 20px 13px; border-bottom: 1px solid var(--stroke); }
+.attempt-selector label { color: #7f899a; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.attempt-selector select { min-width: 0; flex: 1; padding: 7px 8px; font-size: 11px; }
+.attempt-answer { display: grid; gap: 5px; margin: 0 20px; padding: 12px 0; border-bottom: 1px solid var(--stroke); }
+.attempt-answer strong { font-size: 13px; line-height: 1.4; }
+.attempt-answer small { color: #d9ab70; font-size: 11px; line-height: 1.45; }
+.attempt-overview dl, .attempt-checks dl { margin: 0; }
+.attempt-overview dl > div, .attempt-checks dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; min-height: 36px; border-bottom: 1px solid rgb(255 255 255 / .065); }
+.attempt-overview dt, .attempt-checks dt { color: #828c9d; font-size: 11px; }
+.attempt-overview dd, .attempt-checks dd { max-width: 70%; margin: 0; color: #d2d8e1; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; overflow-wrap: anywhere; }
+.attempt-blocker { display: grid; gap: 6px; margin-top: 15px; border: 1px solid rgb(220 148 47 / .32); border-radius: 9px; padding: 11px; background: rgb(132 85 20 / .12); }
+.attempt-blocker strong { color: #efd4b1; font-size: 12px; line-height: 1.45; }
+.attempt-resource-state { display: grid; gap: 4px; border: 1px dashed var(--stroke-strong); border-radius: 9px; padding: 14px; background: rgb(255 255 255 / .018); color: #9da6b4; font-size: 12px; }
+.attempt-resource-state strong { color: #c6cdd7; font-size: 12px; text-transform: capitalize; }
+.attempt-resource-state.state-loading span { color: #a99dff; }
+.attempt-resource-state.state-unavailable span, .attempt-resource-state.state-not_retained span { color: #e5af77; }
+.attempt-resource-state.state-truncated span { color: #e5cf77; }
+.attempt-event { display: grid; gap: 4px; border: 1px solid var(--stroke); border-radius: 8px; padding: 9px; background: rgb(255 255 255 / .018); }
+.attempt-event.warning { border-color: rgb(224 112 112 / .4); }
+.attempt-event strong { font-size: 11px; }
+.attempt-event small { color: #818b9b; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.attempt-event pre, .attempt-checks pre, .attempt-trace pre { max-height: 380px; overflow: auto; margin: 6px 0 0; border: 1px solid var(--stroke); border-radius: 8px; padding: 9px; background: #090c12; color: #cbd3dd; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.attempt-trace { display: grid; gap: 8px; }
+@media (max-width: 800px) {
+  .attempt-selector, .attempt-answer { margin-inline: 16px; }
+  .attempt-selector { padding-inline: 0; }
+  .attempt-overview dd, .attempt-checks dd { max-width: 60%; }
+}

@@ -1,3 +1,37 @@
+export function inspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const explicitStage = stages.find((item) => item.id === selection.stageId) || null;
+  const attempt = attempts.find((item) => item.id === selection.attemptId)
+    || attempts.find((item) => item.workerId === selection.workerId)
+    || (!selection.stageId && attempts.find((item) => item.id === projection?.focus?.attemptId))
+    || null;
+  const worker = workers.find((item) => item.id === (attempt?.workerId || selection.workerId))
+    || (!selection.stageId && workers.find((item) => item.id === projection?.focus?.workerId))
+    || null;
+  const stage = stages.find((item) => item.id === (attempt?.stageId || worker?.stageId || selection.stageId))
+    || (!selection.stageId && stages.find((item) => item.id === projection?.focus?.stageId))
+    || explicitStage;
+  return { stageId: stage?.id || null, workerId: worker?.id || null, attemptId: attempt?.id || null };
+}
+
+export function inspectionResourceLabel(resource = {}) {
+  return ({ available: "Available", loading: "Loading…", unavailable: "Unavailable", not_retained: "Not retained", not_recorded: "Not recorded", not_started: "Not started", not_yet_available: "Not yet available", not_applicable: "Not applicable", truncated: "Truncated" })[resource.state] || "Unavailable";
+}
+
+export function inspectionSummary({ worker = null, attempt = null } = {}) {
+  const item = attempt || worker;
+  if (!item) return { status: "not_started", latestAction: "Not started", blocker: null, evidence: { state: "not_started" }, nextAction: { kind: "none", label: "No action available" } };
+  return {
+    status: item.status,
+    latestAction: item.latestAction || "No activity recorded",
+    blocker: item.blocker || null,
+    evidence: item.evidence || { state: "not_started" },
+    nextAction: item.nextAction || worker?.nextAction || { kind: "none", label: "No action available" }
+  };
+}
+
 export function executionGraph(plan) {
   const nodes = plan?.nodes || [];
   const owner = new Map();
