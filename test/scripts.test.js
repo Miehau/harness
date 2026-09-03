@@ -52,7 +52,7 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.match(server, /runFile\("open", \[path\]\)/);
   assert.doesNotMatch(server, /runFile\("open", \["-a", "Zed"/);
   assert.match(server, /\["requirements", "feature-brief", "architecture"\]/);
-  assert.match(server, /cwd, plan: current\.plan, step, artifacts, images: \[\]/);
+  assert.match(server, /cwd, plan: current\.plan, step, artifacts, proofMap: projectProofMap\(current\), images: \[\]/);
 });
 
 test("nav CLI prints a map and json", async () => {

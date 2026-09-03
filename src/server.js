@@ -437,7 +437,9 @@ function canonicalDiffOutput(run, { scope = "step", stepId = null, attemptId = n
   if (!step) throw new Error("Step not found");
   if (scope === "attempt") {
     if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
-    return ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff || null;
+    return run.attemptDiffHistory?.[stepId]?.[attemptId]
+      || ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff
+      || null;
   }
   if (scope !== "step") throw new Error("Unknown diff scope");
   return step.diff || null;

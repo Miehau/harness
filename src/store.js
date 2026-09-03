@@ -51,6 +51,32 @@ function compactDiff(diff) {
   if (diff && typeof diff === "object") delete diff.patch;
 }
 
+// Keep the full canonical diffs that proof routes reopen before compacting their
+// display copies. The live attempt/review records stay small without making an
+// archived locator resolve to a patchless summary after restart.
+function preserveCanonicalDiffs(run) {
+  for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
+    for (const attempt of step.attempts || []) {
+      if (!attempt.attemptId || !attempt.diff) continue;
+      run.attemptDiffHistory ||= {};
+      run.attemptDiffHistory[step.id] ||= {};
+      // Break aliases before compactDiff mutates the display record below.
+      run.attemptDiffHistory[step.id][attempt.attemptId] = structuredClone(
+        run.attemptDiffHistory[step.id][attempt.attemptId] || attempt.diff
+      );
+    }
+  }
+  for (const review of run.reviews || []) {
+    if (!review.diff) continue;
+    const reviewId = review.reviewId || (Number(review.round) ? `final-review-${Number(review.round)}` : null);
+    if (!reviewId) continue;
+    run.finalDiffHistory ||= {};
+    // Final review history is the immutable proof target. It can share an object
+    // with a review supplied by a caller, which compactDiff intentionally mutates.
+    run.finalDiffHistory[reviewId] = structuredClone(run.finalDiffHistory[reviewId] || review.diff);
+  }
+}
+
 function compactArtifactBodies(value, dataDir) {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
@@ -70,6 +96,7 @@ function compactArtifactBodies(value, dataDir) {
 
 export function compactPersistedState(state, dataDir = null) {
   for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) {
+    preserveCanonicalDiffs(run);
     for (const stage of run.stages || []) {
       compactActivity(stage.activity);
       compactDiff(stage.diff);
