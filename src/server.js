@@ -1118,6 +1118,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         });
         Object.assign(attemptEvidence, { report: result.report, rawOutput: result.rawOutput || "", sessionFile: result.sessionFile || null });
         signal?.throwIfAborted();
+        const workerTree = await snapshotTree(cwd);
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
@@ -1128,11 +1129,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
         const afterTree = await snapshotTree(cwd);
         const diff = await diffTrees(cwd, stepBaseTree, afterTree);
-        const attemptDiff = await diffTrees(cwd, attemptBaseTree, afterTree);
+        const attemptDiff = await diffTrees(cwd, attemptBaseTree, workerTree);
+        const checkDiff = await diffTrees(cwd, workerTree, afterTree);
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
         const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
-        const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, workerWriteScope(currentStep));
+        const violations = currentStep.permission !== "write" ? attemptDiff.files : outsideWriteScope(attemptDiff.files, workerWriteScope(currentStep));
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
@@ -1142,7 +1144,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
-        Object.assign(attemptEvidence, { diff: attemptDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
+        Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, result.report);
         if (runawayDiff) await restoreTree(cwd, stepBaseTree);
         if (violations.length || runawayDiff || (result.report.status !== "completed" && !workerGate)) {
@@ -1164,7 +1166,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange, rolledBack: runawayDiff });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange, rolledBack: runawayDiff });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
@@ -1186,7 +1188,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
@@ -1269,7 +1271,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, checks, verification, diff: attemptDiff, vcsChange });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, checks, verification, diff: attemptDiff, checkDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });
