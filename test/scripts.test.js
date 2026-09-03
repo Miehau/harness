@@ -43,7 +43,14 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.cli.includes("waive"));
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
   const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
+  const dashboard = await readFile(join(repoRoot, "public/app.js"), "utf8");
+  const server = await readFile(join(repoRoot, "src/server.js"), "utf8");
   assert.equal(html.includes("Provider: openai-codex"), false);
+  assert.match(dashboard, /Open \/ zoom/);
+  assert.match(dashboard, /Default app/);
+  assert.doesNotMatch(dashboard, /Zed/);
+  assert.match(server, /runFile\("open", \[path\]\)/);
+  assert.doesNotMatch(server, /runFile\("open", \["-a", "Zed"/);
 });
 
 test("nav CLI prints a map and json", async () => {

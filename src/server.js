@@ -2282,12 +2282,12 @@ async function api(request, response, url) {
   }
   const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/open$/);
   if (request.method === "POST" && openArtifact) {
-    if (process.platform !== "darwin") throw new Error("Opening artifacts in Zed currently requires macOS");
+    if (process.platform !== "darwin") throw new Error("Opening artifacts in their default application currently requires macOS");
     const run = ticketRun(store.read(), decodeURIComponent(openArtifact[1]));
     const path = artifactPathForOpen(run.artifacts, decodeURIComponent(openArtifact[2]), dataDir);
     const file = path ? await stat(path).catch(() => null) : null;
     if (!file?.isFile()) throw new Error("Artifact file not found");
-    await runFile("open", ["-a", "Zed", path]);
+    await runFile("open", [path]);
     return json(response, 200, { opened: true });
   }
   if (request.method === "POST" && url.pathname === "/api/queue/clear") {
