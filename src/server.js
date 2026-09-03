@@ -2522,6 +2522,35 @@ async function api(request, response, url) {
     return json(response, 200, { ticketId, stepId, writeScope: step.writeScope, expectedFiles: step.expectedFiles, scopeChange: step.scopeChanges.at(-1) });
   }
 
+  const stepWaiver = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/waive$/);
+  if (request.method === "POST" && stepWaiver) {
+    const ticketId = decodeURIComponent(stepWaiver[1]);
+    const stepId = decodeURIComponent(stepWaiver[2]);
+    const input = await body(request);
+    const reason = String(input.reason || "").trim();
+    if (!reason) throw new Error("Explain why the verifier finding is false or outside this slice");
+    if (activeTickets.has(ticketId)) throw new Error("Pause the run before waiving a verifier finding");
+    const state = await update((draft) => {
+      const run = ticketRun(draft, ticketId);
+      const step = findNode(run.plan, stepId);
+      if (!step || step.status !== "needs_attention" || run.checkpoint?.stepId !== stepId || run.checkpoint?.source !== "verification") {
+        throw new Error("Only a stopped verifier finding can be waived");
+      }
+      const verification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification;
+      const waiver = { at: new Date().toISOString(), reason, source: "operator", findings: actionableFindings([verification]) };
+      step.verificationWaivers ||= [];
+      step.verificationWaivers.push(waiver);
+      step.status = "review_ready";
+      step.lastError = null;
+      run.status = "awaiting_step_review";
+      run.lastError = null;
+      run.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `Review after verification waiver: ${step.title}`, prompt: reason, createdAt: waiver.at };
+      setStage(run, "implement", "blocked", `Verifier finding waived for review: ${reason}`);
+    });
+    const step = findNode(ticketRun(state, ticketId).plan, stepId);
+    return json(response, 200, { ticketId, stepId, status: step.status, waiver: step.verificationWaivers.at(-1) });
+  }
+
   const stepDecision = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/(accept|changes)$/);
   if (request.method === "POST" && stepDecision) {
     const [, encodedTicketId, encodedStepId, decision] = stepDecision;

@@ -230,3 +230,17 @@ test("scope-add sends one explicit operator-approved path and reason", async () 
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/scope");
   assert.deepEqual(called.body, { paths: ["test/e2e.test.js"], reason: "Canonical failure requires its regression update" });
 });
+
+test("waive rejects one verifier finding with an operator reason", async () => {
+  let called;
+  await runCli(["waive", "build", "ticket-1", "Owned by the next plan slice"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ status: "review_ready" }); } };
+    },
+    stdout: { write() {} }, stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/waive");
+  assert.deepEqual(called.body, { reason: "Owned by the next plan slice" });
+});

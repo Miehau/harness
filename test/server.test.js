@@ -284,6 +284,29 @@ test("operator can auditably expand one blocked step to a directly affected test
   });
 });
 
+test("operator can auditably waive a stopped false verifier finding without accepting the step", async () => {
+  await withDaemon(async (daemon) => {
+    const finding = { severity: "medium", claim: "Implement a later slice", evidence: [{ file: "src/app.js", line: 1 }] };
+    const plan = normalizePlan({ nodes: [{
+      id: "build", title: "Build", permission: "write", status: "needs_attention", writeScope: "src/app.js",
+      attempts: [{ verification: { findings: [finding] } }]
+    }] });
+    const id = await seedRun(daemon, {
+      status: "needs_attention", lastError: "Correction stalled", plan,
+      checkpoint: { kind: "needs_attention", source: "verification", stepId: "build", title: "Correction stalled" }
+    });
+    const waived = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/waive`, { body: { reason: "This behavior is explicitly owned by the next slice." } });
+    assert.equal(waived.status, 200, waived.text);
+    const run = daemon.store.read().ticketRuns[id];
+    assert.equal(run.status, "awaiting_step_review");
+    assert.equal(run.plan.nodes[0].status, "review_ready");
+    assert.equal(run.plan.nodes[0].verificationWaivers[0].reason, "This behavior is explicitly owned by the next slice.");
+    assert.deepEqual(run.plan.nodes[0].verificationWaivers[0].findings, [finding]);
+    assert.equal(run.checkpoint.kind, "step_review");
+    assert.match(run.checkpoint.title, /verification waiver/);
+  });
+});
+
 test("step execution failures persist an actionable run checkpoint", async () => {
   const harness = {
     ...mockHarness(),
