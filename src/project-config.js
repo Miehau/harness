@@ -48,6 +48,17 @@ export function normalizeProjectConfig(value = {}) {
   };
 }
 
+function normalizeLoadedProjectConfig(value = {}) {
+  const { commands: declaredCommands = {}, ...settings } = value;
+  const config = normalizeProjectConfig(settings);
+  const commandErrors = {};
+  for (const [name, argv] of Object.entries(declaredCommands)) {
+    try { config.commands[name] = validateCommand(name, Array.isArray(argv) ? argv.map(String) : argv); }
+    catch (error) { commandErrors[name] = error.message; }
+  }
+  return Object.keys(commandErrors).length ? { ...config, commandErrors } : config;
+}
+
 async function detectedCommands(cwd) {
   try {
     const packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8"));
@@ -66,7 +77,7 @@ export async function detectPreviewCommand(cwd) {
 }
 
 export async function loadProjectConfig(cwd) {
-  try { return normalizeProjectConfig(JSON.parse(await readFile(join(cwd, projectConfigPath), "utf8"))); }
+  try { return normalizeLoadedProjectConfig(JSON.parse(await readFile(join(cwd, projectConfigPath), "utf8"))); }
   catch (error) {
     if (error.code !== "ENOENT") throw error;
     return normalizeProjectConfig({ commands: await detectedCommands(cwd) });
@@ -113,6 +124,7 @@ export function redactCommandOutput(value, environment) {
 
 export async function runProjectCommand(cwd, name, { signal, execImpl = execFileTree, source = process.env } = {}) {
   const config = await loadProjectConfig(cwd);
+  if (config.commandErrors?.[name]) throw new Error(config.commandErrors[name]);
   const argv = config.commands[name];
   if (!argv) throw new Error(`Unknown project command “${name}”; add it to ${projectConfigPath}`);
   validateCommand(name, argv);

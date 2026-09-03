@@ -18,6 +18,24 @@ test("rejects shell escapes and inline code evaluators", () => {
   assert.throws(() => normalizeProjectConfig({ commands: { bad: ["node", "-e", "process.exit()"] } }), /inline code/);
 });
 
+test("an invalid declaration does not poison unrelated project commands", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-isolation-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: {
+      "git-status": ["git", "status"],
+      check: [process.execPath, "check.mjs"]
+    } }));
+    await writeFile(join(root, "check.mjs"), "console.log('checked')\n");
+
+    const config = await loadProjectConfig(root);
+    assert.deepEqual(Object.keys(config.commands), ["check"]);
+    assert.match(config.commandErrors["git-status"], /blocked executable git/);
+    assert.equal((await runProjectCommand(root, "check")).output.trim(), "checked");
+    await assert.rejects(runProjectCommand(root, "git-status"), /Project command “git-status” uses blocked executable git/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("passes only explicit environment values and redacts them from command output", async () => {
   const root = await mkdtemp(join(tmpdir(), "project-env-"));
   try {
