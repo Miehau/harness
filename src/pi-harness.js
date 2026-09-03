@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { assertScopedWrite, diffOutline, normalizeReviewMap } from "./git.js";
@@ -13,8 +11,8 @@ import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommand
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
+import { execFileTree } from "./process-tree.js";
 
-const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
 export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
@@ -666,7 +664,7 @@ export class PiHarness {
     const executable = command === "npm test" ? "npm" : process.execPath;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
+        const { stdout, stderr } = await execFileTree(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
         const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
           .filter((entry) => entry.isFile())
           .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))

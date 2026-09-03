@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import { promisify } from "node:util";
+import { execFileTree } from "./process-tree.js";
 
-const exec = promisify(execFile);
 export const projectConfigPath = ".agent-plan/project.json";
 const inheritedEnvironment = ["HOME", "LANG", "PATH", "SHELL", "TMPDIR", "USER"];
 const blockedExecutables = new Set(["bash", "cmd", "curl", "fish", "git", "mv", "powershell", "pwsh", "rm", "scp", "sh", "ssh", "sudo", "wget", "zsh"]);
@@ -92,7 +90,7 @@ async function ignored(cwd, path, execImpl) {
   catch { return false; }
 }
 
-export async function projectEnvironment(cwd, config, { source = process.env, execImpl = exec } = {}) {
+export async function projectEnvironment(cwd, config, { source = process.env, execImpl = execFileTree } = {}) {
   const available = {};
   for (const file of config.environment.files) {
     const absolute = safeRelative(cwd, file);
@@ -113,7 +111,7 @@ export function redactCommandOutput(value, environment) {
   return output.slice(-100000);
 }
 
-export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env } = {}) {
+export async function runProjectCommand(cwd, name, { signal, execImpl = execFileTree, source = process.env } = {}) {
   const config = await loadProjectConfig(cwd);
   const argv = config.commands[name];
   if (!argv) throw new Error(`Unknown project command “${name}”; add it to ${projectConfigPath}`);
