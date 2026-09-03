@@ -243,6 +243,21 @@ test("activity capture bounds memory and coalesces pending persistence", async (
   assert.equal(maxActiveWrites, 1);
 });
 
+test("activity and attempt snapshots redact secrets before durable persistence", () => {
+  const capture = createActivityCapture({ now: () => 1 });
+  capture.onEvent({ type: "prompt", content: "Use token=secret_abcdefgh", label: "Prompt" });
+  capture.onEvent({ type: "tool_end", result: "Authorization: Bearer abcdefghijklmnop", label: "Done" });
+  capture.onEvent({ type: "text_delta", delta: "ghp_0123456789abcdefghijklmnop" });
+  const activity = capture.snapshot();
+  assert.equal(JSON.stringify(activity).includes("secret_abcdefgh"), false);
+  assert.equal(JSON.stringify(activity).includes("abcdefghijklmnop"), false);
+  const step = normalizePlan({ nodes: [{ id: "one", title: "One" }] }).nodes[0];
+  const attempt = materializeActiveAttempt(step, { attemptId: "attempt-1", activity }, {
+    status: "failed", error: "password=secret_abcdefgh", report: { summary: "token=secret_abcdefgh" }
+  });
+  assert.equal(JSON.stringify(attempt).includes("secret_abcdefgh"), false);
+});
+
 test("groups persisted activity into named repository, change, and verification steps", () => {
   const groups = groupActivityEvents([
     { type: "agent_start", at: "2026-09-02T09:59:59.000Z" },

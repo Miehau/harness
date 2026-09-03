@@ -13,6 +13,7 @@ import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommand
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
+import { redactRecord, redactText, safeReasoningSummary } from "./redaction.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
@@ -201,6 +202,7 @@ function eventText(value) {
   catch { text = String(value); }
   text ??= String(value ?? "");
   // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
+  text = redactText(text);
   return text.length > 10000 ? `${text.slice(0, 10000)}\n\n[truncated after 10,000 characters]` : text;
 }
 
@@ -541,21 +543,21 @@ export class PiHarness {
       const at = new Date(message.timestamp || entry.timestamp || Date.now()).toISOString();
       if ((after && at < after) || (before && at > before)) continue;
       if (message.role === "user") {
-        trace.prompt = textFromContent(message.content);
+        trace.prompt = redactText(textFromContent(message.content));
         trace.prompts.push({ prompt: trace.prompt, at });
       }
       if (message.role === "assistant") for (const part of message.content || []) {
-        if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, part.text, 100000);
+        if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, redactText(part.text), 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
           try {
-            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) pushBounded(trace.events, { type: "reasoning_summary", detail: summary.text, at }, 200);
+            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) pushBounded(trace.events, { type: "reasoning_summary", detail: safeReasoningSummary(summary.text, 1000), at }, 200);
           } catch {}
         }
         if (part.type === "toolCall") pushBounded(trace.events, { type: "tool_start", tool: part.name, callId: part.id, args: eventText(part.arguments), at }, 200);
       }
       if (message.role === "toolResult") pushBounded(trace.events, { type: "tool_end", tool: message.toolName, callId: message.toolCallId, result: eventText(textFromContent(message.content)), isError: Boolean(message.isError), at }, 200);
     }
-    return trace;
+    return redactRecord(trace);
   }
 
   sdk() {

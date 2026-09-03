@@ -59,6 +59,53 @@ test("ticket inspection API returns the canonical compact projection and state o
   });
 });
 
+test("attempt details are bounded, redacted, and require the exact retained identity", async () => {
+  const harness = {
+    ...mockHarness(),
+    sessionTrace: async () => ({
+      prompts: [{ prompt: "trace token=secret_abcdefgh", at: "2026-09-03T10:00:00.000Z" }],
+      events: [{ type: "reasoning_summary", detail: "Safe summary", at: "2026-09-03T10:00:01.000Z" }],
+      rawOutput: "trace ghp_0123456789abcdefghijklmnop"
+    })
+  };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src" }] });
+    plan.nodes[0].attempts = [{
+      attemptId: "attempt-1", runId: "worker-1", status: "verified", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z",
+      rawOutput: "ghp_0123456789abcdefghijklmnop " + "x".repeat(21000),
+      events: [{ type: "tool_end", result: "password=secret_abcdefgh" }],
+      diff: { files: ["src/a.js"], stat: "1 file", patch: "diff --git a/src/a.js b/src/a.js\n" + "x".repeat(21000) },
+      verification: { checks: { status: "passed", command: "node test", summary: "Passed", output: "token=secret_abcdefgh" } },
+      sessionFile: "/tmp/private-session.jsonl"
+    }];
+    const id = await seedRun(daemon, {
+      plan,
+      artifacts: [
+        { id: "prompt", name: "prompt.md", kind: "agent-prompt", stepId: "build", attemptId: "attempt-1", content: "Prompt api_key=secret_abcdefgh", path: "/tmp/prompt.md" },
+        { id: "output", name: "output.md", kind: "agent-output", stepId: "build", attemptId: "attempt-1", content: "Output token=secret_abcdefgh", path: "/tmp/output.md" },
+        { id: "diff", name: "diff.patch", kind: "git-attempt-diff", stepId: "build", attemptId: "attempt-1", content: "diff", path: "/tmp/diff.patch" }
+      ]
+    });
+    const path = `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`;
+    const detail = await invoke(daemon, "GET", path);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.json.output.state, "truncated");
+    assert.equal(detail.json.diff.state, "truncated");
+    assert.equal(detail.json.prompt.content.includes("secret_abcdefgh"), false);
+    assert.equal(JSON.stringify(detail.json).includes("ghp_0123456789abcdefghijklmnop"), false);
+    assert.equal(JSON.stringify(detail.json).includes("/tmp/private-session.jsonl"), false);
+    assert.equal(detail.json.trace.content.events[0].type, "reasoning_summary");
+    assert.equal((await invoke(daemon, "GET", `/api/tickets/${id}/runs/other/steps/build/attempts/attempt-1/details`)).status, 400);
+
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(state.json).includes("rawOutput"), false);
+    assert.equal(JSON.stringify(state.json).includes("secret_abcdefgh"), false);
+    const artifact = await invoke(daemon, "GET", `/api/tickets/${id}/artifacts/prompt`);
+    assert.equal(artifact.json.content, undefined);
+    assert.equal(artifact.json.path, undefined);
+  }, { harness });
+});
+
 test("ticket selection returns a compact acknowledgment", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon);
@@ -89,7 +136,7 @@ test("workflow stage prompts expose persisted agent input with its stage context
     const result = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/stages/design/prompts`);
     assert.equal(result.status, 200);
     assert.deepEqual(result.json.prompts, [{
-      prompt: "Prompt from /tmp/planning.jsonl",
+      prompt: "Prompt from [path]",
       at: "2026-09-02T10:00:01.000Z",
       title: "Design & plan",
       status: "completed"

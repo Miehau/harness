@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { redactText } from "./redaction.js";
 
 const evidenceMediaTypes = new Map([
   [".png", { mediaType: "image/png", mediaKind: "image" }],
@@ -52,8 +53,9 @@ export async function persistArtifact(dataDir, ticket, { name, content, runId = 
   const base = safeName(name || `${stageId}.md`);
   const filename = base.includes(".") ? base : `${base}.md`;
   const path = join(directory, filename);
-  await writeFile(path, String(content || ""), "utf8");
-  return { id: [stageId, stepId, attemptId, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, content, createdAt: new Date().toISOString() };
+  const retainedContent = redactText(content);
+  await writeFile(path, retainedContent, "utf8");
+  return { id: [stageId, stepId, attemptId, filename].filter(Boolean).join(":"), name: filename, kind, stageId, stepId, attemptId, path, content: retainedContent, createdAt: new Date().toISOString() };
 }
 
 function productContextPath(dataDir, sourceCwd) {
@@ -73,6 +75,7 @@ export async function readProductContext(dataDir, sourceCwd) {
 export async function persistProductContext(dataDir, sourceCwd, content) {
   const path = productContextPath(dataDir, sourceCwd);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, String(content || ""), "utf8");
-  return { path, content: String(content || "") };
+  const retainedContent = redactText(content);
+  await writeFile(path, retainedContent, "utf8");
+  return { path, content: retainedContent };
 }

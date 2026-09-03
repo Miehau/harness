@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
+import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
@@ -274,7 +275,7 @@ async function promptsForStage(run, stage) {
   const prompts = [];
   const seen = new Set();
   const add = ({ prompt, content, at, actor, title, status }) => {
-    const value = String(prompt || content || "").trim();
+    const value = boundedText(prompt || content || "", 16000).value.trim();
     if (!value || seen.has(value)) return;
     seen.add(value);
     prompts.push({ prompt: value, at: at || null, title: title || actor || stage.title, status: status || stage.status });
@@ -299,6 +300,87 @@ async function promptsForStage(run, stage) {
     }
   }
   return prompts.sort((left, right) => String(left.at || "").localeCompare(String(right.at || "")));
+}
+
+function runForIdentity(state, ticketId, runId) {
+  const current = state.ticketRuns?.[ticketId];
+  if (current?.runId === runId) return current;
+  const retained = Object.values(state.retainedRuns || {}).find((run) => run.id === ticketId && run.runId === runId);
+  if (retained) return retained;
+  throw new Error("Run not found");
+}
+
+async function artifactContent(artifact) {
+  // Media stays behind the existing media endpoint; textual attempt details never inline binary evidence.
+  if (artifact?.kind === "visual-evidence" || artifact?.mediaType || visualEvidenceMedia(artifact?.name)) return null;
+  if (typeof artifact?.content === "string") return redactText(artifact.content);
+  const path = artifactPathForOpen([artifact], artifact?.id, dataDir);
+  if (!path) return null;
+  try { return redactText(await readFile(path, "utf8")); }
+  catch { return null; }
+}
+
+function fallback(artifact) {
+  return artifact ? { artifact: safeArtifactMetadata(artifact) } : {};
+}
+
+function textDetail(content, limit, unavailable, artifact = null) {
+  if (content == null || content === "") return { state: unavailable, ...fallback(artifact) };
+  const bounded = boundedText(content, limit);
+  return { state: bounded.state, content: bounded.value, ...(bounded.truncated ? fallback(artifact) : {}) };
+}
+
+function detailActivityEvent(event = {}) {
+  const item = redactRecord({ type: event.type || "activity", tool: event.tool || null, callId: event.callId || null, label: boundedText(event.label, 240).value, at: event.at || null, actor: boundedText(event.actor, 120).value || null, isError: Boolean(event.isError) });
+  if (item.type === "thinking") return item;
+  if (event.type === "reasoning_summary") return { ...item, detail: boundedText(event.detail, 1000).value };
+  for (const key of ["args", "detail", "result"]) if (event[key] != null) item[key] = boundedText(event[key], 2000).value;
+  return item;
+}
+
+async function attemptDetails(run, step, attempt) {
+  const artifacts = (run.artifacts || []).filter((artifact) => artifact.stepId === step.id && artifact.attemptId === attempt.attemptId);
+  const byKind = (kind) => artifacts.find((artifact) => artifact.kind === kind) || null;
+  const promptArtifact = byKind("agent-prompt");
+  const outputArtifact = byKind("agent-output");
+  const diffArtifact = byKind("git-attempt-diff") || byKind("git-diff");
+  const verificationArtifact = byKind("step-verification");
+  const prompt = await artifactContent(promptArtifact);
+  const activity = attempt.events || [];
+  const activityItems = activity.slice(-100).map(detailActivityEvent);
+  const rawOutput = redactText(attempt.rawOutput || "");
+  const artifactItems = await Promise.all(artifacts.map(async (artifact) => {
+    const content = await artifactContent(artifact);
+    return { ...safeArtifactMetadata(artifact), ...textDetail(content, 12000, "not_retained", artifact) };
+  }));
+  const traceFile = attempt.sessionFile || null;
+  let trace = null;
+  if (traceFile) {
+    try { trace = redactRecord(await harness.sessionTrace(traceFile, { after: attempt.startedAt, before: attempt.completedAt })); }
+    catch { trace = null; }
+  }
+  const traceContent = trace && {
+    prompts: (trace.prompts || []).slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })),
+    events: (trace.events || []).slice(-100).map(detailActivityEvent),
+    rawOutput: boundedText(trace.rawOutput || "", 20000).value
+  };
+  const traceState = traceContent ? (String(trace.rawOutput || "").length > 20000 ? "truncated" : "available") : "unavailable";
+  const diff = redactRecord(attempt.diff || {});
+  const checks = redactRecord(attempt.verification?.checks || attempt.checks || {});
+  const checkOutput = boundedText(checks.output || "", 16000);
+  return {
+    ticketId: run.id,
+    runId: run.runId,
+    stepId: step.id,
+    attemptId: attempt.attemptId,
+    prompt: textDetail(prompt, 16000, "not_retained", promptArtifact),
+    activity: { state: activity.length > 100 ? "truncated" : activity.length ? "available" : "not_retained", items: activityItems, total: activity.length },
+    output: textDetail(rawOutput, 20000, outputArtifact ? "unavailable" : "not_retained", outputArtifact),
+    artifacts: { state: artifactItems.length ? "available" : "not_retained", items: artifactItems, count: artifactItems.length },
+    diff: diff.patch ? { state: boundedText(diff.patch, 20000).state, files: diff.files || [], stat: diff.stat || "", content: boundedText(diff.patch, 20000).value, ...(diff.patch.length > 20000 ? fallback(diffArtifact) : {}) } : { state: diffArtifact ? "unavailable" : "not_retained", ...fallback(diffArtifact) },
+    checks: Object.keys(checks).length ? { state: checkOutput.state, status: checks.status || null, command: checks.command || null, summary: checks.summary || "", output: checkOutput.value, ...(checkOutput.truncated ? fallback(verificationArtifact) : {}) } : { state: "not_retained" },
+    trace: traceContent ? { state: traceState, content: traceContent } : { state: traceFile ? "unavailable" : "not_retained" }
+  };
 }
 
 function skillSession(state, run) {
@@ -2158,6 +2240,15 @@ async function api(request, response, url) {
     }
     return json(response, 200, { cleaned, inventory: await retentionInventory(store.read(), dataDir), state: store.read() });
   }
+  const attemptDetail = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/steps\/([^/]+)\/attempts\/([^/]+)\/details$/);
+  if (request.method === "GET" && attemptDetail) {
+    const state = store.read();
+    const run = runForIdentity(state, decodeURIComponent(attemptDetail[1]), decodeURIComponent(attemptDetail[2]));
+    const step = findNode(run.plan, decodeURIComponent(attemptDetail[3]));
+    const attempt = step?.attempts?.find((item) => item.attemptId === decodeURIComponent(attemptDetail[4]));
+    if (!attempt) throw new Error("Attempt not found");
+    return json(response, 200, await attemptDetails(run, step, attempt));
+  }
   const artifactMedia = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/media$/);
   if (request.method === "GET" && artifactMedia) {
     const run = ticketRun(store.read(), decodeURIComponent(artifactMedia[1]));
@@ -2175,14 +2266,17 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), decodeURIComponent(artifactGet[1]));
     const artifact = (run.artifacts || []).find((item) => item.id === decodeURIComponent(artifactGet[2]));
     if (!artifact) throw new Error("Artifact not found");
-    return json(response, 200, artifact);
+    return json(response, 200, safeArtifactMetadata(artifact));
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
   if (request.method === "GET" && sessionTrace) {
     const run = ticketRun(store.read(), decodeURIComponent(sessionTrace[1]));
     const step = findNode(run.plan, decodeURIComponent(sessionTrace[2]));
     if (!step) throw new Error("Step not found");
-    return json(response, 200, await harness.sessionTrace(step.sessionFile));
+    const trace = redactRecord(await harness.sessionTrace(step.sessionFile));
+    return json(response, 200, { state: "available", content: {
+      prompts: (trace.prompts || []).slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })), events: (trace.events || []).slice(-100).map(detailActivityEvent), rawOutput: boundedText(trace.rawOutput || "", 20000).value
+    } });
   }
   const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)\/stages\/([^/]+)\/prompts$/);
   if (request.method === "GET" && stagePrompts) {
