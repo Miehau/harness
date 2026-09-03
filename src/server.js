@@ -1834,8 +1834,10 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   }).artifacts;
   const result = await runContainedWorker({
     ticketId, stepId: step.id,
-    cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    runId: current.runId, profile: current.stageProfiles.implementation,
+    cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null,
+    resumeSessionFile: current.merge?.resolverSessionFile || null, feedback: "",
+    runId: current.runId, profile: current.stageProfiles.handoff,
+    onSessionFile: (sessionFile) => update((state) => { ticketRun(state, ticketId).merge.resolverSessionFile = sessionFile; }),
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
   signal?.throwIfAborted();
@@ -1846,7 +1848,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   await update((state) => {
     const run = ticketRun(state, ticketId);
     run.artifacts.push(artifact);
-    Object.assign(run.merge, { resolverCompletedAt: new Date().toISOString(), resolutionArtifact: artifact });
+    Object.assign(run.merge, { resolverCompletedAt: new Date().toISOString(), resolutionArtifact: artifact, resolverSessionFile: null });
   });
 }
 

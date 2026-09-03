@@ -186,24 +186,28 @@ export async function unmergedPaths(cwd, execImpl = exec) {
 }
 
 export async function reconcileWithRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
-  // Ticket worktrees are disposable delivery branches. Restart interrupted
-  // per-commit rebases and merge the reviewed branch tip once instead.
-  await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
-  await git(cwd, ["fetch", "origin", base], execImpl);
+  let activeMerge = false;
+  try { await git(cwd, ["rev-parse", "--verify", "MERGE_HEAD"], execImpl); activeMerge = true; }
+  catch {}
   let failure;
-  try { await git(cwd, ["merge", "--no-edit", `origin/${base}`], execImpl); }
-  catch (error) { failure = error; }
-  if (failure) {
+  if (!activeMerge) {
+    // Ticket worktrees are disposable delivery branches. Restart interrupted
+    // legacy rebases and merge the reviewed branch tip once instead.
+    await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
+    await git(cwd, ["fetch", "origin", base], execImpl);
+    try { await git(cwd, ["merge", "--no-edit", `origin/${base}`], execImpl); }
+    catch (error) { failure = error; }
+  }
+  if (failure || activeMerge) {
     const conflicts = await unmergedPaths(cwd, execImpl);
-    if (!conflicts.length || !resolveConflicts) throw failure;
-    try {
-      await resolveConflicts({ cwd, conflicts });
-      await git(cwd, ["add", "--all"], execImpl);
+    if (activeMerge && !conflicts.length) {
       await git(cwd, ["-c", "core.editor=true", "merge", "--continue"], execImpl);
-    } catch (error) {
-      await git(cwd, ["merge", "--abort"], execImpl).catch(() => {});
-      throw error;
+      return { commit: await git(cwd, ["rev-parse", "HEAD"], execImpl) };
     }
+    if (!conflicts.length || !resolveConflicts) throw failure || new Error("An active merge still needs conflict resolution");
+    await resolveConflicts({ cwd, conflicts });
+    await git(cwd, ["add", "--all"], execImpl);
+    await git(cwd, ["-c", "core.editor=true", "merge", "--continue"], execImpl);
   }
   return { commit: await git(cwd, ["rev-parse", "HEAD"], execImpl) };
 }

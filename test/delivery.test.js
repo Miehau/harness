@@ -66,6 +66,7 @@ test("delivery resolves one final-state merge instead of replaying ticket commit
   let mergeAttempts = 0;
   const execImpl = async (_file, argv) => {
     calls.push(argv);
+    if (argv.includes("--verify")) throw new Error("no active merge");
     if (argv[0] === "rebase") throw new Error("no active rebase");
     if (argv[0] === "merge" && argv.includes("--no-edit") && ++mergeAttempts === 1) throw new Error("conflict");
     if (argv[0] === "diff") return { stdout: "src/a.js\n" };
@@ -76,7 +77,36 @@ test("delivery resolves one final-state merge instead of replaying ticket commit
   assert.equal((await reconcileWithRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "merged");
   assert.deepEqual(resolved, ["src/a.js"]);
   assert.equal(calls.filter((argv) => argv.includes("merge") && argv.includes("--continue")).length, 1);
-  assert.deepEqual(calls[0], ["rebase", "--abort"]);
+  assert.equal(calls.some((argv) => argv[0] === "rebase" && argv.includes("--abort")), true);
+});
+
+test("delivery preserves a partially resolved merge for the next resume", async () => {
+  const calls = [];
+  const execImpl = async (_file, argv) => {
+    calls.push(argv);
+    if (argv.includes("--verify")) throw new Error("no active merge");
+    if (argv[0] === "rebase") throw new Error("no active rebase");
+    if (argv[0] === "merge") throw new Error("conflict");
+    if (argv[0] === "diff") return { stdout: "src/a.js\n" };
+    return { stdout: "" };
+  };
+  await assert.rejects(reconcileWithRemote("/repo", "main", {
+    execImpl, resolveConflicts: async () => { throw new Error("provider unavailable"); }
+  }), /provider unavailable/);
+  assert.equal(calls.some((argv) => argv.includes("--abort") && argv.includes("merge")), false);
+});
+
+test("delivery resumes an existing merge without restarting it", async () => {
+  const calls = [];
+  const execImpl = async (_file, argv) => {
+    calls.push(argv);
+    if (argv.includes("--verify")) return { stdout: "merge-head\n" };
+    if (argv[0] === "diff") return { stdout: "src/a.js\n" };
+    if (argv[0] === "rev-parse") return { stdout: "merged\n" };
+    return { stdout: "" };
+  };
+  assert.equal((await reconcileWithRemote("/repo", "main", { execImpl, resolveConflicts: async () => {} })).commit, "merged");
+  assert.equal(calls.some((argv) => argv[0] === "fetch" || (argv[0] === "rebase" && argv.includes("--abort"))), false);
 });
 
 test("unmerged paths expose an interrupted rebase before delivery correction", async () => {
