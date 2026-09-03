@@ -555,6 +555,13 @@ export function shouldPauseCorrection({ round, findings, previousFingerprint, ma
   return { pause: false, fingerprint };
 }
 
+export function correctionWindowRound(round, reviews = []) {
+  const latestHumanRound = [...reviews].reverse().find((review) =>
+    (review.actionableFindings || review.findings || []).some((finding) => finding.category === "human-proof-review")
+  )?.round;
+  return latestHumanRound ? Math.max(1, Number(round) - Number(latestHumanRound) + 1) : Number(round);
+}
+
 export function pendingReviewFix(reviews = []) {
   const review = reviews.at(-1);
   const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);

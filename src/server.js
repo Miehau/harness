@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1874,7 +1874,8 @@ async function finalReviewLoop(ticketId, signal) {
       });
       return;
     }
-    const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
+    const reviewsWithCurrent = [...(current.reviews || []), { round, actionableFindings: findings }];
+    const decision = shouldPauseCorrection({ round: correctionWindowRound(round, reviewsWithCurrent), findings, previousFingerprint });
     if (decision.pause) {
       const pauseReason = correctionPauseReason(decision.reason, findings);
       await update((state) => {
@@ -1890,7 +1891,6 @@ async function finalReviewLoop(ticketId, signal) {
       return;
     }
     previousFingerprint = decision.fingerprint;
-    const reviewsWithCurrent = [...(current.reviews || []), { actionableFindings: findings }];
     const rootCauseClusters = unaddressedReviewClusters(reviewsWithCurrent);
     if (!await applyFinalReviewFix({ ticketId, round, findings, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }

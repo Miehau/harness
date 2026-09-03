@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -278,6 +278,16 @@ test("changed repository failure diagnostics count as correction progress", () =
   const fingerprint = findingsFingerprint(first);
   assert.equal(shouldPauseCorrection({ round: 2, findings: first, previousFingerprint: fingerprint }).pause, true);
   assert.equal(shouldPauseCorrection({ round: 2, findings: second, previousFingerprint: fingerprint }).pause, false);
+});
+
+test("new human proof feedback starts a fresh bounded correction window", () => {
+  const reviews = [
+    { round: 11, actionableFindings: [{ severity: "high", category: "tests", claim: "Old failure" }] },
+    { round: 12, actionableFindings: [{ severity: "blocking", category: "human-proof-review", claim: "Remove harness artifacts" }] }
+  ];
+  assert.equal(correctionWindowRound(12, reviews), 1);
+  assert.equal(correctionWindowRound(13, reviews), 2);
+  assert.equal(correctionWindowRound(12, reviews.slice(0, 1)), 12);
 });
 
 test("recurring review clusters survive changed wording and duplicate reviewers", () => {
