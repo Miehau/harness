@@ -137,7 +137,7 @@ test("a descendant forked during graceful cleanup receives a bounded second cycl
     }
   }).cleanup("cancelled");
   assert.equal(result.outcome, "complete");
-  assert.equal(discoveries, 5);
+  assert.equal(discoveries, 3, "each cleanup cycle takes one post-force quiescence snapshot");
   assert.deepEqual(actions, [[41, "SIGTERM"], [42, "SIGTERM"], [42, "SIGKILL"]]);
 });
 
@@ -261,7 +261,7 @@ test("one cleanup deadline leaves every unscheduled target unresolved", async ()
   assert.equal(result.outcome, "incomplete");
   assert.deepEqual(result.unresolved.filter(({ pid }) => pid).map(({ pid }) => pid), [41, 42, 43]);
   assert.ok(result.unresolved.filter(({ pid }) => pid).every(({ error }) => /deadline exceeded/i.test(error)));
-  assert.ok(result.unresolved.some(({ reason }) => reason === "post-graceful-discovery-failed"));
+  assert.ok(result.unresolved.some(({ reason }) => reason === "post-force-discovery-failed"));
 });
 
 test("an unreadable Linux process owned by another user is irrelevant", async () => {
@@ -360,15 +360,15 @@ test("unsupported and discovery failures do not speculate with signals", async (
   assert.equal(signals, 0);
 });
 
-test("a descendant found in the post-graceful snapshot receives its own bounded cleanup cycle", async () => {
+test("a descendant found after force receives its own bounded cleanup cycle", async () => {
   const parent = identity();
   const child = identity({ pid: 42, ppid: 41, startTime: "101" });
   let discoveries = 0;
   const signals = [];
   const result = await containment({
-    // The child appears from the parent's graceful handler; the first
-    // post-force snapshot is empty, so only a new discovery phase can find it.
-    discover: async () => [ [parent], [child], [], [], [] ][discoveries++] || [],
+    // The child appears from the parent's graceful handler and is found by
+    // the parent's post-force snapshot before receiving its own cycle.
+    discover: async () => [ [parent], [child], [] ][discoveries++] || [],
     observe: async (pid) => {
       if (pid === parent.pid) return signals.includes("parent") ? null : parent;
       return signals.includes("child") ? null : child;
@@ -376,12 +376,12 @@ test("a descendant found in the post-graceful snapshot receives its own bounded 
     signal: async (pid, signal) => { if (signal === "SIGTERM") signals.push(pid === parent.pid ? "parent" : "child"); }
   }).cleanup("cancelled");
   assert.equal(result.outcome, "complete");
-  assert.equal(discoveries, 5, "cleanup must observe after graceful and force for each discovered identity");
+  assert.equal(discoveries, 3, "cleanup must take a post-force snapshot for each discovered identity");
   assert.deepEqual(result.actions.map(({ pid, signal }) => [pid, signal]), [[41, "SIGTERM"], [42, "SIGTERM"]]);
   assert.deepEqual(result.discovered, [{ pid: 41, ppid: 7, startTime: "100" }, { pid: 42, ppid: 41, startTime: "101" }]);
 });
 
-test("a new descendant present in both follow-up snapshots is signaled once", async () => {
+test("a new descendant present in successive post-force snapshots is signaled once", async () => {
   const parent = identity();
   const child = identity({ pid: 42, ppid: 41, startTime: "101" });
   const forced = new Set();

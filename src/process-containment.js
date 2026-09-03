@@ -360,20 +360,23 @@ export class ProcessContainment {
           return null;
         }
       }
-      // SIGTERM handlers can create a token-inheriting process. Observe that
-      // boundary before escalating the original targets, then give every new
-      // identity its own graceful/force cycle below.
-      const afterGraceful = await discovery("post-graceful");
-      if (!afterGraceful) return null;
+      // Revalidate and escalate the original identities before doing another
+      // full /proc scan. A scan may be slow on a busy host, but it must never
+      // consume the interval between graceful termination and the bounded
+      // force escalation of a still-owned process.
       const forced = [];
       for (const identity of awaiting) {
         const sent = await this.#send(identity, forceSignal, "force", deadlineAt);
         if (sent.safe) forced.push(identity);
       }
-      if (forced.length && this.forceWaitMs) {
+      // Even when a graceful target exits before force, reserve the same short
+      // bounded observation window for a SIGTERM handler that is still forking
+      // a token-inheriting descendant. The post-force snapshot then gives that
+      // new identity its own cleanup cycle without delaying no-target cleanup.
+      if (awaiting.length && this.forceWaitMs) {
         try { await this.#bounded(() => this.sleep(Math.min(this.forceWaitMs, this.timeoutMs)), "force period", deadlineAt); }
         catch (error) {
-          for (const identity of forced) this.#unresolved(identity, "force-wait-failed", error);
+          for (const identity of awaiting) this.#unresolved(identity, "force-wait-failed", error);
           return null;
         }
       }
@@ -381,11 +384,11 @@ export class ProcessContainment {
         const final = await this.#observe(identity, "final", deadlineAt);
         if (final.safe) this.#unresolved(identity, "still-running-after-force");
       }
-      // A second snapshot is the quiescence check: it covers descendants that
-      // appeared while force escalation was in progress as well as stale PIDs.
+      // This quiescence snapshot covers descendants created by graceful
+      // handlers as well as processes that appeared during force escalation.
       const afterForce = await discovery("post-force");
       if (!afterForce) return null;
-      return [...afterGraceful, ...afterForce];
+      return afterForce;
     };
     let pending = await discovery("initial");
     if (!pending) {
