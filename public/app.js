@@ -9,10 +9,11 @@ const escapeHtml = (value = "") => String(value)
 let state = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
 let piModels = [];
-const viewVersion = 2;
+const viewVersion = 3;
 let savedView = {};
 try { savedView = JSON.parse(localStorage.getItem("agent-plan-view") || "{}"); } catch {}
 const currentView = savedView.version === viewVersion;
+const savedTicketId = currentView ? savedView.ticketId || null : null;
 let selectedStepId = currentView ? savedView.selectedStepId || null : null;
 let selectedStageId = currentView ? savedView.selectedStageId || null : null;
 let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
@@ -41,7 +42,7 @@ const profileIds = ["requirements", "exploration", "architecture", "implementati
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function rememberView() {
-  localStorage.setItem("agent-plan-view", JSON.stringify({ version: viewVersion, selectedStepId, selectedStageId, activeTab }));
+  localStorage.setItem("agent-plan-view", JSON.stringify({ version: viewVersion, ticketId: state?.selectedTicketId || null, selectedStepId, selectedStageId, activeTab }));
 }
 
 async function api(path, options = {}) {
@@ -1369,6 +1370,12 @@ events.onmessage = ({ data }) => {
 events.onerror = () => notify("Live connection lost; reconnecting…");
 
 state = await api("/api/state");
+if (savedTicketId !== state.selectedTicketId) {
+  selectedStepId = null;
+  selectedStageId = null;
+  activeTab = "activity";
+  rememberView();
+}
 try { piModels = (await api("/api/models")).models || []; } catch (error) { notify(error.message); }
 await refreshTickets();
 render();
