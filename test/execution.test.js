@@ -64,6 +64,17 @@ test("final review collapses a generic test failure and reviewer paraphrases int
   assert.match(findings[1].claim, /Ambiguous/);
 });
 
+test("final review collapses nearby paraphrases of the same defect across criteria", () => {
+  const findings = actionableFindings([
+    { findings: [{ severity: "medium", category: "correctness", claim: "Cleanup trigger merging drops distinct lifecycle events whenever their payloads match because it removes timestamps before deduplication.", acceptanceCriterion: "Concurrent cleanup retains every trigger.", evidence: [{ file: "src/execution.js", line: 87 }] }] },
+    { findings: [{ severity: "medium", category: "correctness", claim: "Trigger deduplication drops distinct lifecycle occurrences with the same payload because timestamps are removed before deduplication.", acceptanceCriterion: "Repeated cleanup retains every trigger.", evidence: [{ file: "src/execution.js", line: 89 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Cleanup can terminate a newly launched process after ownership transfers.", acceptanceCriterion: "Process ownership transfers safely.", evidence: [{ file: "src/execution.js", line: 90 }] }] }
+  ]);
+  assert.equal(findings.length, 2);
+  assert.match(findings[0].claim, /lifecycle/);
+  assert.match(findings[1].claim, /newly launched/);
+});
+
 test("automatic corrections ignore findings below medium severity", () => {
   const findings = actionableFindings([{ findings: [
     { severity: "low", claim: "Could rename this helper" },

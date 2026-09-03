@@ -441,6 +441,20 @@ export function nextRunnableBatch(plan) {
 
 const actionableSeverities = new Set(["critical", "high", "medium", "blocking", "warning"]);
 
+function similarFinding(left, right) {
+  if (String(left.category || "general").toLowerCase() !== String(right.category || "general").toLowerCase()) return false;
+  const leftEvidence = left.evidence?.[0] || {};
+  const rightEvidence = right.evidence?.[0] || {};
+  if (!leftEvidence.file || String(leftEvidence.file).toLowerCase() !== String(rightEvidence.file || "").toLowerCase()) return false;
+  if (leftEvidence.line && rightEvidence.line && Math.abs(leftEvidence.line - rightEvidence.line) > 5) return false;
+  const words = (value) => new Set(String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []);
+  const leftWords = words(left.claim);
+  const rightWords = words(right.claim);
+  if (Math.min(leftWords.size, rightWords.size) < 4) return false;
+  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
+  return overlap >= 6 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.5;
+}
+
 export function actionableFindings(reviews) {
   const findings = reviews.flatMap((review) => review.findings || [])
     .filter((finding) => actionableSeverities.has(String(finding.severity || "").toLowerCase()));
@@ -457,10 +471,14 @@ export function actionableFindings(reviews) {
     const evidence = finding.evidence?.[0] || {};
     const criterion = String(finding.acceptanceCriterion || "").trim().toLowerCase();
     const file = String(evidence.file || "").trim().toLowerCase();
-    const key = criterion && file
+    let key = criterion && file
       ? `${String(finding.category || "general").toLowerCase()}:${criterion}:${file}`
       : `${file}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
-    const previous = unique.get(key);
+    let previous = unique.get(key);
+    if (!previous) {
+      const similar = [...unique.entries()].find(([, item]) => similarFinding(item.finding, finding));
+      if (similar) [key, previous] = similar;
+    }
     const detail = (finding.evidence?.length || 0) * 1000 + String(finding.claim || "").length + String(finding.suggestedFix || finding.suggested_fix || "").length;
     if (!previous || detail > previous.detail) unique.set(key, { finding, detail });
   }
