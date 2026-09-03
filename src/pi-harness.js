@@ -1174,7 +1174,9 @@ ${JSON.stringify(packet, null, 2)}
 # Findings from earlier review rounds
 ${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
 
-Re-check every earlier finding against the current repository. Report it again when it remains unresolved; omit it only after verifying that the current code or evidence resolves it. Do not let a broad re-audit silently replace prior findings.
+${focusFindings.length
+    ? "This is a correction review. Re-check every earlier finding against the current repository and inspect regressions directly introduced by its fixes. Report an earlier finding again when it remains unresolved; omit it only after verifying that current code or evidence resolves it. Do not start a new broad audit or expand the review horizon."
+    : "This is the initial broad review. Inspect the complete ticket outcome within the charter above."}
 
 Return ONLY JSON:
 {

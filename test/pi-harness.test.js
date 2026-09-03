@@ -459,7 +459,8 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
     });
     assert.match(prompt, /Findings from earlier review rounds/);
     assert.match(prompt, /A late child can escape cleanup/);
-    assert.match(prompt, /Report it again when it remains unresolved/);
+    assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
+    assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
