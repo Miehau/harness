@@ -12,6 +12,7 @@ import { captureFinalProof, captureLiveViewport, cdpConnection, finalProofIdenti
 import { runSeed } from "../scripts/seed.mjs";
 import { runNode, runTests } from "../scripts/test.mjs";
 import { JsonStore } from "../src/store.js";
+import { projectInspection } from "../src/inspection.js";
 import { writeSeed } from "./helpers.js";
 
 function capture() {
@@ -122,6 +123,15 @@ test("seed writes JsonStore state the daemon can reload", async () => {
     assert.equal(plan.status, "awaiting_approval");
     assert.equal(plan.checkpoint.kind, "awaiting_approval");
     assert.ok(plan.plan.nodes.length);
+    const proof = await writeSeed({ dataDir, cwd, scenario: "proof-review" });
+    const proofRun = JSON.parse(await readFile(join(dataDir, "state-v3.json"), "utf8")).ticketRuns[proof.ticketId];
+    assert.equal(proofRun.checkpoint.kind, "evidence_review");
+    assert.deepEqual(proofRun.stages.filter((stage) => stage.status === "completed").map((stage) => stage.id), ["requirements", "explore", "design", "implement", "verify"]);
+    assert.equal(proofRun.artifacts.some((artifact) => artifact.kind === "visual-evidence" && artifact.stageId === "verify"), true);
+    const proofInspection = projectInspection(proofRun);
+    assert.equal(proofInspection.workers[0].lifecycle, "completed");
+    assert.equal(proofInspection.stages.filter((stage) => stage.lifecycle === "completed").length, 5);
+    assert.deepEqual(proofInspection.focus, { stageId: "stage:verify", workerId: null, attemptId: null, reason: "final_proof" });
   } finally {
     await rm(dataDir, { recursive: true, force: true });
     await rm(cwd, { recursive: true, force: true });

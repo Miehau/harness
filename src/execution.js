@@ -422,7 +422,7 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
   run.activeRuns = {};
   run.lastError = null;
   run.recovery = null;
-  for (const key of ["completedAt", "merge", "integration", "deliveredDiff", "productContextPath"]) delete run[key];
+  for (const key of ["completedAt", "merge", "integration", "deliveredDiff", "productContextPath", "finalEvidenceArtifactIds"]) delete run[key];
   const audit = {
     id: `restart-${(run.restartHistory?.length || 0) + 1}`,
     at,

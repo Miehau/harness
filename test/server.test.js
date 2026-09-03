@@ -123,7 +123,7 @@ test("ticket inspection keeps every retained worker attempt individually address
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "parallel-a", title: "Parallel A", permission: "write", writeScope: "src/a.js" }, { id: "parallel-b", title: "Parallel B", permission: "write", writeScope: "src/b.js" }] });
     plan.nodes[0].attempts = [
-      { attemptId: "first", runId: "a-1", status: "failed", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z", terminationReason: "worker_failure", rawOutput: "old result" },
+      { attemptId: "first", runId: "a-1", status: "failed", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:01:00.000Z", terminationReason: "worker_failure", failureKind: "provider", failurePhase: "execution", failure: { kind: "provider", phase: "execution", message: "rate limit" }, rawOutput: "old result" },
       { attemptId: "second", runId: "a-2", status: "verified", startedAt: "2026-09-03T10:02:00.000Z", completedAt: "2026-09-03T10:03:00.000Z", rawOutput: "new result" }
     ];
     plan.nodes[1].attempts = [{ attemptId: "only", runId: "b-1", status: "verified", startedAt: "2026-09-03T10:00:00.000Z", completedAt: "2026-09-03T10:03:00.000Z", rawOutput: "sibling result" }];
@@ -132,6 +132,19 @@ test("ticket inspection keeps every retained worker attempt individually address
     assert.deepEqual(inspection.json.attempts.map((attempt) => attempt.id), ["attempt:parallel-a:first", "attempt:parallel-a:second", "attempt:parallel-b:only"]);
     assert.deepEqual(inspection.json.workers.find((worker) => worker.stepId === "parallel-a").attemptIds, ["attempt:parallel-a:first", "attempt:parallel-a:second"]);
     assert.deepEqual(inspection.json.attempts.map((attempt) => attempt.workerId), ["worker:parallel-a", "worker:parallel-a", "worker:parallel-b"]);
+    assert.deepEqual(inspection.json.attempts[0].resources.prompt, { state: "not_retained" });
+    assert.deepEqual({
+      terminationReason: inspection.json.attempts[0].terminationReason,
+      failureKind: inspection.json.attempts[0].failureKind,
+      failurePhase: inspection.json.attempts[0].failurePhase
+    }, { terminationReason: "worker_failure", failureKind: "provider", failurePhase: "execution" });
+    const detail = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/parallel-a/attempts/first/details`);
+    assert.deepEqual({
+      terminationReason: detail.json.terminationReason,
+      failureKind: detail.json.failureKind,
+      failurePhase: detail.json.failurePhase,
+      failureMessage: detail.json.failure?.message
+    }, { terminationReason: "worker_failure", failureKind: "provider", failurePhase: "execution", failureMessage: "rate limit" });
   });
 });
 

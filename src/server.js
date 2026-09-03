@@ -516,11 +516,21 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   const diff = redactRecord(attempt.diff || {});
   const checks = redactRecord(attempt.verification?.checks || attempt.checks || {});
   const checkOutput = boundedText(checks.output || "", 16000);
+  const terminationReason = boundedText(redactText(attempt.termination?.reason || attempt.terminationReason || ""), 240).value || null;
+  const terminationAt = attempt.termination?.at || attempt.completedAt || null;
+  const failureKind = boundedText(redactText(attempt.failure?.kind || attempt.failureKind || ""), 120).value || null;
+  const failurePhase = boundedText(redactText(attempt.failure?.phase || attempt.failurePhase || ""), 120).value || null;
+  const failureMessage = boundedText(redactText(attempt.failure?.message || attempt.error || ""), 1000).value || null;
   return {
     ticketId: run.id,
     runId: run.runId,
     stepId: step.id,
     attemptId: attempt.attemptId,
+    terminationReason,
+    termination: terminationReason || terminationAt ? { reason: terminationReason, at: terminationAt } : null,
+    failureKind,
+    failurePhase,
+    failure: failureKind || failurePhase || failureMessage ? { kind: failureKind, phase: failurePhase, message: failureMessage } : null,
     prompt: textDetail(prompt, 16000, active ? "not_yet_available" : "not_retained", promptArtifact),
     activity: { state: activity.length > 100 ? "truncated" : activity.length ? "available" : active ? "not_yet_available" : "not_retained", items: activityItems, returned: activityItems.length, total: activity.length },
     output: textDetail(output, 20000, active ? "not_yet_available" : outputArtifact ? "unavailable" : "not_retained", outputArtifact),
@@ -2050,6 +2060,12 @@ async function finishHandoff(ticketId) {
   if (current.ticket.source !== "local" && !proposal) throw new Error("Product-context proposal not found");
   const contextContent = current.ticket.source === "local" ? null : await artifactText(proposal);
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
+  // Integration clears the actionable checkpoint. Retain only its artifact IDs so
+  // completed inspection can still distinguish this approved proof from stale media.
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.finalEvidenceArtifactIds = [...new Set(run.checkpoint.evidenceArtifactIds || [])];
+  });
   const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent });
   queued.promise.catch(() => {});
 }

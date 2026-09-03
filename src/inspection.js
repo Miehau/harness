@@ -40,6 +40,19 @@ function artifactsForAttempt(run, stepId, attemptId) {
   return (run.artifacts || []).filter((artifact) => artifact.stepId === stepId && (!attemptId || artifact.attemptId === attemptId));
 }
 
+function hasFinalVisualEvidence(run) {
+  // A Verify artifact is not proof for a later review: only the evidence IDs
+  // attached to the active gate can complete run-level visual evidence.
+  const ids = new Set(run.checkpoint?.kind === "evidence_review"
+    ? run.checkpoint.evidenceArtifactIds || []
+    : run.finalEvidenceArtifactIds || []);
+  return ids.size > 0 && (run.artifacts || []).some((artifact) => artifact.kind === "visual-evidence" && ids.has(artifact.id));
+}
+
+function checkpointForStep(checkpoint, step) {
+  return Boolean(checkpoint?.stepId && checkpoint.stepId === step?.id);
+}
+
 function attemptEvidence(run, step, attempt, active = false) {
   const artifacts = artifactsForAttempt(run, step.id, attempt.attemptId);
   const checks = checksFor(attempt);
@@ -52,7 +65,9 @@ function attemptEvidence(run, step, attempt, active = false) {
   const checksPresent = checksRequired ? checks?.status === "passed" : true;
   const approvalPresent = approvalRequired ? Boolean(step.acceptedAt) : true;
   const artifactPresent = artifactRequired ? artifacts.some((item) => item.kind === "agent-output") : true;
-  const visualPresent = visualRequired ? artifacts.some((item) => item.kind === "visual-evidence") : true;
+  // Final proof is produced by Verify for the whole run, rather than copied
+  // into every accepted worker attempt.
+  const visualPresent = visualRequired ? artifacts.some((item) => item.kind === "visual-evidence") || hasFinalVisualEvidence(run) : true;
   const missing = [
     reportRequired && !reportPresent ? "report" : null,
     checksRequired && !checksPresent ? "checks" : null,
@@ -88,11 +103,11 @@ function blockerType({ run, stage, step, attempt, evidence }) {
 
 function primaryBlocker({ run, stage = null, step = null, attempt = null, evidence = null }) {
   const status = attempt?.status || step?.status || stage?.status || run.status;
-  const checkpointForStep = run.checkpoint && (!run.checkpoint.stepId || run.checkpoint.stepId === step?.id);
+  const checkpointApplies = checkpointForStep(run.checkpoint, step);
   const blocked = failedStatuses.has(status) || blockedStatuses.has(status) || ["cancelled", "interrupted"].includes(status)
-    || (checkpointForStep && ["needs_attention", "review_blocked", "evidence_review"].includes(run.checkpoint.kind));
+    || (checkpointApplies && ["needs_attention", "review_blocked", "evidence_review"].includes(run.checkpoint.kind));
   if (!blocked && evidence?.state !== "incomplete") return null;
-  const summary = text(attempt?.error || step?.lastError || (checkpointForStep && (run.checkpoint.title || run.checkpoint.prompt)) || stage?.summary || run.lastError,
+  const summary = text(attempt?.error || step?.lastError || (checkpointApplies && (run.checkpoint.title || run.checkpoint.prompt)) || stage?.summary || run.lastError,
     evidence?.missing?.length ? `Missing required ${evidence.missing.join(", ")}` : "Review is required before work can continue");
   return {
     type: blockerType({ run, stage, step, attempt, evidence }),
@@ -113,7 +128,13 @@ function lifecycle(status, evidence = null) {
 
 function nextAction(run, { stage, step } = {}) {
   const checkpoint = run.checkpoint;
-  if (checkpoint && (!checkpoint.stepId || checkpoint.stepId === step?.id)) {
+  // Plan and requirements approval gates apply to the whole run, including
+  // queued workers. Evidence review remains run-level without becoming every
+  // worker's blocker or action.
+  if (checkpoint && !checkpoint.stepId && ["requirements_review", "awaiting_approval"].includes(checkpoint.kind)) {
+    return { kind: "approve", label: text(checkpoint.title, "Approve to continue") };
+  }
+  if (checkpoint && ((!step && !stage) || checkpointForStep(checkpoint, step))) {
     if (checkpoint.kind === "step_review") return { kind: "review_step", label: "Accept the step or request changes" };
     if (checkpoint.kind === "evidence_review") return { kind: "review_evidence", label: "Approve final proof or request changes" };
     if (["requirements_review", "awaiting_approval"].includes(checkpoint.kind)) return { kind: "approve", label: text(checkpoint.title, "Approve to continue") };
@@ -133,8 +154,11 @@ function attemptResources(run, step, attempt, active) {
   const diff = attempt.diff;
   const activityCount = (attempt.events?.length || 0) + (attempt.activityGroups?.length || attempt.activity?.groups?.length || 0);
   const observedActivity = activityCount || (attempt.activity?.lastEvent || attempt.lastEvent || attempt.activity?.lastEventAt || attempt.lastEventAt ? 1 : 0);
+  // Snapshots retain the prompt independently of whether their worker is still
+  // live, so resource availability must not regress when a run is restarted.
+  const retainedPrompt = Boolean(attempt.prompt || attempt.prompts?.length || attempt.activity?.prompts?.length);
   return {
-    prompt: availability(artifacts.some((item) => item.kind === "agent-prompt") || Boolean(active && (attempt.prompt || attempt.activity?.prompts?.length)), active ? "not_yet_available" : "not_retained"),
+    prompt: availability(artifacts.some((item) => item.kind === "agent-prompt") || retainedPrompt, active ? "not_yet_available" : "not_retained"),
     activity: availability(observedActivity > 0, active ? "not_yet_available" : "not_retained", { count: observedActivity }),
     output: availability(Boolean(attempt.report || attempt.rawOutput || attempt.activity?.rawOutput) || artifacts.some((item) => item.kind === "agent-output"), active ? "not_yet_available" : "not_retained"),
     artifacts: availability(artifacts.length > 0, active ? "not_yet_available" : "not_recorded", { count: artifacts.length }),
@@ -161,6 +185,10 @@ function projectAttempt(run, step, attempt, index, now, active = false) {
     timing: elapsed(attempt.startedAt || attempt.activity?.startedAt, attempt.completedAt, now),
     latestAction: text(attempt.activity?.lastEvent || attempt.lastEvent || attempt.activityGroups?.at(-1)?.title || attempt.events?.at(-1)?.label, active ? "Worker started" : "Attempt recorded"),
     latestActionAt: iso(attempt.activity?.lastEventAt, attempt.lastEventAt, attempt.events?.at(-1)?.at, attempt.startedAt),
+    terminationReason: text(attempt.termination?.reason || attempt.terminationReason) || null,
+    terminationAt: iso(attempt.termination?.at, attempt.completedAt),
+    failureKind: text(attempt.failure?.kind || attempt.failureKind) || null,
+    failurePhase: text(attempt.failure?.phase || attempt.failurePhase) || null,
     evidence,
     blocker,
     resources: attemptResources(run, step, saved, active)
@@ -233,12 +261,18 @@ function completionEvidence(run, workers) {
     !finalChecks || finalChecks.status !== "passed" ? "final_checks" : null,
     !run.integration ? "integration" : null,
     !(run.artifacts || []).some((artifact) => artifact.kind === "handoff") ? "handoff_artifact" : null,
-    visualRequired && !(run.artifacts || []).some((artifact) => artifact.kind === "visual-evidence") ? "visual_evidence" : null
+    visualRequired && !hasFinalVisualEvidence(run) ? "visual_evidence" : null
   ].filter(Boolean);
   return { state: missing.length ? "incomplete" : "complete", missing };
 }
 
-function focusFor(stages, workers, attempts) {
+function focusFor(run, stages, workers, attempts) {
+  // A run-level proof gate is actionable at Verify, not at every completed
+  // worker or at the blocked Handoff stage that follows it.
+  if (run.checkpoint?.kind === "evidence_review" && !run.checkpoint.stepId) {
+    const verify = stages.find((stage) => stage.stageId === "verify");
+    if (verify) return { stageId: verify.id, workerId: null, attemptId: null, reason: "final_proof" };
+  }
   const activeAttempt = attempts.find((attempt) => attempt.lifecycle === "active");
   if (activeAttempt) return { stageId: activeAttempt.stageId, workerId: activeAttempt.workerId, attemptId: activeAttempt.id, reason: "active" };
   const activeWorker = workers.find((worker) => worker.lifecycle === "active");
@@ -269,7 +303,7 @@ export function projectInspection(run, { now = Date.now(), revision = null } = {
     workers.push(projectWorker(run, step, projected));
   }
   const stages = (run.stages || []).map((stage) => projectStage(run, stage, workers.filter((worker) => worker.stageId === `stage:${stage.id}`), now));
-  const focus = focusFor(stages, workers, attempts);
+  const focus = focusFor(run, stages, workers, attempts);
   const evidence = completionEvidence(run, workers);
   const runBlocker = evidence.state === "incomplete" ? primaryBlocker({ run, evidence }) : null;
   const blockers = [runBlocker, ...workers.map((worker) => worker.blocker), ...stages.map((stage) => stage.blocker)].filter(Boolean)

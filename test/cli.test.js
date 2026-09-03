@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizePlan } from "../src/plan.js";
+import { markRunCancelled, rewindRun } from "../src/execution.js";
 import { runCli } from "../src/cli.js";
 import { invoke, runAgainstDaemon, seedRun, withDaemon } from "./helpers.js";
 
@@ -150,6 +151,42 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
     assert.equal(timeline.attempts[0].resources.output.state, "available");
     assert.equal(timeline.attempts[0].resources.prompt.state, "available");
     assert.equal(timeline.attempts[1].resources.checks.state, "not_yet_available");
+  });
+});
+
+test("timeline and attempt details retain cancellation prompt and provenance after a restart", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "running", permission: "write", writeScope: "src/build.js" }] });
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      activeRuns: { build: {
+        runId: "cancelled-worker", attemptId: "attempt-1", startedAt: "2026-09-03T10:00:00.000Z",
+        prompt: "Inspect retained prompt", activity: { prompts: [{ content: "Inspect retained prompt" }] }
+      } }
+    });
+    await daemon.store.update((state) => {
+      const current = state.ticketRuns[id];
+      current.baselineTree = "baseline-tree";
+      markRunCancelled(current, "2026-09-03T10:01:00.000Z");
+      rewindRun(current, "step:build", "2026-09-03T10:02:00.000Z");
+    });
+
+    const timeline = await assertCanonicalTimeline(daemon, id);
+    const attempt = timeline.attempts[0];
+    assert.deepEqual({
+      lifecycle: attempt.lifecycle,
+      prompt: attempt.resources.prompt.state,
+      terminationReason: attempt.terminationReason,
+      failureKind: attempt.failureKind,
+      failurePhase: attempt.failurePhase
+    }, { lifecycle: "cancelled", prompt: "available", terminationReason: "run_cancelled", failureKind: "cancellation", failurePhase: "execution" });
+    const detail = await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/attempt-1/details`);
+    assert.deepEqual({
+      prompt: detail.json.prompt.content,
+      terminationReason: detail.json.terminationReason,
+      failureKind: detail.json.failureKind,
+      failurePhase: detail.json.failurePhase
+    }, { prompt: "Inspect retained prompt", terminationReason: "run_cancelled", failureKind: "cancellation", failurePhase: "execution" });
   });
 });
 
