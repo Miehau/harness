@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 
@@ -156,6 +156,28 @@ test("runs the repository's root npm test script as a deterministic gate", async
     assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "failed");
   } finally {
     await rm(root, { recursive: true });
+  }
+});
+
+test("retries one transient filesystem cleanup race without spending a correction round", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-retry-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await writeFile(join(root, "verify.mjs"), `
+      import { readFileSync, writeFileSync } from "node:fs";
+      const path = new URL("count", import.meta.url);
+      let count = 0;
+      try { count = Number(readFileSync(path, "utf8")); } catch {}
+      writeFileSync(path, String(count + 1));
+      if (!count) { console.error("ENOTEMPTY: directory not empty, rmdir '/tmp/agent-plan-daemon-test'"); process.exit(1); }
+    `);
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
+    assert.equal(result.status, "passed");
+    assert.match(result.summary, /after retrying/);
+    assert.equal(await readFile(join(root, "count"), "utf8"), "2");
+    assert.equal(transientRepositoryCheckFailure("ordinary assertion failure"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -19,6 +19,10 @@ const verificationEntry = ".agent-plan/verify.mjs";
 export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
 
+export function transientRepositoryCheckFailure(output = "") {
+  return /\bENOTEMPTY\b[\s\S]{0,200}\b(?:directory not empty|rmdir|scandir)\b/i.test(String(output));
+}
+
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
 const supervisorInstruction = `You are now the persistent supervisor for this plan. The loaded skill is a binding workflow, not optional advice.
@@ -641,21 +645,25 @@ export class PiHarness {
     const startedAt = Date.now();
     const config = await loadProjectConfig(cwd);
     const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
-    try {
-      const executable = command === "npm test" ? "npm" : process.execPath;
-      const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
-      const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
-        .filter((entry) => entry.isFile())
-        .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
-        .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
-        .filter((item) => item.mediaType);
-      const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-      if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-      if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-      return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return { status: "failed", command, summary: `${command} failed.`, output: eventText(redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment)), evidence: [], durationMs: Date.now() - startedAt };
+    const executable = command === "npm test" ? "npm" : process.execPath;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
+        const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
+          .filter((entry) => entry.isFile())
+          .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
+          .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
+          .filter((item) => item.mediaType);
+        const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
+        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        return { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        const output = eventText(redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment));
+        if (!attempt && transientRepositoryCheckFailure(output)) continue;
+        return { status: "failed", command, summary: `${command} failed.`, output, evidence: [], durationMs: Date.now() - startedAt };
+      }
     }
   }
 
