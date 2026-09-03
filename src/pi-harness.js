@@ -1253,7 +1253,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     try {
       signal?.throwIfAborted();
       const turnPrompt = existingFile
-        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
+        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n\nCurrent deterministic gate (authoritative; supersedes every earlier check result in this conversation):\n${JSON.stringify(packet.checks, null, 2)}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
       await session.prompt(turnPrompt, { images: existingFile ? [] : images });

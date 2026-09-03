@@ -558,6 +558,9 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
     assert.match(prompt, /Expected ticket: T-1 — Ticket/);
+    assert.match(prompt, /Current deterministic gate \(authoritative; supersedes every earlier check result/);
+    assert.match(prompt, /"status": "passed"/);
+    assert.match(prompt, /"summary": "Passed"/);
     assert.match(prompt, /filenames, manifests, URLs, and capture-script claims are not proof of identity/);
     assert.match(prompt, /another ticket, blank or partially rendered content, stale recovery state/);
     assert.match(prompt, /New operator final-proof feedback/);
