@@ -1272,6 +1272,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         failed.lastError = error.message;
         delete current.activeRuns[stepId];
         current.status = "needs_attention";
+        current.lastError = error.message;
+        current.checkpoint = {
+          id: randomUUID(), kind: "needs_attention", title: `Step failed: ${failed.title}`,
+          prompt: error.message, stepId, source: "execution", createdAt: new Date().toISOString()
+        };
         setStage(current, "implement", "blocked", error.message);
       });
     }

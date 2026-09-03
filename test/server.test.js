@@ -4,6 +4,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
+import { createZeroStateWorkspace } from "../src/worktrees.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
@@ -256,6 +257,37 @@ test("agent-plan CLI wait is non-zero on needs_attention", async () => {
     assert.equal(result.code, 1);
     assert.match(result.stdout, /needs_attention/);
   });
+});
+
+test("step execution failures persist an actionable run checkpoint", async () => {
+  const harness = {
+    ...mockHarness(),
+    runStep: async () => ({ report: { status: "completed", summary: "implemented" }, output: "implemented", prompt: "build", reviewNotes: [], rawOutput: "" }),
+    runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }),
+    evidenceImages: async () => [],
+    verifyStep: async () => { throw new Error("Verification exceeded its inspection budget."); }
+  };
+  await withDaemon(async (daemon, { cwd }) => {
+    const ticket = { id: "failed-step", identifier: "LOCAL-failed", title: "Fail visibly", description: "Expose the failure", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src", expectedFiles: ["src/app.js"], estimatedChangedLines: 20, acceptanceCriteria: ["Works"] }] });
+    const id = await seedRun(daemon, { ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "awaiting_approval", checkpoint: { id: "plan", kind: "awaiting_approval", title: "Approve" } });
+
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: true } });
+    assert.equal(approved.status, 202, approved.text);
+    const deadline = Date.now() + 3000;
+    let run;
+    while (Date.now() < deadline) {
+      run = daemon.store.read().ticketRuns[id];
+      if (run.status === "needs_attention") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(run.status, "needs_attention");
+    assert.equal(run.lastError, "Verification exceeded its inspection budget.");
+    assert.deepEqual({ kind: run.checkpoint.kind, stepId: run.checkpoint.stepId, source: run.checkpoint.source, prompt: run.checkpoint.prompt }, {
+      kind: "needs_attention", stepId: "build", source: "execution", prompt: "Verification exceeded its inspection budget."
+    });
+  }, { harness });
 });
 
 test("final proof checkpoint exposes durable review metadata", async () => {

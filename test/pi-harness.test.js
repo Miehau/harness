@@ -325,7 +325,7 @@ test("fresh verification stops after its repository inspection budget", async ()
       design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done", checks: {
         status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
       }, runId: "run", round: 1
-    }), /20-action inspection budget/);
+    }), new RegExp(`${MAX_VERIFICATION_ACTIONS}-action inspection budget`));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

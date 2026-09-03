@@ -16,7 +16,7 @@ import { visualEvidenceMedia } from "./artifacts.js";
 
 const exec = promisify(execFile);
 const verificationEntry = ".agent-plan/verify.mjs";
-export const MAX_VERIFICATION_ACTIONS = 20;
+export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
@@ -961,7 +961,7 @@ Review this slice without relying on the implementation conversation. Inspect re
 
 ${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}` : "This is the initial verification pass for this slice."}
 
-Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than 20 repository read, search, find, or list actions.
+Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than ${MAX_VERIFICATION_ACTIONS} repository read, search, find, or list actions.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
