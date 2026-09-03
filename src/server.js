@@ -1634,9 +1634,9 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
     title: `Address ${reason}`, description: `Apply the smallest change that resolves concrete ${reason}.`,
-    prompt: `Address these ${reason}. Read every referenced failing file before editing. Preserve approved behavior, remove unverified experiments from earlier failed delivery passes, and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
+    prompt: `Address these ${reason}. Read every referenced failing file before editing. Preserve approved behavior, remove unverified experiments from earlier failed delivery passes, and avoid unrelated changes. Run focused tests with project_command name "test" and safe filename-filter args; never edit verification configuration just to create a command:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
     contextPolicy: "seeded", harness: "pi", agentId: `remote-review-fixer:${current.ticket.identifier}`,
-    permission: "write", writeScope: "*", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
+    permission: "write", writeScope: "src,test,public,scripts", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
     expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
