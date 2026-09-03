@@ -31,8 +31,15 @@ async function captureMobile({ url, out, script }) {
       };
       chrome.stdout.on("data", receive); chrome.stderr.on("data", receive); chrome.once("exit", (code) => reject(new Error(`Chromium exited ${code}`)));
     });
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    const socket = new WebSocket(targets.find((target) => target.type === "page")?.webSocketDebuggerUrl);
+    let debuggerUrl;
+    await waitFor(`http://127.0.0.1:${port}/json/list`);
+    for (let attempt = 0; attempt < 40 && !debuggerUrl; attempt++) {
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      debuggerUrl = targets.find((target) => target.type === "page")?.webSocketDebuggerUrl;
+      if (!debuggerUrl) await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    if (!debuggerUrl) throw new Error("Chromium did not expose a page target");
+    const socket = new WebSocket(debuggerUrl);
     await new Promise((resolveOpen, reject) => { socket.addEventListener("open", resolveOpen); socket.addEventListener("error", reject); });
     let next = 0;
     const pending = new Map();
