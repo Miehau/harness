@@ -17,6 +17,7 @@ function normalizeReviewBudget(raw = {}) {
 
 function excludedFromReviewBudget(path) {
   return /(^|\/)(?:dist|build|coverage|vendor|generated)(?:\/|$)/i.test(path)
+    || /^\.agent-plan\/(?:evidence\/|project\.json$|verify\.mjs$)/i.test(path)
     || /(^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/i.test(path);
 }
 

@@ -121,6 +121,21 @@ test("measures actual review size while excluding lockfiles", () => {
   assert.equal(result.excludedFiles, 1);
 });
 
+test("visual proof plumbing does not consume the ticket review-file budget", () => {
+  const step = normalizePlan({ nodes: [{ title: "Visual change", permission: "write", writeScope: "public,.agent-plan", reviewBudget: { maxFiles: 2, maxChangedLines: 100 } }] }).nodes[0];
+  const result = diffReviewBudget(step, { files: [
+    "public/app.js", ".agent-plan/capture-dashboard.mjs", ".agent-plan/project.json", ".agent-plan/verify.mjs", ".agent-plan/evidence/desktop.png"
+  ], fileStats: [
+    { path: "public/app.js", additions: 20 }, { path: ".agent-plan/capture-dashboard.mjs", additions: 30 },
+    { path: ".agent-plan/project.json", additions: 3 }, { path: ".agent-plan/verify.mjs", additions: 10 },
+    { path: ".agent-plan/evidence/desktop.png", additions: 0 }
+  ] });
+  assert.equal(result.files, 2);
+  assert.equal(result.changedLines, 50);
+  assert.equal(result.excludedFiles, 3);
+  assert.equal(result.exceeded, false);
+});
+
 test("edited plans reject unknown dependencies, duplicate ids, and cycles", () => {
   assert.throws(() => normalizeEditedPlan({ nodes: [{ id: "a", title: "A", dependsOn: ["missing"] }] }), /unknown dependency/);
   assert.throws(() => normalizeEditedPlan({ nodes: [{ id: "a", title: "A" }, { id: "a", title: "Again" }] }), /duplicate id/);
