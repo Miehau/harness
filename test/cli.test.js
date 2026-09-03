@@ -67,6 +67,22 @@ test("timeline includes the active worker before its attempt is persisted", asyn
   });
 });
 
+test("timeline follows an active verification stage instead of an accepted step", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });
+    const stages = [
+      { id: "implement", status: "completed" },
+      { id: "verify", status: "active", activity: { events: [{ type: "phase", label: "Final review", at: "2" }] } }
+    ];
+    const id = await seedRun(daemon, { status: "reviewing", plan, stages });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, null);
+    assert.equal(timeline.json.stageId, "verify");
+    assert.match(timeline.json.events[0].title, /Final review/);
+  });
+});
+
 test("approve without an id uses the selected ticket (run manually)", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({

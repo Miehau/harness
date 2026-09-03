@@ -231,10 +231,11 @@ async function timeline(explicitId, ctx) {
   const run = state.ticketRuns?.[id];
   if (!run) throw new Error("Ticket run not found");
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const step = steps.find((item) => ["running", "fixing"].includes(item.status))
-    || steps.find((item) => item.id === preferredStepId(run.plan))
-    || null;
   const stage = (run.stages || []).find((item) => item.status === "active");
+  const activeStep = steps.find((item) => ["running", "fixing"].includes(item.status));
+  const step = activeStep
+    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan)) : null)
+    || null;
   const events = step
     ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]
     : stage?.activity?.events || [];
