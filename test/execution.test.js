@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, resumeStage, rewindRun, sessionImages, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, rewindRun, sessionImages, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -84,6 +84,24 @@ test("final review collapses independently worded findings on the same code defe
   assert.equal(findings.length, 2);
   assert.match(findings[0].claim, /Restarting|rewind/);
   assert.match(findings[1].claim, /Media evidence/);
+});
+
+test("final review retains distinct failures on the same criterion and code surface", () => {
+  const shared = { severity: "high", category: "correctness", acceptanceCriterion: "Historical evidence remains valid" };
+  const findings = actionableFindings([{ findings: [
+    { ...shared, claim: "Rewind reuses attempt IDs and aliases old evidence to a new attempt", evidence: [{ file: "src/proof-map.js", line: 84 }] },
+    { ...shared, claim: "Stale locators can be resubmitted without evidence produced after invalidation", evidence: [{ file: "src/proof-map.js", line: 84 }] }
+  ] }]);
+  assert.equal(findings.length, 2);
+});
+
+test("resuming review refreshes canonical findings from durable raw reviewer output", () => {
+  const distinct = [
+    { severity: "high", category: "correctness", claim: "Attempt IDs alias old evidence", evidence: [{ file: "src/proof-map.js", line: 84 }] },
+    { severity: "high", category: "correctness", claim: "Stale locators bypass freshness", evidence: [{ file: "src/proof-map.js", line: 84 }] }
+  ];
+  const review = { reviews: [{ role: "verification", findings: distinct }], actionableFindings: [distinct[0]] };
+  assert.deepEqual(refreshedReviewFindings(review), distinct);
 });
 
 test("automatic corrections ignore findings below medium severity", () => {

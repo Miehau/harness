@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, resumeStage, rewindRun, selectWorkerSession, sessionImages, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, rewindRun, selectWorkerSession, sessionImages, shouldPauseCorrection, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1814,13 +1814,23 @@ async function finalReviewLoop(ticketId, signal) {
     if (removedReviewArtifacts.length) (run.harnessMigrations ||= []).push({
       at: new Date().toISOString(), kind: "legacy-review-artifact-cleanup", files: removedReviewArtifacts
     });
+    const latestReview = run.reviews.at(-1);
+    if (latestReview) {
+      const refreshed = refreshedReviewFindings(latestReview);
+      if (findingsFingerprint(refreshed) !== findingsFingerprint(latestReview.actionableFindings || [])) {
+        latestReview.actionableFindings = refreshed;
+        latestReview.findingsRefreshedAt = new Date().toISOString();
+        if (latestReview.fix?.report?.status === "completed") delete latestReview.fix.report;
+      }
+    }
   });
-  const cleanReview = recoverableCleanReview(started);
+  const refreshedRun = ticketRun(store.read(), ticketId);
+  const cleanReview = recoverableCleanReview(refreshedRun);
   if (cleanReview) {
     await completeCleanReview({ ticketId, current: ticketRun(store.read(), ticketId), ...cleanReview, activity, signal });
     return;
   }
-  const pendingFix = pendingReviewFix(started.reviews);
+  const pendingFix = pendingReviewFix(refreshedRun.reviews);
   if (pendingFix) {
     const current = ticketRun(store.read(), ticketId);
     const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));

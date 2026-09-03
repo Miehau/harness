@@ -503,10 +503,11 @@ export function actionableFindings(reviews) {
       && String(finding.category || "").toLowerCase() === "tests"
       && /^repository check failed:/i.test(String(finding.claim || ""))) continue;
     const evidence = finding.evidence?.[0] || {};
+    const category = String(finding.category || "general").toLowerCase();
     const criterion = String(finding.acceptanceCriterion || "").trim().toLowerCase();
     const file = String(evidence.file || "").trim().toLowerCase();
-    let key = criterion && file
-      ? `${String(finding.category || "general").toLowerCase()}:${criterion}:${file}`
+    let key = category === "tests" && criterion && file
+      ? `${category}:${criterion}:${file}`
       : `${file}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
     let previous = unique.get(key);
     if (!previous) {
@@ -517,6 +518,12 @@ export function actionableFindings(reviews) {
     if (!previous || detail > previous.detail) unique.set(key, { finding, detail });
   }
   return [...unique.values()].map(({ finding }) => finding);
+}
+
+export function refreshedReviewFindings(review = {}) {
+  if (!Array.isArray(review.reviews) || !review.reviews.length) return review.actionableFindings || [];
+  const humanFindings = (review.actionableFindings || []).filter((finding) => finding.category === "human-proof-review");
+  return actionableFindings([...review.reviews, { findings: humanFindings }]);
 }
 
 export const MAX_CORRECTION_ROUNDS = 12;
