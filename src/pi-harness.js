@@ -1152,7 +1152,7 @@ ${diff.patch || "No textual diff"}`;
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, focusFindings = [], images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -1170,6 +1170,11 @@ ${reviewerCharters[role]} The deterministic gate has already run; use the suppli
 
 # Compact review packet
 ${JSON.stringify(packet, null, 2)}
+
+# Findings from earlier review rounds
+${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
+
+Re-check every earlier finding against the current repository. Report it again when it remains unresolved; omit it only after verifying that the current code or evidence resolves it. Do not let a broad re-audit silently replace prior findings.
 
 Return ONLY JSON:
 {

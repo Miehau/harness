@@ -431,6 +431,38 @@ test("verification surfaces the provider error after one retry", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("later final-review rounds explicitly recheck earlier findings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-focus-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompt = "";
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) {
+        prompt = value;
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Rechecked","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const finding = { severity: "high", claim: "A late child can escape cleanup", evidence: [{ file: "src/process.js", line: 42 }] };
+    await harness.reviewTicket({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
+      plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }),
+      artifacts: [], diff: { files: ["src/process.js"], patch: "+change" }, checks: { status: "passed", summary: "Passed" },
+      focusFindings: [finding], role: "integration", round: 2, runId: "run"
+    });
+    assert.match(prompt, /Findings from earlier review rounds/);
+    assert.match(prompt, /A late child can escape cleanup/);
+    assert.match(prompt, /Report it again when it remains unresolved/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("fresh verification stops after its repository inspection budget", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-verification-budget-"));
   try {

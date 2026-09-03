@@ -1750,6 +1750,7 @@ async function finalReviewLoop(ticketId, signal) {
     const afterTree = await snapshotTree(current.workspace.cwd);
     const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
     const verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+    const focusFindings = actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] })));
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
@@ -1757,6 +1758,7 @@ async function finalReviewLoop(ticketId, signal) {
       artifacts: current.artifacts,
       diff,
       checks,
+      focusFindings,
       images: reviewImages,
       role,
       round,
