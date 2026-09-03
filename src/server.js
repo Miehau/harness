@@ -1442,19 +1442,23 @@ function waitForDelivery(milliseconds, signal) {
   });
 }
 
-async function fixRemoteFeedback(ticketId, feedback, signal) {
+async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback") {
   const current = ticketRun(store.read(), ticketId);
   const beforeTree = await snapshotTree(current.workspace.cwd);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
-    title: "Address remote review feedback", description: "Apply the smallest change that resolves concrete pull-request feedback.",
-    prompt: `Address these remote review comments. Preserve approved behavior and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
+    title: `Address ${reason}`, description: `Apply the smallest change that resolves concrete ${reason}.`,
+    prompt: `Address these ${reason}. Preserve approved behavior and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
     contextPolicy: "seeded", harness: "pi", agentId: `remote-review-fixer:${current.ticket.identifier}`,
     permission: "write", writeScope: "*", skills: [], references: [], requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
     expectedArtifacts: ["remote-review-fix.md"], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
-    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: await hydrateArtifacts(current.artifacts, dataDir), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: compactReviewPacket({
+      ticket: current.ticket,
+      plan: current.plan,
+      artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
+    }).artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
@@ -1463,7 +1467,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
   const afterTree = await snapshotTree(current.workspace.cwd);
   const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
-  const commit = await commitWorkspace(current.workspace.cwd, `fix: address remote review feedback\n\nWhy: The reviewed change must resolve concrete maintainer feedback before merge.\nRequirement: ${current.ticket.identifier}`);
+  const commit = await commitWorkspace(current.workspace.cwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
     runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
   });
@@ -1473,7 +1477,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
     run.merge.feedbackFixes ||= [];
     run.merge.feedbackFixes.push({ feedback, diff, artifact, commit, createdAt: new Date().toISOString() });
   });
-  return commit;
+  return { commit, checks };
 }
 
 async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
@@ -1508,7 +1512,12 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     if (!change) {
       await rebase();
       checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-      if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+      if (checks.status === "failed") {
+        ({ checks } = await fixRemoteFeedback(ticketId, [{
+          id: `post-rebase-check-${attempt}`,
+          body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
+        }], signal, "post-rebase verification failures"));
+      }
       await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
       await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
       change = await forge.create({
@@ -1592,9 +1601,16 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
   })().catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
       const run = ticketRun(state, ticketId);
+      const previousStatus = run.status;
+      const previousMergeStatus = run.merge?.status || null;
       run.status = "needs_attention";
       run.lastError = error.message;
       if (run.merge) Object.assign(run.merge, { status: "failed", error: error.message, failedAt: new Date().toISOString() });
+      run.recovery = {
+        kind: "delivery", previousStatus, previousMergeStatus,
+        uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending),
+        message: "Delivery failed before completion. Resume will retry from the persisted delivery state."
+      };
       setStage(run, "handoff", "blocked", error.message);
     });
     await mirrorExecutionBlocker(ticketId, error);
