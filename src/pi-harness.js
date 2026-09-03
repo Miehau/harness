@@ -1258,15 +1258,16 @@ ${stripFrontmatter(content).trim()}
     });
     try {
       signal?.throwIfAborted();
-      const resumedAuthority = resumeSessionFile
-        ? `\n\nCurrent authority:\n- Permission: ${step.permission}\n- Effective write scope: ${step.writeScope || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\nDo not request access to a path already included in this effective write scope.`
+      const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
+      const resumedContext = resumeSessionFile
+        ? `\n\nCurrent slice boundary:\n- Acceptance criteria: ${step.acceptanceCriteria.join("; ") || "none"}\n- Permission: ${step.permission}\n- Effective write scope: ${step.writeScope || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\n- Deferred slices: ${deferredSlices.map((candidate) => `${candidate.title} (${candidate.acceptanceCriteria.join("; ")})`).join("; ") || "none"}\nDo not request access to a path already included in this effective write scope. Do not implement behavior assigned exclusively to a deferred slice; report completed without that change when the current criteria are already met.`
         : "";
       const continuation = feedback
         ? resumeSessionFile
-          ? `The user responded to this worker session.\n\n${feedback}${resumedAuthority}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
+          ? `The user responded to this worker session.\n\n${feedback}${resumedContext}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
           : `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.`
         : resumeSessionFile
-          ? `Continue the interrupted work from this existing session.${resumedAuthority}\n\nYour final action MUST be the worker_report tool.`
+          ? `Continue the interrupted work from this existing session.${resumedContext}\n\nYour final action MUST be the worker_report tool.`
           : "";
       const prompt = resumeSessionFile
         ? continuation

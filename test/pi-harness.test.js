@@ -443,7 +443,10 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}), open: () => ({}), forkFrom: () => ({}) }
     });
-    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "write", writeScope: "src,test/e2e-proof.test.js", skills: [] }] });
+    const plan = normalizePlan({ title: "Read", nodes: [
+      { id: "inspect", title: "Inspect", permission: "write", writeScope: "src,test/e2e-proof.test.js", skills: [], acceptanceCriteria: ["The API stores queued work"] },
+      { id: "deliver", title: "Deliver queued work", permission: "write", writeScope: "src", dependsOn: ["inspect"], acceptanceCriteria: ["Queued work drains after resume"] }
+    ] });
     plan.nodes[0].scopeChanges = [{ paths: ["test/e2e-proof.test.js"], reason: "Canonical proof fixtures exercise this contract." }];
     await assert.rejects(harness.runStep({
       cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [],
@@ -454,6 +457,9 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
     assert.match(prompt, /Effective write scope: src,test\/e2e-proof\.test\.js/);
     assert.match(prompt, /Audited scope additions: test\/e2e-proof\.test\.js \(Canonical proof fixtures exercise this contract\.\)/);
     assert.match(prompt, /Do not request access to a path already included/);
+    assert.match(prompt, /Acceptance criteria: The API stores queued work/);
+    assert.match(prompt, /Deferred slices: Deliver queued work \(Queued work drains after resume\)/);
+    assert.match(prompt, /Do not implement behavior assigned exclusively to a deferred slice/);
     assert.doesNotMatch(prompt, /Skills requested/);
 
     await assert.rejects(harness.runStep({
