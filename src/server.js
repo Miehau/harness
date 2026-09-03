@@ -1695,6 +1695,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     });
     let checks = current.merge?.checks || null;
     let change = resumedChange;
+    let awaitingHeadAfterPush = null;
     if ((await unmergedPaths(current.workspace.cwd)).length) await rebase();
     if (current.merge?.externalActionPending === "push_feedback_revision") {
       await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
@@ -1732,13 +1733,28 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       });
     }
 
+    if (change) {
+      const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd: current.workspace.cwd });
+      if (!status.trim()) {
+        const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd: current.workspace.cwd });
+        const rebased = await rebase();
+        if (rebased.commit !== before.trim()) {
+          await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+          awaitingHeadAfterPush = before.trim();
+        }
+      }
+    }
+
     let mergeResult = null;
     let lastRebaseHead = null;
-    let awaitingHeadAfterPush = null;
     for (;;) {
       signal?.throwIfAborted();
       const delivery = await forge.status(change);
-      if (awaitingHeadAfterPush && delivery.headSha !== awaitingHeadAfterPush) awaitingHeadAfterPush = null;
+      if (awaitingHeadAfterPush === delivery.headSha) {
+        await waitForDelivery(20000, signal);
+        continue;
+      }
+      awaitingHeadAfterPush = null;
       const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
       const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
       await update((state) => {
