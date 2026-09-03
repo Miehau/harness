@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
@@ -108,18 +108,18 @@ export class PreviewManager {
     if (!preview) throw new Error("Preview is not running");
     const browser = await chromiumPath(source);
     const directory = join(this.dataDir, "visual-evidence", id.replace(/[^a-z0-9._-]+/gi, "-"));
-    const profile = join(directory, "chromium-profile");
     await mkdir(directory, { recursive: true });
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
+      const browserProfile = await mkdtemp(join(directory, `.chromium-${name}-`));
       await unlink(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
       try {
-        await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=2000", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+        await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", `--user-data-dir=${browserProfile}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
       } catch (error) {
         if (!/timed out/i.test(error.message)) throw error;
         try { await access(path); } catch { throw error; }
-      }
+      } finally { await rm(browserProfile, { recursive: true, force: true }); }
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
     return evidence;

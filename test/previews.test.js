@@ -39,7 +39,10 @@ test("starts a named preview with isolated port variables and captures desktop a
     assert.deepEqual(evidence.map(({ viewport }) => viewport), [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
     assert.deepEqual(evidence.map(({ mediaType, mediaKind }) => ({ mediaType, mediaKind })), [{ mediaType: "image/png", mediaKind: "image" }, { mediaType: "image/png", mediaKind: "image" }]);
     assert.equal(captures.length, 2);
-    assert.equal(captures.every(({ args }) => args.includes("--virtual-time-budget=2000") && args.includes("--run-all-compositor-stages-before-draw")), true);
+    const profiles = captures.map(({ args }) => args.find((arg) => arg.startsWith("--user-data-dir=")).slice("--user-data-dir=".length));
+    assert.equal(captures.every(({ args }) => !args.some((arg) => arg.startsWith("--virtual-time-budget=")) && args.includes("--run-all-compositor-stages-before-draw")), true);
+    assert.notEqual(profiles[0], profiles[1]);
+    await Promise.all(profiles.map((profile) => assert.rejects(readFile(profile), /ENOENT|EISDIR/)));
     assert.equal(manager.stop("ticket-1"), true);
   } finally { await rm(root, { recursive: true, force: true }); await rm(dataDir, { recursive: true, force: true }); }
 });
