@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectApp, repoRoot } from "../scripts/inspect.js";
 import { runNav } from "../scripts/nav.mjs";
 import { runSeed } from "../scripts/seed.mjs";
-import { runTests } from "../scripts/test.mjs";
+import { runNode, runTests } from "../scripts/test.mjs";
 import { JsonStore } from "../src/store.js";
 import { writeSeed } from "./helpers.js";
 
@@ -14,6 +15,20 @@ function capture() {
   const chunks = [];
   return { stdout: { write(value) { chunks.push(value); } }, text: () => chunks.join("") };
 }
+
+test("test runner treats a signal-terminated child check as a failure", async () => {
+  const child = new EventEmitter();
+  const code = await runNode(["--check", "fixture.js"], repoRoot, {
+    spawnProcess(command, args, options) {
+      assert.equal(command, process.execPath);
+      assert.deepEqual(args, ["--check", "fixture.js"]);
+      assert.equal(options.cwd, repoRoot);
+      queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+      return child;
+    }
+  });
+  assert.equal(code, 1);
+});
 
 test("nav reads API, UI, CLI, and stages from source", async () => {
   const app = await inspectApp();
