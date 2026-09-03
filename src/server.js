@@ -30,6 +30,7 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
+import { projectInspection } from "./inspection.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -2064,6 +2065,11 @@ async function api(request, response, url) {
   if (request.method === "GET" && compactTicketRun) {
     const state = store.read();
     return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
+  }
+  const ticketInspection = url.pathname.match(/^\/api\/tickets\/([^/]+)\/inspection$/);
+  if (request.method === "GET" && ticketInspection) {
+    const state = store.read();
+    return json(response, 200, projectInspection(ticketRun(state, decodeURIComponent(ticketInspection[1])), { revision: state.revision }));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
     const models = await harness.models("openai-codex");

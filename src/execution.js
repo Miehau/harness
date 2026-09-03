@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
+import { inspectionFocus } from "./inspection.js";
 
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],
@@ -188,8 +189,28 @@ export function markRunCancelled(run, at = new Date().toISOString()) {
   run.status = "cancelled";
   run.cancelledAt = at;
   run.checkpoint = null;
+  for (const step of flattenSteps(run.plan)) {
+    if (!inFlightStepStatusSet.has(step.status)) continue;
+    const active = run.activeRuns?.[step.id] || {};
+    const activity = active.activity || {};
+    step.attempts ||= [];
+    step.attempts.push({
+      runId: active.runId || null,
+      attemptId: active.attemptId || `attempt-${step.attempts.length + 1}`,
+      startedAt: active.startedAt || at,
+      completedAt: at,
+      status: "cancelled",
+      lastEvent: activity.lastEvent || active.lastEvent || "",
+      lastEventAt: activity.lastEventAt || active.lastEventAt || null,
+      events: activity.events || [],
+      activityGroups: activity.groups || [],
+      rawOutput: activity.rawOutput || "",
+      sessionFile: active.sessionFile || step.sessionFile || null
+    });
+    if (active.sessionFile) step.sessionFile = active.sessionFile;
+    step.status = "cancelled";
+  }
   run.activeRuns = {};
-  for (const step of flattenSteps(run.plan)) if (inFlightStepStatusSet.has(step.status)) step.status = "cancelled";
   const stage = run.stages.find((item) => item.status === "active");
   if (stage) Object.assign(stage, { status: "blocked", summary: "Run cancelled" });
 }
@@ -499,6 +520,7 @@ export function artifactMetadata(artifact) {
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
+  clone.inspectionFocus = inspectionFocus(run);
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
   for (const stage of clone.stages || []) if (stage.activity) delete stage.activity.prompts;
   for (const step of flattenSteps(clone.plan)) {

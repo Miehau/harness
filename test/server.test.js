@@ -27,6 +27,37 @@ test("GET /api/health and compact run omit artifact content", async () => {
   });
 });
 
+test("ticket inspection API returns the canonical compact projection and state only adds focus metadata", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{
+      id: "build", title: "Build /Users/person/private with ghp_0123456789abcdefghijklmnop", status: "running", permission: "write", writeScope: "src/build.js",
+      expectedArtifacts: ["build.md"], acceptanceCriteria: ["Works"]
+    }] });
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      stages: [{ id: "implement", title: "Implement", status: "active", summary: "Implementing Build" }],
+      activeRuns: { build: { runId: "worker-1", startedAt: "2026-09-03T10:00:00.000Z", lastEvent: "Editing implementation" } }
+    });
+    const result = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/inspection`);
+    assert.equal(result.status, 200);
+    assert.equal(result.json.version, 1);
+    assert.equal(result.json.ticketId, id);
+    assert.equal(result.json.revision > 0, true);
+    assert.equal(result.json.focus.workerId, "worker:build");
+    assert.equal(result.json.attempts[0].resources.output.state, "not_yet_available");
+    assert.equal(JSON.stringify(result.json).includes("rawOutput"), false);
+    assert.equal(JSON.stringify(result.json).includes("/Users/person"), false);
+    assert.equal(JSON.stringify(result.json).includes("ghp_0123456789abcdefghijklmnop"), false);
+
+    const state = await invoke(daemon, "GET", "/api/state");
+    assert.deepEqual(state.json.ticketRuns[id].inspectionFocus, {
+      version: 1, stageId: "stage:implement", workerId: "worker:build",
+      attemptId: "attempt:build:active-worker-1", reason: "active"
+    });
+    assert.equal("stages" in state.json.ticketRuns[id].inspectionFocus, false);
+  });
+});
+
 test("ticket selection returns a compact acknowledgment", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon);
