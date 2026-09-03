@@ -186,15 +186,20 @@ test("bounded repository failure output retains both context and the final faili
   try {
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
     await writeFile(join(root, "verify.mjs"), `
-      console.log("BEGIN-CONTEXT:" + "a".repeat(12000));
-      console.error("FINAL-FAILURE: assertion 237 failed");
+      console.log("BEGIN-CONTEXT:" + "a".repeat(6000));
+      console.log("not ok 237 - preserves the proof record");
+      console.log("  location: 'test/proof.test.js:42:1'");
+      console.log("  error: 'Expected 200 but received 400'");
+      console.log("b".repeat(12000));
       process.exit(1);
     `);
     const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
     assert.equal(result.status, "failed");
     assert.match(result.output, /BEGIN-CONTEXT/);
     assert.match(result.output, /characters omitted/);
-    assert.match(result.output, /FINAL-FAILURE: assertion 237 failed/);
+    assert.match(result.output, /Failure highlights/);
+    assert.match(result.output, /not ok 237 - preserves the proof record/);
+    assert.match(result.output, /test\/proof\.test\.js:42:1/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

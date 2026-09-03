@@ -210,6 +210,16 @@ function eventText(value) {
   return `${text.slice(0, half)}\n\n[${text.length - (half * 2)} characters omitted]\n\n${text.slice(-half)}`;
 }
 
+function failureHighlights(output) {
+  const lines = String(output || "").split(/\r?\n/);
+  const selected = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (!/^(?:not ok\b|FAIL(?:ED)?\b|\s+(?:location|failureType|error|code|name|expected|actual|operator):)/i.test(lines[index])) continue;
+    selected.push(lines[index].slice(0, 500));
+  }
+  return [...new Set(selected)].slice(-40).join("\n").slice(-4500);
+}
+
 function safeEvent(event) {
   if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     return { type: "text_delta", delta: event.assistantMessageEvent.delta, label: "Writing the response" };
@@ -662,7 +672,9 @@ export class PiHarness {
         return { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
       } catch (error) {
         if (signal?.aborted) throw error;
-        const output = eventText(redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment));
+        const rawOutput = redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment);
+        const highlights = failureHighlights(rawOutput);
+        const output = eventText(`${rawOutput}${highlights ? `\n\nFailure highlights:\n${highlights}` : ""}`);
         if (!attempt && transientRepositoryCheckFailure(output)) continue;
         return { status: "failed", command, summary: `${command} failed.`, output, evidence: [], durationMs: Date.now() - startedAt };
       }
