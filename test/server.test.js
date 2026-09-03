@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
+import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
 import { auditHarnessWriteScopes, closeSseClients, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
@@ -556,6 +557,38 @@ test("write-scope enforcement attributes repository-check side effects to the ch
   }, { harness });
 });
 
+test("proof routes keep archived attempts and review rounds distinct", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", acceptanceCriteria: ["Works"] }] });
+    const step = plan.nodes[0];
+    step.attempts = [{ attemptId: "attempt-2", verification: { checks: { status: "passed", output: "new check" } }, diff: { available: true, patch: "new diff", files: ["new.js"] } }];
+    const id = await seedRun(daemon, {
+      plan,
+      archivedAttempts: [{ stepId: "build", attemptId: "attempt-1", verification: { checks: { status: "passed", output: "old check" } }, diff: { available: true, patch: "old diff", files: ["old.js"] } }],
+      finalChecks: { status: "passed", output: "new final" },
+      finalCheckHistory: { "final-review-1": { status: "passed", output: "old final" }, "final-review-2": { status: "passed", output: "new final" } },
+      reviews: [
+        { round: 1, reviewId: "final-review-1", finalChecks: { status: "passed", output: "old final" }, diff: { available: true, patch: "old final diff", files: ["old.js"] } },
+        { round: 2, reviewId: "final-review-2", finalChecks: { status: "passed", output: "new final" }, diff: { available: true, patch: "new final diff", files: ["new.js"] } }
+      ]
+    });
+
+    const oldAttempt = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-1`);
+    const newAttempt = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2`);
+    const oldDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=attempt&stepId=build&attemptId=attempt-1`);
+    const newDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=attempt&stepId=build&attemptId=attempt-2`);
+    const oldFinal = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-1`);
+    const newFinal = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-2`);
+
+    assert.equal(oldAttempt.json.output, "old check");
+    assert.equal(newAttempt.json.output, "new check");
+    assert.equal(oldDiff.json.patch, "old diff");
+    assert.equal(newDiff.json.patch, "new diff");
+    assert.equal(oldFinal.json.output, "old final");
+    assert.equal(newFinal.json.output, "new final");
+  });
+});
+
 test("final proof checkpoint exposes durable review metadata", async () => {
   await withDaemon(async (daemon) => {
     const id = await seedRun(daemon, {
@@ -576,6 +609,67 @@ test("final proof checkpoint exposes durable review metadata", async () => {
     const legacyApproval = await invoke(daemon, "POST", "/api/tickets/" + encodeURIComponent(id) + "/context/approve");
     assert.equal(legacyApproval.status, 400);
     assert.match(legacyApproval.json.error, /Product-context proposal not found/);
+  });
+});
+
+test("proof eligibility blocks both the human step and final-proof gates", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", acceptanceCriteria: ["Works"] }] });
+    const proofMap = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+    const id = await seedRun(daemon, { plan, proofMap, status: "awaiting_step_review", checkpoint: { id: "step-proof", kind: "step_review", stepId: "build" } });
+    const step = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
+    assert.equal(step.status, 400);
+    assert.match(step.json.error, /Proof gate blocked: .*criterion-/);
+
+    await daemon.store.update((state) => {
+      const run = state.ticketRuns[id];
+      run.status = "awaiting_evidence_review";
+      run.checkpoint = { id: "final-proof", kind: "evidence_review" };
+    });
+    const final = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(final.status, 400);
+    assert.match(final.json.error, /Proof gate blocked: .*criterion-/);
+
+    const correction = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/changes`, { body: { feedback: "Recheck proof" } });
+    assert.equal(correction.status, 400);
+    assert.match(correction.json.error, /Identify at least one affected criterion/);
+  });
+});
+
+test("final proof approval rejects pathless visual-evidence locators", async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "accepted", acceptanceCriteria: ["Visible"] }] });
+    const map = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+    const artifacts = [{ id: "screen", kind: "visual-evidence", name: "screen.png", content: "inline capture" }];
+    const proofMap = applyProofReports(map, [{
+      criterionId: map.criteria[0].id, status: "verified", evidence: [{ type: "media", artifactId: "screen" }]
+    }], { plan, artifacts, proofStorageRoot: dataDir }, { reportedAt: "2026-09-10T11:00:00.000Z" });
+    assert.equal(proofMap.criteria[0].current.status, "not_yet_verified");
+
+    const id = await seedRun(daemon, {
+      plan, artifacts, proofMap, proofStorageRoot: dataDir, status: "awaiting_evidence_review",
+      checkpoint: { id: "final-proof", kind: "evidence_review" }
+    });
+    const approval = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(approval.status, 400);
+    assert.match(approval.json.error, /status_not_yet_verified/);
+  });
+});
+
+test("plan approval snapshots proof once and exposes the compatibility projection", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+    const id = await seedRun(daemon, {
+      plan, status: "awaiting_approval",
+      checkpoint: { id: "plan-proof", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: {} });
+    assert.equal(approved.status, 202);
+    const saved = daemon.store.read().ticketRuns[id];
+    assert.equal(saved.proofMap.criteria.length, 1);
+    const projected = await invoke(daemon, "GET", `/api/tickets/${id}/run`);
+    assert.equal(projected.json.proofMap.compatibility, false);
+    assert.equal(projected.json.proofMap.criteria[0].text, "Works");
   });
 });
 

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
@@ -131,11 +132,13 @@ export class PreviewManager {
     const preview = this.active.get(id);
     if (!preview) throw new Error("Preview is not running");
     const directory = join(this.dataDir, "visual-evidence", id.replace(/[^a-z0-9._-]+/gi, "-"));
-    await mkdir(directory, { recursive: true });
+    // Each capture owns its files so artifacts saved by prior review rounds remain
+    // immutable even after a correction triggers re-verification.
+    const captureDirectory = join(directory, "captures", randomUUID());
+    await mkdir(captureDirectory, { recursive: true });
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
-      const path = join(directory, `${name}.png`);
-      await unlink(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
+      const path = join(captureDirectory, `${name}.png`);
       try {
         await this.exec(process.execPath, [screenshotScript, "--url", preview.public.url, "--out", path, "--width", String(width), "--height", String(height), "--wait-ms", "1200", "--click", activeStepSelector], {
           env: { ...process.env, ...source }, timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024

@@ -57,6 +57,20 @@ test("keeps only the latest relevant artifact for each accepted step", () => {
   assert.equal(packet.artifacts[1].content, "new result");
 });
 
+test("keeps every visual-evidence artifact ID available to reviewers", () => {
+  const packet = compactReviewPacket({
+    plan,
+    artifacts: [
+      { id: "screen-a", kind: "visual-evidence", stepId: "search", name: "desktop.png", path: "/proof/desktop.png" },
+      { id: "screen-b", kind: "visual-evidence", stepId: "search", name: "mobile.png", path: "/proof/mobile.png" },
+      { id: "video-a", kind: "visual-evidence", stepId: "search", name: "walkthrough.webm", path: "/proof/walkthrough.webm" }
+    ]
+  });
+
+  assert.deepEqual(packet.artifacts.map((artifact) => artifact.id), ["screen-a", "screen-b", "video-a"]);
+  assert.deepEqual(packet.media.map((artifact) => artifact.id), ["screen-a", "screen-b", "video-a"]);
+});
+
 test("preserves every planned outcome and prioritizes essential artifacts", () => {
   const manySteps = { nodes: Array.from({ length: 30 }, (_, index) => ({ id: `step-${index}`, title: `Step ${index}`, acceptanceCriteria: [`Criterion ${index}`] })) };
   const artifacts = [
@@ -69,6 +83,26 @@ test("preserves every planned outcome and prioritizes essential artifacts", () =
   assert.equal(packet.plan.outcomes.length, 30);
   assert.equal(packet.plan.outcomes[29].acceptanceCriteria[0], "Criterion 29");
   assert.equal(packet.artifacts[0].name, "requirements.md");
+});
+
+test("keeps the ordered proof projection, locators, and retained history in the packet", () => {
+  const proofMap = {
+    version: 1, approvedAt: "2026-09-10T10:00:00.000Z", compatibility: false,
+    eligibility: { eligible: false, blockingReasons: [{ criterionId: "criterion-2", message: "Criterion evidence is not currently valid." }] },
+    criteria: [
+      { id: "criterion-1", stepId: "search", stepTitle: "Implement search", stepRequired: true, index: 0, text: "Matching tickets are returned", current: { status: "verified", evidenceValidity: "valid", evidence: [{ type: "check", scope: "step", stepId: "search", validity: "valid" }] }, history: [] },
+      { id: "criterion-2", stepId: "search", stepTitle: "Implement search", stepRequired: true, index: 1, text: "Invalid input is rejected", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "diff", scope: "step", stepId: "search", validity: "valid" }] }, history: [{ status: "verified", evidenceValidity: "valid", evidence: [] }] }
+    ]
+  };
+  const packet = compactReviewPacket({ plan, proofMap });
+
+  assert.deepEqual(packet.proofMap.criteria.map((criterion) => [criterion.id, criterion.text, criterion.current.evidence[0]?.type, criterion.history.length]), [
+    ["criterion-1", "Matching tickets are returned", "check", 0],
+    ["criterion-2", "Invalid input is rejected", "diff", 1]
+  ]);
+  assert.equal(packet.proofMap.eligibility.blockingReasons[0].criterionId, "criterion-2");
+  proofMap.criteria[0].current.status = "failed";
+  assert.equal(packet.proofMap.criteria[0].current.status, "verified");
 });
 
 test("bounds canonical diff and deterministic check output", () => {
