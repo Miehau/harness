@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 const evidenceMediaTypes = new Map([
@@ -21,6 +21,16 @@ export function safeName(value) {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[-.]+|[-.]+$/g, "") || "artifact";
+}
+
+export async function cleanupLegacyReviewArtifacts(cwd) {
+  const removed = [];
+  for (const entry of await readdir(cwd, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^review-fixes-round-\d+\.md$/.test(entry.name)) continue;
+    await unlink(join(cwd, entry.name));
+    removed.push(entry.name);
+  }
+  return removed.sort();
 }
 
 export function artifactPathForOpen(artifacts, id, dataDir) {

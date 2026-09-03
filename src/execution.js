@@ -4,7 +4,7 @@ import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restart
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 
 export const visualEvidencePolicy = "contract-only-v1";
-export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. Do not create them in the repository. Remove any existing root-level files with that exact generated naming pattern while preserving all product files.";
+export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. The harness removes its legacy copies; do not create or restore them in the repository.";
 
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],

@@ -6,7 +6,7 @@ import { isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
@@ -1744,6 +1744,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
+  const removedReviewArtifacts = await cleanupLegacyReviewArtifacts(started.workspace.cwd);
   const activity = captureStageActivity(ticketId, "verify", started.runId);
   const implementationTree = await snapshotTree(started.workspace.cwd);
   const implementationDiff = await diffTrees(started.workspace.cwd, started.baselineTree, implementationTree);
@@ -1755,6 +1756,9 @@ async function finalReviewLoop(ticketId, signal) {
     run.status = "reviewing";
     run.checkpoint = null;
     run.reviews ||= [];
+    if (removedReviewArtifacts.length) (run.harnessMigrations ||= []).push({
+      at: new Date().toISOString(), kind: "legacy-review-artifact-cleanup", files: removedReviewArtifacts
+    });
   });
   const pendingFix = pendingReviewFix(started.reviews);
   if (pendingFix) {

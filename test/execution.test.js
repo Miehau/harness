@@ -344,7 +344,7 @@ test("final-review fixes keep audit prose out of the product repository", () => 
   assert.match(step.prompt, /Cleanup can miss a late child/);
   assert.match(step.prompt, /external audit records, not product artifacts/);
   assert.match(step.prompt, /Fix the general invariant/);
-  assert.match(finalReviewRepositoryBoundary, /Remove any existing root-level files with that exact generated naming pattern/);
+  assert.match(finalReviewRepositoryBoundary, /harness removes its legacy copies/);
 });
 
 test("an interrupted final-review fix resumes from persisted findings", () => {
