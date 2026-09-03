@@ -1696,6 +1696,10 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
     let checks = current.merge?.checks || null;
     let change = resumedChange;
     if ((await unmergedPaths(current.workspace.cwd)).length) await rebase();
+    if (current.merge?.externalActionPending === "push_feedback_revision") {
+      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
+    }
     if (!change) {
       if (current.recovery?.kind === "delivery" && /failed/i.test(current.lastError || "")) {
         const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
@@ -1745,9 +1749,14 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       if (feedback.length) {
         await fixRemoteFeedback(ticketId, feedback, signal);
         await rebase();
+        await update((state) => {
+          const merge = ticketRun(state, ticketId).merge;
+          merge.feedbackIds.push(...feedback.map((item) => item.id));
+          merge.externalActionPending = "push_feedback_revision";
+        });
         await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
         await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
-        await update((state) => { ticketRun(state, ticketId).merge.feedbackIds.push(...feedback.map((item) => item.id)); });
+        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
         continue;
       }
       if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
