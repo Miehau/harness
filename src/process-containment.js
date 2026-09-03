@@ -271,15 +271,9 @@ export class ProcessContainment {
   async #bounded(operation, label, deadlineAt) {
     const remaining = deadlineAt - this.now();
     if (remaining <= 0) throw new Error(`Cleanup deadline exceeded before ${label}`);
-    let timer;
-    let doReject;
-    const timeout = new Promise((_, reject) => {
-      doReject = reject;
-      timer = setTimeout(() => reject(new Error(`Cleanup deadline exceeded during ${label}`)), remaining);
-    });
-    timeout.catch(() => {});
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`Cleanup deadline exceeded during ${label}`)), remaining).unref?.()).catch(() => {});
     try { return await Promise.race([Promise.resolve().then(operation), timeout]); }
-    finally { clearTimeout(timer); }
+    finally {}
   }
 
   #unresolved(identity, reason, error) {
