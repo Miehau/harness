@@ -154,6 +154,21 @@ test("accept --auto enables automatic continuation at a review checkpoint", asyn
   assert.deepEqual(called.body, { auto: true });
 });
 
+test("approve-proof exposes the dashboard final proof action", async () => {
+  let called;
+  await runCli(["approve-proof", "ticket-1"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ accepted: true }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/evidence/approve");
+  assert.deepEqual(called.body, {});
+});
+
 test("profile overrides one stage on a stopped run", async () => {
   let called;
   await runCli(["profile", "verification", "gpt-5.6-terra", "high", "ticket-1"], {

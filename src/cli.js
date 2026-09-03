@@ -13,6 +13,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   resume [ticketId]                 Resume paused, interrupted, or failed work
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
+  approve-proof [ticketId]          Approve final proof and continue delivery
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
   cancel [ticketId]
@@ -162,6 +163,12 @@ async function handleCommand(command, rest, ctx) {
     const auto = rest.includes("--auto");
     const id = await resolveTicketId(rest.find((arg) => arg !== "--auto"), ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/approve", { body: { auto }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "approve-proof") {
+    const id = await resolveTicketId(rest[0], ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/approve", { body: {}, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
