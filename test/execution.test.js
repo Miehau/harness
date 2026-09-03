@@ -133,6 +133,20 @@ test("resuming review refreshes canonical findings from durable raw reviewer out
   assert.deepEqual(refreshedReviewFindings(review), distinct);
 });
 
+test("resuming a proof correction restores the operator's canonical numbered scope", () => {
+  const feedback = "Proof issues. (1) Remove the blank pill. (2) Fix mobile clipping. (3) Regenerate ticket screenshots.";
+  const review = {
+    reviews: [{ role: "requirements", findings: [{ severity: "high", category: "accessibility", claim: "The mobile row is clipped", evidence: [{ file: "public/styles.css", line: 80 }] }] }],
+    actionableFindings: [
+      { severity: "high", category: "accessibility", claim: "The mobile row is clipped", evidence: [{ file: "public/styles.css", line: 80 }] },
+      { severity: "blocking", category: "human-proof-review", claim: feedback }
+    ]
+  };
+  assert.deepEqual(refreshedReviewFindings(review).map((finding) => finding.claim), [
+    "Remove the blank pill.", "Fix mobile clipping.", "Regenerate ticket screenshots."
+  ]);
+});
+
 test("review refresh detects findings removed by canonicalization", () => {
   const generic = { severity: "high", category: "tests", claim: "The required suite is not green: the gate reports failures", evidence: [{ file: ".agent-plan/verify.mjs", line: 8 }] };
   const concrete = { severity: "medium", category: "tests", claim: "The producedAt assertion is stale", evidence: [{ file: "test/proof-map.test.js", line: 85 }] };

@@ -546,8 +546,10 @@ export function actionableFindings(reviews) {
 
 export function refreshedReviewFindings(review = {}) {
   if (!Array.isArray(review.reviews) || !review.reviews.length) return review.actionableFindings || [];
-  const humanFindings = (review.actionableFindings || []).filter((finding) => finding.category === "human-proof-review");
-  return actionableFindings([...review.reviews, { findings: humanFindings }]);
+  const humanFindings = (review.actionableFindings || [])
+    .filter((finding) => finding.category === "human-proof-review")
+    .flatMap((finding) => humanProofFindings(finding.claim));
+  return humanFindings.length ? humanFindings : actionableFindings(review.reviews);
 }
 
 export function reviewScopeExpanded(previous = [], refreshed = []) {
