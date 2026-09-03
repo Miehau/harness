@@ -60,14 +60,10 @@ export function repositoryCheckReview(checks) {
 }
 
 export function reconcileVisualChecks(checks, evidence = [], { required = false, requiredVideo = false } = {}) {
-  checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
+  checks.evidence = [...new Map((checks.evidence || []).map((item) => [item.path, item])).values()];
+  checks.previewEvidence = [...new Map(evidence.map((item) => [item.path, item])).values()];
   const hasImage = checks.evidence.some((item) => item.mediaKind === "image");
   const hasVideo = checks.evidence.some((item) => item.mediaKind === "video");
-  if (checks.failureKind === "visual-evidence" && hasImage && (!requiredVideo || hasVideo)) {
-    checks.status = "passed";
-    checks.summary = `${checks.command} passed with ${checks.evidence.length} visual artifact${checks.evidence.length === 1 ? "" : "s"}.`;
-    delete checks.failureKind;
-  }
   if (required && (!hasImage || (requiredVideo && !hasVideo))) Object.assign(checks, {
     status: "failed",
     failureKind: "visual-evidence",
@@ -211,16 +207,18 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
   }
   const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
   reconcileVisualChecks(checks, evidence, { required, requiredVideo });
-  if (preview || checks.evidence.length) await update((state) => {
+  if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
     if (preview) run.previews[previewId] = preview;
-    for (const item of checks.evidence) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
-      id: randomUUID(), name: item.name, path: item.path, kind: "visual-evidence", stageId: "verify", stepId,
-      mediaType: item.mediaType, mediaKind: item.mediaKind,
-      summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
-      createdAt: new Date().toISOString()
-    });
+    for (const [kind, items] of [["visual-evidence", checks.evidence], ["preview-diagnostic", checks.previewEvidence]]) {
+      for (const item of items) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
+        id: randomUUID(), name: item.name, path: item.path, kind, stageId: "verify", stepId,
+        mediaType: item.mediaType, mediaKind: item.mediaKind,
+        summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
+        createdAt: new Date().toISOString()
+      });
+    }
   });
   return checks;
 }

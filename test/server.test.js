@@ -32,7 +32,7 @@ test("daemon shutdown ends open event streams before closing the server", () => 
   assert.equal(clients.size, 0);
 });
 
-test("harness screenshots satisfy a passing check that lacked its own visual artifact", () => {
+test("preview diagnostics cannot satisfy missing verification-contract evidence", () => {
   const checks = reconcileVisualChecks({
     status: "failed",
     failureKind: "visual-evidence",
@@ -44,10 +44,11 @@ test("harness screenshots satisfy a passing check that lacked its own visual art
     { name: "desktop.png", path: "/proof/desktop.png", mediaKind: "image" },
     { name: "mobile.png", path: "/proof/mobile.png", mediaKind: "image" }
   ], { required: true });
-  assert.equal(checks.status, "passed");
-  assert.equal(checks.failureKind, undefined);
-  assert.match(checks.summary, /passed with 2 visual artifacts/);
-  assert.deepEqual(repositoryCheckReview(checks).findings, []);
+  assert.equal(checks.status, "failed");
+  assert.equal(checks.failureKind, "visual-evidence");
+  assert.deepEqual(checks.evidence, []);
+  assert.equal(checks.previewEvidence.length, 2);
+  assert.equal(repositoryCheckReview(checks).findings[0].category, "evidence");
 });
 
 test("resuming a persisted visual step audits the newly available contract scope", () => {
