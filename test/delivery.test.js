@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, rebaseOntoRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
+import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, pushTicketBranch, rebaseOntoRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
 
 function response(value) { return { ok: true, text: async () => JSON.stringify(value) }; }
 
@@ -80,4 +80,10 @@ test("rebase conflict resolution is scoped and continues automatically", async (
 test("unmerged paths expose an interrupted rebase before delivery correction", async () => {
   const execImpl = async () => ({ stdout: "src/server.js\ntest/server.test.js\n" });
   assert.deepEqual(await unmergedPaths("/repo", execImpl), ["src/server.js", "test/server.test.js"]);
+});
+
+test("ticket branches use a lease when reconciliation rewrites history", async () => {
+  let args;
+  await pushTicketBranch("/repo", "ticket", async (_file, argv) => { args = argv; return { stdout: "" }; });
+  assert.deepEqual(args, ["push", "--force-with-lease", "--set-upstream", "origin", "ticket"]);
 });

@@ -178,7 +178,7 @@ export async function remoteContext(cwd, execImpl = exec) {
 }
 
 export async function pushTicketBranch(cwd, branch, execImpl = exec) {
-  await git(cwd, ["push", "--set-upstream", "origin", branch], execImpl);
+  await git(cwd, ["push", "--force-with-lease", "--set-upstream", "origin", branch], execImpl);
 }
 
 export async function unmergedPaths(cwd, execImpl = exec) {
