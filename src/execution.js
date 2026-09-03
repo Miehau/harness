@@ -455,7 +455,7 @@ export function actionableFindings(reviews) {
     });
 }
 
-export const MAX_CORRECTION_ROUNDS = 3;
+export const MAX_CORRECTION_ROUNDS = 6;
 
 export function findingsFingerprint(findings = []) {
   return actionableFindings([{ findings }])
