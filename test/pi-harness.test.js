@@ -230,7 +230,10 @@ test("prefers the repository verification contract and discovers image and video
     ]);
     const images = await harness.evidenceImages(result.evidence);
     assert.equal(images.length, 1);
-    assert.equal(images[0].source.mediaType, "image/png");
+    assert.equal(images[0].mimeType, "image/png");
+    assert.equal(images[0].type, "image");
+    assert.equal(typeof images[0].data, "string");
+    assert.equal("source" in images[0], false);
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "passed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), `

@@ -684,11 +684,8 @@ export class PiHarness {
   async evidenceImages(evidence = []) {
     return Promise.all(evidence.filter((item) => item.mediaKind === "image").map(async ({ path, mediaType }) => ({
       type: "image",
-      source: {
-        type: "base64",
-        mediaType,
-        data: (await readFile(path)).toString("base64")
-      }
+      data: (await readFile(path)).toString("base64"),
+      mimeType: mediaType
     })));
   }
 
