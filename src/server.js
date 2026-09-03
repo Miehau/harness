@@ -2040,7 +2040,7 @@ async function api(request, response, url) {
     return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
-    const models = await harness.models();
+    const models = await harness.models("openai-codex");
     const providers = [...new Set(models.map((model) => model.provider).filter(Boolean))];
     return json(response, 200, {
       models,

@@ -162,14 +162,20 @@ test("API token rejects unauthenticated /api calls", async () => {
   }, { apiToken: "secret" });
 });
 
-test("GET /api/models reports the real provider instead of a hardcoded Codex label", async () => {
+test("GET /api/models lists OpenAI subscription models", async () => {
+  const harness = {
+    ...mockHarness(),
+    async models(provider) {
+      assert.equal(provider, "openai-codex");
+      return [{ id: "gpt-test", name: "Test", provider }];
+    }
+  };
   await withDaemon(async (daemon) => {
     const result = await invoke(daemon, "GET", "/api/models");
     assert.equal(result.status, 200);
-    assert.equal(result.json.provider, "pi-test");
-    assert.equal(result.json.models[0].provider, "pi-test");
-    assert.notEqual(result.json.provider, "openai-codex");
-  });
+    assert.equal(result.json.provider, "openai-codex");
+    assert.equal(result.json.models[0].provider, "openai-codex");
+  }, { harness });
 });
 
 test("binding a skill creates run.checkpoint and continue resumes the ticket", async () => {
