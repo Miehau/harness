@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { auditHarnessWriteScopes, closeSseClients, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
+import { auditHarnessWriteScopes, closeSseClients, createDaemon, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
 import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
@@ -128,6 +129,28 @@ test("GET /api/health and compact run omit artifact content", async () => {
     assert.equal(state.json.ticketRuns[id].artifacts[0].name, "design.md");
     assert.equal(state.json.ticketRuns[id].artifacts[0].content, undefined);
   });
+});
+
+test("daemon shutdown bounds an unresponsive preview cleanup", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-shutdown-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-shutdown-cwd-"));
+  const daemon = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness(), lifecycleCleanupTimeoutMs: 20, shutdownTimeoutMs: 20 });
+  try {
+    daemon.previews.active.set("shutdown-preview", {
+      child: { exitCode: null },
+      public: { port: 47821, status: "running", cleanup: null },
+      containment: { cleanup: async () => new Promise(() => {}) },
+      cleanup: null
+    });
+    daemon.previews.ports.add(47821);
+    const started = Date.now();
+    await daemon.close({ exit: false });
+    assert.ok(Date.now() - started < 1_000, "shutdown must not await an unresponsive preview cleanup");
+  } finally {
+    await daemon.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("public run state preserves actionable process cleanup evidence", async () => {

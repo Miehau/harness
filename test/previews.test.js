@@ -240,6 +240,24 @@ test("redacts ownership tokens from failed preview output", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("routes a later preview stop through the daemon cleanup observer", async () => {
+  const manager = new PreviewManager({});
+  const triggers = [];
+  manager.active.set("ticket:step", {
+    child: { exitCode: null }, public: { port: 47821, status: "running", cleanup: null }, cleanup: null,
+    containment: { cleanup: async () => assert.fail("the server observer owns durable cleanup") },
+    onCleanup: async (trigger) => {
+      triggers.push(trigger);
+      return { executionId: "check-1", outcome: "complete", triggers: [trigger] };
+    }
+  });
+  manager.ports.add(47821);
+  assert.equal(manager.stopMatching("ticket:", { trigger: "preview-stop", reason: "run-cancelled" }), 1);
+  await manager.settleMatching("ticket:", 50);
+  assert.deepEqual(triggers, [{ trigger: "preview-stop", reason: "run-cancelled", previewId: "ticket:step" }]);
+  assert.equal(manager.list().length, 0);
+});
+
 test("stopAll delegates every preview process to containment", async () => {
   const manager = new PreviewManager({});
   const cleanup = [];

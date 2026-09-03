@@ -79,15 +79,28 @@ function cleanupFailure(containment, error) {
 }
 
 function cleanupPreview(preview, trigger) {
-  preview.cleanup ||= Promise.resolve()
-    .then(() => preview.containment.cleanup(trigger))
+  // Every lifecycle caller reaches containment so it can retain its trigger,
+  // while containment itself guarantees that only its first caller signals.
+  const observed = Promise.resolve()
+    .then(() => preview.onCleanup ? preview.onCleanup(trigger) : preview.containment.cleanup(trigger))
     .catch((error) => cleanupFailure(preview.containment, error))
     .then((record) => {
       preview.public.cleanup = record;
       preview.public.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
       return record;
     });
-  return preview.cleanup;
+  // Containment deduplicates signaling; callers still need their own observed
+  // promise so a later exit/shutdown trigger reaches durable persistence.
+  if (!preview.cleanup) preview.cleanup = observed;
+  return observed;
+}
+
+function settledWithin(promise, timeoutMs) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); })
+  ]).finally(() => clearTimeout(timer));
 }
 
 export class PreviewManager {
@@ -102,6 +115,7 @@ export class PreviewManager {
     this.probeTimeoutMs = probeTimeoutMs;
     this.captureTimeoutMs = captureTimeoutMs;
     this.active = new Map();
+    this.pending = new Map();
     this.ports = new Set();
   }
 
@@ -113,7 +127,7 @@ export class PreviewManager {
     throw new Error("Could not allocate a unique preview port");
   }
 
-  async ensure({ id, cwd, seedState = null, containment } = {}) {
+  async ensure({ id, cwd, seedState = null, containment, onCleanup = null } = {}) {
     const existing = this.active.get(id);
     if (existing?.child.exitCode === null && existing.cwd === cwd && !seedState) return existing.public;
     // A seeded preview is a proof fixture for one exact run snapshot. Restart
@@ -166,12 +180,12 @@ export class PreviewManager {
       throw new Error(detail);
     }
     const publicPreview = { id, cwd, command: commandName, port, url, status: "running", cleanup: null, startedAt: new Date().toISOString() };
-    const preview = { child, cwd, containment: previewContainment, get output() { return output; }, public: publicPreview, cleanup: null };
+    const preview = { child, cwd, containment: previewContainment, onCleanup, get output() { return output; }, public: publicPreview, cleanup: null };
     this.active.set(id, preview);
     child.once("exit", () => {
       if (this.active.get(id) === preview) this.active.delete(id);
       this.ports.delete(port);
-      void cleanupPreview(preview, { trigger: "preview-exit", previewId: id });
+      this.trackCleanup(id, cleanupPreview(preview, { trigger: "preview-exit", previewId: id }));
     });
     return publicPreview;
   }
@@ -200,7 +214,15 @@ export class PreviewManager {
     return evidence;
   }
 
-  stop(id) {
+  trackCleanup(id, promise) {
+    this.pending.set(id, promise);
+    promise.finally(() => {
+      if (this.pending.get(id) === promise) this.pending.delete(id);
+    });
+    return promise;
+  }
+
+  stop(id, trigger = { trigger: "preview-stop" }) {
     const preview = this.active.get(id);
     if (!preview) return false;
     this.active.delete(id);
@@ -208,20 +230,31 @@ export class PreviewManager {
     preview.public.status = "stopping";
     // PID-only child.kill is unsafe after process replacement or descendant
     // forks. The containment service rediscoveres the exact owned identities.
-    void cleanupPreview(preview, { trigger: "preview-stop", previewId: id });
+    this.trackCleanup(id, cleanupPreview(preview, { ...trigger, previewId: id }));
     return true;
   }
 
-  stopMatching(prefix) {
+  stopMatching(prefix, trigger) {
     let stopped = 0;
-    for (const id of [...this.active.keys()]) if (id.startsWith(prefix) && this.stop(id)) stopped++;
+    for (const id of [...this.active.keys()]) if (id.startsWith(prefix) && this.stop(id, trigger)) stopped++;
     return stopped;
   }
 
-  stopAll() {
+  stopAll(trigger) {
     let stopped = 0;
-    for (const id of [...this.active.keys()]) if (this.stop(id)) stopped++;
+    for (const id of [...this.active.keys()]) if (this.stop(id, trigger)) stopped++;
     return stopped;
+  }
+
+  async settleMatching(prefix, timeoutMs) {
+    const pending = [...this.pending.entries()]
+      .filter(([id]) => id.startsWith(prefix))
+      .map(([, promise]) => promise);
+    await Promise.all(pending.map((promise) => settledWithin(promise, timeoutMs)));
+  }
+
+  async settleAll(timeoutMs) {
+    await Promise.all([...this.pending.values()].map((promise) => settledWithin(promise, timeoutMs)));
   }
 
   list() { return [...this.active.values()].map((preview) => preview.public); }

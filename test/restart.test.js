@@ -1,6 +1,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { invoke, seedRun, withDaemon } from "./helpers.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDaemon } from "../src/server.js";
+import { mockHarness, invoke, seedRun, withDaemon } from "./helpers.js";
+
+test("startup recovery records interrupted ownership as incomplete rather than successful", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-cleanup-restart-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-cleanup-restart-cwd-"));
+  let first;
+  let restarted;
+  try {
+    first = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness() });
+    const id = await seedRun(first, {
+      cleanup: {
+        outcome: "running",
+        executions: [{ executionId: "interrupted-worker", outcome: "running", ownership: { tokenPresent: true }, triggers: [] }]
+      }
+    });
+    await first.close({ exit: false });
+    restarted = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness() });
+    const cleanup = restarted.store.read().ticketRuns[id].cleanup;
+    assert.equal(cleanup.outcome, "incomplete");
+    assert.equal(cleanup.executions[0].outcome, "incomplete");
+    assert.ok(cleanup.executions[0].triggers.some(({ trigger }) => trigger === "daemon-restart-recovery"));
+    assert.ok(cleanup.executions[0].unresolved.some(({ reason }) => reason === "restart-ownership-token-unavailable"));
+  } finally {
+    await restarted?.close({ exit: false });
+    await first?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
 
 test("fresh restart keeps a free-text local ticket out of the fixture path", async () => {
   await withDaemon(async (daemon) => {
