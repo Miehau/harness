@@ -56,8 +56,7 @@ async function linuxOwnerUid(pid, procRoot, readFileImpl, directoryStat) {
       const metadata = await directoryStat(`${procRoot}/${pid}`);
       if (Number.isInteger(metadata?.uid) && metadata.uid >= 0) return { uid: metadata.uid };
     } catch (error) {
-      if (["ENOENT", "ESRCH"].includes(error.code)) return null;
-      if (["EACCES", "EPERM"].includes(error.code)) return { unresolved: { pid, reason: "discovery-ownership-observation-failed", error: message(error) } };
+      if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(error.code)) return null;
       throw error;
     }
   }
@@ -65,10 +64,10 @@ async function linuxOwnerUid(pid, procRoot, readFileImpl, directoryStat) {
   try { status = await readFileImpl(`${procRoot}/${pid}/status`, "utf8"); }
   catch (error) {
     if (["ENOENT", "ESRCH"].includes(error.code)) return null;
-    // A protected status file is not positive evidence of foreign ownership.
-    // Keep the PID as unresolved rather than allowing cleanup to claim that no
-    // token-owned process exists without ever observing its ownership.
-    if (["EACCES", "EPERM"].includes(error.code)) return { unresolved: { pid, reason: "discovery-ownership-observation-failed", error: message(error) } };
+    // Same UID is only a cheap prefilter, not ownership evidence. If /proc
+    // denies the token read, this process cannot be attributed and must not
+    // turn an otherwise empty owned cleanup into an unrelated warning.
+    if (["EACCES", "EPERM"].includes(error.code)) return null;
     throw error;
   }
   const match = String(status).match(/^Uid:\s+(\d+)(?:\s+\d+){3}\s*$/m);
@@ -151,19 +150,17 @@ export function createPlatformAdapter({
       const inspected = await Promise.all(entries.map(async (entry) => {
         if (!/^\d+$/.test(entry)) return null;
         const pid = Number(entry);
-        // Token-bearing children inherit the daemon's real UID. A readable
-        // foreign UID is irrelevant, but an unreadable status cannot establish
-        // foreign ownership and must remain durable cleanup uncertainty.
+        // Token-bearing children inherit the daemon's real UID. A same-UID
+        // process still is not attributable until its token is readable.
         const owner = await linuxOwnerUid(pid, procRoot, readFileImpl, directoryStat);
-        if (owner?.unresolved) return { unresolved: owner.unresolved };
         if (owner?.uid !== currentUid) return null;
         try {
           const identity = await linuxIdentity(pid, token, procRoot, readFileImpl);
           return identity?.ownershipToken === token ? { process: identity } : null;
         } catch (error) {
-          if (["EACCES", "EPERM"].includes(error.code)) {
-            return { unresolved: { pid, reason: "discovery-observation-failed", error: message(error) } };
-          }
+          // An unreadable environment cannot prove this same-UID process owns
+          // the token. Do not report arbitrary host processes as unresolved.
+          if (["EACCES", "EPERM"].includes(error.code)) return null;
           throw error;
         }
       }));

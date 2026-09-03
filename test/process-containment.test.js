@@ -301,7 +301,7 @@ test("directory ownership filters foreign Linux processes before environment ins
   assert.deepEqual(result.unresolved, []);
 });
 
-test("an unreadable Linux ownership status remains durable uncertainty", async () => {
+test("an unreadable Linux ownership status is not an attributable process", async () => {
   let environmentReads = 0;
   const denied = new Error("status permission denied");
   denied.code = "EACCES";
@@ -315,11 +315,11 @@ test("an unreadable Linux ownership status remains durable uncertainty", async (
   });
   const result = await containment(adapter).cleanup("shutdown");
   assert.equal(environmentReads, 0);
-  assert.equal(result.outcome, "incomplete");
-  assert.deepEqual(result.unresolved, [{ pid: 51, reason: "discovery-ownership-observation-failed", error: "status permission denied" }]);
+  assert.equal(result.outcome, "not-required");
+  assert.deepEqual(result.unresolved, []);
 });
 
-test("an unreadable plausible-owned Linux process remains durable uncertainty", async () => {
+test("an unreadable same-UID Linux process is not an attributable process", async () => {
   let signals = 0;
   const denied = new Error("permission denied");
   denied.code = "EACCES";
@@ -337,9 +337,8 @@ test("an unreadable plausible-owned Linux process remains durable uncertainty", 
   });
   const result = await containment(adapter).cleanup("shutdown");
   assert.equal(signals, 0);
-  assert.equal(result.outcome, "incomplete");
-  assert.deepEqual(result.unresolved, [{ pid: 51, reason: "discovery-observation-failed", error: "permission denied" }]);
-  assert.match(result.diagnostics[0], /could not inspect 1 process/);
+  assert.equal(result.outcome, "not-required");
+  assert.deepEqual(result.unresolved, []);
 });
 
 test("unsupported and discovery failures do not speculate with signals", async () => {
