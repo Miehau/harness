@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { auditHarnessWriteScopes, closeSseClients, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
+import { auditHarnessWriteScopes, closeSseClients, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
 import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
@@ -35,6 +35,12 @@ test("daemon shutdown ends open event streams before closing the server", () => 
 
 test("delivery observers consume failures from the scheduled inner promise", async () => {
   assert.equal(await settleScheduledDelivery(Promise.resolve({ promise: Promise.reject(new Error("delivery failed")) })), undefined);
+});
+
+test("delivery fixers receive repository paths named by failing checks", () => {
+  assert.deepEqual(deliveryFeedbackReferences([{ body: "location: '/tmp/worktree/test/e2e-proof.test.js:109:1'\ninspect src/server.js" }]), [
+    "test/e2e-proof.test.js", "src/server.js"
+  ]);
 });
 
 test("preview diagnostics cannot satisfy missing verification-contract evidence", () => {

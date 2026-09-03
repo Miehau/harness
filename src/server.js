@@ -88,6 +88,12 @@ export function settleScheduledDelivery(scheduled) {
   return Promise.resolve(scheduled).then(({ promise }) => promise).catch(() => {});
 }
 
+export function deliveryFeedbackReferences(feedback = []) {
+  return [...new Set(feedback.flatMap((item) => [...`${item.path || ""}\n${item.body || ""}`
+    .matchAll(/(?:^|[\/\s'"(])((?:src|test|public|scripts|\.agent-plan)\/[a-z0-9._/-]+)/gi)]
+    .map((match) => match[1])))];
+}
+
 export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
   const changes = [];
   for (const step of flattenSteps(run?.plan)) {
@@ -1449,13 +1455,14 @@ function waitForDelivery(milliseconds, signal) {
 async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback") {
   const current = ticketRun(store.read(), ticketId);
   const beforeTree = await snapshotTree(current.workspace.cwd);
+  const references = deliveryFeedbackReferences(feedback);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
     title: `Address ${reason}`, description: `Apply the smallest change that resolves concrete ${reason}.`,
-    prompt: `Address these ${reason}. Preserve approved behavior and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
+    prompt: `Address these ${reason}. Read every referenced failing file before editing. Preserve approved behavior, remove unverified experiments from earlier failed delivery passes, and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
     contextPolicy: "seeded", harness: "pi", agentId: `remote-review-fixer:${current.ticket.identifier}`,
-    permission: "write", writeScope: "*", skills: [], references: [], requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
-    expectedArtifacts: ["remote-review-fix.md"], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
+    permission: "write", writeScope: "*", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
+    expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
   const result = await harness.runStep({
     cwd: current.workspace.cwd, plan: current.plan, step, artifacts: compactReviewPacket({
