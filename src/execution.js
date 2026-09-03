@@ -4,6 +4,7 @@ import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restart
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 
 export const visualEvidencePolicy = "contract-only-v1";
+export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. Do not create them in the repository. Remove any existing root-level files with that exact generated naming pattern while preserving all product files.";
 
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],
@@ -73,7 +74,7 @@ export function finalReviewFixStep(round, findings, rootCauseClusters = []) {
   return {
     id: `review-fix-${round}`,
     title: `Fix final review findings — round ${round}`,
-    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}`,
+    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\n${finalReviewRepositoryBoundary}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}`,
     contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
     permission: "write", writeScope: "**", skills: [], references: [],
     // Review prose belongs in the harness audit store, never in the product repository.
