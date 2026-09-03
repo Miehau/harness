@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -491,11 +491,24 @@ test("final-review fixes keep audit prose out of the product repository", () => 
 
 test("an interrupted final-review fix resumes from persisted findings", () => {
   const findings = [{ severity: "high", claim: "Cleanup can miss a late child", evidence: [{ file: "src/process.js", line: 42 }] }];
-  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings }]), { round: 2, findings, sessionFile: null });
-  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { sessionFile: "/tmp/review-fix.jsonl" } }]), { round: 2, findings, sessionFile: "/tmp/review-fix.jsonl" });
-  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings, sessionFile: null });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings }]), { round: 2, findings, sessionFile: null, restartFeedback: "" });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { sessionFile: "/tmp/review-fix.jsonl" } }]), { round: 2, findings, sessionFile: "/tmp/review-fix.jsonl", restartFeedback: "" });
+  assert.deepEqual(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "needs_input" } } }]), { round: 2, findings, sessionFile: null, restartFeedback: "" });
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: findings, fix: { report: { status: "completed" } } }]), null);
   assert.equal(pendingReviewFix([{ round: 2, actionableFindings: [] }]), null);
+});
+
+test("a contaminated fixer session restarts fresh without discarding its worktree", () => {
+  const run = {
+    status: "paused", checkpoint: { kind: "pause" }, lastError: "old",
+    reviews: [{ round: 18, actionableFindings: [{ severity: "high", claim: "Live capture URL is missing" }], fix: { sessionFile: "/audit/old.jsonl", startedAt: "before" } }]
+  };
+  assert.deepEqual(restartReviewFixSession(run, "Remove the queued synthetic fallback"), { round: 18, previousSessionFile: "/audit/old.jsonl" });
+  assert.equal(run.status, "interrupted");
+  assert.equal(run.reviews[0].fix.sessionFile, null);
+  assert.match(run.reviews[0].fix.restartFeedback, /synthetic fallback/);
+  assert.equal(run.reviewFixSessionRestarts[0].previousSessionFile, "/audit/old.jsonl");
+  assert.match(finalReviewFixStep(18, run.reviews[0].actionableFindings, [], run.reviews[0].fix.restartFeedback).prompt, /Operator restart directive/);
 });
 
 test("a persisted clean review resumes at final proof without rerunning reviewers", () => {

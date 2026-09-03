@@ -15,6 +15,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
   revise-proof <ticketId> <feedback> Request final-proof corrections from the agent
+  restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
   waive <stepId> <ticketId> <reason> Reject a false verifier finding and return to review
@@ -196,6 +197,14 @@ async function handleCommand(command, rest, ctx) {
     const feedback = words.join(" ").trim();
     if (!id || !feedback) throw new Error("Usage: agent-plan revise-proof <ticketId> <feedback>");
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: { feedback }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "restart-fixer") {
+    const [id, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!id || !reason) throw new Error("Usage: agent-plan restart-fixer <ticketId> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/review-fix/restart", { body: { reason }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

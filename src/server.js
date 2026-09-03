@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1694,10 +1694,10 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
   return { position: queued.position, promise: tracked };
 }
 
-async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
+async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, restartFeedback = "", reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
   const current = ticketRun(store.read(), ticketId);
   const fixArtifactName = `review-fixes-round-${round}.md`;
-  const fixStep = finalReviewFixStep(round, findings, rootCauseClusters);
+  const fixStep = finalReviewFixStep(round, findings, rootCauseClusters, restartFeedback);
   await update((state) => {
     const run = ticketRun(state, ticketId);
     run.status = "fixing";
@@ -2518,6 +2518,20 @@ async function api(request, response, url) {
     else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
     else await surfaceImmediateFailure(id, runTicket(id));
     return json(response, 202, { accepted: true, ticketId: id });
+  }
+
+  const restartFixer = url.pathname.match(/^\/api\/tickets\/([^/]+)\/review-fix\/restart$/);
+  if (request.method === "POST" && restartFixer) {
+    const id = decodeURIComponent(restartFixer[1]);
+    const input = await body(request);
+    let restarted;
+    await update((state) => {
+      const run = ticketRun(state, id);
+      restarted = restartReviewFixSession(run, input.reason);
+      setStage(run, "verify", "active", `Restarting final-review fixer · round ${restarted.round}`);
+    });
+    await surfaceImmediateFailure(id, runTicket(id));
+    return json(response, 202, { accepted: true, ticketId: id, round: restarted.round });
   }
 
   const restart = url.pathname.match(/^\/api\/tickets\/([^/]+)\/restart$/);

@@ -73,12 +73,13 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
   };
 }
 
-export function finalReviewFixStep(round, findings, rootCauseClusters = []) {
+export function finalReviewFixStep(round, findings, rootCauseClusters = [], restartFeedback = "") {
   const rootCauseInstruction = rootCauseClusters.length ? `\n\nThese findings recur across at least three review rounds on the same code surface (${rootCauseClusters.join(", ")}). Fix the general invariant, not only the reported examples or additional deny-list words. Prefer a positive decision tied to approved requirements, capabilities, or architecture, with data-driven counterexamples. If that general correction is impossible within the approved scope, report needs_input with the exact boundary.` : "";
+  const restartInstruction = restartFeedback ? `\n\nOperator restart directive: ${restartFeedback}` : "";
   return {
     id: `review-fix-${round}`,
     title: `Fix final review findings — round ${round}`,
-    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\n${finalReviewRepositoryBoundary}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}`,
+    prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\n${finalReviewRepositoryBoundary}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.${rootCauseInstruction}${restartInstruction}`,
     contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
     permission: "write", writeScope: "**", skills: [], references: [],
     // Review prose belongs in the harness audit store, never in the product repository.
@@ -652,7 +653,24 @@ export function pendingReviewFix(reviews = []) {
   const review = reviews.at(-1);
   const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
   if (!review || !findings.length || review.fix?.report?.status === "completed") return null;
-  return { round: Number(review.round) || reviews.length, findings, sessionFile: review.fix?.sessionFile || null };
+  return { round: Number(review.round) || reviews.length, findings, sessionFile: review.fix?.sessionFile || null, restartFeedback: review.fix?.restartFeedback || "" };
+}
+
+export function restartReviewFixSession(run, reason) {
+  const feedback = String(reason || "").trim();
+  if (!feedback) throw new Error("Describe why the fixer session must restart");
+  if (!["paused", "needs_attention", "failed"].includes(run?.status)) throw new Error("Pause or stop the run before restarting its fixer session");
+  const review = run.reviews?.at(-1);
+  const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
+  if (!review || !findings.length || !review.fix?.sessionFile) throw new Error("No active final-review fixer session is available to restart");
+  const previousSessionFile = review.fix.sessionFile;
+  (run.reviewFixSessionRestarts ||= []).push({ round: review.round, previousSessionFile, reason: feedback, at: new Date().toISOString() });
+  review.fix = { ...review.fix, sessionFile: null, restartFeedback: feedback };
+  delete review.fix.report;
+  run.status = "interrupted";
+  run.checkpoint = null;
+  run.lastError = null;
+  return { round: review.round, previousSessionFile };
 }
 
 export function recoverableCleanReview(run = {}) {
