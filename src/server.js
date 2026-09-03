@@ -998,6 +998,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
     if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
+    let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
       let vcsChange = null;
@@ -1026,6 +1027,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const workerRunId = randomUUID();
         const startedAt = new Date().toISOString();
         const attemptId = `attempt-${(currentStep.attempts?.length || 0) + 1}`;
+        attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
         const contextArtifacts = [
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
           ...dependencyArtifacts(latest.plan, currentStep)
@@ -1036,7 +1038,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          current.activeRuns[stepId] = { runId: workerRunId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
+          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
@@ -1055,12 +1057,14 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
           signal
         });
+        Object.assign(attemptEvidence, { report: result.report, rawOutput: result.rawOutput || "", sessionFile: result.sessionFile || null });
         signal?.throwIfAborted();
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && result.report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
           checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
         }
+        attemptEvidence.checks = checks;
         signal?.throwIfAborted();
         if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
         const afterTree = await snapshotTree(cwd);
@@ -1078,6 +1082,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
+        Object.assign(attemptEvidence, { diff: attemptDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, result.report);
         if (violations.length || (result.report.status !== "completed" && !workerGate)) {
           const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
@@ -1257,18 +1262,29 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const active = current.activeRuns[stepId] || {};
         const activity = active.activity || {};
         failed.attempts ||= [];
-        failed.attempts.push({
-          runId: active.runId || null,
-          attemptId: `attempt-${failed.attempts.length + 1}`,
-          startedAt: active.startedAt || new Date().toISOString(),
+        const failedAttempt = {
+          ...(attemptEvidence || {}),
+          runId: attemptEvidence?.runId || active.runId || null,
+          attemptId: attemptEvidence?.attemptId || active.attemptId || `attempt-${failed.attempts.length + 1}`,
+          startedAt: attemptEvidence?.startedAt || active.startedAt || new Date().toISOString(),
           completedAt: new Date().toISOString(),
           status: "failed",
           events: activity.events || [],
           activityGroups: activity.groups || [],
-          rawOutput: activity.rawOutput || "",
-          sessionFile: active.sessionFile || failed.sessionFile || null,
+          rawOutput: activity.rawOutput || attemptEvidence?.rawOutput || "",
+          sessionFile: active.sessionFile || attemptEvidence?.sessionFile || failed.sessionFile || null,
           error: error.message
-        });
+        };
+        const prior = failed.attempts.findIndex((attempt) => attempt.attemptId === failedAttempt.attemptId);
+        if (prior >= 0) failed.attempts[prior] = { ...failed.attempts[prior], ...failedAttempt };
+        else failed.attempts.push(failedAttempt);
+        if (attemptEvidence?.aggregateDiff) failed.diff = attemptEvidence.aggregateDiff;
+        if (attemptEvidence?.reviewNotes) failed.reviewNotes = attemptEvidence.reviewNotes;
+        if (attemptEvidence?.reviewBudgetResult) failed.reviewBudgetResult = attemptEvidence.reviewBudgetResult;
+        if (attemptEvidence?.artifacts?.length) {
+          failed.artifacts = [attemptEvidence.artifacts[0]];
+          for (const artifact of attemptEvidence.artifacts) if (!current.artifacts.some((item) => item.id === artifact.id)) current.artifacts.push(artifact);
+        }
         failed.status = "failed";
         failed.lastError = error.message;
         delete current.activeRuns[stepId];

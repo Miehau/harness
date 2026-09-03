@@ -284,6 +284,10 @@ test("step execution failures persist an actionable run checkpoint", async () =>
     }
     assert.equal(run.status, "needs_attention");
     assert.equal(run.lastError, "Verification exceeded its inspection budget.");
+    assert.equal(run.plan.nodes[0].attempts.at(-1).report.summary, "implemented");
+    assert.equal(run.plan.nodes[0].attempts.at(-1).checks.status, "passed");
+    assert.equal(run.plan.nodes[0].attempts.at(-1).diff.available, true);
+    assert.ok(run.plan.nodes[0].attempts.at(-1).artifacts.some((artifact) => artifact.kind === "agent-prompt"));
     assert.deepEqual({ kind: run.checkpoint.kind, stepId: run.checkpoint.stepId, source: run.checkpoint.source, prompt: run.checkpoint.prompt }, {
       kind: "needs_attention", stepId: "build", source: "execution", prompt: "Verification exceeded its inspection budget."
     });
