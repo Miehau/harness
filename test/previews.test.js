@@ -66,6 +66,21 @@ test("starts a conventional package preview when a legacy contract omits one", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a timed-out Chromium capture is usable when its screenshot was written", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "preview-timeout-"));
+  try {
+    const manager = new PreviewManager({ dataDir, captureTimeoutMs: 10, execImpl: async (_file, args) => {
+      const output = args.find((arg) => arg.startsWith("--screenshot=")).slice("--screenshot=".length);
+      await writeFile(output, "png");
+      throw new Error("Chromium timed out after 10ms");
+    } });
+    manager.active.set("ticket", { public: { url: "http://127.0.0.1:4317" } });
+    const evidence = await manager.capture("ticket", { source: { CHROMIUM_PATH: process.execPath } });
+    assert.equal(evidence.length, 2);
+    assert.equal(evidence.every((item) => item.mediaType === "image/png"), true);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("a hanging preview probe cannot bypass the readiness deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "preview-manager-"));
   try {

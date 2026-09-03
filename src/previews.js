@@ -1,12 +1,10 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { detectPreviewCommand, loadProjectConfig, projectEnvironment } from "./project-config.js";
 import { visualEvidenceMedia } from "./artifacts.js";
-
-const exec = promisify(execFile);
+import { execFileTree, signalProcessTree } from "./process-tree.js";
 
 export function availablePort(host = "127.0.0.1") {
   return new Promise((resolvePort, reject) => {
@@ -51,7 +49,7 @@ async function waitUntilReady(url, child, fetchImpl, timeoutMs = 60000, probeTim
 }
 
 export class PreviewManager {
-  constructor({ dataDir, spawnImpl = spawn, execImpl = exec, fetchImpl = fetch, portImpl = availablePort, readyTimeoutMs = 60000, probeTimeoutMs = 2000 } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, execImpl = execFileTree, fetchImpl = fetch, portImpl = availablePort, readyTimeoutMs = 60000, probeTimeoutMs = 2000, captureTimeoutMs = 15000 } = {}) {
     this.dataDir = dataDir;
     this.spawn = spawnImpl;
     this.exec = execImpl;
@@ -59,6 +57,7 @@ export class PreviewManager {
     this.port = portImpl;
     this.readyTimeoutMs = readyTimeoutMs;
     this.probeTimeoutMs = probeTimeoutMs;
+    this.captureTimeoutMs = captureTimeoutMs;
     this.active = new Map();
     this.ports = new Set();
   }
@@ -92,12 +91,12 @@ export class PreviewManager {
         await writeFile(join(environment.AGENT_PLAN_DATA_DIR, "state-v3.json"), JSON.stringify(seedState, null, 2));
       }
     }
-    const child = this.spawn(commandExecutable(cwd, command), command.slice(1), { cwd, env: environment, stdio: ["ignore", "pipe", "pipe"] });
+    const child = this.spawn(commandExecutable(cwd, command), command.slice(1), { cwd, env: environment, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) stream.on("data", (chunk) => { output = `${output}${chunk}`.slice(-50000); });
     const url = `http://127.0.0.1:${port}`;
     try { await waitUntilReady(url, child, this.fetch, this.readyTimeoutMs, this.probeTimeoutMs); }
-    catch (error) { this.ports.delete(port); child.kill("SIGTERM"); throw new Error(`${error.message}\n${output}`.trim()); }
+    catch (error) { this.ports.delete(port); signalProcessTree(child); throw new Error(`${error.message}\n${output}`.trim()); }
     const publicPreview = { id, cwd, command: commandName, port, url, startedAt: new Date().toISOString() };
     this.active.set(id, { child, cwd, get output() { return output; }, public: publicPreview });
     child.once("exit", () => { this.active.delete(id); this.ports.delete(port); });
@@ -114,7 +113,12 @@ export class PreviewManager {
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
-      await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=2000", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+      try {
+        await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=2000", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: this.captureTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+      } catch (error) {
+        if (!/timed out/i.test(error.message)) throw error;
+        await access(path);
+      }
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
     return evidence;
@@ -123,7 +127,7 @@ export class PreviewManager {
   stop(id) {
     const preview = this.active.get(id);
     if (!preview) return false;
-    preview.child.kill("SIGTERM");
+    signalProcessTree(preview.child);
     this.active.delete(id);
     this.ports.delete(preview.public.port);
     return true;

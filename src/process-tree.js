@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
-function signalTree(child, signal) {
-  if (!child?.pid) return;
+export function signalProcessTree(child, signal = "SIGTERM") {
+  if (!child?.pid) return child?.kill?.(signal);
   try {
     if (process.platform === "win32") child.kill(signal);
     else process.kill(-child.pid, signal);
@@ -21,8 +21,8 @@ export function execFileTree(file, args, { timeout = 0, signal, maxBuffer = 1024
   let failure;
   let killTimer;
   const terminate = () => {
-    signalTree(child, "SIGTERM");
-    killTimer ||= setTimeout(() => signalTree(child, "SIGKILL"), 1000);
+    signalProcessTree(child, "SIGTERM");
+    killTimer ||= setTimeout(() => signalProcessTree(child, "SIGKILL"), 1000);
     killTimer.unref?.();
   };
   const collect = (chunks, stream) => (chunk) => {
