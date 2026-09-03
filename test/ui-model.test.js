@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { readFile } from "node:fs/promises";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("resolves canonical attempt selection without replacing a retained choice", () => {
   const projection = {
@@ -50,6 +51,7 @@ test("restores deliberate inspection selection and announces only meaningful att
     selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: false, disappeared: true, reason: "active"
   });
 });
+
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -224,6 +226,13 @@ test("review stage becomes a findings-and-fixes timeline", () => {
   assert.match(milestones[2].detail, /Persisted completion/);
 });
 
+test("review stage names an active fixer and repeats the issues being corrected", () => {
+  const stage = { id: "verify", status: "active", updatedAt: "2026-09-03T10:00:00.000Z" };
+  const items = stageMilestones({ status: "fixing", reviews: [{ createdAt: stage.updatedAt, actionableFindings: [{ severity: "high", claim: "Scope expansion bypasses the approved plan" }] }] }, stage);
+  assert.equal(items.at(-1).title, "Focused correction in progress.");
+  assert.match(items.at(-1).detail, /Scope expansion bypasses the approved plan/);
+});
+
 test("handoff timeline exposes merge queue, conflict resolution, verification, and integration", () => {
   const milestones = stageMilestones({
     merge: {
@@ -269,6 +278,37 @@ test("final review keeps supported visual proof and its final check summary", ()
   assert.deepEqual(review.proof.map((item) => item.media), ["image", "video"]);
   assert.deepEqual(review.checks, { status: "passed", summary: "node scripts/test.mjs", command: undefined });
   assert.deepEqual(review.reviews, [{ role: "integration", summary: "No issues found" }]);
+});
+
+test("proof presentation preserves ordered history and makes typed evidence actionable", () => {
+  const run = {
+    id: "ticket/a", proofMap: {
+      compatibility: false, approvedAt: "2026-09-10T10:00:00.000Z", criteria: [
+        { id: "one", stepId: "build", stepTitle: "Build", index: 0, text: "Works", current: { status: "verified", evidenceValidity: "valid", evidence: [{ type: "check", scope: "step", stepId: "build" }] }, history: [{ status: "unresolved", evidenceValidity: "missing" }] },
+        { id: "two", stepId: "build", stepTitle: "Build", index: 1, text: "Still works", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "diff", scope: "step", stepId: "build" }] }, history: [] },
+        { id: "three", stepId: "visual", stepTitle: "Visual", index: 0, text: "Looks right", current: { status: "verified", evidenceValidity: "missing", evidence: [{ type: "media", artifactId: "screen" }] }, history: [] },
+        { id: "four", stepId: "visual", stepTitle: "Visual", index: 1, text: "Explains failure", current: { status: "failed", evidenceValidity: "missing", evidence: [] }, history: [] },
+        { id: "five", stepId: "visual", stepTitle: "Visual", index: 2, text: "Waiting", current: { status: "unresolved", evidenceValidity: "missing", evidence: [] }, history: [] }
+      ]
+    }
+  };
+  const all = proofMapView(run);
+  assert.deepEqual(all.criteria.map((criterion) => [criterion.id, criterion.state, criterion.history.length]), [
+    ["one", "verified", 1], ["two", "stale", 0], ["three", "missing-evidence", 0], ["four", "failed", 0], ["five", "not_yet_verified", 0]
+  ]);
+  assert.equal(all.criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=step&stepId=build");
+  assert.deepEqual(proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[0], current: { ...run.proofMap.criteria[0].current, evidence: [{ type: "check", scope: "attempt", stepId: "build", attemptId: "attempt-2" }] } }] } }).criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2");
+  assert.deepEqual(all.criteria.slice(2).map((criterion) => [criterion.resultLabel, criterion.evidenceLabel]), [["Verified", "Evidence missing"], ["Failed", "Evidence missing"], ["Not yet verified", "Evidence missing"]]);
+  assert.equal(all.criteria[1].evidence[0].tab, "diff");
+  assert.equal(all.criteria[1].evidence[0].route, "/api/tickets/ticket%2Fa/proof/diff?scope=step&stepId=build");
+  const attemptDiffRoute = (attemptId) => proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[1], current: { ...run.proofMap.criteria[1].current, evidence: [{ type: "diff", scope: "attempt", stepId: "build", attemptId }] } }] } }).criteria[0].evidence[0].route;
+  assert.equal(attemptDiffRoute("attempt-1"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-1");
+  assert.equal(attemptDiffRoute("attempt-2"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-2");
+  assert.equal(all.criteria[2].evidence[0].mediaUrl, "/api/tickets/ticket%2Fa/artifacts/screen/media");
+  const missing = proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[2], current: { ...run.proofMap.criteria[2].current, evidence: [{ type: "media", artifactId: "screen", validity: "missing", reason: "missing_evidence" }] } }] } }).criteria[0].evidence[0];
+  assert.deepEqual([missing.unavailable, missing.route, missing.mediaUrl, missing.label], [true, undefined, undefined, "Evidence unavailable: missing evidence"]);
+  assert.equal(all.eligibility.blockingReasons[0].criterionId, "two");
+  assert.equal(proofMapView(run, { stepId: "build" }).criteria.length, 2);
 });
 
 test("free text becomes a local ticket without losing the original request", () => {
@@ -325,6 +365,26 @@ test("stage details keep the implementation index ordered and split its dependen
     dependencies: { internal: [{ from: "foundation", to: "build", title: "Foundation", status: "accepted" }], external: [] }
   });
   assert.deepEqual(stageDetailModel(run, "verify").dependencies.external, [{ from: "build", to: "verify-ui", title: "Build UI", status: "running" }]);
+});
+
+test("cleanup inspector keeps every durable outcome and marks only advisories as warnings", async () => {
+  const executions = {
+    complete: { executionId: "complete", outcome: "complete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 42, ppid: 7, startTime: "101" }], actions: [{ pid: 42, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }], unresolved: [], diagnostics: [] },
+    incomplete: { executionId: "incomplete", outcome: "incomplete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "run-cancelled", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 43, ppid: 7, startTime: "102" }], actions: [{ pid: 43, signal: "SIGKILL", status: "sent" }], unresolved: [{ pid: 43, reason: "still-running-after-force" }], diagnostics: ["Fixture process did not exit"] },
+    unsupported: { executionId: "unsupported", outcome: "unsupported", platform: { name: "darwin", supported: false, reason: "Safe discovery unavailable" }, triggers: [{ trigger: "daemon-shutdown", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: ["No safe adapter"] },
+    "not-required": { executionId: "none", outcome: "not-required", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: [] }
+  };
+  for (const [outcome, execution] of Object.entries(executions)) {
+    const model = cleanupInspectorModel({ cleanup: { outcome, updatedAt: "2026-09-03T10:00:02.000Z", executions: [execution] } });
+    assert.equal(model.outcome, outcome);
+    assert.equal(model.advisory, ["incomplete", "unsupported"].includes(outcome));
+    assert.deepEqual(model.executions[0].discovered, execution.discovered);
+    assert.deepEqual(model.executions[0].unresolved, execution.unresolved);
+    assert.deepEqual(model.executions[0].diagnostics, execution.diagnostics);
+  }
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(app, /cleanup-advisory/);
+  assert.match(app, /cleanup-inspector \$\{cleanup\.advisory \? "advisory" : "neutral"\}/);
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {

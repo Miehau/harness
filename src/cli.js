@@ -15,8 +15,12 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
+  revise-proof <ticketId> <feedback> Request final-proof corrections from the agent
+  restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
+  waive <stepId> <ticketId> <reason> Reject a false verifier finding and return to review
+  scope-add <stepId> <ticketId> <path> <reason> Approve one audited file-scope expansion
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -134,6 +138,22 @@ async function handleCommand(command, rest, ctx) {
     print(stdout, result);
     return 0;
   }
+  if (command === "scope-add") {
+    const [stepId, id, path, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!stepId || !id || !path || !reason) throw new Error("Usage: agent-plan scope-add <stepId> <ticketId> <path> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/scope", { body: { paths: [path], reason }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "waive") {
+    const [stepId, id, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!stepId || !id || !reason) throw new Error("Usage: agent-plan waive <stepId> <ticketId> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/waive", { body: { reason }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
   if (command === "queue") {
     if (rest[0] !== "clear") throw new Error("Usage: agent-plan queue clear\n" + usage);
     const result = await request("POST", "/api/queue/clear", { body: {}, env, fetchImpl });
@@ -174,6 +194,22 @@ async function handleCommand(command, rest, ctx) {
   if (command === "approve-proof") {
     const id = await resolveTicketId(rest[0], ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/approve", { body: {}, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "revise-proof") {
+    const [id, ...words] = rest;
+    const feedback = words.join(" ").trim();
+    if (!id || !feedback) throw new Error("Usage: agent-plan revise-proof <ticketId> <feedback>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: { feedback }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "restart-fixer") {
+    const [id, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!id || !reason) throw new Error("Usage: agent-plan restart-fixer <ticketId> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/review-fix/restart", { body: { reason }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -321,13 +357,14 @@ function terminal(run) {
   if (run.status === "needs_attention" || (run.checkpoint && run.checkpoint.kind === "needs_attention")) return { done: true, code: 1, reason: "needs_attention" };
   if (run.status === "failed") return { done: true, code: 1, reason: "failed" };
   if (run.status === "completed") return { done: true, code: 0, reason: "completed" };
+  if (run.status === "paused") return { done: true, code: 0, reason: "paused" };
   if (run.checkpoint) return { done: true, code: 0, reason: "checkpoint" };
   return { done: false, code: 0, reason: run.status };
 }
 
 if (process.argv[1] && import.meta.url === ("file://" + process.argv[1])) {
-  runCli(process.argv.slice(2)).then((code) => process.exit(code), (error) => {
+  runCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => {
     process.stderr.write(error.message + String.fromCharCode(10));
-    process.exit(1);
+    process.exitCode = 1;
   });
 }

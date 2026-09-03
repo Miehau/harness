@@ -8,7 +8,8 @@ const relevantArtifactKinds = new Set([
   "architecture",
   "agent-output",
   "step-verification",
-  "product-context-update"
+  "product-context-update",
+  "visual-evidence"
 ]);
 const essentialArtifactKinds = new Set(["requirements", "feature-brief", "implementation-delta", "architecture"]);
 
@@ -24,28 +25,56 @@ function clippedStrings(values, count, length) {
   return (Array.isArray(values) ? values : []).slice(0, count).map((value) => clip(value, length));
 }
 
-export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {} }) {
+function compactProofMap(proofMap) {
+  if (!proofMap) return null;
+  return {
+    version: proofMap.version || 1,
+    approvedAt: proofMap.approvedAt || null,
+    compatibility: Boolean(proofMap.compatibility),
+    eligibility: structuredClone(proofMap.eligibility || { eligible: false, blockingReasons: [] }),
+    criteria: (proofMap.criteria || []).map((criterion) => ({
+      id: criterion.id,
+      stepId: criterion.stepId,
+      stepTitle: criterion.stepTitle || "",
+      stepRequired: criterion.stepRequired !== false,
+      index: criterion.index,
+      text: criterion.text,
+      current: structuredClone(criterion.current),
+      history: structuredClone(criterion.history || [])
+    })),
+    ...(proofMap.legacy ? { legacy: structuredClone(proofMap.legacy) } : {})
+  };
+}
+
+export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {}, proofMap = null }) {
   const steps = flattenSteps(plan);
   const statuses = new Map(steps.map((step) => [step.id, step.status]));
   const latestArtifacts = new Map();
 
   artifacts.forEach((artifact, index) => {
     const content = artifact?.content || artifact?.summary;
-    if (!content || !relevantArtifactKinds.has(artifact?.kind)) return;
+    if ((!content && artifact?.kind !== "visual-evidence") || !relevantArtifactKinds.has(artifact?.kind)) return;
     if (artifact.stepId && statuses.has(artifact.stepId) && statuses.get(artifact.stepId) !== "accepted") return;
-    latestArtifacts.set(`${artifact.kind}:${artifact.stepId || "run"}`, { artifact, index });
+    // Media is evidence by immutable artifact ID, not a replaceable step summary.
+    const key = artifact.kind === "visual-evidence" ? `${artifact.kind}:${artifact.id || index}` : `${artifact.kind}:${artifact.stepId || "run"}`;
+    latestArtifacts.set(key, { artifact, index });
   });
 
-  const selectedArtifacts = [...latestArtifacts.values()]
-    .sort((left, right) => Number(essentialArtifactKinds.has(right.artifact.kind)) - Number(essentialArtifactKinds.has(left.artifact.kind)) || right.index - left.index)
-    .slice(0, 8)
-    .map(({ artifact }) => ({
+  const retained = [...latestArtifacts.values()];
+  const selectedArtifacts = [
+    ...retained.filter(({ artifact }) => artifact.kind === "visual-evidence"),
+    ...retained.filter(({ artifact }) => artifact.kind !== "visual-evidence")
+      .sort((left, right) => Number(essentialArtifactKinds.has(right.artifact.kind)) - Number(essentialArtifactKinds.has(left.artifact.kind)) || right.index - left.index)
+      .slice(0, 20)
+  ].map(({ artifact }) => ({
+
+      id: artifact.id || null,
       kind: artifact.kind,
       name: clip(artifact.name, 300),
       stepId: artifact.stepId ? clip(artifact.stepId, 200) : null,
       sourceStepTitle: artifact.sourceStepTitle ? clip(artifact.sourceStepTitle, 300) : null,
       path: artifact.path ? clip(artifact.path, 1_000) : null,
-      content: clip(artifact.content || artifact.summary, 4_000)
+      ...(artifact.kind === "visual-evidence" ? {} : { content: clip(artifact.content || artifact.summary, 4_000) })
     }));
 
   const files = clippedStrings(diff.files, 100, 300);
@@ -70,6 +99,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
       }))
     },
     artifacts: selectedArtifacts,
+    media: selectedArtifacts.filter((artifact) => artifact.kind === "visual-evidence").map(({ id, name, stepId, path }) => ({ id, name, stepId, path })),
     canonicalDiff: {
       reference: diff.reference || diff.path || null,
       files,
@@ -77,6 +107,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
       stat: clip(diff.stat, 4_000),
       patch: clip(diff.patch || "No textual diff", 60_000)
     },
+    proofMap: compactProofMap(proofMap),
     checks: {
       status: String(checks.status || "unknown"),
       command: clip(checks.command, 1_000),

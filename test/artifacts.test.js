@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -35,9 +35,27 @@ test("same-named artifacts of different kinds retain separate bodies", async () 
   assert.equal(await readFile(prompt.path, "utf8"), "worker prompt");
 });
 
+test("hydrates compact artifact metadata only from app storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ticket-hydration-"));
+  const stored = await persistArtifact(root, { identifier: "MM-42" }, { name: "result.md", content: "full result", runId: "run-7" });
+  const compact = { ...stored, content: undefined, bodyStored: true };
+  assert.equal((await hydrateArtifact(compact, root)).content, "full result");
+  assert.equal((await hydrateArtifacts([compact], root))[0].content, "full result");
+  await assert.rejects(hydrateArtifact({ id: "unsafe", name: "unsafe.md", path: join(tmpdir(), "unsafe.md"), bodyStored: true }, root), /outside the data directory/);
+});
+
 test("safeName constrains directory components", () => {
   assert.equal(safeName("../MM 42"), "mm-42");
   assert.equal(safeName(".."), "artifact");
+});
+
+test("cleans only root-level legacy review transcripts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "legacy-review-artifacts-"));
+  await writeFile(join(root, "review-fixes-round-12.md"), "legacy");
+  await writeFile(join(root, "review-fixes-round-latest.md"), "product");
+  await writeFile(join(root, "review-fixes-round-12.txt"), "product");
+  assert.deepEqual(await cleanupLegacyReviewArtifacts(root), ["review-fixes-round-12.md"]);
+  assert.deepEqual((await readdir(root)).sort(), ["review-fixes-round-12.txt", "review-fixes-round-latest.md"]);
 });
 
 test("classifies supported visual evidence media without guessing unsupported files", () => {

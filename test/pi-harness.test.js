@@ -3,9 +3,10 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, scopedWorkerTools, stepContext } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
+import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("commit messages always explain why and name the requirement", () => {
   assert.equal(formatCommitMessage({ subject: "feat: add task board", why: "Users need a visible queue.", requirement: "REQ-board — tasks are displayed" }, {}), "feat: add task board\n\nWhy: Users need a visible queue.\nRequirement: REQ-board — tasks are displayed");
@@ -100,6 +101,26 @@ test("configured guidance is emitted once per stage in a session", () => {
   assert.match(harness.configuredPrompt(session, { ...profile, id: "exploration" }, "Explore."), /Ask only consequential questions[\s\S]*Explore/);
 });
 
+test("worker project commands defer canonical verification to the framework", async () => {
+  const result = await projectCommandTool("/unused").execute("call-1", { name: "verify" });
+  assert.equal(result.isError, false);
+  assert.equal(result.details.status, "deferred");
+  assert.match(result.content[0].text, /once after worker_report/);
+});
+
+test("worker project commands isolate generated evidence from the worktree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-command-evidence-"));
+  try {
+    let options;
+    const tool = projectCommandTool("/fixture", undefined, undefined, async (_cwd, _name, received) => {
+      options = received;
+      return { status: "passed", command: "capture", output: "captured" };
+    }, undefined, root);
+    await tool.execute("call-1", { name: "capture" });
+    assert.match(options.environment.AGENT_PLAN_EVIDENCE_DIR, new RegExp(`^${root}/command-`));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("architecture workers see completed and future plan outcomes without unrelated verification ownership", () => {
   const plan = normalizePlan({ title: "Board", nodes: [
     { id: "skeleton", title: "Create skeleton", description: "Launch the empty app.", status: "accepted" },
@@ -122,6 +143,7 @@ test("existing projects get one focused verification contract before feature wor
   ] }), false);
   assert.equal(plan.nodes[0].role, "architecture");
   assert.equal(plan.nodes[0].writeScope, ".agent-plan");
+  assert.equal(plan.nodes[1].writeScope, "src,test,.agent-plan");
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
   assert.match(plan.nodes[0].prompt, /project\.json/);
@@ -130,12 +152,54 @@ test("existing projects get one focused verification contract before feature wor
   assert.equal(ensureVerificationContractStep(plan, true), plan);
 });
 
+test("existing verification contracts remain correctable by visual steps", () => {
+  const original = normalizePlan({ nodes: [
+    { id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test", requiresVisualEvidence: true }
+  ] });
+  const plan = ensureVerificationContractStep(original, true, true);
+  assert.equal(plan.nodes.length, 1);
+  assert.equal(plan.nodes[0].writeScope, "public,test,.agent-plan");
+  assert.match(stepContext({ plan: original, step: original.nodes[0], artifacts: [] }), /Write scope: public,test,.agent-plan/);
+  assert.equal(ensureVerificationContractStep(plan, true, true), plan);
+});
+
+test("focused screenshot corrections do not receive repository inspection tools", () => {
+  const finding = { severity: "high", category: "requirements", claim: "The screenshot omits the proof panel", evidence: [{ file: "proof.png", line: 1 }] };
+  assert.deepEqual(verificationTools([finding], [{ data: "image" }]), []);
+  assert.deepEqual(verificationTools([finding], []), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(verificationTools([{ ...finding, evidence: [{ file: "src/app.js", line: 1 }] }], [{ data: "image" }]), ["read", "grep", "find", "ls"]);
+});
+
+test("worker prompts bind structured results to the approved criterion IDs", () => {
+  const plan = normalizePlan({ title: "Proof", nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+  const prompt = stepContext({
+    plan, step: plan.nodes[0], artifacts: [],
+    proofMap: { criteria: [{ id: "criterion-fixed", stepId: "build", text: "Works" }] }
+  });
+  assert.match(prompt, /Criterion proof report/);
+  assert.match(prompt, /criterion-fixed: Works/);
+  assert.match(prompt, /Omit criterionResults entirely/);
+});
+
 test("synthetic review steps can omit optional planning arrays", () => {
   const step = { id: "review-fix", title: "Fix review findings", role: "implementation", harness: "pi", contextPolicy: "seeded", permission: "write" };
   const prompt = stepContext({ plan: { title: "Review", nodes: [step] }, step, artifacts: [] });
   assert.match(prompt, /Skills requested: none/);
   assert.match(prompt, /use review_note for up to five non-obvious changed sections/);
   assert.match(prompt, /one to three informative, direct sentences/);
+});
+
+test("review fixer context stays focused when historical artifacts are large", () => {
+  const plan = { title: "Ticket plan", summary: "Implement the ticket", nodes: [] };
+  const step = {
+    id: "review-fix-4", title: "Fix review findings", role: "implementation", harness: "pi",
+    contextPolicy: "seeded", permission: "write", writeScope: "**", skills: [], references: [],
+    prompt: "Correct the persisted findings.", expectedArtifacts: ["review-fix.md"],
+    acceptanceCriteria: ["The reported defect is resolved"]
+  };
+  const prompt = stepContext({ plan, step, artifacts: [] });
+  assert.match(prompt, /Correct the persisted findings/);
+  assert.ok(prompt.length < 10000);
 });
 
 test("runs the repository's root npm test script as a deterministic gate", async () => {
@@ -149,6 +213,96 @@ test("runs the repository's root npm test script as a deterministic gate", async
     assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "failed");
   } finally {
     await rm(root, { recursive: true });
+  }
+});
+
+test("retries one transient filesystem cleanup race without spending a correction round", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-retry-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await writeFile(join(root, "verify.mjs"), `
+      import { readFileSync, writeFileSync } from "node:fs";
+      const path = new URL("count", import.meta.url);
+      let count = 0;
+      try { count = Number(readFileSync(path, "utf8")); } catch {}
+      writeFileSync(path, String(count + 1));
+      if (!count) { console.error("ENOTEMPTY: directory not empty, rmdir '/tmp/agent-plan-daemon-test'"); process.exit(1); }
+    `);
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
+    assert.equal(result.status, "passed");
+    assert.match(result.summary, /after retrying/);
+    assert.equal(await readFile(join(root, "count"), "utf8"), "2");
+    assert.equal(transientRepositoryCheckFailure("ordinary assertion failure"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded repository failure output retains both context and the final failing evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-output-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await writeFile(join(root, "verify.mjs"), `
+      console.log("BEGIN-CONTEXT:" + "a".repeat(6000));
+      console.log("not ok 237 - preserves the proof record");
+      console.log("  location: 'test/proof.test.js:42:1'");
+      console.log("  error: |-");
+      console.log("    Command failed: git worktree add --detach /tmp/feature abc123");
+      console.log("    fatal: failed to read .git/worktrees/feature/commondir");
+      console.log("  code: 128");
+      console.log("Final proof dashboard did not render selected MEA-55 workflow within 45 seconds");
+      console.log("AFTER-FAILURE-NOISE:" + "c".repeat(120000));
+      console.error("CHROME-NOISE:" + "b".repeat(120000));
+      process.exit(1);
+    `);
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root });
+    assert.equal(result.status, "failed");
+    assert.match(result.output, /BEGIN-CONTEXT/);
+    assert.match(result.output, /characters omitted/);
+    assert.match(result.output, /Failure highlights/);
+    assert.match(result.output, /not ok 237 - preserves the proof record/);
+    assert.match(result.output, /test\/proof\.test\.js:42:1/);
+    assert.match(result.failureHighlights, /not ok 237 - preserves the proof record/);
+    assert.match(result.failureHighlights, /Command failed: git worktree add/);
+    assert.match(result.failureHighlights, /fatal: failed to read/);
+    assert.match(result.failureHighlights, /did not render selected MEA-55 workflow within 45 seconds/);
+    assert.doesNotMatch(result.failureHighlights, /BEGIN-CONTEXT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("repository-check timeouts settle despite inherited pipes and request containment immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-pipe-timeout-"));
+  let parent;
+  let descendant;
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), `import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+const child = spawn(process.execPath, [new URL("./held.mjs", import.meta.url).pathname], { stdio: "inherit" });
+await writeFile("pids", [process.pid, child.pid].join(":"));
+setInterval(() => {}, 1000);
+`);
+    await writeFile(join(root, "held.mjs"), "setInterval(() => {}, 1000);\n");
+    const triggers = [];
+    const containment = {
+      executionId: "timed-repository-check", ownership: { token: "timed-check-owner" },
+      cleanup: async (trigger) => { triggers.push(trigger); return { executionId: "timed-repository-check", outcome: "complete" }; }
+    };
+    const started = Date.now();
+    const result = await new PiHarness({ dataDir: root, repositoryCheckTimeoutMs: 500 }).runRepositoryChecks({ cwd: root, containment });
+    assert.ok(Date.now() - started < 1_500, "timeout must not wait for inherited stdio to close");
+    assert.equal(result.status, "failed");
+    assert.deepEqual(triggers.map(({ trigger }) => trigger), ["repository-check-timeout", "repository-check-exit"]);
+    assert.match(triggers[1].at, /^\d{4}-\d{2}-\d{2}T/);
+    [parent, descendant] = (await readFile(join(root, "pids"), "utf8")).split(":").map(Number);
+  } finally {
+    for (const pid of [parent, descendant]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -175,7 +329,10 @@ test("prefers the repository verification contract and discovers image and video
     ]);
     const images = await harness.evidenceImages(result.evidence);
     assert.equal(images.length, 1);
-    assert.equal(images[0].source.mediaType, "image/png");
+    assert.equal(images[0].mimeType, "image/png");
+    assert.equal(images[0].type, "image");
+    assert.equal(typeof images[0].data, "string");
+    assert.equal("source" in images[0], false);
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "passed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), `
@@ -195,11 +352,195 @@ test("prefers the repository verification contract and discovers image and video
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), "// no screenshot\n");
-    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true })).status, "failed");
+    const missingEvidence = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(missingEvidence.status, "failed");
+    assert.equal(missingEvidence.failureKind, "visual-evidence");
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test("repository checks add only the supplied execution ownership to their curated environment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-owned-checks-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// injected executor\n");
+    let options;
+    let cleanupTrigger;
+    const harness = new PiHarness({ dataDir: root, execImpl: async (_file, _args, value) => {
+      options = value;
+      return { stdout: "ok", stderr: "" };
+    } });
+    const containment = {
+      executionId: "check-execution", ownership: { token: "check-owner" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "not-required" }; }
+    };
+    const result = await harness.runRepositoryChecks({ cwd: root, containment });
+    assert.equal(result.status, "passed");
+    assert.equal(options.env[PROCESS_OWNERSHIP_ENV], "check-owner");
+    assert.equal(options.env.UNLISTED, undefined);
+    assert.equal(cleanupTrigger.trigger, "repository-check-exit");
+    assert.equal(cleanupTrigger.at, result.cleanupTrigger.at);
+    assert.match(result.cleanupTrigger.at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(result.cleanup.outcome, "not-required");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a repository check launched after settled cleanup starts a fresh owned-process cycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-after-settled-cleanup-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// injected executor\n");
+    const ownership = createExecutionOwnership("check-after-settled", { randomUUIDImpl: () => "check-owner", now: () => 0 });
+    const targets = new Map();
+    const signals = [];
+    const containment = new ProcessContainment({
+      executionId: ownership.executionId,
+      ownership,
+      graceMs: 0,
+      forceWaitMs: 0,
+      timeoutMs: 100,
+      adapter: {
+        platform: "test",
+        supported: true,
+        discover: async () => ({ processes: [...targets.values()], unresolved: [] }),
+        observe: async (pid) => targets.get(pid) || null,
+        signal: async (pid, signal) => { signals.push([pid, signal]); targets.delete(pid); }
+      }
+    });
+    await containment.cleanup("preview-exit");
+    const harness = new PiHarness({
+      dataDir: root,
+      execImpl: async () => {
+        targets.set(41, { pid: 41, ppid: 7, startTime: "100", ownershipToken: ownership.token });
+        return { stdout: "ok", stderr: "" };
+      }
+    });
+
+    const result = await harness.runRepositoryChecks({ cwd: root, containment });
+
+    assert.equal(result.status, "passed");
+    assert.deepEqual(signals, [[41, "SIGTERM"]]);
+    assert.deepEqual(result.cleanup.discovered, [{ pid: 41, ppid: 7, startTime: "100" }]);
+    assert.deepEqual(result.cleanup.triggers.map(({ trigger }) => trigger), ["preview-exit", "repository-check-exit"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("timed-out repository commands forward the containment timeout trigger unchanged", async () => {
+  const cleanupTrigger = { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z" };
+  const cleanup = { executionId: "timed-command", outcome: "complete" };
+  const containment = {
+    executionId: "timed-command", ownership: { token: "timed-owner" },
+    cleanup: async () => assert.fail("the command already requested containment cleanup")
+  };
+  let persisted;
+  const tool = projectCommandTool("/fixture", undefined, containment, async () => ({
+    status: "failed", command: "check", timedOut: true, output: "timed out", cleanup, cleanupTrigger
+  }), (evidence, trigger) => { persisted = { evidence, trigger }; });
+  const result = await tool.execute("timeout", { name: "check" });
+  assert.equal(result.isError, true);
+  assert.strictEqual(result.details.cleanup, cleanup);
+  assert.strictEqual(persisted.evidence, cleanup);
+  assert.strictEqual(persisted.trigger, cleanupTrigger);
+});
+
+test("repository-check discovery settles containment when no command can launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-empty-checks-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "empty-check", ownership: { token: "empty-owner" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "empty-check", outcome: "not-required", actions: [] }; }
+    };
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root, containment });
+    assert.equal(result.status, "skipped");
+    assert.equal(result.cleanup.outcome, "not-required");
+    assert.equal(cleanupTrigger.trigger, "repository-check-exit");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker project commands share execution ownership and cleanup on exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-owned-worker-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, "check.mjs"), "console.log(process.env.AGENT_PLAN_EXECUTION_OWNER)\n");
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: ["node", "check.mjs"] } }));
+    let customTools;
+    let cleanupTrigger;
+    const harness = new PiHarness({
+      dataDir: root,
+      containmentFactory: () => ({
+        executionId: "worker-execution", ownership: { token: "own" },
+        cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "not-required" }; }
+      })
+    });
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] },
+      resourceLoader: { getSkills: () => ({ skills: [] }) }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() {
+        const command = customTools.find((tool) => tool.name === "project_command");
+        const report = customTools.find((tool) => tool.name === "worker_report");
+        const commandResult = await command.execute("command", { name: "check" });
+        await report.execute("report", { status: "completed", summary: "Done", artifact: commandResult.details.output });
+      }
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async (options) => { customTools = options.customTools; return { session }; },
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Owned command", nodes: [{ id: "owned", title: "Owned", permission: "write", writeScope: "src", skills: [] }] });
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [] });
+    assert.equal(result.output.trim(), "own");
+    assert.equal(cleanupTrigger.trigger, "worker-completed");
+    assert.equal(result.cleanup.outcome, "not-required");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker uses a daemon-supplied containment rather than replacing its ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-supplied-worker-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "persisted-worker", ownership: { executionId: "persisted-worker", token: "persisted-owner", createdAt: "2026-09-03T10:00:00.000Z" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "persisted-worker", outcome: "not-required" }; }
+    };
+    const harness = new PiHarness({ dataDir: root, containmentFactory: () => assert.fail("must use the containment persisted by the daemon") });
+    let customTools;
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] }, resourceLoader: { getSkills: () => ({ skills: [] }) },
+      setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Done", artifact: "ok" }); }
+    };
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ title: "Supplied containment", nodes: [{ id: "owned", title: "Owned", permission: "read", skills: [] }] });
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], containment });
+    assert.equal(result.cleanup.executionId, "persisted-worker");
+    assert.equal(cleanupTrigger.trigger, "worker-completed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker aborts retain conservative cleanup evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-worker-abort-"));
+  try {
+    const controller = new AbortController();
+    let cleanupTrigger;
+    const harness = new PiHarness({
+      dataDir: root,
+      containmentFactory: () => ({
+        executionId: "aborted-worker", ownership: { token: "aborted-owner" },
+        cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "incomplete" }; }
+      })
+    });
+    const session = {
+      state: { messages: [] }, resourceLoader: { getSkills: () => ({ skills: [] }) }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { controller.abort(new Error("cancelled")); }, async abort() {}
+    };
+    harness.sdk = async () => ({ createAgentSession: async () => ({ session }), SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ title: "Abort", nodes: [{ id: "abort", title: "Abort", permission: "read", skills: [] }] });
+    await assert.rejects(harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], signal: controller.signal }), /cancelled/);
+    assert.equal(cleanupTrigger.trigger, "worker-aborted");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("hard worker tools allow scoped writes and block sibling paths", async () => {
@@ -209,7 +550,25 @@ test("hard worker tools allow scoped writes and block sibling paths", async () =
     const write = scopedWorkerTools(root, "allowed").find((tool) => tool.name === "write");
     await write.execute("allowed", { path: "allowed/result.txt", content: "ok" });
     assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
+    await assert.rejects(write.execute("replace", { path: "allowed/result.txt", content: "truncated" }), /exist/i);
+    assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
     await assert.rejects(write.execute("blocked", { path: "blocked.txt", content: "nope" }), /Write blocked outside scope/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workers can delete only files inside their write scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delete-"));
+  try {
+    await mkdir(join(root, "allowed"));
+    await writeFile(join(root, "allowed", "obsolete.js"), "old");
+    await writeFile(join(root, "blocked.js"), "keep");
+    const remove = scopedWorkerTools(root, "allowed").find((tool) => tool.name === "delete");
+    await remove.execute("allowed", { path: "allowed/obsolete.js" });
+    await assert.rejects(readFile(join(root, "allowed", "obsolete.js")), /ENOENT/);
+    await assert.rejects(remove.execute("blocked", { path: "blocked.js" }), /Write blocked outside scope/);
+    assert.equal(await readFile(join(root, "blocked.js"), "utf8"), "keep");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -271,7 +630,10 @@ test("fresh verification receives the completed deterministic gate", async () =>
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}) }
     });
-    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+    const plan = normalizePlan({ title: "Verify", nodes: [
+      { id: "slice", title: "Slice", permission: "write", writeScope: "src" },
+      { id: "later", title: "Recover queued work", permission: "write", writeScope: "src", dependsOn: ["slice"], acceptanceCriteria: ["Paused work drains after resume"] }
+    ] });
 
     const input = {
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
@@ -283,9 +645,15 @@ test("fresh verification receives the completed deterministic gate", async () =>
 
     assert.equal(result.summary, "Verified");
     assert.match(prompt, /The deterministic gate has already run/);
-    assert.match(prompt, /10 tests passed/);
+    assert.match(prompt, /Checks passed\./);
+    assert.doesNotMatch(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
+    assert.match(prompt, /primary review packet/);
+    assert.match(prompt, /concrete medium-or-higher risk/);
+    assert.match(prompt, /Deferred plan slices \(not acceptance criteria for this review\)/);
+    assert.match(prompt, /Recover queued work: Paused work drains after resume/);
+    assert.match(prompt, /Do not report behavior assigned exclusively to a deferred plan slice/);
     assert.doesNotMatch(prompt, /run focused deterministic checks when useful/);
 
     await harness.verifyStep({ ...input, round: 2, focusFindings: [{ severity: "high", claim: "Write guard is bypassed" }] });
@@ -295,6 +663,152 @@ test("fresh verification receives the completed deterministic gate", async () =>
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("fresh verification retries one empty model response without repeating inspection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-retry-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    const prompts = [];
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) {
+        prompts.push(value);
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: prompts.length === 1 ? " " : '{"summary":"Verified after retry","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    const result = await harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done",
+      checks: { status: "passed", command: "verify", summary: "Passed", output: "10 tests passed" }, runId: "run", round: 1
+    });
+
+    assert.equal(result.summary, "Verified after retry");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /do not repeat repository inspection/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("verification surfaces the provider error after one retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-error-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompts = 0;
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt() {
+        prompts++;
+        this.state.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider rejected the image payload" });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    await assert.rejects(harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done",
+      checks: { status: "passed", command: "verify", summary: "Passed" }, runId: "run", round: 1
+    }), /Provider rejected the image payload/);
+    assert.equal(prompts, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("later final-review rounds explicitly recheck earlier findings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-focus-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompt = "";
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value) {
+        prompt = value;
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Rechecked","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const finding = { severity: "high", claim: "A late child can escape cleanup", evidence: [{ file: "src/process.js", line: 42 }] };
+    await harness.reviewTicket({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
+      plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }),
+      artifacts: [], diff: { files: ["src/process.js"], patch: "+change" }, checks: { status: "passed", summary: "Passed" },
+      focusFindings: [finding], operatorFeedback: "AGENT_PLAN_CAPTURE_* variables were injected by the live harness.",
+      images: [{ type: "image", data: "proof", mimeType: "image/png" }], role: "integration", round: 2, runId: "run"
+    });
+    assert.match(prompt, /Findings from earlier review rounds/);
+    assert.match(prompt, /A late child can escape cleanup/);
+    assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
+    assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
+    assert.match(prompt, /verify the rendered page itself identifies the expected ticket/);
+    assert.match(prompt, /Operator evidence and correction constraints/);
+    assert.match(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
+    assert.match(prompt, /Do not repeat a finding directly contradicted/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an interrupted independent reviewer resumes its durable session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-resume-"));
+  try {
+    const sessionDir = join(root, "pi-sessions", "tickets", "T-1", "run", "reviews", "round-2", "integration");
+    await mkdir(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "saved.jsonl");
+    await writeFile(sessionFile, "persisted review");
+    const opened = [];
+    let prompt;
+    let promptImages;
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value, options) {
+        prompt = value;
+        promptImages = options.images;
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Resumed","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    const harness = new PiHarness({ dataDir: root });
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({ fresh: true }), open: (...args) => { opened.push(args); return { resumed: true }; } }
+    });
+    await harness.reviewTicket({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
+      plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }), artifacts: [], diff: { files: [], patch: "" },
+      checks: { status: "passed", summary: "Passed" }, operatorFeedback: "Fix the blank status pill and clipped mobile worker row.", images: [{ data: "large" }], role: "integration", round: 2, runId: "run"
+    });
+    assert.equal(opened[0][0], sessionFile);
+    assert.match(prompt, /Continue the interrupted independent review/);
+    assert.match(prompt, /Expected ticket: T-1 — Ticket/);
+    assert.match(prompt, /Current deterministic gate \(authoritative; supersedes every earlier check result/);
+    assert.match(prompt, /"status": "passed"/);
+    assert.match(prompt, /"summary": "Passed"/);
+    assert.match(prompt, /filenames, manifests, URLs, and capture-script claims are not proof of identity/);
+    assert.match(prompt, /another ticket, blank or partially rendered content, stale recovery state/);
+    assert.match(prompt, /New operator final-proof feedback/);
+    assert.match(prompt, /blank status pill and clipped mobile worker row/);
+    assert.deepEqual(promptImages, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("fresh verification stops after its repository inspection budget", async () => {
@@ -325,7 +839,7 @@ test("fresh verification stops after its repository inspection budget", async ()
       design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done", checks: {
         status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
       }, runId: "run", round: 1
-    }), /20-action inspection budget/);
+    }), new RegExp(`${MAX_VERIFICATION_ACTIONS}-action inspection budget`));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -401,13 +915,23 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}), open: () => ({}), forkFrom: () => ({}) }
     });
-    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read", skills: [] }] });
+    const plan = normalizePlan({ title: "Read", nodes: [
+      { id: "inspect", title: "Inspect", permission: "write", writeScope: "src,test/e2e-proof.test.js", skills: [], acceptanceCriteria: ["The API stores queued work"] },
+      { id: "deliver", title: "Deliver queued work", permission: "write", writeScope: "src", dependsOn: ["inspect"], acceptanceCriteria: ["Queued work drains after resume"] }
+    ] });
+    plan.nodes[0].scopeChanges = [{ paths: ["test/e2e-proof.test.js"], reason: "Canonical proof fixtures exercise this contract." }];
     await assert.rejects(harness.runStep({
       cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [],
       feedback: "Use the existing queue model", resumeSessionFile: join(root, "worker.jsonl")
     }), /required worker_report tool/);
     assert.match(prompt, /The user responded to this worker session/);
     assert.match(prompt, /Use the existing queue model/);
+    assert.match(prompt, /Effective write scope: src,test\/e2e-proof\.test\.js/);
+    assert.match(prompt, /Audited scope additions: test\/e2e-proof\.test\.js \(Canonical proof fixtures exercise this contract\.\)/);
+    assert.match(prompt, /Do not request access to a path already included/);
+    assert.match(prompt, /Acceptance criteria: The API stores queued work/);
+    assert.match(prompt, /Deferred slices: Deliver queued work \(Queued work drains after resume\)/);
+    assert.match(prompt, /Do not implement behavior assigned exclusively to a deferred slice/);
     assert.doesNotMatch(prompt, /Skills requested/);
 
     await assert.rejects(harness.runStep({

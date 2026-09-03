@@ -112,6 +112,76 @@ export function artifactsForStage(artifacts = [], stageId) {
 
 const proofMedia = { png: "image", jpg: "image", jpeg: "image", webp: "image", webm: "video", mp4: "video" };
 
+function proofEvidenceNavigation(run, locator = {}) {
+  const ticketId = encodeURIComponent(run?.id || "");
+  if (locator.validity && locator.validity !== "valid") return {
+    ...locator,
+    unavailable: true,
+    label: locator.reason ? `Evidence unavailable: ${locator.reason.replaceAll("_", " ")}` : "Evidence unavailable"
+  };
+  if (["artifact", "media"].includes(locator.type) && locator.artifactId) {
+    const artifactId = encodeURIComponent(locator.artifactId);
+    return {
+      type: locator.type,
+      artifactId: locator.artifactId,
+      route: `/api/tickets/${ticketId}/artifacts/${artifactId}`,
+      mediaUrl: locator.type === "media" ? `/api/tickets/${ticketId}/artifacts/${artifactId}/media` : null,
+      label: locator.type === "media" ? "Open media" : "Open artifact"
+    };
+  }
+  if (locator.type === "check" || locator.type === "diff") {
+    const params = new URLSearchParams({ scope: locator.scope || "step" });
+    if (locator.stepId) params.set("stepId", locator.stepId);
+    if (locator.attemptId) params.set("attemptId", locator.attemptId);
+    if (locator.reviewId) params.set("reviewId", locator.reviewId);
+    const isDiff = locator.type === "diff";
+    return {
+      ...locator,
+      label: isDiff ? (locator.scope === "final" ? "Open final diff" : "Open diff") : "Open check output",
+      route: `/api/tickets/${ticketId}/proof/${isDiff ? "diff" : "check-output"}?${params}`,
+      tab: isDiff ? "diff" : "run"
+    };
+  }
+  return { ...locator, label: "Evidence unavailable" };
+}
+
+function projectedEligibility(criteria) {
+  const blockingReasons = criteria.flatMap((criterion) => {
+    const current = criterion.current || {};
+    if (current.status !== "verified") return [{ criterionId: criterion.id, criterion: criterion.text, code: `status_${current.status || "unresolved"}`, message: current.explanation?.summary || "Criterion is unresolved." }];
+    if (current.evidenceValidity !== "valid") return [{ criterionId: criterion.id, criterion: criterion.text, code: `evidence_${current.evidenceValidity || "missing"}`, message: "Criterion evidence is not currently valid." }];
+    return [];
+  });
+  return { eligible: blockingReasons.length === 0, blockingReasons };
+}
+
+/** Turns the server's proof projection into ordered, actionable presentation data. */
+export function proofMapView(run, { stepId = null, requiredOnly = false } = {}) {
+  const proof = run?.proofMap || { criteria: [], compatibility: true };
+  const criteria = (proof.criteria || [])
+    .filter((criterion) => (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false))
+    .map((criterion) => {
+      const current = structuredClone(criterion.current || { status: "not_yet_verified", evidenceValidity: "missing", evidence: [] });
+      if (current.status === "unresolved") current.status = "not_yet_verified";
+      const state = current.status === "verified" && current.evidenceValidity === "stale" ? "stale"
+        : current.status === "verified" && current.evidenceValidity !== "valid" ? "missing-evidence"
+          : current.status || "not_yet_verified";
+      const resultLabel = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified" })[current.status] || "Not yet verified";
+      const evidenceLabel = ({ valid: "Evidence valid", stale: "Evidence stale", missing: "Evidence missing" })[current.evidenceValidity] || "Evidence missing";
+      const label = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified", stale: "Stale evidence", "missing-evidence": "Missing evidence" })[state] || resultLabel;
+      return {
+        ...structuredClone(criterion), current, state, label, resultLabel, evidenceLabel,
+        evidence: (current.evidence || []).map((locator) => proofEvidenceNavigation(run, locator)),
+        history: (criterion.history || []).map((item) => ({
+          ...structuredClone(item),
+          status: item.status === "unresolved" ? "not_yet_verified" : item.status,
+          evidence: (item.evidence || []).map((locator) => proofEvidenceNavigation(run, locator))
+        }))
+      };
+    });
+  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: proof.compatibility ? { eligible: true, blockingReasons: [] } : projectedEligibility(criteria) };
+}
+
 export function finalReview(run) {
   const extension = (name = "") => String(name).split(".").at(-1).toLowerCase();
   const review = run?.reviews?.at(-1);
@@ -119,6 +189,7 @@ export function finalReview(run) {
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
   const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
   return {
+    criteria: proofMapView(run),
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,
@@ -167,6 +238,51 @@ export function stageDetailModel(run, stageId) {
     stage: { id: stage.id, title: stage.title, status: stage.status, position: stageIndex + 1, total: stages.length },
     stepIndex: steps.map((step, index) => ({ id: step.id, title: step.title, status: step.status, position: index + 1 })),
     dependencies
+  };
+}
+
+const cleanupOutcomeCopy = new Set(["running", "not-required", "complete", "incomplete", "unsupported"]);
+
+/**
+ * Shapes durable process-containment evidence for the run inspector without
+ * reducing unresolved cleanup to a generic worker error.
+ */
+export function cleanupInspectorModel(run) {
+  const cleanup = run?.cleanup || {};
+  const executions = Array.isArray(cleanup.executions) ? cleanup.executions.map((execution) => ({
+    executionId: String(execution?.executionId || "unknown-execution"),
+    outcome: cleanupOutcomeCopy.has(execution?.outcome) ? execution.outcome : "incomplete",
+    stepId: execution?.stepId || null,
+    attemptId: execution?.attemptId || null,
+    ownership: execution?.ownership || null,
+    platform: execution?.platform || null,
+    startedAt: execution?.startedAt || null,
+    completedAt: execution?.completedAt || null,
+    triggers: Array.isArray(execution?.triggers) ? execution.triggers : [],
+    discovered: Array.isArray(execution?.discovered) ? execution.discovered : [],
+    actions: Array.isArray(execution?.actions) ? execution.actions : [],
+    unresolved: Array.isArray(execution?.unresolved) ? execution.unresolved : [],
+    diagnostics: Array.isArray(execution?.diagnostics) ? execution.diagnostics : []
+  })) : [];
+  const outcome = cleanupOutcomeCopy.has(cleanup.outcome)
+    ? cleanup.outcome
+    : executions.some((execution) => execution.outcome === "incomplete") ? "incomplete"
+      : executions.some((execution) => execution.outcome === "unsupported") ? "unsupported"
+        : executions.some((execution) => execution.outcome === "complete") ? "complete" : "not-required";
+  const labels = {
+    running: "Cleanup in progress",
+    complete: "Cleanup complete",
+    incomplete: "Cleanup incomplete",
+    unsupported: "Cleanup unsupported",
+    "not-required": "No cleanup required"
+  };
+  return {
+    outcome,
+    label: labels[outcome],
+    advisory: outcome === "incomplete" || outcome === "unsupported",
+    updatedAt: cleanup.updatedAt || null,
+    executionCount: executions.length,
+    executions
   };
 }
 
@@ -394,7 +510,10 @@ export function stageMilestones(run, stage) {
         detail: [review.fix.report?.summary, review.fix.diff ? `${review.fix.diff.files?.length || 0} files · +${review.fix.diff.additions || 0} −${review.fix.diff.deletions || 0}` : null].filter(Boolean).join("\n\n")
       });
     }
-    if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
+    if (stage.status === "active" && run?.status === "fixing") {
+      const findings = run.reviews?.at(-1)?.actionableFindings || [];
+      items.push({ title: "Focused correction in progress.", status: "fixing", at: stage.updatedAt, detail: findingDetails(findings) || "Correcting the latest actionable review findings." });
+    } else if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
     if (stage.status === "completed") items.push({ title: "Agent review completed.", status: "complete", at: stage.updatedAt, detail: stage.summary });
     return items;
   }

@@ -154,7 +154,24 @@ test("timeline preserves canonical active focus, parallel workers, and live reso
   });
 });
 
-test("timeline and attempt details retain cancellation prompt and provenance after a restart", async () => {
+test("timeline follows the active run after automatic step advancement", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [
+      { id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "read", args: '{"path":"old.js"}', at: "2026-09-03T00:00:00.000Z" }] }] },
+      { id: "next", title: "Next", status: "ready" }
+    ] });
+    const id = await seedRun(daemon, {
+      status: "running", plan,
+      activeRuns: { next: { activity: { events: [{ type: "tool_start", tool: "edit", args: '{"path":"next.js"}', at: "2026-09-03T00:01:00.000Z" }] } } }
+    });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, "next");
+    assert.equal(timeline.json.events[0].tool, "edit");
+  });
+});
+
+test("timeline follows an active verification stage instead of an accepted step", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "running", permission: "write", writeScope: "src/build.js" }] });
     const id = await seedRun(daemon, {
@@ -266,6 +283,53 @@ test("timeline carries every canonical blocker class without reinterpreting it",
   });
 });
 
+test("timeline hydrates an explicitly targeted unselected run", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "target-step", title: "Target", status: "running", attempts: [{ events: [{ type: "tool_start", tool: "read", at: "1" }] }] }] });
+    const targetId = await seedRun(daemon, { ticket: { id: "target", identifier: "TARGET", title: "Target" }, status: "running", plan });
+    await seedRun(daemon, { ticket: { id: "selected", identifier: "SELECTED", title: "Selected" } });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", targetId]);
+    assert.equal(timeline.json.ticketId, targetId);
+    assert.equal(timeline.json.stepId, "target-step");
+    assert.equal(timeline.json.events[0].tool, "read");
+  });
+});
+
+test("timeline keeps a paused verification stage instead of falling back to old step activity", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });
+    const stages = [
+      { id: "implement", status: "completed" },
+      { id: "verify", status: "paused", activity: { events: [{ type: "phase", label: "Review fixer paused", at: "2" }] } }
+    ];
+    const id = await seedRun(daemon, { status: "paused", plan, stages });
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, null);
+    assert.equal(timeline.json.stageId, "verify");
+    assert.match(timeline.json.events[0].title, /Review fixer paused/);
+  });
+});
+
+test("timeline follows the stopped step named by the current checkpoint", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [
+      { id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "read", args: '{"path":"old.js"}', at: "1" }] }] },
+      { id: "blocked", title: "Blocked", status: "needs_attention", attempts: [{ events: [{ type: "tool_end", tool: "edit", result: "failed", isError: true, at: "2" }] }] }
+    ] });
+    const id = await seedRun(daemon, {
+      status: "needs_attention", plan,
+      stages: [{ id: "implement", status: "blocked" }],
+      checkpoint: { id: "cp", kind: "needs_attention", stepId: "blocked", title: "Correction stalled" }
+    });
+
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, "blocked");
+    assert.equal(timeline.json.stepStatus, "needs_attention");
+    assert.equal(timeline.json.events[0].isError, true);
+  });
+});
+
 test("approve without an id uses the selected ticket (run manually)", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({
@@ -320,6 +384,35 @@ test("restart exposes the dashboard restart route", async () => {
   });
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/restart");
   assert.deepEqual(called.body, { target: "stage:design", confirmed: true });
+});
+
+test("revise-proof exposes final evidence corrections to operators", async () => {
+  let called;
+  await runCli(["revise-proof", "ticket-1", "Remove", "harness", "artifacts"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/evidence/changes");
+  assert.deepEqual(called.body, { feedback: "Remove harness artifacts" });
+});
+
+test("restart-fixer abandons a contaminated correction session with an audit reason", async () => {
+  let called;
+  await runCli(["restart-fixer", "ticket-1", "Remove", "the", "synthetic", "fallback"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true }); } };
+    },
+    stdout: { write() {} }, stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/review-fix/restart");
+  assert.deepEqual(called.body, { reason: "Remove the synthetic fallback" });
 });
 
 test("accept --auto enables automatic continuation at a review checkpoint", async () => {
@@ -380,4 +473,33 @@ test("revise sends focused feedback to a review-ready step", async () => {
   });
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/changes");
   assert.deepEqual(called.body, { feedback: "Match the installed SDK interface" });
+});
+
+test("scope-add sends one explicit operator-approved path and reason", async () => {
+  let called;
+  await runCli(["scope-add", "build", "ticket-1", "test/e2e.test.js", "Canonical failure requires its regression update"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ ticketId: "ticket-1" }); } };
+    },
+    stdout: { write() {} },
+    stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/scope");
+  assert.deepEqual(called.body, { paths: ["test/e2e.test.js"], reason: "Canonical failure requires its regression update" });
+});
+
+test("waive rejects one verifier finding with an operator reason", async () => {
+  let called;
+  await runCli(["waive", "build", "ticket-1", "Owned by the next plan slice"], {
+    env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
+    fetchImpl: async (url, options) => {
+      called = { url, body: JSON.parse(options.body) };
+      return { ok: true, status: 200, async text() { return JSON.stringify({ status: "review_ready" }); } };
+    },
+    stdout: { write() {} }, stderr: { write() {} }
+  });
+  assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/waive");
+  assert.deepEqual(called.body, { reason: "Owned by the next plan slice" });
 });

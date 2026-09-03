@@ -42,9 +42,21 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.ui.dialogs.includes("workspace-dialog"));
   assert.ok(app.cli.includes("wait"));
   assert.ok(app.cli.includes("select"));
+  assert.ok(app.cli.includes("approve-proof"));
+  assert.ok(app.cli.includes("scope-add"));
+  assert.ok(app.cli.includes("waive"));
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
   const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
+  const dashboard = await readFile(join(repoRoot, "public/app.js"), "utf8");
+  const server = await readFile(join(repoRoot, "src/server.js"), "utf8");
   assert.equal(html.includes("Provider: openai-codex"), false);
+  assert.match(dashboard, /Open \/ zoom/);
+  assert.match(dashboard, /Default app/);
+  assert.doesNotMatch(dashboard, /Zed/);
+  assert.match(server, /runFile\("open", \[path\]\)/);
+  assert.doesNotMatch(server, /runFile\("open", \["-a", "Zed"/);
+  assert.match(server, /\["requirements", "feature-brief", "architecture"\]/);
+  assert.match(server, /cwd, plan: current\.plan, step, artifacts, proofMap: projectProofMap\(current\), images: \[\]/);
 });
 
 test("nav CLI prints a map and json", async () => {

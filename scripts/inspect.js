@@ -85,7 +85,7 @@ export function parseUi(html) {
 }
 
 export function parseCli(source) {
-  return [...source.matchAll(/if \(command === "([a-z]+)"\)/g)].map((match) => match[1]);
+  return [...source.matchAll(/if \(command === "([a-z][a-z-]*)"\)/g)].map((match) => match[1]);
 }
 
 export async function inspectApp(root = repoRoot) {

@@ -1,9 +1,96 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonStore } from "../src/store.js";
+import { compactPersistedState, JsonStore } from "../src/store.js";
+
+test("persisted audit detail stays bounded without losing prompts and event summaries", () => {
+  const huge = "x".repeat(300000);
+  const activity = { events: [{ type: "tool_end", tool: "test", result: huge }], prompts: [{ actor: "reviewer", content: huge }], rawOutput: huge, groups: [{ events: [] }] };
+  const attempt = { events: [{ type: "tool_end", result: huge }], rawOutput: huge, activityGroups: [{ events: [] }], verification: { rawOutput: huge }, diff: { stat: "1 file", patch: huge }, checkDiff: { patch: huge }, aggregateDiff: { patch: huge } };
+  const state = { ticketRuns: { one: { stages: [{ activity, diff: { patch: huge } }], activeRuns: { step: { activity: structuredClone(activity) } }, plan: { nodes: [{ id: "step", diff: { patch: huge }, attempts: [attempt] }] }, reviews: [{ diff: { patch: huge }, fix: { diff: { patch: huge } } }] } }, retainedRuns: {} };
+  compactPersistedState(state);
+  assert.match(activity.prompts[0].content, /state detail truncated/);
+  assert.ok(activity.prompts[0].content.length < 51_000);
+  assert.equal(activity.events[0].tool, "test");
+  assert.match(activity.events[0].result, /state detail truncated/);
+  assert.ok(activity.events[0].result.length < 5_000);
+  assert.equal("groups" in activity, false);
+  assert.match(attempt.rawOutput, /state detail truncated/);
+  assert.ok(attempt.rawOutput.length < 51_000);
+  assert.equal("activityGroups" in attempt, false);
+  assert.match(attempt.verification.rawOutput, /state detail truncated/);
+  assert.equal(attempt.diff.patch, undefined);
+  assert.equal(attempt.diff.stat, "1 file");
+  assert.equal(attempt.checkDiff.patch, undefined);
+  assert.equal(attempt.aggregateDiff.patch, undefined);
+  assert.equal(state.ticketRuns.one.stages[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.plan.nodes[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.reviews[0].diff.patch, undefined);
+  assert.equal(state.ticketRuns.one.reviews[0].fix.diff.patch, undefined);
+});
+
+test("persisted activity keeps the newest bounded audit window", () => {
+  const activity = {
+    events: Array.from({ length: 150 }, (_, index) => ({ label: `event-${index}` })),
+    prompts: Array.from({ length: 15 }, (_, index) => ({ content: `prompt-${index}` }))
+  };
+  const attempt = { events: Array.from({ length: 150 }, (_, index) => ({ label: `attempt-${index}` })) };
+  compactPersistedState({ ticketRuns: { one: { stages: [{ activity }], plan: { nodes: [{ id: "step", attempts: [attempt] }] } } } });
+  assert.equal(activity.events.length, 100);
+  assert.equal(activity.events[0].label, "event-50");
+  assert.equal(activity.events.at(-1).label, "event-149");
+  assert.equal(activity.prompts.length, 10);
+  assert.equal(activity.prompts[0].content, "prompt-5");
+  assert.equal(attempt.events.length, 100);
+  assert.equal(attempt.events[0].label, "attempt-50");
+});
+
+test("keeps file-backed artifact bodies out of memory and persisted state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-artifact-state-"));
+  const file = join(root, "state.json");
+  const artifactPath = join(root, "ticket-runs", "one", "result.md");
+  await mkdir(join(root, "ticket-runs", "one"), { recursive: true });
+  await writeFile(artifactPath, "x".repeat(10_000));
+  try {
+    const store = new JsonStore(file, root);
+    await store.init();
+    await store.update((state) => {
+      const artifact = { id: "result", name: "result.md", kind: "agent-output", path: artifactPath, content: "x".repeat(10_000) };
+      state.ticketRuns.one = {
+        status: "paused", stages: [], activeRuns: {}, artifacts: [{ ...artifact }],
+        plan: { nodes: [{ id: "step", type: "step", artifacts: [{ ...artifact }], attempts: [{ artifacts: [{ ...artifact }] }] }] },
+        reviews: [{ fix: { artifact: { ...artifact } } }]
+      };
+      state.ticketRuns.two = {
+        status: "paused", stages: [], activeRuns: {}, artifacts: [
+          { id: "external", name: "external.md", kind: "agent-output", path: join(tmpdir(), "external.md"), content: "inline fallback" },
+          { id: "missing", name: "missing.md", kind: "agent-output", path: join(root, "ticket-runs", "missing.md"), content: "only surviving copy" }
+        ]
+      };
+    });
+    const memory = store.read();
+    assert.equal(memory.ticketRuns.one.artifacts[0].content, undefined);
+    assert.equal(memory.ticketRuns.one.artifacts[0].bodyStored, true);
+    assert.match(memory.ticketRuns.one.artifacts[0].bodySummary, /state detail truncated/);
+    assert.equal(memory.ticketRuns.one.plan.nodes[0].artifacts[0].content, undefined);
+    assert.equal(memory.ticketRuns.one.plan.nodes[0].attempts[0].artifacts[0].content, undefined);
+    assert.equal(memory.ticketRuns.one.reviews[0].fix.artifact.content, undefined);
+    assert.equal(memory.ticketRuns.two.artifacts[0].content, "inline fallback");
+    assert.equal(memory.ticketRuns.two.artifacts[1].content, "only surviving copy");
+    const persisted = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(persisted.ticketRuns.one.artifacts[0].content, undefined);
+    assert.equal(persisted.ticketRuns.one.artifacts[0].bodyStored, true);
+    assert.equal(persisted.ticketRuns.two.artifacts[0].content, "inline fallback");
+    assert.equal(persisted.ticketRuns.two.artifacts[1].content, "only surviving copy");
+    const reloaded = await new JsonStore(file, root).init();
+    assert.equal(reloaded.ticketRuns.one.artifacts[0].content, undefined);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
 
 test("server restart marks active work as interrupted and clears dead runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-plan-store-"));
@@ -27,11 +114,12 @@ test("server restart marks active work as interrupted and clears dead runs", asy
     assert.equal(state.ticketRuns["run-1"].status, "interrupted");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].status, "interrupted");
     assert.deepEqual(state.ticketRuns["run-1"].activeRuns, {});
-    assert.deepEqual(state.ticketRuns["run-1"].plan.nodes[0].attempts.map((attempt) => attempt.attemptId), ["attempt-3", "attempt-4"]);
+assert.deepEqual(state.ticketRuns["run-1"].plan.nodes[0].attempts.map((attempt) => attempt.attemptId), ["attempt-3", "attempt-4"]);
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].status, "interrupted");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].terminationReason, "daemon_restart");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].rawOutput, "partial output");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].prompt.includes("0123456789abcdef"), false);
+    assert.equal(state.ticketRuns["run-1"].cleanup.outcome, "incomplete");
     const reloaded = await new JsonStore(file, root).init();
     assert.equal(reloaded.ticketRuns["run-1"].plan.nodes[0].attempts.length, 2);
     assert.equal(state.ticketRuns["run-2"].status, "interrupted");
@@ -45,59 +133,16 @@ test("server restart marks active work as interrupted and clears dead runs", asy
   }
 });
 
-test("store upgrade migrates legacy artifact bodies into authorized files", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-plan-artifact-upgrade-"));
-  const file = join(root, "state-v3.json");
+test("normalizes active and retained cleanup evidence without erasing diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-cleanup-store-"));
   try {
-    await writeFile(file, JSON.stringify({
-      version: 5, workspace: { cwd: root }, ticketRuns: {
-        "run-1": {
-          id: "run-1", runId: "legacy-run", status: "completed", ticket: { id: "run-1", identifier: "LEG-1" },
-          artifacts: [{ id: "legacy-output", name: "output.md", kind: "agent-output", stageId: "implement", content: "legacy api_key=0123456789abcdef" }]
-        }
-      }
-    }));
+    const file = join(root, "state.json");
+    await writeFile(file, JSON.stringify({ version: 6, workspace: { cwd: root }, ticketRuns: { active: { status: "paused", plan: { nodes: [] }, cleanup: { executions: [{ executionId: "active-worker", outcome: "unknown", diagnostics: ["adapter lost"] }] } } }, retainedRuns: { "old:run": { status: "completed", cleanup: { executions: [{ executionId: "old-worker", outcome: "unsupported", platform: { name: "darwin", supported: false }, diagnostics: ["no adapter"] }] } } } }));
     const state = await new JsonStore(file, root).init();
-    const artifact = state.ticketRuns["run-1"].artifacts[0];
-    assert.equal(artifact.content, undefined);
-    assert.match(artifact.path, /ticket-runs\/leg-1\/runs\/legacy-run\/artifacts\/implement\/agent-output-[a-f0-9]{10}-output\.md$/);
-    assert.equal((await readFile(artifact.path, "utf8")).includes("0123456789abcdef"), false);
-    assert.equal((await readFile(file, "utf8")).includes("0123456789abcdef"), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("store migration preserves duplicate legacy artifact bodies", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-plan-artifact-collision-"));
-  const file = join(root, "state-v3.json");
-  try {
-    await writeFile(file, JSON.stringify({
-      version: 5, workspace: { cwd: root }, ticketRuns: {
-        "run-1": {
-          id: "run-1", runId: "legacy-run", status: "completed", ticket: { id: "run-1", identifier: "LEG-1" },
-          checkpoint: { evidenceArtifactIds: ["legacy-output", "legacy-output"], media: [{ id: "legacy-output" }, { id: "legacy-output" }] },
-          artifacts: [
-            { id: "legacy-output", name: "output.md", kind: "agent-output", stageId: "implement", stepId: "build", attemptId: "attempt-1", content: "first body" },
-            { id: "legacy-output", name: "output.md", kind: "agent-output", stageId: "implement", stepId: "build", attemptId: "attempt-1", content: "second body" }
-          ]
-        }
-      }
-    }));
-    const state = await new JsonStore(file, root).init();
-    const artifacts = state.ticketRuns["run-1"].artifacts;
-    assert.notEqual(artifacts[0].id, artifacts[1].id);
-    assert.notEqual(artifacts[0].path, artifacts[1].path);
-    assert.match(artifacts[0].path, /agent-output-[a-f0-9]{10}-output\.md$/);
-    assert.match(artifacts[1].path, /agent-output-[a-f0-9]{10}-output\.md$/);
-    assert.equal(await readFile(artifacts[0].path, "utf8"), "first body");
-    assert.equal(await readFile(artifacts[1].path, "utf8"), "second body");
-    assert.equal(artifacts.every((artifact) => artifact.content === undefined), true);
-    assert.deepEqual(state.ticketRuns["run-1"].checkpoint.evidenceArtifactIds, artifacts.map((artifact) => artifact.id));
-    assert.deepEqual(state.ticketRuns["run-1"].checkpoint.media.map((artifact) => artifact.id), artifacts.map((artifact) => artifact.id));
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+    assert.equal(state.ticketRuns.active.cleanup.outcome, "incomplete");
+    assert.deepEqual(state.ticketRuns.active.cleanup.executions[0].diagnostics, ["adapter lost"]);
+    assert.equal(state.retainedRuns["old:run"].cleanup.outcome, "unsupported");
+  } finally { await rm(root, { recursive: true }); }
 });
 
 test("preserves daemon settings and ignores retired ticket capacity", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, rebaseOntoRemote, safeSyncLocal } from "../src/delivery.js";
+import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, pushTicketBranch, reconcileWithRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
 
 function response(value) { return { ok: true, text: async () => JSON.stringify(value) }; }
 
@@ -28,6 +28,21 @@ test("GitHub waits for checks and feedback then squash-merges", async () => {
   assert.equal(JSON.parse(calls.at(-1).input.body).merge_method, "squash");
 });
 
+test("GitHub exposes failed check logs as actionable feedback", async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/pulls/7")) return response({ head: { sha: "abc" }, mergeable: true, mergeable_state: "blocked", draft: false, merged: false });
+    if (url.endsWith("/reviews") || url.endsWith("/comments")) return response([]);
+    if (url.endsWith("/check-runs")) return response({ check_runs: [{ id: 99, name: "verify", status: "completed", conclusion: "failure", details_url: "https://ci/99" }] });
+    if (url.endsWith("/actions/jobs/99/logs")) return response("noise\nnot ok 3 - cleanup remains durable\n  expected: complete\n  actual: incomplete");
+    if (url.endsWith("/status")) return response({ statuses: [] });
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const status = await new GitHubDelivery({ repository: "acme/app", token: "token", fetchImpl }).status({ id: 7 });
+  assert.equal(status.checks, "failed");
+  assert.equal(status.feedback[0].id, "check:99");
+  assert.match(status.feedback[0].body, /not ok 3.*expected: complete.*actual: incomplete/s);
+});
+
 test("GitLab treats unresolved review discussions as feedback", async () => {
   const delivery = new GitLabDelivery({ project: "group/app", token: "token", fetchImpl: async (url) =>
     response(url.endsWith("/discussions") ? [{ notes: [{ id: 2, body: "Fix this", resolvable: true, resolved: false, system: false }] }] : {
@@ -46,18 +61,61 @@ test("safe local sync skips dirty work and only fast-forwards an ancestor", asyn
   assert.equal(args.some((argv) => argv[0] === "merge"), false);
 });
 
-test("rebase conflict resolution is scoped and continues automatically", async () => {
+test("delivery resolves one final-state merge instead of replaying ticket commits", async () => {
   const calls = [];
-  let rebaseAttempts = 0;
+  let mergeAttempts = 0;
   const execImpl = async (_file, argv) => {
     calls.push(argv);
-    if (argv[0] === "rebase" && ++rebaseAttempts === 1) throw new Error("conflict");
+    if (argv.includes("--verify")) throw new Error("no active merge");
+    if (argv[0] === "rebase") throw new Error("no active rebase");
+    if (argv[0] === "merge" && argv.includes("--no-edit") && ++mergeAttempts === 1) throw new Error("conflict");
     if (argv[0] === "diff") return { stdout: "src/a.js\n" };
-    if (argv[0] === "rev-parse") return { stdout: "rebased\n" };
+    if (argv[0] === "rev-parse") return { stdout: "merged\n" };
     return { stdout: "" };
   };
   const resolved = [];
-  assert.equal((await rebaseOntoRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "rebased");
+  assert.equal((await reconcileWithRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "merged");
   assert.deepEqual(resolved, ["src/a.js"]);
-  assert.equal(calls.some((argv) => argv.includes("--continue")), true);
+  assert.equal(calls.filter((argv) => argv.includes("merge") && argv.includes("--continue")).length, 1);
+  assert.equal(calls.some((argv) => argv[0] === "rebase" && argv.includes("--abort")), true);
+});
+
+test("delivery preserves a partially resolved merge for the next resume", async () => {
+  const calls = [];
+  const execImpl = async (_file, argv) => {
+    calls.push(argv);
+    if (argv.includes("--verify")) throw new Error("no active merge");
+    if (argv[0] === "rebase") throw new Error("no active rebase");
+    if (argv[0] === "merge") throw new Error("conflict");
+    if (argv[0] === "diff") return { stdout: "src/a.js\n" };
+    return { stdout: "" };
+  };
+  await assert.rejects(reconcileWithRemote("/repo", "main", {
+    execImpl, resolveConflicts: async () => { throw new Error("provider unavailable"); }
+  }), /provider unavailable/);
+  assert.equal(calls.some((argv) => argv.includes("--abort") && argv.includes("merge")), false);
+});
+
+test("delivery resumes an existing merge without restarting it", async () => {
+  const calls = [];
+  const execImpl = async (_file, argv) => {
+    calls.push(argv);
+    if (argv.includes("--verify")) return { stdout: "merge-head\n" };
+    if (argv[0] === "diff") return { stdout: "src/a.js\n" };
+    if (argv[0] === "rev-parse") return { stdout: "merged\n" };
+    return { stdout: "" };
+  };
+  assert.equal((await reconcileWithRemote("/repo", "main", { execImpl, resolveConflicts: async () => {} })).commit, "merged");
+  assert.equal(calls.some((argv) => argv[0] === "fetch" || (argv[0] === "rebase" && argv.includes("--abort"))), false);
+});
+
+test("unmerged paths expose an interrupted rebase before delivery correction", async () => {
+  const execImpl = async () => ({ stdout: "src/server.js\ntest/server.test.js\n" });
+  assert.deepEqual(await unmergedPaths("/repo", execImpl), ["src/server.js", "test/server.test.js"]);
+});
+
+test("ticket branches use a lease when reconciliation rewrites history", async () => {
+  let args;
+  await pushTicketBranch("/repo", "ticket", async (_file, argv) => { args = argv; return { stdout: "" }; });
+  assert.deepEqual(args, ["push", "--force-with-lease", "--set-upstream", "origin", "ticket"]);
 });

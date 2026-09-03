@@ -1,24 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { access, mkdir, mkdtemp, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { join, relative, resolve, sep } from "node:path";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { assertScopedWrite, diffOutline, normalizeReviewMap } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
 import { parseModelOutput } from "./model-output.js";
 import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
-import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runProjectCommand } from "./project-config.js";
+import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runManagedCommand, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
 import { redactRecord, redactText, safeReasoningSummary } from "./redaction.js";
+import { createExecutionOwnership, createProcessContainment, environmentForOwnership } from "./process-containment.js";
 
 const exec = promisify(execFile);
+
 const verificationEntry = ".agent-plan/verify.mjs";
-export const MAX_VERIFICATION_ACTIONS = 20;
+export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
+const visualProofIdentityInstruction = `For every attached screenshot, verify the rendered page itself identifies the expected ticket and shows a fully loaded state. Compare visible ticket identifier/title and run state with the review packet; filenames, manifests, URLs, and capture-script claims are not proof of identity. Report a high-severity evidence finding when an image shows another ticket, blank or partially rendered content, stale recovery state, or any identity that cannot be verified visibly.`;
+
+export function transientRepositoryCheckFailure(output = "") {
+  return /\bENOTEMPTY\b[\s\S]{0,200}\b(?:directory not empty|rmdir|scandir)\b/i.test(String(output));
+}
 
 const planningInstruction = `You are shaping an executable development plan with the user. Discuss the problem before proposing execution. You may inspect the repository and load discovered skills, but you must not modify files. Organize substantial work into a short, task-specific sequence using workflow_stage and keep its current stage updated. Keep recommendations concrete and concise.`;
 
@@ -182,7 +189,13 @@ function textFromContent(content) {
 function lastAssistantText(session) {
   const messages = session.state?.messages || session.messages || [];
   const message = [...messages].reverse().find((item) => item?.role === "assistant");
-  return textFromContent(message?.content);
+  const text = textFromContent(message?.content);
+  if (!text && message?.stopReason === "error") {
+    const error = new Error(message.errorMessage || "Model request failed");
+    error.code = "MODEL_RESPONSE_ERROR";
+    throw error;
+  }
+  return text;
 }
 
 function availableSkillNames(session) {
@@ -203,7 +216,15 @@ function eventText(value) {
   text ??= String(value ?? "");
   // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
   text = redactText(text);
-  return text.length > 10000 ? `${text.slice(0, 10000)}\n\n[truncated after 10,000 characters]` : text;
+  if (text.length <= 10000) return text;
+  const half = 5000;
+  return `${text.slice(0, half)}\n\n[${text.length - (half * 2)} characters omitted]\n\n${text.slice(-half)}`;
+}
+
+function failureHighlights(output) {
+  const lines = String(output || "").split(/\r?\n/);
+  return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
+}
 }
 
 function safeEvent(event) {
@@ -271,9 +292,11 @@ export function formatCommitMessage(value, step) {
   return `${commitField(value?.subject, `feat: ${step.title}`)}\n\nWhy: ${commitField(value?.why, step.description || step.title)}\nRequirement: ${commitField(value?.requirement, fallbackRequirement)}`;
 }
 
-export function stepContext({ plan, step, artifacts }) {
+export function stepContext({ plan, step, artifacts, proofMap }) {
+  const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
+    .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
-    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.content || artifact.summary || ""}`).join("\n\n")
+    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.id ? ` [artifactId: ${artifact.id}]` : ""}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.kind === "visual-evidence" ? "Captured visual evidence; use its artifactId as a media locator without copying it." : artifact.content || artifact.summary || ""}`).join("\n\n")
     : "No dependency artifacts.";
   const steps = flattenSteps(plan);
   const summarize = (items) => items.length
@@ -306,7 +329,7 @@ Role: ${step.role}
 Harness: ${step.harness}
 Context policy: ${step.contextPolicy}
 Permission: ${step.permission}
-Write scope: ${step.writeScope || "none"}
+Write scope: ${workerWriteScope(step) || "none"}
 Expected files: ${step.expectedFiles?.join(", ") || "none specified"}
 Estimated changed lines: ${step.estimatedChangedLines || "not estimated"}
 Review budget: ${step.reviewBudget ? `${step.reviewBudget.maxFiles} files / ${step.reviewBudget.maxChangedLines} changed lines${step.reviewBudget.justification ? ` (${step.reviewBudget.justification})` : ""}` : "default"}
@@ -334,12 +357,17 @@ ${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise ru
 ## Acceptance criteria
 ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
 
+## Criterion proof report
+Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt), artifact/media (artifactId shown in Dependency artifacts), or diff (scope and stepId for step/attempt).
+${stepCriteria}
+
 Visual evidence: ${step.requiresVideoEvidence ? `required; make ${verificationEntry} write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; make ${verificationEntry} write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} The framework runs ${verificationEntry} after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} Do not run the canonical verify command yourself; the framework runs ${verificationEntry} once after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact.`;
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
+  plan = includeVisualVerificationScope(plan);
   if ((contractExists && projectConfigExists) || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(projectConfigPath)))) return plan;
   const id = findContractId(plan);
   const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
@@ -365,16 +393,60 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
   }, ...nodes] });
 }
 
-export function projectCommandTool(cwd, signal) {
+export function workerWriteScope(step) {
+  const scope = String(step?.writeScope || "").split(",").map((item) => item.trim()).filter(Boolean);
+  // Visual proof is produced by the repository contract, so a visual slice must
+  // be able to correct that contract without gaining access to unrelated code.
+  if (step?.permission === "write" && step.requiresVisualEvidence && outsideContractScope(scope.join(","))) scope.push(".agent-plan");
+  return [...new Set(scope)].join(",");
+}
+
+export function verificationTools(focusFindings = [], images = []) {
+  const imageFinding = (finding) => (finding.evidence || []).some(({ file }) => /\.(?:png|jpe?g|webp)$/i.test(String(file || "")));
+  return focusFindings.length && images.length && focusFindings.every(imageFinding) ? [] : ["read", "grep", "find", "ls"];
+}
+
+function includeVisualVerificationScope(plan) {
+  if (!flattenSteps(plan).some((step) => workerWriteScope(step) !== String(step.writeScope || ""))) return plan;
+  const scoped = structuredClone(plan);
+  for (const step of flattenSteps(scoped)) step.writeScope = workerWriteScope(step);
+  return normalizePlan(scoped);
+}
+
+export function projectCommandTool(cwd, signal, containment, runCommand = runProjectCommand, onCleanup, evidenceRoot) {
   return defineTool({
     name: "project_command",
     label: "Project command",
-    description: `Run one named argv command declared in ${projectConfigPath}; arbitrary shell strings and extra arguments are not accepted.`,
+    description: `Run one repository-approved argv command. Optional safe word arguments can narrow commands such as test filters.`,
     promptSnippet: "Run a repository-approved development command",
     promptGuidelines: ["Use this for focused tests, lint, type checks, formatting, and builds declared by the repository."],
-    parameters: Type.Object({ name: Type.String() }),
-    async execute(_toolCallId, { name }) {
-      const result = await runProjectCommand(cwd, name, { signal });
+    parameters: Type.Object({ name: Type.String(), args: Type.Optional(Type.Array(Type.String())) }),
+    async execute(_toolCallId, { name, args = [] }) {
+      if (name === "verify") return {
+        content: [{ type: "text", text: `The framework runs ${verificationEntry} once after worker_report; continue without rerunning it.` }],
+        details: { status: "deferred", command: name }, isError: false
+      };
+      let environment;
+      if (evidenceRoot) {
+        await mkdir(evidenceRoot, { recursive: true });
+        environment = { AGENT_PLAN_EVIDENCE_DIR: await mkdtemp(join(evidenceRoot, "command-")) };
+      }
+      const result = await runCommand(cwd, name, { signal, args, ownership: containment?.ownership, containment, environment });
+      // A timed-out command can leave token-owning descendants behind even
+      // though the tool returns a normal failed result. Request the shared
+      // coordinator now; it remains idempotent when worker exit follows.
+      if (result.timedOut && containment) {
+        // Reuse the timestamped trigger supplied to the containment call so
+        // the daemon treats this callback as delivery of that same lifecycle event.
+        const trigger = result.cleanupTrigger || { trigger: "repository-command-timeout", command: name, at: new Date().toISOString() };
+        try {
+          if (!result.cleanup) result.cleanup = await containment.cleanup(trigger);
+          await onCleanup?.(result.cleanup, trigger);
+        }
+        catch (error) {
+          result.cleanup = { executionId: containment.executionId, outcome: "incomplete", diagnostics: [`Repository-command cleanup failed: ${error instanceof Error ? error.message : String(error)}`] };
+        }
+      }
       return { content: [{ type: "text", text: result.output || `${name} ${result.status}` }], details: result, isError: result.status === "failed" };
     }
   });
@@ -442,6 +514,21 @@ function stageTool(capture) {
   });
 }
 
+function criterionResultSchema() {
+  return Type.Object({
+    criterionId: Type.String(),
+    status: Type.Union([Type.Literal("verified"), Type.Literal("failed"), Type.Literal("blocked")]),
+    explanation: Type.Optional(Type.Object({ summary: Type.String(), details: Type.Optional(Type.String()) })),
+    evidence: Type.Optional(Type.Array(Type.Object({
+      type: Type.Union([Type.Literal("check"), Type.Literal("artifact"), Type.Literal("media"), Type.Literal("diff")]),
+      scope: Type.Optional(Type.Union([Type.Literal("step"), Type.Literal("attempt"), Type.Literal("final")])),
+      stepId: Type.Optional(Type.String()),
+      attemptId: Type.Optional(Type.String()),
+      artifactId: Type.Optional(Type.String())
+    })))
+  });
+}
+
 function workerReportTool(capture) {
   return defineTool({
     name: "worker_report",
@@ -453,7 +540,8 @@ function workerReportTool(capture) {
       status: Type.Union([Type.Literal("completed"), Type.Literal("needs_input"), Type.Literal("awaiting_approval")]),
       summary: Type.String(),
       artifact: Type.String(),
-      request: Type.Optional(Type.String())
+      request: Type.Optional(Type.String()),
+      criterionResults: Type.Optional(Type.Array(criterionResultSchema()))
     }),
     async execute(_toolCallId, params) {
       capture(params);
@@ -511,15 +599,29 @@ export function scopedWorkerTools(cwd, writeScope) {
         }
         await mkdir(path, { recursive: true });
       },
-      writeFile: async (path, content) => writeFile(await check(path), content)
-    } })
+      writeFile: async (path, content) => writeFile(await check(path), content, { flag: "wx" })
+    } }),
+    defineTool({
+      name: "delete",
+      label: "Delete file",
+      description: "Delete one repository file inside the approved write scope.",
+      parameters: Type.Object({ path: Type.String({ description: "Repository-relative file path" }) }),
+      async execute(_toolCallId, { path }) {
+        const target = await check(path);
+        await unlink(target);
+        return { content: [{ type: "text", text: `Deleted ${relative(cwd, target)}` }], details: { path: relative(cwd, target) } };
+      }
+    })
   ];
 }
 
 export class PiHarness {
-  constructor({ dataDir, publish }) {
+  constructor({ dataDir, publish, containmentFactory = createProcessContainment, execImpl = exec, repositoryCheckTimeoutMs = 10 * 60 * 1000 }) {
     this.dataDir = dataDir;
     this.publish = publish;
+    this.containmentFactory = containmentFactory;
+    this.exec = execImpl;
+    this.repositoryCheckTimeoutMs = repositoryCheckTimeoutMs;
     this.sdkPromise = null;
     this.modelRuntimePromise = null;
     this.planning = new Map();
@@ -610,61 +712,116 @@ export class PiHarness {
       .sort((left, right) => left.id.localeCompare(right.id) || String(left.provider || "").localeCompare(String(right.provider || "")));
   }
 
-  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false, environment: captureEnvironment = {} }) {
+  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false, environment: captureEnvironment = {}, ownership, containment } = {}) {
     requireVisualEvidence ||= requireVideoEvidence;
+    const executionId = `repository-check:${randomUUID()}`;
+    const executionContainment = containment || this.containmentFactory({
+      executionId,
+      ownership: ownership || createExecutionOwnership(executionId)
+    });
+    const executionOwnership = executionContainment.ownership;
     let command = `node ${verificationEntry}`;
     let args = [join(cwd, verificationEntry)];
-    try { await access(args[0]); }
-    catch (error) {
-      if (error.code !== "ENOENT") return { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
-      let packageJson;
-      try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
-      catch (packageError) {
-        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
-      }
-      if (!packageJson.scripts?.test) {
-        const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-        return { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
-      }
-      command = "npm test";
-      args = ["test"];
-    }
-    let evidenceDir = null;
-    if (requireVisualEvidence) {
-      const evidenceRoot = join(this.dataDir, "visual-evidence");
-      await mkdir(evidenceRoot, { recursive: true });
-      evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
-    }
+    let environment = null;
+    let result;
+    let failure;
+    let cleanupTrigger;
     const startedAt = Date.now();
-    const config = await loadProjectConfig(cwd);
-    const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment, ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
+
     try {
+      try { await access(args[0]); }
+      catch (error) {
+        if (error.code !== "ENOENT") {
+          result = { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
+          return result;
+        }
+        let packageJson;
+        try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
+        catch (packageError) {
+          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
+          return result;
+        }
+        if (!packageJson.scripts?.test) {
+          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
+          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
+          return result;
+        }
+        command = "npm test";
+        args = ["test"];
+      }
+      let evidenceDir = null;
+      if (requireVisualEvidence) {
+        const evidenceRoot = join(this.dataDir, "visual-evidence");
+        await mkdir(evidenceRoot, { recursive: true });
+        evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
+      }
+      const config = await loadProjectConfig(cwd);
+      environment = environmentForOwnership(executionOwnership, {
+        ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment,
+        ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {})
+      });
       const executable = command === "npm test" ? "npm" : process.execPath;
-      const { stdout, stderr } = await exec(executable, args, { cwd, signal, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: environment });
-      const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
-        .filter((entry) => entry.isFile())
-        .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
-        .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
-        .filter((item) => item.mediaType);
-      const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-      if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) return { status: "failed", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-      if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) return { status: "failed", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-      return { status: "passed", command, summary: `${command} passed${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+      // execFile waits for `close`, which a token-owned descendant can defer by
+      // retaining inherited pipes. The controlled runner settles at the child
+      // exit or deadline so timeout cleanup below is requested immediately.
+      const runner = this.exec === exec ? runManagedCommand : this.exec;
+      for (let attempt = 0; attempt < 2; attempt++) try {
+        // A prior preview or timeout cleanup may already be settled on this
+        // shared containment. Mark this launch before invoking the runner so
+        // descendants require a fresh worker-exit containment cycle.
+        executionContainment.beginLaunch?.();
+        const { stdout, stderr } = await runner(executable, args, { cwd, signal, timeout: this.repositoryCheckTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: environment });
+        const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
+          .filter((entry) => entry.isFile())
+          .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
+          .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
+          .filter((item) => item.mediaType);
+        const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
+        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        else if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
+        else result = { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+        return result;
+      } catch (error) {
+        const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM");
+        if (timedOut || signal?.aborted) {
+          const trigger = { trigger: signal?.aborted ? "repository-check-aborted" : "repository-check-timeout", command };
+          try { await executionContainment.cleanup(trigger); }
+          catch { /* The exit cleanup below records durable failure evidence. */ }
+        }
+        if (signal?.aborted) { failure = error; throw error; }
+        // Bound each process channel before combining them. A noisy stderr tail
+        // must not evict the causal stdout line (or the process error itself).
+        const channels = [error.stdout, error.stderr, error.message].filter(Boolean);
+        const rawOutput = eventText(redactCommandOutput(channels.map(eventText).join("\n"), environment, { truncate: false }));
+        const highlights = failureHighlights(redactCommandOutput(channels.join("\n"), environment, { truncate: false }));
+        const output = eventText(`${rawOutput}${highlights ? `\n\nFailure highlights:\n${highlights}` : ""}`);
+        if (!attempt && transientRepositoryCheckFailure(output)) continue;
+        result = { status: "failed", command, summary: `${command} failed.`, output, failureHighlights: highlights, evidence: [], durationMs: Date.now() - startedAt };
+        return result;
+      }
     } catch (error) {
-      if (signal?.aborted) throw error;
-      return { status: "failed", command, summary: `${command} failed.`, output: eventText(redactCommandOutput([error.stdout, error.stderr, error.message].filter(Boolean).join("\n"), environment)), evidence: [], durationMs: Date.now() - startedAt };
+      failure = error;
+      throw error;
+    } finally {
+      // This timestamp is the durable identity of this completion request.
+      // The daemon receives the same object when it settles shared containment.
+      cleanupTrigger = { trigger: signal?.aborted ? "repository-check-aborted" : "repository-check-exit", command, at: new Date().toISOString() };
+      let cleanup;
+      try { cleanup = await executionContainment.cleanup(cleanupTrigger); }
+      catch (error) {
+        cleanup = { executionId: executionContainment.executionId, outcome: "incomplete", diagnostics: [`Repository-check cleanup failed: ${error instanceof Error ? error.message : String(error)}`] };
+      }
+      if (result) Object.assign(result, { cleanup, cleanupTrigger });
+      else if (failure && typeof failure === "object") Object.assign(failure, { cleanup, cleanupTrigger });
     }
   }
 
   async evidenceImages(evidence = []) {
     return Promise.all(evidence.filter((item) => item.mediaKind === "image").map(async ({ path, mediaType }) => ({
       type: "image",
-      source: {
-        type: "base64",
-        mediaType,
-        data: (await readFile(path)).toString("base64")
-      }
+      data: (await readFile(path)).toString("base64"),
+      mimeType: mediaType
     })));
   }
 
@@ -925,17 +1082,18 @@ export class PiHarness {
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: ["read", "grep", "find", "ls"],
+      tools: verificationTools(focusFindings, images),
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
+    const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
     const unbindAbort = bindAbort(session, signal);
     let lastThinkingAt = 0;
     let actionCount = 0;
@@ -961,9 +1119,10 @@ export class PiHarness {
 
 Review this slice without relying on the implementation conversation. Inspect repository evidence. The deterministic gate has already run; use its result below rather than attempting to rerun it.
 
-${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}` : "This is the initial verification pass for this slice."}
+${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}${verificationTools(focusFindings, images).length ? "" : "\n\nThese findings concern only the attached visual evidence. Judge the supplied screenshots directly and return the required JSON without repository inspection."}` : "This is the initial verification pass for this slice."}
 
-Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than 20 repository read, search, find, or list actions.
+Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than ${MAX_VERIFICATION_ACTIONS} repository read, search, find, or list actions.
+Treat the supplied acceptance criteria, diff, worker artifact, and deterministic result as the primary review packet. Start there. Open an unchanged repository file only when you can name the concrete medium-or-higher risk that file will confirm or refute; use targeted reads and searches rather than broad repository surveys. Stop inspecting once every acceptance criterion and concrete risk is resolved.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
@@ -977,11 +1136,18 @@ ${design}
 
 Slice: ${step.title}
 Step permission: ${step.permission}
-Write scope: ${step.writeScope || "none"}
+Write scope: ${workerWriteScope(step) || "none"}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
+Deferred plan slices (not acceptance criteria for this review):
+${deferredSlices.length ? deferredSlices.map((candidate) => `- ${candidate.title}: ${candidate.acceptanceCriteria.join("; ")}`).join("\n") : "- none"}
+Criterion IDs for this step:
+${(proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id).map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None"}
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
+${images.length ? visualProofIdentityInstruction : ""}
+Eligible captured media IDs (use these as evidence.type=media artifactId values):
+${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifact.stepId || artifact.stepId === step.id)).map((artifact) => `- ${artifact.id}: ${artifact.name}`).join("\n") || "- None"}
 
 Worker artifact:
 ${output}
@@ -991,12 +1157,18 @@ Diff:
 ${diff.patch || "No textual diff"}
 
 Deterministic gate:
-${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "", output: eventText(checks?.output || "") }, null, 2)}
+${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }, null, 2)}
 
 Return ONLY JSON:
 {
   "summary": "concise verification result",
-  "findings": [{
+  "criterionResults": [{
+    "criterionId": "an exact criterion ID from this step",
+    "status": "verified | failed | blocked",
+    "explanation": {"summary": "specific evidence-based result"},
+    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+  }],
+  "findings": [{ 
     "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
@@ -1008,12 +1180,28 @@ Return ONLY JSON:
 
 ${findingRubric}
 
-Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
+Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       if (budgetError) throw budgetError;
       signal?.throwIfAborted();
-      const rawOutput = lastAssistantText(session);
-      const parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
-      return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
+      let rawOutput;
+      let parsed;
+      try {
+        rawOutput = lastAssistantText(session);
+        parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
+      } catch (error) {
+        if (error.code !== "MODEL_RESPONSE_ERROR" && !/^(?:Model output|Verification output)/.test(error.message)) throw error;
+        onEvent?.({ type: "phase", label: "Retrying failed or incomplete verification output" });
+        await session.prompt("Your previous verification response failed, was empty, or was invalid. Return only the required JSON object with a non-empty summary and a findings array; do not repeat repository inspection.");
+        if (budgetError) throw budgetError;
+        signal?.throwIfAborted();
+        rawOutput = lastAssistantText(session);
+        parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
+      }
+      return {
+        summary: String(parsed.summary || ""),
+        criterionResults: Array.isArray(parsed.criterionResults) ? parsed.criterionResults : [],
+        findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile
+      };
     } finally {
       clearTimeout(budgetTimer);
       unsubscribe();
@@ -1109,18 +1297,25 @@ ${diff.patch || "No textual diff"}`;
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
+    const existingFile = (await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).sort().at(-1);
+    let manager;
+    try {
+      manager = existingFile ? SessionManager.open(join(sessionDir, existingFile), sessionDir, cwd) : SessionManager.create(cwd, sessionDir);
+    } catch {
+      manager = SessionManager.create(cwd, sessionDir);
+    }
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
       tools: ["read", "grep", "find", "ls"],
-      sessionManager: SessionManager.create(cwd, sessionDir)
+      sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
-    const packet = compactReviewPacket({ ticket, plan, artifacts, diff, checks });
+    const packet = { ...compactReviewPacket({ ticket, plan, artifacts, diff, checks }), proofMap: proofMap || null };
     const prompt = this.configuredPrompt(session, profile, `# Independent ${role} review
 
 ${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
@@ -1128,10 +1323,32 @@ ${reviewerCharters[role]} The deterministic gate has already run; use the suppli
 # Compact review packet
 ${JSON.stringify(packet, null, 2)}
 
+# Approved criterion IDs
+${(proofMap?.criteria || []).map((criterion) => `- ${criterion.id} (${criterion.stepTitle}): ${criterion.text}`).join("\n") || "- None"}
+
+${images.length ? visualProofIdentityInstruction : ""}
+
+# Findings from earlier review rounds
+${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
+
+# Operator evidence and correction constraints
+${operatorFeedback || "None"}
+${operatorFeedback ? "Treat these as authoritative constraints. Do not repeat a finding directly contradicted by them unless current evidence proves the issue has regressed." : ""}
+
+${focusFindings.length
+    ? "This is a correction review. Re-check every earlier finding against the current repository and inspect regressions directly introduced by its fixes. Report an earlier finding again when it remains unresolved; omit it only after verifying that current code or evidence resolves it. Do not start a new broad audit or expand the review horizon."
+    : "This is the initial broad review. Inspect the complete ticket outcome within the charter above."}
+
 Return ONLY JSON:
 {
   "summary": "concise independent assessment",
-  "findings": [{
+  "criterionResults": [{
+    "criterionId": "an exact criterion ID",
+    "status": "verified | failed | blocked",
+    "explanation": {"summary": "specific evidence-based result"},
+    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+  }],
+  "findings": [{ 
     "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
@@ -1155,13 +1372,17 @@ Every reported finding triggers an automatic correction round. Report concrete d
     });
     try {
       signal?.throwIfAborted();
-      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
-      await session.prompt(prompt, { images });
+      const turnPrompt = existingFile
+        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n\nCurrent deterministic gate (authoritative; supersedes every earlier check result in this conversation):\n${JSON.stringify(packet.checks, null, 2)}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
+        : prompt;
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
+      await session.prompt(turnPrompt, { images: existingFile ? [] : images });
       signal?.throwIfAborted();
       const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
       return {
         role,
         summary: String(parsed.summary || ""),
+        criterionResults: Array.isArray(parsed.criterionResults) ? parsed.criterionResults : [],
         findings: Array.isArray(parsed.findings) ? parsed.findings : [],
         sessionFile: session.sessionFile
       };
@@ -1172,80 +1393,94 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
-    const { createAgentSession, SessionManager } = await this.sdk();
-    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
-    await mkdir(sessionDir, { recursive: true });
-    let manager;
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onCleanup, ticketId = "shared", runId = "legacy", profile, signal, containment: suppliedContainment }) {
+    // The daemon may persist this containment before invoking us. Never replace
+    // it: project commands must inherit the exact ownership record on disk.
+    const containment = suppliedContainment || this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
+    let session;
+    let unsubscribe = () => {};
+    let unbindAbort = async () => {};
+    let result;
+    let failure;
     try {
-      manager = resumeSessionFile
-        ? SessionManager.open(resumeSessionFile, sessionDir, cwd)
-        : step.contextPolicy === "fork" && forkSessionFile
-          ? SessionManager.forkFrom(forkSessionFile, cwd, sessionDir)
-          : SessionManager.create(cwd, sessionDir);
-    } catch {
-      manager = SessionManager.create(cwd, sessionDir);
-    }
-    const tools = step.permission === "write"
-      ? ["read", "grep", "find", "ls", "edit", "write"]
-      : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
-    let report = null;
-    const reviewNotes = [];
-    tools.push("worker_report");
-    const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, step.writeScope), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
-    if (step.permission === "write") tools.push("project_command", "review_note");
-    const { session } = await createAgentSession({
-      ...(await this.sessionOptions(profile)),
-      cwd,
-      tools,
-      customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
-      sessionManager: manager
-    });
-    session.setSessionName(step.agentId);
-    await onSessionFile?.(session.sessionFile);
-    const unbindAbort = bindAbort(session, signal);
-    const availableSkills = session.resourceLoader.getSkills().skills;
-    const skillBlocks = [];
-    for (const name of step.skills) {
-      const skill = availableSkills.find((item) => item.name === name);
-      if (!skill) throw new Error(`Pi skill not found: ${name}`);
-      const content = await readFile(skill.filePath, "utf8");
-      skillBlocks.push(`<skill name="${skill.name}" location="${skill.filePath}">
+      const { createAgentSession, SessionManager } = await this.sdk();
+      const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
+      await mkdir(sessionDir, { recursive: true });
+      let manager;
+      try {
+        manager = resumeSessionFile
+          ? SessionManager.open(resumeSessionFile, sessionDir, cwd)
+          : step.contextPolicy === "fork" && forkSessionFile
+            ? SessionManager.forkFrom(forkSessionFile, cwd, sessionDir)
+            : SessionManager.create(cwd, sessionDir);
+      } catch {
+        manager = SessionManager.create(cwd, sessionDir);
+      }
+      const tools = step.permission === "write"
+        ? ["read", "grep", "find", "ls", "edit", "write"]
+        : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
+      let report = null;
+      const reviewNotes = [];
+      tools.push("worker_report");
+      const scopedTools = step.permission === "write"
+        ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence")), reviewNoteTool((note) => reviewNotes.push(note))]
+        : [];
+      if (step.permission === "write") tools.push("project_command", "review_note", "delete");
+      ({ session } = await createAgentSession({
+        ...(await this.sessionOptions(profile)),
+        cwd,
+        tools,
+        customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
+        sessionManager: manager
+      }));
+      session.setSessionName(step.agentId);
+      await onSessionFile?.(session.sessionFile);
+      unbindAbort = bindAbort(session, signal);
+      const availableSkills = session.resourceLoader.getSkills().skills;
+      const skillBlocks = [];
+      for (const name of step.skills) {
+        const skill = availableSkills.find((item) => item.name === name);
+        if (!skill) throw new Error(`Pi skill not found: ${name}`);
+        const content = await readFile(skill.filePath, "utf8");
+        skillBlocks.push(`<skill name="${skill.name}" location="${skill.filePath}">
 References are relative to ${skill.baseDir}.
 
 ${stripFrontmatter(content).trim()}
 </skill>`);
-    }
-    let output = "";
-    const events = [];
-    let lastThinkingAt = 0;
-    const unsubscribe = session.subscribe((event) => {
-      const safe = safeEvent(event);
-      if (!safe) return;
-      if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
-      if (safe.type === "thinking") lastThinkingAt = Date.now();
-      if (safe.type === "text_delta") output += safe.delta;
-      else pushBounded(events, { ...safe, at: new Date().toISOString() }, 100);
-      onEvent?.(safe);
-    });
-    try {
+      }
+      let output = "";
+      const events = [];
+      let lastThinkingAt = 0;
+      unsubscribe = session.subscribe((event) => {
+        const safe = safeEvent(event);
+        if (!safe) return;
+        if (safe.type === "thinking" && Date.now() - lastThinkingAt < 2000) return;
+        if (safe.type === "thinking") lastThinkingAt = Date.now();
+        if (safe.type === "text_delta") output += safe.delta;
+        else pushBounded(events, { ...safe, at: new Date().toISOString() }, 100);
+        onEvent?.(safe);
+      });
       signal?.throwIfAborted();
+      const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
+      const resumedContext = resumeSessionFile
+        ? `\n\nCurrent slice boundary:\n- Acceptance criteria: ${step.acceptanceCriteria.join("; ") || "none"}\n- Permission: ${step.permission}\n- Effective write scope: ${workerWriteScope(step) || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\n- Deferred slices: ${deferredSlices.map((candidate) => `${candidate.title} (${candidate.acceptanceCriteria.join("; ")})`).join("; ") || "none"}\nDo not request access to a path already included in this effective write scope. Do not implement behavior assigned exclusively to a deferred slice; report completed without that change when the current criteria are already met.`
+        : "";
       const continuation = feedback
         ? resumeSessionFile
-          ? `The user responded to this worker session.\n\n${feedback}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
+          ? `The user responded to this worker session.\n\n${feedback}${resumedContext}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
           : `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.`
         : resumeSessionFile
-          ? "Continue the interrupted work from this existing session. Your final action MUST be the worker_report tool."
+          ? `Continue the interrupted work from this existing session.${resumedContext}\n\nYour final action MUST be the worker_report tool.`
           : "";
       const prompt = resumeSessionFile
         ? continuation
-        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), continuation].filter(Boolean).join("\n\n");
+        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();
       const rawOutput = output || lastAssistantText(session);
       if (!report) throw new Error("Worker did not finish with the required worker_report tool");
-      return {
+      result = {
         prompt,
         rawOutput,
         output: report.artifact,
@@ -1254,10 +1489,26 @@ ${stripFrontmatter(content).trim()}
         sessionFile: session.sessionFile,
         events
       };
+      return result;
+    } catch (error) {
+      failure = error;
+      throw error;
     } finally {
       unsubscribe();
       await unbindAbort();
-      session.dispose();
+      session?.dispose();
+      let cleanup;
+      try {
+        cleanup = await containment.cleanup({ trigger: signal?.aborted ? "worker-aborted" : result?.report?.status === "completed" ? "worker-completed" : "worker-exit", stepId: step.id });
+      } catch (error) {
+        cleanup = {
+          executionId: containment.executionId,
+          outcome: "incomplete",
+          diagnostics: [`Worker cleanup failed: ${error instanceof Error ? error.message : String(error)}`]
+        };
+      }
+      if (result) result.cleanup = cleanup;
+      else if (failure && typeof failure === "object") failure.cleanup = cleanup;
     }
   }
 }

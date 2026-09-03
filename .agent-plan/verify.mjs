@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
@@ -115,6 +115,15 @@ async function validatePng(path) {
 let failed = false;
 const checkEnvironment = { ...process.env };
 delete checkEnvironment.AGENT_PLAN_EVIDENCE_DIR;
+const capturePath = resolve(repositoryRoot, ".agent-plan", "capture-proof-dashboard.mjs");
+if (await stat(capturePath).then(() => true, () => false)) {
+  process.stdout.write("Capturing criterion-proof dashboard evidence\n");
+  const capture = await runCheck({ args: [".agent-plan/capture-proof-dashboard.mjs"], env: checkEnvironment });
+  if (capture.error || capture.code !== 0) {
+    failed = true;
+    process.stderr.write(`Failed criterion-proof dashboard capture${capture.error ? `: ${capture.error.message}` : ""}\n`);
+  }
+}
 for (const check of checks) {
   process.stdout.write(`Running ${check.name}\n`);
   const result = await runCheck({ ...check, env: checkEnvironment });

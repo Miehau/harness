@@ -1,10 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { persistArtifact, safeName } from "./artifacts.js";
+import { artifactPathInDataDir, persistArtifact, safeName } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
 import { flattenSteps } from "./plan.js";
-import { materializeActiveAttempt } from "./execution.js";
+import { initializeRunCleanup, materializeActiveAttempt } from "./execution.js";
 
 function ensureAttemptIds(run) {
   let changed = false;
@@ -99,6 +100,24 @@ async function migrateArtifactBodies(run, dataDir) {
     if (replacement) { pause.artifactId = replacement; changed = true; }
   }
   return changed;
+function recoverInterruptedCleanup(run, at = new Date().toISOString()) {
+  const cleanup = initializeRunCleanup(run, { legacy: true });
+  for (const execution of cleanup.executions) {
+    if (execution.outcome !== "running") continue;
+    // Ownership tokens are intentionally never persisted, so a restarted
+    // daemon cannot safely rediscover these processes. Preserve uncertainty
+    // rather than claiming a cleanup result based on a reusable PID.
+    execution.outcome = "incomplete";
+    execution.completedAt = at;
+    execution.triggers ||= [];
+    execution.triggers.push({ trigger: "daemon-restart-recovery", at });
+    execution.unresolved ||= [];
+    execution.unresolved.push({ reason: "restart-ownership-token-unavailable" });
+    execution.diagnostics ||= [];
+    execution.diagnostics.push("Daemon restart cannot safely inspect an interrupted execution without its non-persisted ownership token");
+  }
+  if (cleanup.executions.some((execution) => execution.outcome === "incomplete")) cleanup.outcome = "incomplete";
+  cleanup.updatedAt = at;
 }
 
 function initialState(cwd) {
@@ -113,6 +132,114 @@ function initialState(cwd) {
     retainedRuns: {},
     notice: null
   };
+}
+
+const STATE_EVENT_DETAIL_LIMIT = 4000;
+const STATE_PROMPT_LIMIT = 50000;
+const STATE_OUTPUT_LIMIT = 50000;
+const STATE_ARTIFACT_SUMMARY_LIMIT = 1000;
+const STATE_EVENT_COUNT_LIMIT = 100;
+const STATE_PROMPT_COUNT_LIMIT = 10;
+
+function boundedAuditText(value, limit) {
+  if (typeof value !== "string" || value.length <= limit) return value;
+  return `${value.slice(0, limit)}\n… state detail truncated to keep the harness responsive`;
+}
+
+function compactActivity(activity) {
+  if (!activity) return;
+  activity.events = (activity.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
+    const compact = { ...event };
+    for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
+    return compact;
+  });
+  activity.prompts = (activity.prompts || []).slice(-STATE_PROMPT_COUNT_LIMIT).map((prompt) => ({
+    ...prompt,
+    content: boundedAuditText(prompt.content, STATE_PROMPT_LIMIT),
+    prompt: boundedAuditText(prompt.prompt, STATE_PROMPT_LIMIT)
+  }));
+  activity.rawOutput = boundedAuditText(activity.rawOutput, STATE_OUTPUT_LIMIT);
+  delete activity.groups;
+}
+
+function compactDiff(diff) {
+  if (diff && typeof diff === "object") delete diff.patch;
+}
+
+// Keep the full canonical diffs that proof routes reopen before compacting their
+// display copies. The live attempt/review records stay small without making an
+// archived locator resolve to a patchless summary after restart.
+function preserveCanonicalDiffs(run) {
+  for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
+    for (const attempt of step.attempts || []) {
+      if (!attempt.attemptId || !attempt.diff) continue;
+      run.attemptDiffHistory ||= {};
+      run.attemptDiffHistory[step.id] ||= {};
+      // Break aliases before compactDiff mutates the display record below.
+      run.attemptDiffHistory[step.id][attempt.attemptId] = structuredClone(
+        run.attemptDiffHistory[step.id][attempt.attemptId] || attempt.diff
+      );
+    }
+  }
+  for (const review of run.reviews || []) {
+    if (!review.diff) continue;
+    const reviewId = review.reviewId || (Number(review.round) ? `final-review-${Number(review.round)}` : null);
+    if (!reviewId) continue;
+    run.finalDiffHistory ||= {};
+    // Final review history is the immutable proof target. It can share an object
+    // with a review supplied by a caller, which compactDiff intentionally mutates.
+    run.finalDiffHistory[reviewId] = structuredClone(run.finalDiffHistory[reviewId] || review.diff);
+  }
+}
+
+function compactArtifactBodies(value, dataDir) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) compactArtifactBodies(item, dataDir);
+    return;
+  }
+  const storedPath = typeof value.content === "string" && value.id && value.name && value.kind
+    ? artifactPathInDataDir(value, dataDir)
+    : null;
+  if (storedPath && existsSync(storedPath)) {
+    value.bodyStored = true;
+    value.bodySummary = boundedAuditText(value.content, STATE_ARTIFACT_SUMMARY_LIMIT);
+    delete value.content;
+  }
+  for (const child of Object.values(value)) compactArtifactBodies(child, dataDir);
+}
+
+export function compactPersistedState(state, dataDir = null) {
+  for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) {
+    preserveCanonicalDiffs(run);
+    for (const stage of run.stages || []) {
+      compactActivity(stage.activity);
+      compactDiff(stage.diff);
+    }
+    for (const active of Object.values(run.activeRuns || {})) compactActivity(active.activity);
+    for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
+      compactDiff(step.diff);
+      for (const attempt of step.attempts || []) {
+        attempt.events = (attempt.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
+          const compact = { ...event };
+          for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
+          return compact;
+        });
+        attempt.rawOutput = boundedAuditText(attempt.rawOutput, STATE_OUTPUT_LIMIT);
+        if (attempt.verification) attempt.verification.rawOutput = boundedAuditText(attempt.verification.rawOutput, STATE_OUTPUT_LIMIT);
+        compactDiff(attempt.diff);
+        compactDiff(attempt.checkDiff);
+        compactDiff(attempt.aggregateDiff);
+        delete attempt.activityGroups;
+      }
+    }
+    for (const review of run.reviews || []) {
+      compactDiff(review.diff);
+      compactDiff(review.fix?.diff);
+    }
+  }
+  if (dataDir) compactArtifactBodies(state, dataDir);
+  return state;
 }
 
 export function normalizeSettings(value = {}) {
@@ -147,6 +274,7 @@ export class JsonStore {
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
       for (const run of [...Object.values(this.state.ticketRuns), ...Object.values(this.state.retainedRuns)]) {
+        recoverInterruptedCleanup(run);
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
         if (await migrateArtifactBodies(run, dirname(this.file))) recovered = true;
         if (ensureAttemptIds(run)) recovered = true;
@@ -185,30 +313,33 @@ export class JsonStore {
           };
         }
       }
+      // Retained runs are audit evidence too; a saved in-flight record remains
+      // uncertain after restart rather than being represented as a success.
+      for (const run of Object.values(this.state.retainedRuns)) recoverInterruptedCleanup(run);
+      await this.save();
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
-      await this.save();
     }
-    // Restart recovery is a lifecycle transition, so persist it before the daemon
-    // can expose state or another restart can clear the only active snapshot.
+    // Restart recovery is a lifecycle transition, so persist it before exposure.
     if (recovered) await this.save();
     return this.read();
   }
 
   read() { return structuredClone(this.state); }
 
-  async update(change) {
+  async update(change, { snapshot = true } = {}) {
     const work = this.queue.then(async () => {
       await change(this.state);
       this.state.revision = (this.state.revision || 0) + 1;
       await this.save();
-      return this.read();
+      return snapshot ? this.read() : this.state;
     });
     this.queue = work.catch(() => {});
     return work;
   }
 
   async save() {
+    compactPersistedState(this.state, dirname(this.file));
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
     await rename(temporary, this.file);
