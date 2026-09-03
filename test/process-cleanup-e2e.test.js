@@ -229,6 +229,11 @@ test("a fixture descendant forked during graceful cleanup receives a second clea
   let childPid;
   try {
     ({ pid: parentPid } = await launchOwnedFixture("fork-on-graceful", eventFile, ownership));
+    // The launcher reports its spawned PID before the descendant necessarily
+    // reaches exec. Establish token-backed identity before asking cleanup to
+    // take its initial snapshot, so this test exercises the graceful fork
+    // rather than a launch race that correctly yields not-required.
+    await ownedTarget(adapter, ownership, parentPid);
     const containment = new ProcessContainment({
       executionId: ownership.executionId, ownership, adapter, graceMs: 80, forceWaitMs: 20, timeoutMs: 750
     });
