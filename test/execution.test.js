@@ -627,10 +627,10 @@ test("compact run and public state omit artifact bodies", () => {
     stages: [{ id: "design", diff: { files: ["a.js"], patch: "large stage patch" }, activity: { prompts: [{ content: "# private prompt" }], rawOutput: "private output", groups: [{ events: [] }], events: [{ type: "tool_end", output: "x".repeat(3000) }] } }],
     artifacts: [{ id: "a", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret body" }],
     plan: { nodes: [{ id: "one", type: "step", artifacts: [{ id: "b", name: "out.md", content: "worker body" }], attempts: [
-      { rawOutput: "old", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "historical detail" }] },
-      { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], verification: { rawOutput: "review transcript" }, diff: { files: ["a.js"], patch: "attempt patch" }, checkDiff: { patch: "check patch" }, aggregateDiff: { patch: "aggregate patch" } }
+      { rawOutput: "old", activityGroups: [{ events: [] }], events: [{ type: "tool_start", args: "historical args" }, { type: "tool_end", output: "historical detail" }, { type: "usage", input: 10 }], checks: { status: "failed", output: "historical checks" }, feedback: "f".repeat(5000) },
+      { rawOutput: "latest", activityGroups: [{ events: [] }], events: [{ type: "tool_end", output: "y".repeat(3000) }], checks: { status: "passed", output: "latest checks" }, verification: { rawOutput: "review transcript", checks: { status: "passed", output: "duplicated checks" } }, diff: { files: ["a.js"], patch: "attempt patch" }, checkDiff: { patch: "check patch" }, aggregateDiff: { patch: "aggregate patch" } }
     ] }] },
-    reviews: [{ diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" }, artifact: { id: "fix", name: "fix.md", kind: "review-fix", bodyStored: true, bodySummary: "private fix" } } }]
+    reviews: [{ reviews: [{ role: "deterministic", checks: { status: "passed", output: "review checks" } }], diff: { files: ["a.js"], patch: "repeated review patch" }, fix: { diff: { files: ["a.js"], patch: "fix patch" }, artifact: { id: "fix", name: "fix.md", kind: "review-fix", bodyStored: true, bodySummary: "private fix" } } }]
   };
   const compact = compactRun(run, 9);
   assert.equal(compact.revision, 9);
@@ -648,15 +648,22 @@ test("compact run and public state omit artifact bodies", () => {
   assert.equal(published.ticketRuns.t1.stages[0].activity.rawOutput, undefined);
   assert.equal(published.ticketRuns.t1.stages[0].activity.groups, undefined);
   assert.equal(published.ticketRuns.t1.stages[0].diff.patch, undefined);
-  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[0].events[0].output, undefined);
+  assert.deepEqual(published.ticketRuns.t1.plan.nodes[0].attempts[0].events.map((event) => event.type), ["tool_start", "usage"]);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[0].events[0].args, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[0].checks.output, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[0].checks.status, "failed");
+  assert.match(published.ticketRuns.t1.plan.nodes[0].attempts[0].feedback, /feedback truncated/);
   assert.match(published.ticketRuns.t1.plan.nodes[0].attempts[1].events[0].output, /truncated/);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].checks.output, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].rawOutput, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].activityGroups, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].verification.rawOutput, undefined);
+  assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].verification.checks, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].diff.patch, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].checkDiff.patch, undefined);
   assert.equal(published.ticketRuns.t1.plan.nodes[0].attempts[1].aggregateDiff.patch, undefined);
   assert.equal(published.ticketRuns.t1.reviews[0].diff.patch, undefined);
+  assert.equal(published.ticketRuns.t1.reviews[0].reviews[0].checks.output, undefined);
   assert.equal(published.ticketRuns.t1.reviews[0].fix.artifact.bodySummary, undefined);
 });
 

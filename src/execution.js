@@ -820,6 +820,12 @@ function diffSummary(diff) {
   return summary;
 }
 
+function publicChecks(checks) {
+  if (!checks) return checks;
+  const { output, ...summary } = checks;
+  return summary;
+}
+
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
@@ -833,10 +839,20 @@ export function publicRun(run) {
     if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
     for (const [index, attempt] of (step.attempts || []).entries()) {
       const detailed = index === step.attempts.length - 1;
-      attempt.events = (attempt.events || []).map((event) => publicEvent(event, detailed));
+      const events = detailed
+        ? attempt.events || []
+        : (attempt.events || []).filter((event) => ["usage", "tool_start"].includes(event.type));
+      attempt.events = events.map((event) => publicEvent(event, detailed));
       delete attempt.activityGroups;
       delete attempt.rawOutput;
-      if (attempt.verification) delete attempt.verification.rawOutput;
+      if (attempt.checks) attempt.checks = publicChecks(attempt.checks);
+      if (attempt.verification) {
+        delete attempt.verification.rawOutput;
+        delete attempt.verification.checks;
+      }
+      if (typeof attempt.feedback === "string" && attempt.feedback.length > 4000) {
+        attempt.feedback = `${attempt.feedback.slice(0, 4000)}\n… feedback truncated; open the saved session for full detail`;
+      }
       attempt.diff = diffSummary(attempt.diff);
       attempt.checkDiff = diffSummary(attempt.checkDiff);
       attempt.aggregateDiff = diffSummary(attempt.aggregateDiff);
@@ -845,6 +861,7 @@ export function publicRun(run) {
   }
   for (const review of clone.reviews || []) {
     review.diff = diffSummary(review.diff);
+    for (const item of review.reviews || []) if (item.checks) item.checks = publicChecks(item.checks);
     if (review.fix) {
       review.fix.diff = diffSummary(review.fix.diff);
       review.fix.artifact = artifactMetadata(review.fix.artifact);
