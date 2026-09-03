@@ -65,7 +65,6 @@ function renderProfiles() {
     return `<fieldset class="profile-card" data-profile="${id}"><legend>${label}</legend><label for="${id}-model">Model<select id="${id}-model" name="${id}-model" required>${models.map((model) => `<option value="${escapeHtml(model.id)}" ${profile.model === model.id ? "selected" : ""}>${escapeHtml(model.name || model.id)}</option>`).join("")}</select></label><label for="${id}-thinking">Reasoning<select id="${id}-thinking" name="${id}-thinking">${thinkingLevels.map((level) => `<option value="${level}" ${profile.thinking === level ? "selected" : ""}>${level === "off" ? "none" : level}</option>`).join("")}</select></label><label class="profile-prompt" for="${id}-prompt">Agent instructions<textarea id="${id}-prompt" name="${id}-prompt" rows="5">${escapeHtml(profile.prompt)}</textarea></label></fieldset>`;
   }).join("");
   $("#profile-fields").innerHTML = cards;
-  $("#max-concurrent-tickets").value = state.settings?.maxConcurrentTickets || 2;
   $("#project-mode").value = state.settings?.projectMode || "manual";
   $("#poll-interval-seconds").value = state.settings?.pollIntervalSeconds || 60;
   const providers = [...new Set(piModels.map((model) => model.provider).filter(Boolean))];
@@ -179,8 +178,7 @@ function renderTickets() {
   $("#ticket-list").innerHTML = groups.length
     ? groups.map((group) => `<section class="ticket-group"><header><span>${group.label}</span><b>${group.items.length}</b></header>${group.items.map(ticketCard).join("")}</section>`).join("")
     : empty;
-  const occupied = Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted", "paused"].includes(run.status)).length;
-  $("#run-capacity").textContent = `${occupied} / ${state.settings?.maxConcurrentTickets || 2} slots`;
+  $("#run-capacity").textContent = `${Object.values(state.ticketRuns || {}).filter((run) => !["completed", "failed", "needs_attention", "cancelled", "interrupted", "paused"].includes(run.status)).length} running`;
 }
 
 function workflowStageName(stage) {
@@ -1193,7 +1191,6 @@ document.addEventListener("submit", async (event) => {
     }]));
     try {
       const settings = {
-        maxConcurrentTickets: Number(data.get("maxConcurrentTickets")),
         projectMode: data.get("projectMode"),
         pollIntervalSeconds: Number(data.get("pollIntervalSeconds"))
       };

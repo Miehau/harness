@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { admissionCandidates, occupiedTicketIds, ticketReady } from "../src/admission.js";
+import { admissionCandidates, ticketReady } from "../src/admission.js";
 
 const ticket = (id, name = "Ready", priority = null, type = "unstarted") => ({ id, priority, state: { name, type } });
 
@@ -10,11 +10,10 @@ test("only unblocked ready-column tickets are eligible for automatic admission",
   assert.equal(ticketReady(ticket("active", "In progress", 1, "started")), false);
 });
 
-test("pending approval reserves capacity and admission follows ticket priority", () => {
+test("automatic admission skips existing runs and follows ticket priority", () => {
   const state = { ticketRuns: {
     pending: { id: "pending", status: "awaiting_approval" },
     old: { id: "old", status: "completed" }
   } };
-  assert.deepEqual([...occupiedTicketIds(state)], ["pending"]);
-  assert.deepEqual(admissionCandidates([ticket("low", "Ready", 4), ticket("high", "Ready", 1)], state, 2).map(({ id }) => id), ["high"]);
+  assert.deepEqual(admissionCandidates([ticket("low", "Ready", 4), ticket("high", "Ready", 1)], state).map(({ id }) => id), ["high", "low"]);
 });
