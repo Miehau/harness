@@ -350,6 +350,15 @@ test("agent-plan CLI wait is non-zero on needs_attention", async () => {
   });
 });
 
+test("agent-plan CLI wait returns when an operator pauses the run", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "paused", checkpoint: null });
+    const result = await runAgainstDaemon(daemon, ["wait", id]);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /paused/);
+  });
+});
+
 test("operator can auditably expand one blocked step to a directly affected test", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", status: "needs_attention", writeScope: "src/app.js", expectedFiles: ["src/app.js"] }] });

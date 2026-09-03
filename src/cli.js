@@ -343,6 +343,7 @@ function terminal(run) {
   if (run.status === "needs_attention" || (run.checkpoint && run.checkpoint.kind === "needs_attention")) return { done: true, code: 1, reason: "needs_attention" };
   if (run.status === "failed") return { done: true, code: 1, reason: "failed" };
   if (run.status === "completed") return { done: true, code: 0, reason: "completed" };
+  if (run.status === "paused") return { done: true, code: 0, reason: "paused" };
   if (run.checkpoint) return { done: true, code: 0, reason: "checkpoint" };
   return { done: false, code: 0, reason: run.status };
 }
