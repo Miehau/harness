@@ -114,7 +114,7 @@ export class PreviewManager {
     const evidence = [];
     for (const [name, width, height] of [["desktop", 1440, 900], ["mobile", 390, 844]]) {
       const path = join(directory, `${name}.png`);
-      await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+      await this.exec(browser, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=2000", `--user-data-dir=${profile}-${name}`, `--window-size=${width},${height}`, `--screenshot=${path}`, preview.public.url], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
       evidence.push({ name: `${name}.png`, path, ...visualEvidenceMedia(path), viewport: { width, height }, url: preview.public.url });
     }
     return evidence;
