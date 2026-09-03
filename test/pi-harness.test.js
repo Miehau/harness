@@ -315,6 +315,8 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.match(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
+    assert.match(prompt, /primary review packet/);
+    assert.match(prompt, /concrete medium-or-higher risk/);
     assert.doesNotMatch(prompt, /run focused deterministic checks when useful/);
 
     await harness.verifyStep({ ...input, round: 2, focusFindings: [{ severity: "high", claim: "Write guard is bypassed" }] });

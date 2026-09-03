@@ -974,6 +974,7 @@ Review this slice without relying on the implementation conversation. Inspect re
 ${focusFindings.length ? `This is a correction verification. Re-check the findings below and regressions directly introduced by their fixes. Do not start a new broad audit or report unrelated pre-existing issues.\n\nPrevious findings:\n${JSON.stringify(focusFindings, null, 2)}` : "This is the initial verification pass for this slice."}
 
 Keep inspection inside the current working directory. Do not search home directories, sibling repositories, editor caches, or other dependency installations. Use no more than ${MAX_VERIFICATION_ACTIONS} repository read, search, find, or list actions.
+Treat the supplied acceptance criteria, diff, worker artifact, and deterministic result as the primary review packet. Start there. Open an unchanged repository file only when you can name the concrete medium-or-higher risk that file will confirm or refute; use targeted reads and searches rather than broad repository surveys. Stop inspecting once every acceptance criterion and concrete risk is resolved.
 
 Ticket: ${ticket.identifier} — ${ticket.title}
 Requirement IDs: ${step.requirementIds.join(", ") || "none"}
