@@ -66,8 +66,8 @@ test("final review collapses a generic test failure and reviewer paraphrases int
 
 test("final review collapses nearby paraphrases of the same defect across criteria", () => {
   const findings = actionableFindings([
-    { findings: [{ severity: "medium", category: "correctness", claim: "Cleanup trigger merging drops distinct lifecycle events whenever their payloads match because it removes timestamps before deduplication.", acceptanceCriterion: "Concurrent cleanup retains every trigger.", evidence: [{ file: "src/execution.js", line: 87 }] }] },
-    { findings: [{ severity: "medium", category: "correctness", claim: "Trigger deduplication drops distinct lifecycle occurrences with the same payload because timestamps are removed before deduplication.", acceptanceCriterion: "Repeated cleanup retains every trigger.", evidence: [{ file: "src/execution.js", line: 89 }] }] },
+    { findings: [{ severity: "high", category: "tests", claim: "The verification gate fails because completeRunCleanup stores the trigger object instead of flattening its fields, leaving lifecycle evidence malformed.", suggestedFix: "Preserve the complete trigger payload and timestamp, then deduplicate only exact records.", acceptanceCriterion: "Full tests pass.", evidence: [{ file: "src/execution.js", line: 147 }, { file: "src/execution.js", line: 155 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Cleanup trigger persistence drops payload fields because completeRunCleanup records only trigger and timestamp, producing mismatched lifecycle evidence.", suggestedFix: "Pass the complete trigger payload and timestamp through cleanup, then deduplicate only exact records.", acceptanceCriterion: "Repeated cleanup retains every trigger.", evidence: [{ file: "src/execution.js", line: 154 }, { file: "src/execution.js", line: 155 }] }] },
     { findings: [{ severity: "high", category: "correctness", claim: "Cleanup can terminate a newly launched process after ownership transfers.", acceptanceCriterion: "Process ownership transfers safely.", evidence: [{ file: "src/execution.js", line: 90 }] }] }
   ]);
   assert.equal(findings.length, 2);

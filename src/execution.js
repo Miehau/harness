@@ -442,17 +442,21 @@ export function nextRunnableBatch(plan) {
 const actionableSeverities = new Set(["critical", "high", "medium", "blocking", "warning"]);
 
 function similarFinding(left, right) {
-  if (String(left.category || "general").toLowerCase() !== String(right.category || "general").toLowerCase()) return false;
-  const leftEvidence = left.evidence?.[0] || {};
-  const rightEvidence = right.evidence?.[0] || {};
-  if (!leftEvidence.file || String(leftEvidence.file).toLowerCase() !== String(rightEvidence.file || "").toLowerCase()) return false;
-  if (leftEvidence.line && rightEvidence.line && Math.abs(leftEvidence.line - rightEvidence.line) > 5) return false;
+  const leftCategory = String(left.category || "general").toLowerCase();
+  const rightCategory = String(right.category || "general").toLowerCase();
+  if (leftCategory !== rightCategory && leftCategory !== "tests" && rightCategory !== "tests") return false;
+  const sharesSurface = (left.evidence || []).some((leftEvidence) => (right.evidence || []).some((rightEvidence) =>
+    leftEvidence.file
+    && String(leftEvidence.file).toLowerCase() === String(rightEvidence.file || "").toLowerCase()
+    && (!leftEvidence.line || !rightEvidence.line || Math.abs(leftEvidence.line - rightEvidence.line) <= 5)
+  ));
+  if (!sharesSurface) return false;
   const words = (value) => new Set(String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []);
-  const leftWords = words(left.claim);
-  const rightWords = words(right.claim);
+  const leftWords = words(`${left.claim || ""} ${left.suggestedFix || left.suggested_fix || ""}`);
+  const rightWords = words(`${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`);
   if (Math.min(leftWords.size, rightWords.size) < 4) return false;
   const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  return overlap >= 6 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.5;
+  return overlap >= 6 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.4;
 }
 
 export function actionableFindings(reviews) {
