@@ -1734,9 +1734,11 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
 
     let mergeResult = null;
     let lastRebaseHead = null;
+    let awaitingHeadAfterPush = null;
     for (;;) {
       signal?.throwIfAborted();
       const delivery = await forge.status(change);
+      if (awaitingHeadAfterPush && delivery.headSha !== awaitingHeadAfterPush) awaitingHeadAfterPush = null;
       const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
       const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
       await update((state) => {
@@ -1755,8 +1757,13 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
           merge.externalActionPending = "push_feedback_revision";
         });
         await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+        awaitingHeadAfterPush = delivery.headSha;
         await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
         await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
+        continue;
+      }
+      if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
+        await waitForDelivery(20000, signal);
         continue;
       }
       if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
