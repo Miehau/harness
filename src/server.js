@@ -96,6 +96,10 @@ export function deliveryFeedbackReferences(feedback = []) {
     .map((match) => match[1])))];
 }
 
+export function deliveryFailureNeedsFix(message = "") {
+  return /SyntaxError|ReferenceError|AssertionError|\bERR_[A-Z_]+\b|Failure highlights:|\bnot ok\b/i.test(String(message));
+}
+
 export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
   const changes = [];
   for (const step of flattenSteps(run?.plan)) {
@@ -1936,7 +1940,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
     }
     if (!change) {
-      if (current.recovery?.kind === "delivery" && /failed/i.test(current.lastError || "")) {
+      if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
         const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
           || String(current.lastError).slice(-4500);
         ({ checks } = await fixRemoteFeedback(ticketId, [{
