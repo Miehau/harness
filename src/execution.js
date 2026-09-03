@@ -467,6 +467,19 @@ export function findingsFingerprint(findings = []) {
     .join("|");
 }
 
+export function recurringReviewClusters(reviews = [], minRounds = 3) {
+  const counts = new Map();
+  for (const review of reviews) {
+    const keys = new Set(actionableFindings([{ findings: review.actionableFindings || review.findings || [] }]).map((finding) => {
+      const evidence = finding.evidence?.[0] || {};
+      const surface = String(evidence.file || finding.acceptanceCriterion || finding.claim || "unknown").trim().toLowerCase();
+      return `${String(finding.category || "general").toLowerCase()}:${surface}`;
+    }));
+    for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts].filter(([, count]) => count >= minRounds).map(([key]) => key).sort();
+}
+
 export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
   const fingerprint = findingsFingerprint(findings);
   if (Number(round) >= maxRounds) {

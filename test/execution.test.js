@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -246,6 +246,19 @@ test("correction pauses when findings repeat but allows distinct medium-or-highe
   const capped = shouldPauseCorrection({ round: 12, findings, previousFingerprint: "other" });
   assert.equal(capped.pause, true);
   assert.match(capped.reason, /12 verification attempts/);
+});
+
+test("recurring review clusters survive changed wording and duplicate reviewers", () => {
+  const finding = (claim) => ({ severity: "high", category: "requirements", claim, evidence: [{ file: "src/steering.js", line: 12 }] });
+  assert.deepEqual(recurringReviewClusters([
+    { actionableFindings: [finding("Postgres is accepted"), finding("OAuth is accepted")] },
+    { actionableFindings: [finding("CSV export is accepted")] },
+    { actionableFindings: [finding("SQLite is accepted")] }
+  ]), ["requirements:src/steering.js"]);
+  assert.deepEqual(recurringReviewClusters([
+    { actionableFindings: [finding("First occurrence")] },
+    { actionableFindings: [finding("Second occurrence")] }
+  ]), []);
 });
 
 test("correction pause output retains the latest actionable evidence", () => {
