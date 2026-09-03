@@ -524,6 +524,16 @@ test("a contaminated fixer session restarts fresh without discarding its worktre
   assert.equal(reviewFixConstraints(run), "- Remove the queued synthetic fallback");
 });
 
+test("an interrupted run can restart its contaminated fixer after a daemon reload", () => {
+  const run = {
+    status: "interrupted",
+    reviews: [{ round: 4, actionableFindings: [{ severity: "medium", claim: "Proof used stale server code" }], fix: { sessionFile: "/audit/stale.jsonl" } }]
+  };
+
+  assert.deepEqual(restartReviewFixSession(run, "Use the corrected proof harness"), { round: 4, previousSessionFile: "/audit/stale.jsonl" });
+  assert.equal(run.reviews[0].fix.sessionFile, null);
+});
+
 test("operator fixer constraints survive into later correction rounds", () => {
   const run = { reviewFixSessionRestarts: [
     { reason: "Never replace live ticket capture with a seeded fallback" },

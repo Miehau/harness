@@ -668,7 +668,7 @@ export function reviewFixConstraints(run = {}) {
 export function restartReviewFixSession(run, reason, inheritedFiles = []) {
   const feedback = String(reason || "").trim();
   if (!feedback) throw new Error("Describe why the fixer session must restart");
-  if (!["paused", "needs_attention", "failed"].includes(run?.status)) throw new Error("Pause or stop the run before restarting its fixer session");
+  if (!["paused", "interrupted", "needs_attention", "failed"].includes(run?.status)) throw new Error("Pause or stop the run before restarting its fixer session");
   const review = run.reviews?.at(-1);
   const findings = actionableFindings([{ findings: review?.actionableFindings || [] }]);
   if (!review || !findings.length || !review.fix?.sessionFile) throw new Error("No active final-review fixer session is available to restart");
