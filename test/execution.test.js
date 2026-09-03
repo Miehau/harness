@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -254,6 +254,20 @@ test("correction pause output retains the latest actionable evidence", () => {
   assert.match(reason, /\[HIGH\] Sentence-final root paths evade scope checks/);
   assert.match(reason, /src\/scope\.js:42/);
   assert.match(reason, /table-driven regression/);
+});
+
+test("an audited scope expansion starts a fresh bounded correction window", () => {
+  const step = {
+    attempts: [
+      { completedAt: "2026-09-03T10:00:00.000Z", verification: { findings: [{ severity: "high", claim: "Old" }] } },
+      { completedAt: "2026-09-03T10:05:00.000Z", error: "provider timeout" },
+      { completedAt: "2026-09-03T10:10:00.000Z", report: { status: "needs_input" } },
+      { completedAt: "2026-09-03T10:20:00.000Z", verification: { findings: [{ severity: "medium", claim: "New" }] } }
+    ],
+    scopeChanges: [{ at: "2026-09-03T10:15:00.000Z", paths: ["test/e2e.test.js"] }]
+  };
+  assert.equal(nextCorrectionRound(step), 2);
+  assert.equal(nextCorrectionRound({ attempts: step.attempts }), 3);
 });
 
 test("compact run and public state omit artifact bodies", () => {

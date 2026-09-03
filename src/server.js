@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1020,7 +1020,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
       }
       let previousFindings = actionableFindings([priorVerification]);
       let previousFingerprint = findingsFingerprint(previousFindings);
-      for (let round = (step.attempts?.length || 0) + 1; ; round++) {
+      for (let round = nextCorrectionRound(step); ; round++) {
         signal?.throwIfAborted();
         const latest = ticketRun(store.read(), ticketId);
         const currentStep = findNode(latest.plan, stepId);
@@ -1133,6 +1133,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         }
         await update((state) => {
           const current = ticketRun(state, ticketId);
+          findNode(current.plan, stepId).status = "verifying";
           current.status = "verifying";
           current.activeRuns[stepId].lastEvent = `Fresh verification round ${round}`;
           current.activeRuns[stepId].lastEventAt = new Date().toISOString();
@@ -1203,7 +1204,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
+          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, checks, verification, diff: attemptDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });

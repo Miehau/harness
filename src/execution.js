@@ -488,6 +488,15 @@ export function correctionPauseReason(reason, findings = []) {
   return details.length ? `${reason}\nLatest actionable findings:\n${details.join("\n")}` : reason;
 }
 
+export function nextCorrectionRound(step = {}) {
+  const changedAt = Date.parse(step.scopeChanges?.at(-1)?.at || "");
+  const attempts = Array.isArray(step.attempts) ? step.attempts : [];
+  return attempts.filter((attempt) =>
+    (!Number.isFinite(changedAt) || Date.parse(attempt.completedAt || "") >= changedAt)
+    && attempt.verification && actionableFindings([attempt.verification]).length
+  ).length + 1;
+}
+
 export function workflowResumeStage(run) {
   if (workflowBlockers(run?.workflow).length) return "blocked";
   const has = (kind) => (run?.artifacts || []).some((artifact) => artifact.kind === kind);
