@@ -31,6 +31,7 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
+import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -330,6 +331,45 @@ function ticketRun(state, ticketId) {
   const run = state.ticketRuns[ticketId];
   if (!run) throw new Error("Ticket run not found");
   return run;
+}
+
+function stepCriterionIds(run, stepId) {
+  return (run.proofMap?.criteria || []).filter((criterion) => criterion.stepId === stepId).map((criterion) => criterion.id);
+}
+
+function proofGate(run, options) {
+  return proofEligibility(projectProofMap(run), options);
+}
+
+function proofGateError(eligibility) {
+  return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""}: ${reason.message}`).join("; ")}`;
+}
+
+function applyStepProof(run, stepId, reports) {
+  if (!run.proofMap) return;
+  run.proofMap = applyProofReports(run.proofMap, reports, run, { criterionIds: stepCriterionIds(run, stepId) });
+}
+
+function explicitCriterionIds(run, candidateIds, { stepId = null } = {}) {
+  const known = new Set((run.proofMap?.criteria || []).filter((criterion) => !stepId || criterion.stepId === stepId).map((criterion) => criterion.id));
+  const selected = [...new Set((Array.isArray(candidateIds) ? candidateIds : []).map(String))];
+  const unknown = selected.filter((id) => !known.has(id));
+  if (unknown.length) throw new Error(`Unknown or unrelated criterion IDs: ${unknown.join(", ")}`);
+  return selected;
+}
+
+async function persistProofSnapshot(ticketId, { stageId = "proof", stepId = null, attemptId = null, name = "proof-map.json" } = {}) {
+  const run = ticketRun(store.read(), ticketId);
+  if (!run.proofMap) return null;
+  const artifact = await persistArtifact(dataDir, run.ticket, {
+    runId: run.runId, stageId, stepId, attemptId, name, kind: "proof-map",
+    content: JSON.stringify(run.proofMap, null, 2)
+  });
+  await update((state) => {
+    const current = state.ticketRuns[ticketId];
+    if (current?.runId === run.runId && current.proofMap) current.artifacts.push(artifact);
+  });
+  return artifact;
 }
 
 async function promptsForStage(run, stage) {
@@ -1137,7 +1177,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           feedback: nextFeedback
         });
         const result = await harness.runStep({
-          cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, images: [],
+          cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
           feedback: nextFeedback, ticketId, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
@@ -1187,6 +1227,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
+            target.checks = checks;
             target.diff = diff;
             target.reviewNotes = reviewNotes;
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1197,10 +1238,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.lastError = error;
             target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange, rolledBack: runawayDiff });
             current.artifacts.push(...artifacts);
+            applyStepProof(current, stepId, result.report.criterionResults);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
             setStage(current, "implement", "blocked", error);
           });
+          await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-worker.json" });
           return;
         }
         if (workerGate) {
@@ -1209,6 +1252,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = workerGate.kind;
+            target.checks = checks;
             target.diff = diff;
             target.reviewNotes = reviewNotes;
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1219,11 +1263,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.lastError = null;
             target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange });
             current.artifacts.push(...artifacts);
+            applyStepProof(current, stepId, result.report.criterionResults);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
             current.checkpoint = { id: randomUUID(), ...workerGate, createdAt: new Date().toISOString() };
             setStage(current, "implement", "blocked", workerGate.title);
           });
+          await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-worker.json" });
           await mirrorCheckpoint(ticketId);
           return;
         }
@@ -1249,7 +1295,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
-            design, diff, output: result.output, checks, runId: latest.runId, round,
+            design, diff, output: result.output, checks, proofMap: projectProofMap(latest), runId: latest.runId, round,
             focusFindings: verificationFocusFindings(nextFeedback, previousFindings),
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
@@ -1293,6 +1339,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
+          target.checks = checks;
           target.diff = diff;
           target.reviewNotes = reviewNotes;
           target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1303,8 +1350,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.artifacts = [artifacts[0], verificationArtifact];
           target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, checks, verification, diff: attemptDiff, checkDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
+          applyStepProof(current, stepId, result.report.criterionResults);
+          applyStepProof(current, stepId, verification.criterionResults);
           delete current.activeRuns[stepId];
         });
+        await persistProofSnapshot(ticketId, { stageId: "verify", stepId, attemptId, name: "proof-map-verification.json" });
         if (supervisorGate && !findings.length) {
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -1428,7 +1478,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
   }).artifacts;
   const result = await harness.runStep({
-    cwd, plan: current.plan, step, artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
@@ -1469,7 +1519,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
       ticket: current.ticket,
       plan: current.plan,
       artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
-    }).artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    }).artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
@@ -1761,7 +1811,7 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
   });
   const beforeFix = await snapshotTree(current.workspace.cwd);
   const result = await harness.runStep({
-    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [],
+    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [], proofMap: projectProofMap(current),
     images: reviewFixImages(sessionFile, findings, reviewImages), forkSessionFile: null, resumeSessionFile: sessionFile,
     feedback: sessionFile ? finalReviewFixFeedback(findings) : "", ticketId, runId: current.runId,
     profile: current.stageProfiles.implementation,
@@ -1941,6 +1991,7 @@ async function finalReviewLoop(ticketId, signal) {
       artifacts: reviewArtifacts,
       diff,
       checks,
+      proofMap: projectProofMap(current),
       focusFindings,
       operatorFeedback,
       images: reviewImages,
@@ -1962,15 +2013,22 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
+    const finalChecks = {
+      status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
+      evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
+    };
     const findings = humanEvidenceFinding.length ? humanEvidenceFinding : actionableFindings(reviews);
     await update((state) => {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
+      run.finalChecks = finalChecks;
+      if (run.proofMap) for (const review of reviews) run.proofMap = applyProofReports(run.proofMap, review.criterionResults, run);
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
       delete run.pendingReviewAttempt;
       delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });
+    await persistProofSnapshot(ticketId, { stageId: "verify", attemptId: `round-${round}`, name: "proof-map-final-review.json" });
     if (!findings.length) {
       await completeCleanReview({ ticketId, current, round, checks, diff, activity, signal });
       return;
@@ -2000,6 +2058,8 @@ async function finalReviewLoop(ticketId, signal) {
 async function finishHandoff(ticketId) {
   const current = ticketRun(store.read(), ticketId);
   if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
+  const eligibility = proofGate(current, { requiredOnly: true });
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
   const contextContent = current.ticket.source === "local" ? null : (await hydrateArtifact(proposal, dataDir))?.content;
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
@@ -2033,6 +2093,8 @@ async function acceptStep(ticketId, stepId) {
   const current = ticketRun(store.read(), ticketId);
   const step = findNode(current.plan, stepId);
   if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
+  const eligibility = proofGate(current, { stepId });
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
   const message = step.commitMessage || `feat: ${step.title}\n\nWhy: ${step.description || step.title}\nRequirement: ${step.requirementIds.join(", ") || step.acceptanceCriteria.join("; ") || "Complete the approved execution-plan slice"}`;
   let commit;
   let vcsChange = step.vcsChange || null;
@@ -2670,13 +2732,21 @@ async function api(request, response, url) {
     const violations = planReviewViolations(run.plan);
     if (violations.length) throw new Error(`Split or justify oversized plan steps before approval: ${violations.join("; ")}`);
     const input = await body(request);
+    const approvedAt = new Date().toISOString();
+    const proofMap = run.proofMap || initializeProofMap(run.plan, { approvedAt });
+    const proofArtifact = run.proofMap ? null : await persistArtifact(dataDir, run.ticket, {
+      runId: run.runId, stageId: "design", name: "proof-map-approved.json", kind: "proof-map",
+      content: JSON.stringify(proofMap, null, 2)
+    });
     await update((state) => {
       const current = ticketRun(state, id);
       current.auto = input.auto === undefined ? Boolean(current.automaticAdmission) : Boolean(input.auto);
       current.status = "awaiting_approval";
       current.ticketSnapshot = structuredClone(current.ticket);
       current.trackerRevision = current.ticket.updatedAt || null;
-      current.planApprovedAt = new Date().toISOString();
+      current.planApprovedAt ||= approvedAt;
+      current.proofMap ||= proofMap;
+      if (proofArtifact) current.artifacts.push(proofArtifact);
       current.lastError = null;
     });
     await surfaceImmediateFailure(id, runTicket(id));
@@ -2699,8 +2769,11 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     if (run.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting changes");
     const checkpoint = run.checkpoint;
+    const affectedCriterionIds = explicitCriterionIds(run, input.criterionIds);
+    if (run.proofMap && !affectedCriterionIds.length) throw new Error("Identify at least one affected criterion before requesting proof changes");
     await update((state) => {
       const current = ticketRun(state, id);
+      if (affectedCriterionIds.length) current.proofMap = invalidateProof(current.proofMap, affectedCriterionIds, { reason: feedback });
       current.pendingEvidenceFeedback = feedback;
       (current.evidenceFeedbackHistory ||= []).push({
         feedback,
@@ -2712,6 +2785,7 @@ async function api(request, response, url) {
       current.status = "reviewing";
       setStage(current, "verify", "active", "Addressing final proof review feedback");
     });
+    if (affectedCriterionIds.length) await persistProofSnapshot(id, { stageId: "verify", name: "proof-map-final-correction.json" });
     await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)));
     return json(response, 202, { accepted: true, ticketId: id });
   }
@@ -2803,13 +2877,17 @@ async function api(request, response, url) {
         ? input.noteRequests
         : [...(Array.isArray(input.noteIds) ? input.noteIds : []), input.noteId].map((id) => ({ id, feedback: input.feedback }));
       const feedback = reviewNoteFeedback(step.reviewNotes, noteRequests, input.feedback);
+      const affectedCriterionIds = explicitCriterionIds(current, input.criterionIds, { stepId });
+      if (current.proofMap && !affectedCriterionIds.length) throw new Error("Identify at least one affected criterion before requesting changes");
       await update((state) => {
         const run = ticketRun(state, ticketId);
+        if (affectedCriterionIds.length) run.proofMap = invalidateProof(run.proofMap, affectedCriterionIds, { reason: feedback });
         delete findNode(run.plan, stepId).workspaceCommit;
         run.status = "running";
         run.checkpoint = null;
         setStage(run, "implement", "active", `Revising ${step.title}`);
       });
+      if (affectedCriterionIds.length) await persistProofSnapshot(ticketId, { stageId: "implement", stepId, name: "proof-map-step-correction.json" });
       await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => executeStep(ticketId, stepId, { feedback, signal })));
       return json(response, 202, { accepted: true, ticketId, stepId });
     }

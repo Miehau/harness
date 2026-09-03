@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
+import { initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
 import { auditHarnessWriteScopes, closeSseClients, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
@@ -576,6 +577,47 @@ test("final proof checkpoint exposes durable review metadata", async () => {
     const legacyApproval = await invoke(daemon, "POST", "/api/tickets/" + encodeURIComponent(id) + "/context/approve");
     assert.equal(legacyApproval.status, 400);
     assert.match(legacyApproval.json.error, /Product-context proposal not found/);
+  });
+});
+
+test("proof eligibility blocks both the human step and final-proof gates", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", acceptanceCriteria: ["Works"] }] });
+    const proofMap = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+    const id = await seedRun(daemon, { plan, proofMap, status: "awaiting_step_review", checkpoint: { id: "step-proof", kind: "step_review", stepId: "build" } });
+    const step = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
+    assert.equal(step.status, 400);
+    assert.match(step.json.error, /Proof gate blocked: .*criterion-/);
+
+    await daemon.store.update((state) => {
+      const run = state.ticketRuns[id];
+      run.status = "awaiting_evidence_review";
+      run.checkpoint = { id: "final-proof", kind: "evidence_review" };
+    });
+    const final = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(final.status, 400);
+    assert.match(final.json.error, /Proof gate blocked: .*criterion-/);
+
+    const correction = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/changes`, { body: { feedback: "Recheck proof" } });
+    assert.equal(correction.status, 400);
+    assert.match(correction.json.error, /Identify at least one affected criterion/);
+  });
+});
+
+test("plan approval snapshots proof once and exposes the compatibility projection", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+    const id = await seedRun(daemon, {
+      plan, status: "awaiting_approval",
+      checkpoint: { id: "plan-proof", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: {} });
+    assert.equal(approved.status, 202);
+    const saved = daemon.store.read().ticketRuns[id];
+    assert.equal(saved.proofMap.criteria.length, 1);
+    const projected = await invoke(daemon, "GET", `/api/tickets/${id}/run`);
+    assert.equal(projected.json.proofMap.compatibility, false);
+    assert.equal(projected.json.proofMap.criteria[0].text, "Works");
   });
 });
 

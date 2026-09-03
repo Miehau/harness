@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
+import { initializeProofMap } from "../src/proof-map.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
   const plan = normalizePlan({ nodes: [
@@ -617,6 +618,15 @@ test("provider usage exhaustion becomes a durable wait checkpoint", () => {
     retryAt: "Sep 7th, 2026 8:42 PM"
   });
   assert.equal(providerWaitCheckpoint(new Error("Verification failed")), null);
+});
+
+test("public projections preserve legacy compatibility and stored proof eligibility", () => {
+  const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+  const run = { id: "proof", plan, proofMap: initializeProofMap(plan), artifacts: [], stages: [] };
+  assert.equal(compactRun(run).proofMap.compatibility, false);
+  assert.equal(compactRun(run).proofMap.eligibility.eligible, false);
+  assert.equal(publicState({ ticketRuns: { proof: run }, retainedRuns: {} }).ticketRuns.proof.proofMap.criteria[0].text, "Works");
+  assert.equal(compactRun({ id: "legacy", plan, artifacts: [], stages: [] }).proofMap.compatibility, true);
 });
 
 test("compact run and public state omit artifact bodies", () => {

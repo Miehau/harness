@@ -290,7 +290,9 @@ export function formatCommitMessage(value, step) {
   return `${commitField(value?.subject, `feat: ${step.title}`)}\n\nWhy: ${commitField(value?.why, step.description || step.title)}\nRequirement: ${commitField(value?.requirement, fallbackRequirement)}`;
 }
 
-export function stepContext({ plan, step, artifacts }) {
+export function stepContext({ plan, step, artifacts, proofMap }) {
+  const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
+    .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
     ? artifacts.map((artifact) => `### ${artifact.name}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.content || artifact.summary || ""}`).join("\n\n")
     : "No dependency artifacts.";
@@ -352,6 +354,10 @@ ${step.expectedArtifacts?.map((item) => `- ${item}`).join("\n") || "- Concise ru
 
 ## Acceptance criteria
 ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The requested outcome is complete and verified"}
+
+## Criterion proof report
+Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt), artifact/media (artifactId), or diff (scope and stepId for step/attempt).
+${stepCriteria}
 
 Visual evidence: ${step.requiresVideoEvidence ? `required; make ${verificationEntry} write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; make ${verificationEntry} write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
@@ -486,6 +492,21 @@ function stageTool(capture) {
   });
 }
 
+function criterionResultSchema() {
+  return Type.Object({
+    criterionId: Type.String(),
+    status: Type.Union([Type.Literal("verified"), Type.Literal("failed"), Type.Literal("blocked")]),
+    explanation: Type.Optional(Type.Object({ summary: Type.String(), details: Type.Optional(Type.String()) })),
+    evidence: Type.Optional(Type.Array(Type.Object({
+      type: Type.Union([Type.Literal("check"), Type.Literal("artifact"), Type.Literal("media"), Type.Literal("diff")]),
+      scope: Type.Optional(Type.Union([Type.Literal("step"), Type.Literal("attempt"), Type.Literal("final")])),
+      stepId: Type.Optional(Type.String()),
+      attemptId: Type.Optional(Type.String()),
+      artifactId: Type.Optional(Type.String())
+    })))
+  });
+}
+
 function workerReportTool(capture) {
   return defineTool({
     name: "worker_report",
@@ -497,7 +518,8 @@ function workerReportTool(capture) {
       status: Type.Union([Type.Literal("completed"), Type.Literal("needs_input"), Type.Literal("awaiting_approval")]),
       summary: Type.String(),
       artifact: Type.String(),
-      request: Type.Optional(Type.String())
+      request: Type.Optional(Type.String()),
+      criterionResults: Type.Optional(Type.Array(criterionResultSchema()))
     }),
     async execute(_toolCallId, params) {
       capture(params);
@@ -986,7 +1008,7 @@ export class PiHarness {
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
@@ -1046,6 +1068,8 @@ Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
 Deferred plan slices (not acceptance criteria for this review):
 ${deferredSlices.length ? deferredSlices.map((candidate) => `- ${candidate.title}: ${candidate.acceptanceCriteria.join("; ")}`).join("\n") : "- none"}
+Criterion IDs for this step:
+${(proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id).map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None"}
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 ${images.length ? visualProofIdentityInstruction : ""}
 
@@ -1062,7 +1086,13 @@ ${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command
 Return ONLY JSON:
 {
   "summary": "concise verification result",
-  "findings": [{
+  "criterionResults": [{
+    "criterionId": "an exact criterion ID from this step",
+    "status": "verified | failed | blocked",
+    "explanation": {"summary": "specific evidence-based result"},
+    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+  }],
+  "findings": [{ 
     "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
@@ -1091,7 +1121,11 @@ Every reported finding triggers an automatic correction round. Judge only this s
         rawOutput = lastAssistantText(session);
         parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
       }
-      return { summary: String(parsed.summary || ""), findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile };
+      return {
+        summary: String(parsed.summary || ""),
+        criterionResults: Array.isArray(parsed.criterionResults) ? parsed.criterionResults : [],
+        findings: Array.isArray(parsed.findings) ? parsed.findings : [], rawOutput, sessionFile: session.sessionFile
+      };
     } finally {
       clearTimeout(budgetTimer);
       unsubscribe();
@@ -1187,7 +1221,7 @@ ${diff.patch || "No textual diff"}`;
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -1205,13 +1239,16 @@ ${diff.patch || "No textual diff"}`;
       sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
-    const packet = compactReviewPacket({ ticket, plan, artifacts, diff, checks });
+    const packet = { ...compactReviewPacket({ ticket, plan, artifacts, diff, checks }), proofMap: proofMap || null };
     const prompt = this.configuredPrompt(session, profile, `# Independent ${role} review
 
 ${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
 
 # Compact review packet
 ${JSON.stringify(packet, null, 2)}
+
+# Approved criterion IDs
+${(proofMap?.criteria || []).map((criterion) => `- ${criterion.id} (${criterion.stepTitle}): ${criterion.text}`).join("\n") || "- None"}
 
 ${images.length ? visualProofIdentityInstruction : ""}
 
@@ -1229,7 +1266,13 @@ ${focusFindings.length
 Return ONLY JSON:
 {
   "summary": "concise independent assessment",
-  "findings": [{
+  "criterionResults": [{
+    "criterionId": "an exact criterion ID",
+    "status": "verified | failed | blocked",
+    "explanation": {"summary": "specific evidence-based result"},
+    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+  }],
+  "findings": [{ 
     "severity": "critical | high | medium",
     "category": "correctness | requirements | tests | security | accessibility | performance | maintainability",
     "claim": "specific problem",
@@ -1263,6 +1306,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
       return {
         role,
         summary: String(parsed.summary || ""),
+        criterionResults: Array.isArray(parsed.criterionResults) ? parsed.criterionResults : [],
         findings: Array.isArray(parsed.findings) ? parsed.findings : [],
         sessionFile: session.sessionFile
       };
@@ -1273,7 +1317,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, ticketId = "shared", runId = "legacy", profile, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticketId).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "steps");
     await mkdir(sessionDir, { recursive: true });
@@ -1344,7 +1388,7 @@ ${stripFrontmatter(content).trim()}
           : "";
       const prompt = resumeSessionFile
         ? continuation
-        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts })), continuation].filter(Boolean).join("\n\n");
+        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();

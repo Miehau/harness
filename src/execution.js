@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
+import { projectProofMap } from "./proof-map.js";
 
 export const visualEvidencePolicy = "contract-only-v1";
 export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. The harness removes its legacy copies; do not create or restore them in the repository.";
@@ -830,6 +831,7 @@ function publicChecks(checks) {
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
+  clone.proofMap = projectProofMap(run);
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
   for (const stage of clone.stages || []) {
     stage.activity = publicActivity(stage.activity);
@@ -913,6 +915,7 @@ export function compactRun(run, revision = null) {
     checkpoint: run?.checkpoint || null,
     lastError: run?.lastError || null,
     workflow: run?.workflow || null,
+    proofMap: projectProofMap(run),
     revision
   };
 }

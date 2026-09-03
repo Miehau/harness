@@ -156,6 +156,17 @@ test("focused screenshot corrections do not receive repository inspection tools"
   assert.deepEqual(verificationTools([{ ...finding, evidence: [{ file: "src/app.js", line: 1 }] }], [{ data: "image" }]), ["read", "grep", "find", "ls"]);
 });
 
+test("worker prompts bind structured results to the approved criterion IDs", () => {
+  const plan = normalizePlan({ title: "Proof", nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+  const prompt = stepContext({
+    plan, step: plan.nodes[0], artifacts: [],
+    proofMap: { criteria: [{ id: "criterion-fixed", stepId: "build", text: "Works" }] }
+  });
+  assert.match(prompt, /Criterion proof report/);
+  assert.match(prompt, /criterion-fixed: Works/);
+  assert.match(prompt, /Omit criterionResults entirely/);
+});
+
 test("synthetic review steps can omit optional planning arrays", () => {
   const step = { id: "review-fix", title: "Fix review findings", role: "implementation", harness: "pi", contextPolicy: "seeded", permission: "write" };
   const prompt = stepContext({ plan: { title: "Review", nodes: [step] }, step, artifacts: [] });

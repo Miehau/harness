@@ -26,6 +26,7 @@ function criterionSnapshots(plan) {
       id: criterionId(step.id, index, text),
       stepId: step.id,
       stepTitle: String(step.title || ""),
+      stepRequired: step.required !== false,
       index,
       text
     } : null;
@@ -141,12 +142,12 @@ function sameResult(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** Apply reports only to the explicitly expected criterion set; omitted reports fail closed. */
+/** Apply only explicit reports. Silence never rewrites existing proof. */
 export function applyProofReports(map, reports, run, { criterionIds, reportedAt } = {}) {
   const expected = new Set(criterionIds || map?.criteria?.map((item) => item.id) || []);
   const grouped = new Map();
   for (const report of Array.isArray(reports) ? reports : []) {
-    if (!report || typeof report.criterionId !== "string") continue;
+    if (!report || typeof report.criterionId !== "string" || !expected.has(report.criterionId)) continue;
     const matches = grouped.get(report.criterionId) || [];
     matches.push(report);
     grouped.set(report.criterionId, matches);
@@ -154,11 +155,11 @@ export function applyProofReports(map, reports, run, { criterionIds, reportedAt 
   const at = timestamp(reportedAt);
   const next = structuredClone(map);
   for (const criterion of next.criteria || []) {
-    if (!expected.has(criterion.id)) continue;
-    const matches = grouped.get(criterion.id) || [];
+    const matches = grouped.get(criterion.id);
+    if (!matches) continue;
     const current = matches.length === 1
       ? normalizeProofResult(matches[0], run, { reportedAt: at })
-      : unresolved(at, matches.length ? "Conflicting criterion reports were supplied." : "No structured criterion result was reported.");
+      : unresolved(at, "Conflicting criterion reports were supplied.");
     if (!sameResult(criterion.current, current)) criterion.history.push(criterion.current);
     criterion.current = current;
   }
@@ -181,14 +182,17 @@ export function invalidateProof(map, criterionIds, { invalidatedAt, reason = "Af
 function blockers(criteria) {
   return criteria.flatMap((criterion) => {
     const result = criterion.current;
-    if (result.status !== "verified") return [{ criterionId: criterion.id, code: `status_${result.status}`, message: result.explanation?.summary || "Criterion is unresolved." }];
-    if (result.evidenceValidity !== "valid") return [{ criterionId: criterion.id, code: `evidence_${result.evidenceValidity}`, message: "Criterion evidence is not currently valid." }];
+    if (result.status !== "verified") return [{ criterionId: criterion.id, criterion: criterion.text, code: `status_${result.status}`, message: result.explanation?.summary || "Criterion is unresolved." }];
+    if (result.evidenceValidity !== "valid") return [{ criterionId: criterion.id, criterion: criterion.text, code: `evidence_${result.evidenceValidity}`, message: "Criterion evidence is not currently valid." }];
     return [];
   });
 }
 
-export function proofEligibility(proof) {
-  const reasons = blockers(proof?.criteria || []);
+export function proofEligibility(proof, { stepId = null, requiredOnly = false } = {}) {
+  const criteria = (proof?.criteria || []).filter((criterion) =>
+    (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false)
+  );
+  const reasons = blockers(criteria);
   return { eligible: reasons.length === 0, blockingReasons: reasons };
 }
 
