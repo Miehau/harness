@@ -175,7 +175,7 @@ export function runManagedCommand(executable, args, { cwd, env, signal, timeout,
   });
 }
 
-export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership, containment, timeoutMs = 10 * 60 * 1000 } = {}) {
+export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership, containment, timeoutMs = 10 * 60 * 1000, environment: overrides = {} } = {}) {
   const config = await loadProjectConfig(cwd);
   if (config.commandErrors?.[name]) throw new Error(config.commandErrors[name]);
   const argv = config.commands[name];
@@ -185,7 +185,8 @@ export async function runProjectCommand(cwd, name, { signal, execImpl = exec, so
   const baseEnvironment = await projectEnvironment(cwd, config, { source, execImpl });
   // Ownership augments the deliberately curated command environment; it never
   // substitutes process.env or grants a command access to ambient secrets.
-  const environment = ownership ? environmentForOwnership(ownership, baseEnvironment) : baseEnvironment;
+  const commandEnvironment = { ...baseEnvironment, ...overrides };
+  const environment = ownership ? environmentForOwnership(ownership, commandEnvironment) : commandEnvironment;
   const executable = argv[0].startsWith("./") ? resolve(cwd, argv[0]) : argv[0];
   // Record the launch before spawn, rather than at timeout cleanup: if a
   // prior timeout already settled this execution, worker completion must open

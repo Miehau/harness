@@ -217,3 +217,17 @@ test("allows bounded word arguments for focused commands", async () => {
     await assert.rejects(runProjectCommand(root, "test", { args: ["--watch"], execImpl }), /unsafe arguments/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("trusted command environment keeps generated evidence outside the repository", async () => {
+  const root = await mkdtemp(join(tmpdir(), "project-command-evidence-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { capture: ["node", "capture.mjs"] } }));
+    let environment;
+    await runProjectCommand(root, "capture", {
+      source: {}, environment: { AGENT_PLAN_EVIDENCE_DIR: "/run-owned/evidence" },
+      execImpl: async (_executable, _args, options) => { environment = options.env; return { stdout: "ok", stderr: "" }; }
+    });
+    assert.equal(environment.AGENT_PLAN_EVIDENCE_DIR, "/run-owned/evidence");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -415,7 +415,7 @@ function includeVisualVerificationScope(plan) {
   return normalizePlan(scoped);
 }
 
-export function projectCommandTool(cwd, signal, containment, runCommand = runProjectCommand, onCleanup) {
+export function projectCommandTool(cwd, signal, containment, runCommand = runProjectCommand, onCleanup, evidenceRoot) {
   return defineTool({
     name: "project_command",
     label: "Project command",
@@ -428,7 +428,12 @@ export function projectCommandTool(cwd, signal, containment, runCommand = runPro
         content: [{ type: "text", text: `The framework runs ${verificationEntry} once after worker_report; continue without rerunning it.` }],
         details: { status: "deferred", command: name }, isError: false
       };
-      const result = await runCommand(cwd, name, { signal, args, ownership: containment?.ownership, containment });
+      let environment;
+      if (evidenceRoot) {
+        await mkdir(evidenceRoot, { recursive: true });
+        environment = { AGENT_PLAN_EVIDENCE_DIR: await mkdtemp(join(evidenceRoot, "command-")) };
+      }
+      const result = await runCommand(cwd, name, { signal, args, ownership: containment?.ownership, containment, environment });
       // A timed-out command can leave token-owning descendants behind even
       // though the tool returns a normal failed result. Request the shared
       // coordinator now; it remains idempotent when worker exit follows.
@@ -1419,7 +1424,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
       const reviewNotes = [];
       tools.push("worker_report");
       const scopedTools = step.permission === "write"
-        ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup), reviewNoteTool((note) => reviewNotes.push(note))]
+        ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence")), reviewNoteTool((note) => reviewNotes.push(note))]
         : [];
       if (step.permission === "write") tools.push("project_command", "review_note", "delete");
       ({ session } = await createAgentSession({

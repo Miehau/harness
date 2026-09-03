@@ -108,6 +108,19 @@ test("worker project commands defer canonical verification to the framework", as
   assert.match(result.content[0].text, /once after worker_report/);
 });
 
+test("worker project commands isolate generated evidence from the worktree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-command-evidence-"));
+  try {
+    let options;
+    const tool = projectCommandTool("/fixture", undefined, undefined, async (_cwd, _name, received) => {
+      options = received;
+      return { status: "passed", command: "capture", output: "captured" };
+    }, undefined, root);
+    await tool.execute("call-1", { name: "capture" });
+    assert.match(options.environment.AGENT_PLAN_EVIDENCE_DIR, new RegExp(`^${root}/command-`));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("architecture workers see completed and future plan outcomes without unrelated verification ownership", () => {
   const plan = normalizePlan({ title: "Board", nodes: [
     { id: "skeleton", title: "Create skeleton", description: "Launch the empty app.", status: "accepted" },
