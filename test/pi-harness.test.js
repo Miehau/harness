@@ -225,6 +225,7 @@ test("bounded repository failure output retains both context and the final faili
       console.log("    Command failed: git worktree add --detach /tmp/feature abc123");
       console.log("    fatal: failed to read .git/worktrees/feature/commondir");
       console.log("  code: 128");
+      console.log("Final proof dashboard did not render selected MEA-55 workflow within 45 seconds");
       console.error("CHROME-NOISE:" + "b".repeat(120000));
       process.exit(1);
     `);
@@ -238,6 +239,7 @@ test("bounded repository failure output retains both context and the final faili
     assert.match(result.failureHighlights, /not ok 237 - preserves the proof record/);
     assert.match(result.failureHighlights, /Command failed: git worktree add/);
     assert.match(result.failureHighlights, /fatal: failed to read/);
+    assert.match(result.failureHighlights, /did not render selected MEA-55 workflow within 45 seconds/);
     assert.doesNotMatch(result.failureHighlights, /BEGIN-CONTEXT/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -492,13 +494,17 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
       plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }),
       artifacts: [], diff: { files: ["src/process.js"], patch: "+change" }, checks: { status: "passed", summary: "Passed" },
-      focusFindings: [finding], images: [{ type: "image", data: "proof", mimeType: "image/png" }], role: "integration", round: 2, runId: "run"
+      focusFindings: [finding], operatorFeedback: "AGENT_PLAN_CAPTURE_* variables were injected by the live harness.",
+      images: [{ type: "image", data: "proof", mimeType: "image/png" }], role: "integration", round: 2, runId: "run"
     });
     assert.match(prompt, /Findings from earlier review rounds/);
     assert.match(prompt, /A late child can escape cleanup/);
     assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
     assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
     assert.match(prompt, /verify the rendered page itself identifies the expected ticket/);
+    assert.match(prompt, /Operator evidence and correction constraints/);
+    assert.match(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
+    assert.match(prompt, /Do not repeat a finding directly contradicted/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

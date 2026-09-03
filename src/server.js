@@ -42,13 +42,14 @@ function cliOption(name, fallback, argv = process.argv.slice(2)) {
 
 export function repositoryCheckReview(checks) {
   const missingVisualEvidence = checks.failureKind === "visual-evidence";
+  const failureDiagnostic = String(checks.failureHighlights || "").trim().slice(-1500);
   return {
     role: "deterministic",
     summary: checks.summary,
     findings: checks.status === "failed" ? [{
       severity: "blocking",
       category: missingVisualEvidence ? "evidence" : "tests",
-      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}`,
+      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
       evidence: [],
       suggestedFix: missingVisualEvidence
         ? "Configure a preview command or make the verification contract capture the required visual evidence."
@@ -1876,6 +1877,7 @@ async function finalReviewLoop(ticketId, signal) {
     signal?.throwIfAborted();
     const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
     const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
+    const operatorFeedback = [reviewFixConstraints(current), current.pendingEvidenceFeedback || ""].filter(Boolean).join("\n");
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
@@ -1884,7 +1886,7 @@ async function finalReviewLoop(ticketId, signal) {
       diff,
       checks,
       focusFindings,
-      operatorFeedback: current.pendingEvidenceFeedback || "",
+      operatorFeedback,
       images: reviewImages,
       role,
       round,

@@ -219,7 +219,7 @@ function failureHighlights(output) {
   const lines = String(output || "").split(/\r?\n/);
   const selected = [];
   for (let index = 0; index < lines.length; index++) {
-    if (!/^(?:not ok\b|FAIL(?:ED)?\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(lines[index])) continue;
+    if (!/^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(lines[index])) continue;
     selected.push(lines[index].slice(0, 500));
   }
   return [...new Set(selected)].slice(-40).join("\n").slice(-4500);
@@ -1205,6 +1205,10 @@ ${images.length ? visualProofIdentityInstruction : ""}
 
 # Findings from earlier review rounds
 ${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
+
+# Operator evidence and correction constraints
+${operatorFeedback || "None"}
+${operatorFeedback ? "Treat these as authoritative constraints. Do not repeat a finding directly contradicted by them unless current evidence proves the issue has regressed." : ""}
 
 ${focusFindings.length
     ? "This is a correction review. Re-check every earlier finding against the current repository and inspect regressions directly introduced by its fixes. Report an earlier finding again when it remains unresolved; omit it only after verifying that current code or evidence resolves it. Do not start a new broad audit or expand the review horizon."

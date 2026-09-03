@@ -89,6 +89,7 @@ test("repository failures send correction workers only focused highlights", () =
     failureHighlights: "not ok 17 - retains the steering claim\nexpected: queued\nactual: withheld"
   });
   assert.match(review.findings[0].suggestedFix, /not ok 17/);
+  assert.match(review.findings[0].claim, /not ok 17 - retains the steering claim/);
   assert.doesNotMatch(review.findings[0].suggestedFix, /thousands of passing/);
 });
 
