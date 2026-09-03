@@ -17,7 +17,7 @@ import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
 import { ensureVerificationContractStep, formatTicketHorizon, PiHarness } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
-import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations } from "./plan.js";
+import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
@@ -1093,6 +1093,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const attemptDiff = await diffTrees(cwd, attemptBaseTree, afterTree);
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
+        const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
         const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, currentStep.writeScope);
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
@@ -1105,8 +1106,13 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         ];
         Object.assign(attemptEvidence, { diff: attemptDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, result.report);
-        if (violations.length || (result.report.status !== "completed" && !workerGate)) {
-          const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
+        if (runawayDiff) await restoreTree(cwd, stepBaseTree);
+        if (violations.length || runawayDiff || (result.report.status !== "completed" && !workerGate)) {
+          const error = violations.length
+            ? `Changes outside permission or write scope: ${violations.join(", ")}`
+            : runawayDiff
+              ? `Runaway diff rolled back to the step checkpoint: ${reviewBudget.reasons.join("; ")}`
+              : (result.report.request || result.report.summary);
           const attemptActivity = activity.snapshot();
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -1120,7 +1126,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange, rolledBack: runawayDiff });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";

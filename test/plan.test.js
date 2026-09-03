@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { blockingReasons, dependencyArtifacts, diffReviewBudget, findNode, groupStatus, normalizeEditedPlan, normalizePlan, planReviewViolations } from "../src/plan.js";
+import { blockingReasons, dependencyArtifacts, diffReviewBudget, findNode, groupStatus, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "../src/plan.js";
 
 function planFixture() {
   return normalizePlan({
@@ -37,6 +37,11 @@ test("a group is a hard barrier until every required child is accepted", () => {
   assert.deepEqual(blockingReasons(plan, build), []);
   research.children[0].artifacts.push({ name: "verification.json", kind: "step-verification", content: "large TAP audit" });
   assert.deepEqual(dependencyArtifacts(plan, build).map((artifact) => artifact.name), ["repo.md", "risk.md"]);
+});
+
+test("runaway review diffs require rollback while ordinary overruns remain reviewable", () => {
+  assert.equal(reviewBudgetRequiresRollback({ files: 9, maxFiles: 8, changedLines: 450, maxChangedLines: 400 }), false);
+  assert.equal(reviewBudgetRequiresRollback({ files: 6, maxFiles: 8, changedLines: 1800, maxChangedLines: 400 }), true);
 });
 
 test("nested groups are rejected in the MVP", () => {

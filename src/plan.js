@@ -121,6 +121,11 @@ export function diffReviewBudget(step, diff) {
   };
 }
 
+export function reviewBudgetRequiresRollback(result, multiplier = 2) {
+  return Number(result?.files || 0) > Number(result?.maxFiles || 0) * multiplier
+    || Number(result?.changedLines || 0) > Number(result?.maxChangedLines || 0) * multiplier;
+}
+
 export function normalizePlan(raw) {
   if (!raw || typeof raw !== "object") throw new Error("Plan must be an object");
   const used = new Set();
