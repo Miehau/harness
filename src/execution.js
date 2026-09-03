@@ -683,6 +683,9 @@ export function restartReviewFixSession(run, reason, inheritedFiles = []) {
   (run.reviewFixSessionRestarts ||= []).push({ round: review.round, previousSessionFile, reason: feedback, inheritedFiles: files, at: new Date().toISOString() });
   review.fix = { ...review.fix, sessionFile: null, restartFeedback };
   delete review.fix.report;
+  // A fresh fixer supersedes any gate captured after the abandoned session.
+  // Reusing it would review evidence from before the audited restart boundary.
+  delete run.pendingReviewAttempt;
   run.status = "interrupted";
   run.checkpoint = null;
   run.lastError = null;

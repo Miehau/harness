@@ -511,11 +511,13 @@ test("an interrupted final-review fix resumes from persisted findings", () => {
 test("a contaminated fixer session restarts fresh without discarding its worktree", () => {
   const run = {
     status: "paused", checkpoint: { kind: "pause" }, lastError: "old",
+    pendingReviewAttempt: { round: 19, checks: { status: "failed" } },
     reviews: [{ round: 18, actionableFindings: [{ severity: "high", claim: "Live capture URL is missing" }], fix: { sessionFile: "/audit/old.jsonl", startedAt: "before" } }]
   };
   assert.deepEqual(restartReviewFixSession(run, "Remove the queued synthetic fallback", ["public/app.js", "scripts/capture.mjs"]), { round: 18, previousSessionFile: "/audit/old.jsonl" });
   assert.equal(run.status, "interrupted");
   assert.equal(run.reviews[0].fix.sessionFile, null);
+  assert.equal(run.pendingReviewAttempt, undefined);
   assert.match(run.reviews[0].fix.restartFeedback, /synthetic fallback/);
   assert.match(run.reviews[0].fix.restartFeedback, /Inherited changed files at restart:\n- public\/app\.js\n- scripts\/capture\.mjs/);
   assert.equal(run.reviewFixSessionRestarts[0].previousSessionFile, "/audit/old.jsonl");
