@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
-import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
+import { deliveryForRemote, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
@@ -1920,15 +1920,15 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       run.status = resumedChange ? "waiting_for_checks" : "rebasing";
       run.recovery = null;
       run.checkpoint = null;
-      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Rebasing onto origin/${base}`);
+      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling with origin/${base}`);
     });
-    const rebase = () => rebaseOntoRemote(current.workspace.cwd, base, {
+    const reconcile = () => reconcileWithRemote(current.workspace.cwd, base, {
       resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
     });
     let checks = current.merge?.checks || null;
     let change = resumedChange;
     let awaitingHeadAfterPush = null;
-    if ((await unmergedPaths(current.workspace.cwd)).length) await rebase();
+    if ((await unmergedPaths(current.workspace.cwd)).length) await reconcile();
     if (current.merge?.externalActionPending === "push_feedback_revision") {
       await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
       await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
@@ -1939,10 +1939,10 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
           || String(current.lastError).slice(-4500);
         ({ checks } = await fixRemoteFeedback(ticketId, [{
           id: `delivery-recovery-${attempt}`,
-          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before rebasing again.`
+          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
         }], signal, "persisted delivery verification failure"));
       }
-      await rebase();
+      await reconcile();
       checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
       if (checks.status === "failed") {
         ({ checks } = await fixRemoteFeedback(ticketId, [{
@@ -1969,8 +1969,8 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd: current.workspace.cwd });
       if (!status.trim()) {
         const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd: current.workspace.cwd });
-        const rebased = await rebase();
-        if (rebased.commit !== before.trim()) {
+        const reconciled = await reconcile();
+        if (reconciled.commit !== before.trim()) {
           await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
           awaitingHeadAfterPush = before.trim();
         }
@@ -1998,7 +1998,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
       if (feedback.length) {
         await fixRemoteFeedback(ticketId, feedback, signal);
-        await rebase();
+        await reconcile();
         await update((state) => {
           const merge = ticketRun(state, ticketId).merge;
           merge.feedbackIds.push(...feedback.map((item) => item.id));
@@ -2023,7 +2023,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       }
       if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
         lastRebaseHead = delivery.headSha;
-        await rebase();
+        await reconcile();
         await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
         continue;
       }

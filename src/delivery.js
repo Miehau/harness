@@ -185,22 +185,23 @@ export async function unmergedPaths(cwd, execImpl = exec) {
   return (await git(cwd, ["diff", "--name-only", "--diff-filter=U"], execImpl)).split("\n").filter(Boolean);
 }
 
-export async function rebaseOntoRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
+export async function reconcileWithRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
+  // Ticket worktrees are disposable delivery branches. Restart interrupted
+  // per-commit rebases and merge the reviewed branch tip once instead.
+  await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
   await git(cwd, ["fetch", "origin", base], execImpl);
   let failure;
-  try { await git(cwd, ["rebase", `origin/${base}`], execImpl); }
+  try { await git(cwd, ["merge", "--no-edit", `origin/${base}`], execImpl); }
   catch (error) { failure = error; }
-  while (failure) {
+  if (failure) {
     const conflicts = await unmergedPaths(cwd, execImpl);
     if (!conflicts.length || !resolveConflicts) throw failure;
     try {
       await resolveConflicts({ cwd, conflicts });
       await git(cwd, ["add", "--all"], execImpl);
-      failure = null;
-      try { await git(cwd, ["-c", "core.editor=true", "rebase", "--continue"], execImpl); }
-      catch (error) { failure = error; }
+      await git(cwd, ["-c", "core.editor=true", "merge", "--continue"], execImpl);
     } catch (error) {
-      await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
+      await git(cwd, ["merge", "--abort"], execImpl).catch(() => {});
       throw error;
     }
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, pushTicketBranch, rebaseOntoRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
+import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, pushTicketBranch, reconcileWithRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
 
 function response(value) { return { ok: true, text: async () => JSON.stringify(value) }; }
 
@@ -61,20 +61,22 @@ test("safe local sync skips dirty work and only fast-forwards an ancestor", asyn
   assert.equal(args.some((argv) => argv[0] === "merge"), false);
 });
 
-test("rebase conflict resolution is scoped and continues automatically", async () => {
+test("delivery resolves one final-state merge instead of replaying ticket commits", async () => {
   const calls = [];
-  let rebaseAttempts = 0;
+  let mergeAttempts = 0;
   const execImpl = async (_file, argv) => {
     calls.push(argv);
-    if (argv[0] === "rebase" && ++rebaseAttempts === 1) throw new Error("conflict");
+    if (argv[0] === "rebase") throw new Error("no active rebase");
+    if (argv[0] === "merge" && argv.includes("--no-edit") && ++mergeAttempts === 1) throw new Error("conflict");
     if (argv[0] === "diff") return { stdout: "src/a.js\n" };
-    if (argv[0] === "rev-parse") return { stdout: "rebased\n" };
+    if (argv[0] === "rev-parse") return { stdout: "merged\n" };
     return { stdout: "" };
   };
   const resolved = [];
-  assert.equal((await rebaseOntoRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "rebased");
+  assert.equal((await reconcileWithRemote("/repo", "main", { execImpl, resolveConflicts: async ({ conflicts }) => resolved.push(...conflicts) })).commit, "merged");
   assert.deepEqual(resolved, ["src/a.js"]);
-  assert.equal(calls.some((argv) => argv.includes("--continue")), true);
+  assert.equal(calls.filter((argv) => argv.includes("merge") && argv.includes("--continue")).length, 1);
+  assert.deepEqual(calls[0], ["rebase", "--abort"]);
 });
 
 test("unmerged paths expose an interrupted rebase before delivery correction", async () => {
