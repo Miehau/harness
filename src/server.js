@@ -17,6 +17,7 @@ import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
 import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
+import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
@@ -1411,8 +1412,13 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     expectedArtifacts: [`merge-conflict-resolution-${attempt}.md`], acceptanceCriteria: ["Every Git conflict is resolved", "Verified behavior from both branches is preserved"],
     dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
+  const artifacts = compactReviewPacket({
+    ticket: current.ticket,
+    plan: current.plan,
+    artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
+  }).artifacts;
   const result = await harness.runStep({
-    cwd, plan: current.plan, step, artifacts: [], images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    cwd, plan: current.plan, step, artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
