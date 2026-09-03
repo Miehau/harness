@@ -16,6 +16,7 @@ import { execFileTree } from "./process-tree.js";
 const verificationEntry = ".agent-plan/verify.mjs";
 export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
+const visualProofIdentityInstruction = `For every attached screenshot, verify the rendered page itself identifies the expected ticket and shows a fully loaded state. Compare visible ticket identifier/title and run state with the review packet; filenames, manifests, URLs, and capture-script claims are not proof of identity. Report a high-severity evidence finding when an image shows another ticket, blank or partially rendered content, stale recovery state, or any identity that cannot be verified visibly.`;
 
 export function transientRepositoryCheckFailure(output = "") {
   return /\bENOTEMPTY\b[\s\S]{0,200}\b(?:directory not empty|rmdir|scandir)\b/i.test(String(output));
@@ -1032,6 +1033,7 @@ ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
 Deferred plan slices (not acceptance criteria for this review):
 ${deferredSlices.length ? deferredSlices.map((candidate) => `- ${candidate.title}: ${candidate.acceptanceCriteria.join("; ")}`).join("\n") : "- none"}
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
+${images.length ? visualProofIdentityInstruction : ""}
 
 Worker artifact:
 ${output}
@@ -1197,6 +1199,8 @@ ${reviewerCharters[role]} The deterministic gate has already run; use the suppli
 # Compact review packet
 ${JSON.stringify(packet, null, 2)}
 
+${images.length ? visualProofIdentityInstruction : ""}
+
 # Findings from earlier review rounds
 ${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
 
@@ -1232,7 +1236,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     try {
       signal?.throwIfAborted();
       const turnPrompt = existingFile
-        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
+        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
       await session.prompt(turnPrompt, { images: existingFile ? [] : images });

@@ -492,12 +492,13 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
       plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }),
       artifacts: [], diff: { files: ["src/process.js"], patch: "+change" }, checks: { status: "passed", summary: "Passed" },
-      focusFindings: [finding], role: "integration", round: 2, runId: "run"
+      focusFindings: [finding], images: [{ type: "image", data: "proof", mimeType: "image/png" }], role: "integration", round: 2, runId: "run"
     });
     assert.match(prompt, /Findings from earlier review rounds/);
     assert.match(prompt, /A late child can escape cleanup/);
     assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
     assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
+    assert.match(prompt, /verify the rendered page itself identifies the expected ticket/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -534,6 +535,9 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     });
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
+    assert.match(prompt, /Expected ticket: T-1 — Ticket/);
+    assert.match(prompt, /filenames, manifests, URLs, and capture-script claims are not proof of identity/);
+    assert.match(prompt, /another ticket, blank or partially rendered content, stale recovery state/);
     assert.match(prompt, /New operator final-proof feedback/);
     assert.match(prompt, /blank status pill and clipped mobile worker row/);
     assert.deepEqual(promptImages, []);
