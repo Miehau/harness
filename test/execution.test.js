@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -340,6 +340,12 @@ test("an audited scope expansion starts a fresh bounded correction window", () =
   };
   assert.equal(nextCorrectionRound(step), 2);
   assert.equal(nextCorrectionRound({ attempts: step.attempts }), 3);
+});
+
+test("a correction keeps its verification focus after the round window resets", () => {
+  const findings = [{ severity: "high", claim: "The supplied screenshot is incomplete" }];
+  assert.deepEqual(verificationFocusFindings("Retry the interrupted correction", findings), findings);
+  assert.deepEqual(verificationFocusFindings("", findings), []);
 });
 
 test("compact run and public state omit artifact bodies", () => {

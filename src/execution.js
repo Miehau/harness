@@ -531,6 +531,10 @@ export function interruptedStepFeedback(step = {}) {
   return findings.length ? `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}` : "";
 }
 
+export function verificationFocusFindings(feedback, findings = []) {
+  return feedback ? findings : [];
+}
+
 export function correctionPauseReason(reason, findings = []) {
   const details = actionableFindings([{ findings }]).map((finding) => {
     const evidence = finding.evidence?.[0] || {};
