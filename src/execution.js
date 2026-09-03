@@ -3,6 +3,8 @@ import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 
+export const visualEvidencePolicy = "contract-only-v1";
+
 export const runStageDefs = [
   ["requirements", "Clarify requirements"],
   ["explore", "Explore code & ticket horizon"],
@@ -38,6 +40,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     auto = false,
     lastError = null,
     workflow,
+    harnessEvidencePolicy = visualEvidencePolicy,
     createdAt = new Date().toISOString(),
     ...rest
   } = extras;
@@ -59,6 +62,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     auto,
     lastError,
     workflow: workflow || initialWorkflow(),
+    harnessEvidencePolicy,
     createdAt,
     ...rest
   };
@@ -580,12 +584,31 @@ export function correctionPauseReason(reason, findings = []) {
 }
 
 export function nextCorrectionRound(step = {}) {
-  const changedAt = Date.parse(step.scopeChanges?.at(-1)?.at || "");
+  const changedAt = Math.max(
+    Date.parse(step.scopeChanges?.at(-1)?.at || "") || 0,
+    Date.parse(step.correctionResets?.at(-1)?.at || "") || 0
+  );
   const attempts = Array.isArray(step.attempts) ? step.attempts : [];
   return attempts.filter((attempt) =>
     (!Number.isFinite(changedAt) || Date.parse(attempt.completedAt || "") >= changedAt)
     && attempt.verification && actionableFindings([attempt.verification]).length
   ).length + 1;
+}
+
+export function auditVisualEvidencePolicy(run, at = new Date().toISOString()) {
+  if (!run || run.harnessEvidencePolicy === visualEvidencePolicy) return [];
+  const changes = [];
+  for (const step of flattenSteps(run.plan)) {
+    if (!step.requiresVisualEvidence) continue;
+    step.correctionResets ||= [];
+    step.correctionResets.push({
+      at, source: "harness", policy: visualEvidencePolicy,
+      reason: "Generic preview captures are diagnostic only; the repository contract must emit acceptance evidence."
+    });
+    changes.push(step.id);
+  }
+  run.harnessEvidencePolicy = visualEvidencePolicy;
+  return changes;
 }
 
 export function workflowResumeStage(run) {

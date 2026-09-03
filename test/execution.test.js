@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -352,6 +352,18 @@ test("an audited scope expansion starts a fresh bounded correction window", () =
   };
   assert.equal(nextCorrectionRound(step), 2);
   assert.equal(nextCorrectionRound({ attempts: step.attempts }), 3);
+});
+
+test("the strict visual-evidence policy audit resets legacy correction windows once", () => {
+  const run = {
+    plan: normalizePlan({ nodes: [{ id: "visual", title: "Prove it", requiresVisualEvidence: true }, { id: "logic", title: "Check it" }] })
+  };
+  run.plan.nodes[0].attempts = [{ completedAt: "2026-09-03T10:00:00.000Z", verification: { findings: [{ severity: "high", claim: "Old preview mismatch" }] } }];
+  assert.deepEqual(auditVisualEvidencePolicy(run, "2026-09-03T10:15:00.000Z"), ["visual"]);
+  assert.equal(run.harnessEvidencePolicy, visualEvidencePolicy);
+  assert.equal(nextCorrectionRound(run.plan.nodes[0]), 1);
+  assert.deepEqual(auditVisualEvidencePolicy(run, "2026-09-03T10:20:00.000Z"), []);
+  assert.equal(run.plan.nodes[0].correctionResets.length, 1);
 });
 
 test("a correction keeps its verification focus after the round window resets", () => {
