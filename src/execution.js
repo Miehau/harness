@@ -469,12 +469,12 @@ function similarFinding(left, right) {
   const leftCategory = String(left.category || "general").toLowerCase();
   const rightCategory = String(right.category || "general").toLowerCase();
   if (leftCategory !== rightCategory && leftCategory !== "tests" && rightCategory !== "tests") return false;
-  const sharesSurface = (left.evidence || []).some((leftEvidence) => (right.evidence || []).some((rightEvidence) =>
+  const sharedSurfaces = (left.evidence || []).filter((leftEvidence) => (right.evidence || []).some((rightEvidence) =>
     leftEvidence.file
     && String(leftEvidence.file).toLowerCase() === String(rightEvidence.file || "").toLowerCase()
     && (!leftEvidence.line || !rightEvidence.line || Math.abs(leftEvidence.line - rightEvidence.line) <= 5)
-  ));
-  if (!sharesSurface) return false;
+  )).length;
+  if (!sharedSurfaces) return false;
   const words = (value) => new Set((String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []).map((word) => {
     if (word.length > 7 && word.endsWith("ing")) return word.slice(0, -3);
     if (word.length > 6 && word.endsWith("ed")) return word.slice(0, -2);
@@ -486,22 +486,25 @@ function similarFinding(left, right) {
   const rightWords = words(`${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`);
   if (Math.min(leftWords.size, rightWords.size) < 4) return false;
   const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  return overlap >= 4 && overlap / Math.min(leftWords.size, rightWords.size) >= 0.25;
+  const ratio = overlap / Math.min(leftWords.size, rightWords.size);
+  return (sharedSurfaces >= 2 && overlap >= 4 && ratio >= 0.25)
+    || (overlap >= 6 && ratio >= 0.6);
 }
 
 export function actionableFindings(reviews) {
   const findings = reviews.flatMap((review) => review.findings || [])
     .filter((finding) => actionableSeverities.has(String(finding.severity || "").toLowerCase()));
+  const genericGateClaim = (finding) => /^(?:repository check failed:|(?:the )?(?:authoritative )?(?:canonical |verification )?gate is red\b)/i.test(String(finding.claim || ""));
   const hasSpecificTestFinding = findings.some((finding) =>
     String(finding.category || "").toLowerCase() === "tests"
     && (finding.evidence?.[0]?.file || finding.acceptanceCriterion)
-    && !/^repository check failed:/i.test(String(finding.claim || ""))
+    && !genericGateClaim(finding)
   );
   const unique = new Map();
   for (const finding of findings) {
     if (hasSpecificTestFinding
       && String(finding.category || "").toLowerCase() === "tests"
-      && /^repository check failed:/i.test(String(finding.claim || ""))) continue;
+      && genericGateClaim(finding)) continue;
     const evidence = finding.evidence?.[0] || {};
     const category = String(finding.category || "general").toLowerCase();
     const criterion = String(finding.acceptanceCriterion || "").trim().toLowerCase();

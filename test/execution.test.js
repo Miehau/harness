@@ -77,8 +77,8 @@ test("final review collapses nearby paraphrases of the same defect across criter
 
 test("final review collapses independently worded findings on the same code defect", () => {
   const findings = actionableFindings([
-    { findings: [{ severity: "high", category: "correctness", claim: "Restarting an approved run does not reset or invalidate its proof map, so a rerun can inherit verified records for superseded code.", suggestedFix: "Discard prior proof on design restart and invalidate affected criteria on step restart.", evidence: [{ file: "src/execution.js", line: 300 }] }] },
-    { findings: [{ severity: "high", category: "correctness", claim: "Run rewind does not reconcile the proof map with restored code or redesigned plans, retaining obsolete proof after restarts.", suggestedFix: "Make rewind proof-aware and archive prior approved proof before redesign.", evidence: [{ file: "src/execution.js", line: 302 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Restarting an approved run does not reset or invalidate its proof map, so a rerun can inherit verified records for superseded code.", suggestedFix: "Discard prior proof on design restart and invalidate affected criteria on step restart.", evidence: [{ file: "src/execution.js", line: 300 }, { file: "src/server.js", line: 900 }] }] },
+    { findings: [{ severity: "high", category: "correctness", claim: "Run rewind does not reconcile the proof map with restored code or redesigned plans, retaining obsolete proof after restarts.", suggestedFix: "Make rewind proof-aware and archive prior approved proof before redesign.", evidence: [{ file: "src/execution.js", line: 302 }, { file: "src/server.js", line: 902 }] }] },
     { findings: [{ severity: "high", category: "correctness", claim: "Media evidence remains valid when an unrelated cache entry changes.", suggestedFix: "Scope cache identity to the run.", evidence: [{ file: "src/execution.js", line: 302 }] }] }
   ]);
   assert.equal(findings.length, 2);
@@ -93,6 +93,23 @@ test("final review retains distinct failures on the same criterion and code surf
     { ...shared, claim: "Stale locators can be resubmitted without evidence produced after invalidation", evidence: [{ file: "src/proof-map.js", line: 84 }] }
   ] }]);
   assert.equal(findings.length, 2);
+});
+
+test("final review keeps separate stale-evidence bypass mechanisms", () => {
+  const shared = { severity: "high", category: "correctness", acceptanceCriterion: "Re-verification requires fresh evidence" };
+  const findings = actionableFindings([{ findings: [
+    { ...shared, claim: "Submitting the same stale locator twice drops invalidatedAt after the first rejection", evidence: [{ file: "src/proof-map.js", line: 202 }] },
+    { ...shared, claim: "A different pre-existing locator without producedAt bypasses freshness after invalidation", evidence: [{ file: "src/proof-map.js", line: 198 }] }
+  ] }]);
+  assert.equal(findings.length, 2);
+});
+
+test("a generic red-gate report does not duplicate its concrete test findings", () => {
+  const findings = actionableFindings([{ findings: [
+    { severity: "high", category: "tests", claim: "The authoritative canonical gate is red: four tests fail", evidence: [{ file: ".agent-plan/verify.mjs", line: 7 }] },
+    { severity: "medium", category: "tests", claim: "Two assertions still expect the old rejection wording", acceptanceCriterion: "Full tests pass", evidence: [{ file: "test/proof-map.test.js", line: 99 }] }
+  ] }]);
+  assert.deepEqual(findings.map((finding) => finding.claim), ["Two assertions still expect the old rejection wording"]);
 });
 
 test("resuming review refreshes canonical findings from durable raw reviewer output", () => {
