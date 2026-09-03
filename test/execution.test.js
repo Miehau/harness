@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -188,6 +188,15 @@ test("numbered visual proof feedback creates distinct visual correction criteria
   const step = finalReviewFixStep(17, findings);
   assert.equal(step.requiresVisualEvidence, true);
   assert.equal(step.acceptanceCriteria.length, 3);
+});
+
+test("visual checks receive the live ticket and run capture identity", () => {
+  assert.deepEqual(liveCaptureEnvironment({ address: "127.0.0.1", port: 4317 }, "ticket-1", "run-2"), {
+    AGENT_PLAN_CAPTURE_URL: "http://127.0.0.1:4317",
+    AGENT_PLAN_CAPTURE_TICKET_ID: "ticket-1",
+    AGENT_PLAN_CAPTURE_RUN_ID: "run-2"
+  });
+  assert.deepEqual(liveCaptureEnvironment(null, "ticket-1", "run-2"), {});
 });
 
 test("automatic corrections ignore findings below medium severity", () => {

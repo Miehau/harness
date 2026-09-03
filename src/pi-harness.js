@@ -653,7 +653,7 @@ export class PiHarness {
       .sort((left, right) => left.id.localeCompare(right.id) || String(left.provider || "").localeCompare(String(right.provider || "")));
   }
 
-  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false }) {
+  async runRepositoryChecks({ cwd, signal, requireVisualEvidence = false, requireVideoEvidence = false, environment: captureEnvironment = {} }) {
     requireVisualEvidence ||= requireVideoEvidence;
     let command = `node ${verificationEntry}`;
     let args = [join(cwd, verificationEntry)];
@@ -681,7 +681,7 @@ export class PiHarness {
     }
     const startedAt = Date.now();
     const config = await loadProjectConfig(cwd);
-    const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
+    const environment = { ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment, ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {}) };
     const executable = command === "npm test" ? "npm" : process.execPath;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {

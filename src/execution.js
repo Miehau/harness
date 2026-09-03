@@ -600,6 +600,15 @@ export function humanProofFindings(feedback) {
   }));
 }
 
+export function liveCaptureEnvironment(address, ticketId, runId) {
+  if (!address || typeof address === "string" || !address.port || !ticketId || !runId) return {};
+  return {
+    AGENT_PLAN_CAPTURE_URL: `http://127.0.0.1:${address.port}`,
+    AGENT_PLAN_CAPTURE_TICKET_ID: ticketId,
+    AGENT_PLAN_CAPTURE_RUN_ID: runId
+  };
+}
+
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
   const counts = new Map();
   for (const review of reviews) {
