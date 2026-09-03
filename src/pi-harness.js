@@ -185,7 +185,13 @@ function textFromContent(content) {
 function lastAssistantText(session) {
   const messages = session.state?.messages || session.messages || [];
   const message = [...messages].reverse().find((item) => item?.role === "assistant");
-  return textFromContent(message?.content);
+  const text = textFromContent(message?.content);
+  if (!text && message?.stopReason === "error") {
+    const error = new Error(message.errorMessage || "Model request failed");
+    error.code = "MODEL_RESPONSE_ERROR";
+    throw error;
+  }
+  return text;
 }
 
 function availableSkillNames(session) {
@@ -1036,14 +1042,15 @@ ${findingRubric}
 Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
       if (budgetError) throw budgetError;
       signal?.throwIfAborted();
-      let rawOutput = lastAssistantText(session);
+      let rawOutput;
       let parsed;
       try {
+        rawOutput = lastAssistantText(session);
         parsed = parseModelOutput(rawOutput, { summary: "nonEmptyString", findings: "array" }, "Verification output");
       } catch (error) {
-        if (!/^(?:Model output|Verification output)/.test(error.message)) throw error;
-        onEvent?.({ type: "phase", label: "Retrying incomplete verification output" });
-        await session.prompt("Your previous verification response was empty or invalid. Return only the required JSON object with a non-empty summary and a findings array; do not repeat repository inspection.");
+        if (error.code !== "MODEL_RESPONSE_ERROR" && !/^(?:Model output|Verification output)/.test(error.message)) throw error;
+        onEvent?.({ type: "phase", label: "Retrying failed or incomplete verification output" });
+        await session.prompt("Your previous verification response failed, was empty, or was invalid. Return only the required JSON object with a non-empty summary and a findings array; do not repeat repository inspection.");
         if (budgetError) throw budgetError;
         signal?.throwIfAborted();
         rawOutput = lastAssistantText(session);

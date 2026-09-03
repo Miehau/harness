@@ -401,6 +401,36 @@ test("fresh verification retries one empty model response without repeating insp
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("verification surfaces the provider error after one retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-verification-error-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let prompts = 0;
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt() {
+        prompts++;
+        this.state.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider rejected the image payload" });
+      },
+      dispose() {}
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Verify", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+
+    await assert.rejects(harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+change" }, output: "Done",
+      checks: { status: "passed", command: "verify", summary: "Passed" }, runId: "run", round: 1
+    }), /Provider rejected the image payload/);
+    assert.equal(prompts, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("fresh verification stops after its repository inspection budget", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-verification-budget-"));
   try {
