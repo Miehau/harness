@@ -38,6 +38,9 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.ui.dialogs.includes("workspace-dialog"));
   assert.ok(app.cli.includes("wait"));
   assert.ok(app.cli.includes("select"));
+  assert.ok(app.cli.includes("approve-proof"));
+  assert.ok(app.cli.includes("scope-add"));
+  assert.ok(app.cli.includes("waive"));
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
   const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
   assert.equal(html.includes("Provider: openai-codex"), false);
