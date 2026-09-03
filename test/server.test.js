@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { closeSseClients, reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
+import { auditHarnessWriteScopes, closeSseClients, reconcileVisualChecks, repositoryCheckReview } from "../src/server.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("reports missing visual evidence instead of mislabeling passing checks", () => {
@@ -48,6 +48,22 @@ test("harness screenshots satisfy a passing check that lacked its own visual art
   assert.equal(checks.failureKind, undefined);
   assert.match(checks.summary, /passed with 2 visual artifacts/);
   assert.deepEqual(repositoryCheckReview(checks).findings, []);
+});
+
+test("resuming a persisted visual step audits the newly available contract scope", () => {
+  const run = { plan: normalizePlan({ nodes: [{
+    id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test",
+    expectedFiles: ["public/app.js"], requiresVisualEvidence: true,
+    attempts: [{ completedAt: "2026-09-03T10:00:00.000Z", verification: { findings: [{ severity: "high", claim: "Missing proof" }] } }]
+  }] }) };
+  assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:15:00.000Z"), [{ stepId: "visual", paths: [".agent-plan"] }]);
+  assert.equal(run.plan.nodes[0].writeScope, "public,test,.agent-plan");
+  assert.deepEqual(run.plan.nodes[0].expectedFiles, ["public/app.js", ".agent-plan"]);
+  assert.deepEqual(run.plan.nodes[0].scopeChanges[0], {
+    at: "2026-09-03T10:15:00.000Z", paths: [".agent-plan"], source: "harness",
+    reason: "Visual verification must be able to correct its repository-owned evidence contract."
+  });
+  assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:20:00.000Z"), []);
 });
 
 test("repository failures send correction workers only focused highlights", () => {

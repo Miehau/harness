@@ -85,6 +85,25 @@ export function closeSseClients(clients) {
   clients.clear();
 }
 
+export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
+  const changes = [];
+  for (const step of flattenSteps(run?.plan)) {
+    const before = String(step.writeScope || "");
+    const after = workerWriteScope(step);
+    if (after === before) continue;
+    const paths = after.split(",").filter((path) => !before.split(",").includes(path));
+    step.writeScope = after;
+    step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
+    step.scopeChanges ||= [];
+    step.scopeChanges.push({
+      at, paths, source: "harness",
+      reason: "Visual verification must be able to correct its repository-owned evidence contract."
+    });
+    changes.push({ stepId: step.id, paths });
+  }
+  return changes;
+}
+
 export async function createDaemon(options = {}) {
   const initialCwd = options.cwd || cliOption("--cwd", process.cwd());
   const port = Number(options.port ?? cliOption("--port", process.env.PORT || 4317));
@@ -2447,7 +2466,11 @@ async function api(request, response, url) {
     }
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
-    if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
+    if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => {
+      const current = ticketRun(state, id);
+      auditHarnessWriteScopes(current);
+      prepareRunResume(current);
+    });
     if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
     else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
     else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
