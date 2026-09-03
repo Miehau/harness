@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, interruptedStepFeedback, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -1817,11 +1817,12 @@ async function finalReviewLoop(ticketId, signal) {
     });
     const latestReview = run.reviews.at(-1);
     if (latestReview) {
+      const previous = latestReview.actionableFindings || [];
       const refreshed = refreshedReviewFindings(latestReview);
-      if (storedFindingsFingerprint(refreshed) !== storedFindingsFingerprint(latestReview.actionableFindings || [])) {
+      if (storedFindingsFingerprint(refreshed) !== storedFindingsFingerprint(previous)) {
         latestReview.actionableFindings = refreshed;
         latestReview.findingsRefreshedAt = new Date().toISOString();
-        if (latestReview.fix?.report?.status === "completed") delete latestReview.fix.report;
+        if (latestReview.fix?.report?.status === "completed" && reviewScopeExpanded(previous, refreshed)) delete latestReview.fix.report;
       }
     }
   });
@@ -1847,13 +1848,25 @@ async function finalReviewLoop(ticketId, signal) {
   for (let round = firstRound; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
-    activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+    const savedAttempt = pendingReviewAttempt(current, round);
+    let checks = savedAttempt?.checks;
+    let diff = savedAttempt?.diff;
+    let verificationDiff = savedAttempt?.verificationDiff;
+    if (!savedAttempt) {
+      activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
+      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+      signal?.throwIfAborted();
+      const afterTree = await snapshotTree(current.workspace.cwd);
+      diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
+      verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+      await update((state) => {
+        ticketRun(state, ticketId).pendingReviewAttempt = { round, checks, diff, verificationDiff, createdAt: new Date().toISOString() };
+      });
+    } else {
+      activity.onEvent({ type: "thinking", label: `Resuming independent reviewers · round ${round}` }, "checks");
+    }
     const reviewImages = await harness.evidenceImages(checks.evidence);
     signal?.throwIfAborted();
-    const afterTree = await snapshotTree(current.workspace.cwd);
-    const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
-    const verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
     const focusFindings = actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] })));
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
@@ -1891,6 +1904,7 @@ async function finalReviewLoop(ticketId, signal) {
       const run = ticketRun(state, ticketId);
       run.artifacts.push(...persisted);
       run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
+      delete run.pendingReviewAttempt;
       delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, resumeStage, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -140,6 +140,20 @@ test("review refresh detects findings removed by canonicalization", () => {
   const refreshed = actionableFindings([{ findings: stored }]);
   assert.equal(findingsFingerprint(stored), findingsFingerprint(refreshed));
   assert.notEqual(storedFindingsFingerprint(stored), storedFindingsFingerprint(refreshed));
+});
+
+test("review refresh reopens completed fixes only for newly exposed mechanisms", () => {
+  const prior = { severity: "high", category: "tests", claim: "The canonical verifier fails because collision-resistant artifact storage paths no longer match two stale migration-test regexes.", evidence: [{ file: "test/store.test.js", line: 63 }, { file: "src/artifacts.js", line: 61 }], suggestedFix: "Update migration assertions to validate kind/hash-prefixed storage paths and retained bodies." };
+  const paraphrase = { severity: "high", category: "tests", claim: "Two store migration tests expect legacy filenames that no longer match collision-resistant artifact storage names.", evidence: [{ file: "test/store.test.js", line: 61 }, { file: "src/artifacts.js", line: 59 }], suggestedFix: "Update migration path assertions for collision-resistant persisted paths and retained bodies." };
+  const distinct = { severity: "high", category: "correctness", claim: "Artifact bodies are overwritten on a same-name collision", evidence: [{ file: "src/artifacts.js", line: 59 }], suggestedFix: "Include artifact kind in storage identity." };
+  assert.equal(reviewScopeExpanded([prior], [paraphrase]), false);
+  assert.equal(reviewScopeExpanded([prior], [paraphrase, distinct]), true);
+});
+
+test("an interrupted review round reuses its persisted deterministic attempt", () => {
+  const attempt = { round: 12, checks: { status: "passed" }, diff: { available: true }, verificationDiff: { available: true } };
+  assert.equal(pendingReviewAttempt({ pendingReviewAttempt: attempt }, 12), attempt);
+  assert.equal(pendingReviewAttempt({ pendingReviewAttempt: attempt }, 13), null);
 });
 
 test("automatic corrections ignore findings below medium severity", () => {

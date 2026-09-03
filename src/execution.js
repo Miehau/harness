@@ -544,6 +544,14 @@ export function refreshedReviewFindings(review = {}) {
   return actionableFindings([...review.reviews, { findings: humanFindings }]);
 }
 
+export function reviewScopeExpanded(previous = [], refreshed = []) {
+  const before = actionableFindings([{ findings: previous }]);
+  const after = actionableFindings([{ findings: refreshed }]);
+  return after.some((finding) => !before.some((prior) =>
+    findingsFingerprint([prior]) === findingsFingerprint([finding]) || similarFinding(prior, finding)
+  ));
+}
+
 export const MAX_CORRECTION_ROUNDS = 12;
 
 export function findingsFingerprint(findings = []) {
@@ -567,6 +575,11 @@ export function storedFindingsFingerprint(findings = []) {
     })
     .sort()
     .join("|");
+}
+
+export function pendingReviewAttempt(run, round) {
+  const attempt = run?.pendingReviewAttempt;
+  return Number(attempt?.round) === Number(round) && attempt?.checks && attempt?.diff ? attempt : null;
 }
 
 export function recurringReviewClusters(reviews = [], minRounds = 3) {
