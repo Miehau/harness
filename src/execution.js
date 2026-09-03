@@ -7,7 +7,7 @@ export const visualEvidencePolicy = "contract-only-v1";
 export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. The harness removes its legacy copies; do not create or restore them in the repository.";
 
 export function finalReviewFixFeedback(findings) {
-  return `${finalReviewRepositoryBoundary}\n\nCanonical current findings (this list supersedes any earlier duplicated or stale finding list in the session):\n${JSON.stringify(findings, null, 2)}`;
+  return `${finalReviewRepositoryBoundary}\n\nCanonical current findings (this list supersedes any earlier duplicated or stale finding list in the session):\n${JSON.stringify(findings, null, 2)}\n\nRe-evaluate these findings against the current harness runtime before editing. If a harness or environment correction made a finding pass without a repository change, preserve the repository and report it completed for fresh verification; do not add a synthetic fallback.`;
 }
 
 export const runStageDefs = [

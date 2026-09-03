@@ -486,6 +486,7 @@ test("final-review fixes keep audit prose out of the product repository", () => 
   assert.match(finalReviewRepositoryBoundary, /harness removes its legacy copies/);
   assert.match(finalReviewFixFeedback(findings), /supersedes any earlier duplicated or stale finding list/);
   assert.match(finalReviewFixFeedback(findings), /Cleanup can miss a late child/);
+  assert.match(finalReviewFixFeedback(findings), /do not add a synthetic fallback/);
 });
 
 test("an interrupted final-review fix resumes from persisted findings", () => {
