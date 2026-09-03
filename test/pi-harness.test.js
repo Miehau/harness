@@ -266,6 +266,8 @@ test("hard worker tools allow scoped writes and block sibling paths", async () =
     const write = scopedWorkerTools(root, "allowed").find((tool) => tool.name === "write");
     await write.execute("allowed", { path: "allowed/result.txt", content: "ok" });
     assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
+    await assert.rejects(write.execute("replace", { path: "allowed/result.txt", content: "truncated" }), /exist/i);
+    assert.equal(await readFile(join(root, "allowed", "result.txt"), "utf8"), "ok");
     await assert.rejects(write.execute("blocked", { path: "blocked.txt", content: "nope" }), /Write blocked outside scope/);
   } finally {
     await rm(root, { recursive: true, force: true });

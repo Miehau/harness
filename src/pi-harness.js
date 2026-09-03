@@ -529,7 +529,7 @@ export function scopedWorkerTools(cwd, writeScope) {
         }
         await mkdir(path, { recursive: true });
       },
-      writeFile: async (path, content) => writeFile(await check(path), content)
+      writeFile: async (path, content) => writeFile(await check(path), content, { flag: "wx" })
     } })
   ];
 }
