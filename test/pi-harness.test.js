@@ -316,6 +316,22 @@ test("hard worker tools allow scoped writes and block sibling paths", async () =
   }
 });
 
+test("workers can delete only files inside their write scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delete-"));
+  try {
+    await mkdir(join(root, "allowed"));
+    await writeFile(join(root, "allowed", "obsolete.js"), "old");
+    await writeFile(join(root, "blocked.js"), "keep");
+    const remove = scopedWorkerTools(root, "allowed").find((tool) => tool.name === "delete");
+    await remove.execute("allowed", { path: "allowed/obsolete.js" });
+    await assert.rejects(readFile(join(root, "allowed", "obsolete.js")), /ENOENT/);
+    await assert.rejects(remove.execute("blocked", { path: "blocked.js" }), /Write blocked outside scope/);
+    assert.equal(await readFile(join(root, "blocked.js"), "utf8"), "keep");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an exact file scope can create its missing parent directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-exact-scope-"));
   try {

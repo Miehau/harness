@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -556,7 +556,18 @@ export function scopedWorkerTools(cwd, writeScope) {
         await mkdir(path, { recursive: true });
       },
       writeFile: async (path, content) => writeFile(await check(path), content, { flag: "wx" })
-    } })
+    } }),
+    defineTool({
+      name: "delete",
+      label: "Delete file",
+      description: "Delete one repository file inside the approved write scope.",
+      parameters: Type.Object({ path: Type.String({ description: "Repository-relative file path" }) }),
+      async execute(_toolCallId, { path }) {
+        const target = await check(path);
+        await unlink(target);
+        return { content: [{ type: "text", text: `Deleted ${relative(cwd, target)}` }], details: { path: relative(cwd, target) } };
+      }
+    })
   ];
 }
 
@@ -1282,7 +1293,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     const reviewNotes = [];
     tools.push("worker_report");
     const scopedTools = step.permission === "write" ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal), reviewNoteTool((note) => reviewNotes.push(note))] : [];
-    if (step.permission === "write") tools.push("project_command", "review_note");
+    if (step.permission === "write") tools.push("project_command", "review_note", "delete");
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
