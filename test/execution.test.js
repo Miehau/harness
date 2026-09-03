@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, correctionPauseReason, createActivityCapture, groupActivityEvents, interruptedStepFeedback, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewFix, planApprovalPending, prepareRunResume, publicPreviewState, publicState, recurringReviewClusters, resumeStage, rewindRun, shouldPauseCorrection } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 
 test("only the first dependency-ready implementation slice is selected", () => {
@@ -348,6 +348,17 @@ test("public state fully projects only the selected run", () => {
   const published = publicState({ revision: 7, selectedTicketId: "selected", ticketRuns: { selected, other }, retainedRuns: {} });
   assert.ok(Array.isArray(published.ticketRuns.selected.artifacts));
   assert.deepEqual(published.ticketRuns.other, compactRun(other, 7));
+});
+
+test("preview state contains only the selected public run", () => {
+  const selected = { id: "selected", runId: "r1", status: "verifying", ticket: { id: "selected", title: "Selected" }, artifacts: [{ id: "a", content: "private" }], stages: [], plan: { nodes: [] } };
+  const other = { id: "other", runId: "r2", status: "completed", ticket: { id: "other", title: "Other" }, artifacts: [{ content: "x".repeat(10000) }], stages: [], plan: { nodes: [] } };
+  const preview = publicPreviewState({ version: 6, revision: 8, workspace: { cwd: "/repo" }, settings: {}, stageProfiles: {}, notice: null, ticketRuns: { selected, other }, retainedRuns: { old: other } }, "selected");
+  assert.equal(preview.selectedTicketId, "selected");
+  assert.deepEqual(Object.keys(preview.ticketRuns), ["selected"]);
+  assert.deepEqual(preview.retainedRuns, {});
+  assert.equal(preview.ticketRuns.selected.ticket.title, "Selected");
+  assert.equal(preview.ticketRuns.selected.artifacts[0].content, undefined);
 });
 
 test("public state keeps retained audits compact", () => {

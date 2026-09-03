@@ -610,6 +610,21 @@ export function publicState(state) {
   return clone;
 }
 
+export function publicPreviewState(state, ticketId) {
+  const run = state?.ticketRuns?.[ticketId];
+  return publicState({
+    version: state?.version,
+    revision: state?.revision,
+    workspace: state?.workspace,
+    settings: state?.settings,
+    stageProfiles: state?.stageProfiles,
+    selectedTicketId: ticketId,
+    ticketRuns: run ? { [ticketId]: run } : {},
+    retainedRuns: {},
+    notice: state?.notice || null
+  });
+}
+
 export function compactRun(run, revision = null) {
   return {
     id: run?.id || null,
