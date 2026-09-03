@@ -601,10 +601,11 @@ export function humanProofFindings(feedback) {
   }));
 }
 
-export function liveCaptureEnvironment(address, ticketId, runId) {
-  if (!address || typeof address === "string" || !address.port || !ticketId || !runId) return {};
+export function liveCaptureEnvironment(target, ticketId, runId) {
+  const url = typeof target === "string" ? target.replace(/\/$/, "") : target?.port ? `http://127.0.0.1:${target.port}` : null;
+  if (!url || !ticketId || !runId) return {};
   return {
-    AGENT_PLAN_CAPTURE_URL: `http://127.0.0.1:${address.port}`,
+    AGENT_PLAN_CAPTURE_URL: url,
     AGENT_PLAN_CAPTURE_TICKET_ID: ticketId,
     AGENT_PLAN_CAPTURE_RUN_ID: runId
   };

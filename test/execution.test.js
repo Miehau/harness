@@ -197,6 +197,11 @@ test("visual checks receive the live ticket and run capture identity", () => {
     AGENT_PLAN_CAPTURE_RUN_ID: "run-2"
   });
   assert.deepEqual(liveCaptureEnvironment(null, "ticket-1", "run-2"), {});
+  assert.deepEqual(liveCaptureEnvironment("http://127.0.0.1:47821/", "ticket-1", "run-2"), {
+    AGENT_PLAN_CAPTURE_URL: "http://127.0.0.1:47821",
+    AGENT_PLAN_CAPTURE_TICKET_ID: "ticket-1",
+    AGENT_PLAN_CAPTURE_RUN_ID: "run-2"
+  });
 });
 
 test("automatic corrections ignore findings below medium severity", () => {

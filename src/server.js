@@ -210,7 +210,11 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
   const current = ticketRun(store.read(), ticketId);
   const checks = await harness.runRepositoryChecks({
     cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
-    environment: required ? liveCaptureEnvironment(server.address(), ticketId, current.runId) : {}
+    // Canonical screenshots must render the code under review. The ticket
+    // preview serves worktree assets and a ticket-scoped state snapshot; the
+    // operator daemon serves the main checkout and therefore cannot prove UI
+    // changes made in the isolated ticket worktree.
+    environment: required ? liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId) : {}
   });
   reconcileVisualChecks(checks, evidence, { required, requiredVideo });
   if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
