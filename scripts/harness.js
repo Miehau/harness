@@ -56,6 +56,13 @@ export async function invoke(daemon, method, path, { body, token } = {}) {
   return { status, headers, text, json };
 }
 
+async function removeTemporaryDirectory(path) {
+  // Daemon shutdown can settle a final queued state write after its worker
+  // promise has completed. Retry transient ENOTEMPTY while removing test-only
+  // directories so that write cannot make an otherwise successful fixture fail.
+  await rm(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
 export async function withDaemon(fn, opts = {}) {
   const dataDir = opts.dataDir || await mkdtemp(join(tmpdir(), "agent-plan-daemon-"));
   const cwd = opts.cwd || await mkdtemp(join(tmpdir(), "agent-plan-cwd-"));
@@ -65,9 +72,13 @@ export async function withDaemon(fn, opts = {}) {
   try { return await fn(daemon, { dataDir, cwd }); }
   finally {
     await daemon.close({ exit: false });
+    // Wait for state persistence already queued by the bounded shutdown before
+    // deleting its backing directory; the retry below covers a last write that
+    // was scheduled concurrently by a detached activity callback.
+    await daemon.store.queue;
     if (!opts.keep) {
-      if (!opts.dataDir) await rm(dataDir, { recursive: true, force: true });
-      if (!opts.cwd) await rm(cwd, { recursive: true, force: true });
+      if (!opts.dataDir) await removeTemporaryDirectory(dataDir);
+      if (!opts.cwd) await removeTemporaryDirectory(cwd);
     }
   }
 }

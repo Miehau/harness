@@ -4,6 +4,27 @@ import { dirname } from "node:path";
 import { artifactPathInDataDir } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { initializeRunCleanup } from "./execution.js";
+
+function recoverInterruptedCleanup(run, at = new Date().toISOString()) {
+  const cleanup = initializeRunCleanup(run, { legacy: true });
+  for (const execution of cleanup.executions) {
+    if (execution.outcome !== "running") continue;
+    // Ownership tokens are intentionally never persisted, so a restarted
+    // daemon cannot safely rediscover these processes. Preserve uncertainty
+    // rather than claiming a cleanup result based on a reusable PID.
+    execution.outcome = "incomplete";
+    execution.completedAt = at;
+    execution.triggers ||= [];
+    execution.triggers.push({ trigger: "daemon-restart-recovery", at });
+    execution.unresolved ||= [];
+    execution.unresolved.push({ reason: "restart-ownership-token-unavailable" });
+    execution.diagnostics ||= [];
+    execution.diagnostics.push("Daemon restart cannot safely inspect an interrupted execution without its non-persisted ownership token");
+  }
+  if (cleanup.executions.some((execution) => execution.outcome === "incomplete")) cleanup.outcome = "incomplete";
+  cleanup.updatedAt = at;
+}
 
 function initialState(cwd) {
   return {
@@ -158,6 +179,7 @@ export class JsonStore {
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
       for (const run of Object.values(this.state.ticketRuns)) {
+        recoverInterruptedCleanup(run);
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
         run.auto ||= false;
         run.activeRuns = {};
@@ -185,6 +207,10 @@ export class JsonStore {
           };
         }
       }
+      // Retained runs are audit evidence too; a saved in-flight record remains
+      // uncertain after restart rather than being represented as a success.
+      for (const run of Object.values(this.state.retainedRuns)) recoverInterruptedCleanup(run);
+      await this.save();
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }

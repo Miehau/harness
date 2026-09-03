@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
+import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("commit messages always explain why and name the requirement", () => {
   assert.equal(formatCommitMessage({ subject: "feat: add task board", why: "Users need a visible queue.", requirement: "REQ-board — tasks are displayed" }, {}), "feat: add task board\n\nWhy: Users need a visible queue.\nRequirement: REQ-board — tasks are displayed");
@@ -258,6 +259,40 @@ test("bounded repository failure output retains both context and the final faili
   }
 });
 
+test("repository-check timeouts settle despite inherited pipes and request containment immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-pipe-timeout-"));
+  let parent;
+  let descendant;
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), `import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+const child = spawn(process.execPath, [new URL("./held.mjs", import.meta.url).pathname], { stdio: "inherit" });
+await writeFile("pids", [process.pid, child.pid].join(":"));
+setInterval(() => {}, 1000);
+`);
+    await writeFile(join(root, "held.mjs"), "setInterval(() => {}, 1000);\n");
+    const triggers = [];
+    const containment = {
+      executionId: "timed-repository-check", ownership: { token: "timed-check-owner" },
+      cleanup: async (trigger) => { triggers.push(trigger); return { executionId: "timed-repository-check", outcome: "complete" }; }
+    };
+    const started = Date.now();
+    const result = await new PiHarness({ dataDir: root, repositoryCheckTimeoutMs: 500 }).runRepositoryChecks({ cwd: root, containment });
+    assert.ok(Date.now() - started < 1_500, "timeout must not wait for inherited stdio to close");
+    assert.equal(result.status, "failed");
+    assert.deepEqual(triggers.map(({ trigger }) => trigger), ["repository-check-timeout", "repository-check-exit"]);
+    assert.match(triggers[1].at, /^\d{4}-\d{2}-\d{2}T/);
+    [parent, descendant] = (await readFile(join(root, "pids"), "utf8")).split(":").map(Number);
+  } finally {
+    for (const pid of [parent, descendant]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("prefers the repository verification contract and discovers image and video evidence when declared", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-contract-"));
   const dataDir = await mkdtemp(join(tmpdir(), "pi-contract-state-"));
@@ -311,6 +346,188 @@ test("prefers the repository verification contract and discovers image and video
     await rm(root, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test("repository checks add only the supplied execution ownership to their curated environment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-owned-checks-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// injected executor\n");
+    let options;
+    let cleanupTrigger;
+    const harness = new PiHarness({ dataDir: root, execImpl: async (_file, _args, value) => {
+      options = value;
+      return { stdout: "ok", stderr: "" };
+    } });
+    const containment = {
+      executionId: "check-execution", ownership: { token: "check-owner" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "not-required" }; }
+    };
+    const result = await harness.runRepositoryChecks({ cwd: root, containment });
+    assert.equal(result.status, "passed");
+    assert.equal(options.env[PROCESS_OWNERSHIP_ENV], "check-owner");
+    assert.equal(options.env.UNLISTED, undefined);
+    assert.equal(cleanupTrigger.trigger, "repository-check-exit");
+    assert.equal(cleanupTrigger.at, result.cleanupTrigger.at);
+    assert.match(result.cleanupTrigger.at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(result.cleanup.outcome, "not-required");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a repository check launched after settled cleanup starts a fresh owned-process cycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-check-after-settled-cleanup-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// injected executor\n");
+    const ownership = createExecutionOwnership("check-after-settled", { randomUUIDImpl: () => "check-owner", now: () => 0 });
+    const targets = new Map();
+    const signals = [];
+    const containment = new ProcessContainment({
+      executionId: ownership.executionId,
+      ownership,
+      graceMs: 0,
+      forceWaitMs: 0,
+      timeoutMs: 100,
+      adapter: {
+        platform: "test",
+        supported: true,
+        discover: async () => ({ processes: [...targets.values()], unresolved: [] }),
+        observe: async (pid) => targets.get(pid) || null,
+        signal: async (pid, signal) => { signals.push([pid, signal]); targets.delete(pid); }
+      }
+    });
+    await containment.cleanup("preview-exit");
+    const harness = new PiHarness({
+      dataDir: root,
+      execImpl: async () => {
+        targets.set(41, { pid: 41, ppid: 7, startTime: "100", ownershipToken: ownership.token });
+        return { stdout: "ok", stderr: "" };
+      }
+    });
+
+    const result = await harness.runRepositoryChecks({ cwd: root, containment });
+
+    assert.equal(result.status, "passed");
+    assert.deepEqual(signals, [[41, "SIGTERM"]]);
+    assert.deepEqual(result.cleanup.discovered, [{ pid: 41, ppid: 7, startTime: "100" }]);
+    assert.deepEqual(result.cleanup.triggers.map(({ trigger }) => trigger), ["preview-exit", "repository-check-exit"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("timed-out repository commands forward the containment timeout trigger unchanged", async () => {
+  const cleanupTrigger = { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z" };
+  const cleanup = { executionId: "timed-command", outcome: "complete" };
+  const containment = {
+    executionId: "timed-command", ownership: { token: "timed-owner" },
+    cleanup: async () => assert.fail("the command already requested containment cleanup")
+  };
+  let persisted;
+  const tool = projectCommandTool("/fixture", undefined, containment, async () => ({
+    status: "failed", command: "check", timedOut: true, output: "timed out", cleanup, cleanupTrigger
+  }), (evidence, trigger) => { persisted = { evidence, trigger }; });
+  const result = await tool.execute("timeout", { name: "check" });
+  assert.equal(result.isError, true);
+  assert.strictEqual(result.details.cleanup, cleanup);
+  assert.strictEqual(persisted.evidence, cleanup);
+  assert.strictEqual(persisted.trigger, cleanupTrigger);
+});
+
+test("repository-check discovery settles containment when no command can launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-empty-checks-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "empty-check", ownership: { token: "empty-owner" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "empty-check", outcome: "not-required", actions: [] }; }
+    };
+    const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root, containment });
+    assert.equal(result.status, "skipped");
+    assert.equal(result.cleanup.outcome, "not-required");
+    assert.equal(cleanupTrigger.trigger, "repository-check-exit");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker project commands share execution ownership and cleanup on exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-owned-worker-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, "check.mjs"), "console.log(process.env.AGENT_PLAN_EXECUTION_OWNER)\n");
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { check: ["node", "check.mjs"] } }));
+    let customTools;
+    let cleanupTrigger;
+    const harness = new PiHarness({
+      dataDir: root,
+      containmentFactory: () => ({
+        executionId: "worker-execution", ownership: { token: "own" },
+        cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "not-required" }; }
+      })
+    });
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] },
+      resourceLoader: { getSkills: () => ({ skills: [] }) }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() {
+        const command = customTools.find((tool) => tool.name === "project_command");
+        const report = customTools.find((tool) => tool.name === "worker_report");
+        const commandResult = await command.execute("command", { name: "check" });
+        await report.execute("report", { status: "completed", summary: "Done", artifact: commandResult.details.output });
+      }
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async (options) => { customTools = options.customTools; return { session }; },
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Owned command", nodes: [{ id: "owned", title: "Owned", permission: "write", writeScope: "src", skills: [] }] });
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [] });
+    assert.equal(result.output.trim(), "own");
+    assert.equal(cleanupTrigger.trigger, "worker-completed");
+    assert.equal(result.cleanup.outcome, "not-required");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker uses a daemon-supplied containment rather than replacing its ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-supplied-worker-"));
+  try {
+    let cleanupTrigger;
+    const containment = {
+      executionId: "persisted-worker", ownership: { executionId: "persisted-worker", token: "persisted-owner", createdAt: "2026-09-03T10:00:00.000Z" },
+      cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "persisted-worker", outcome: "not-required" }; }
+    };
+    const harness = new PiHarness({ dataDir: root, containmentFactory: () => assert.fail("must use the containment persisted by the daemon") });
+    let customTools;
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] }, resourceLoader: { getSkills: () => ({ skills: [] }) },
+      setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Done", artifact: "ok" }); }
+    };
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ title: "Supplied containment", nodes: [{ id: "owned", title: "Owned", permission: "read", skills: [] }] });
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], containment });
+    assert.equal(result.cleanup.executionId, "persisted-worker");
+    assert.equal(cleanupTrigger.trigger, "worker-completed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker aborts retain conservative cleanup evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-worker-abort-"));
+  try {
+    const controller = new AbortController();
+    let cleanupTrigger;
+    const harness = new PiHarness({
+      dataDir: root,
+      containmentFactory: () => ({
+        executionId: "aborted-worker", ownership: { token: "aborted-owner" },
+        cleanup: async (trigger) => { cleanupTrigger = trigger; return { outcome: "incomplete" }; }
+      })
+    });
+    const session = {
+      state: { messages: [] }, resourceLoader: { getSkills: () => ({ skills: [] }) }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { controller.abort(new Error("cancelled")); }, async abort() {}
+    };
+    harness.sdk = async () => ({ createAgentSession: async () => ({ session }), SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ title: "Abort", nodes: [{ id: "abort", title: "Abort", permission: "read", skills: [] }] });
+    await assert.rejects(harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], signal: controller.signal }), /cancelled/);
+    assert.equal(cleanupTrigger.trigger, "worker-aborted");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("hard worker tools allow scoped writes and block sibling paths", async () => {

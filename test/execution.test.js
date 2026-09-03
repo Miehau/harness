@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 import { initializeProofMap } from "../src/proof-map.js";
 
@@ -629,6 +629,94 @@ test("public projections preserve legacy compatibility and stored proof eligibil
   const legacy = compactRun({ id: "legacy", plan, artifacts: [], stages: [] }).proofMap;
   assert.equal(legacy.compatibility, true);
   assert.equal(legacy.eligibility.eligible, true, "legacy UI consumes the server-compatible approval gate");
+});
+
+test("cleanup evidence remains pessimistic through cancellation, serialization, and archiving", () => {
+  const ticket = { id: "cleanup-ticket", identifier: "CLEAN-1" };
+  const run = createTicketRun(ticket, {}, { status: "running", plan: normalizePlan({ nodes: [{ id: "one", title: "One", status: "running" }] }) });
+  beginRunCleanup(run, { executionId: "worker-1", stepId: "one", attemptId: "attempt-1", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "incomplete", platform: { name: "linux", supported: true }, discovered: [{ pid: 41, ppid: 7, startTime: "100" }],
+    actions: [{ pid: 41, signal: "SIGTERM", status: "sent" }], unresolved: [{ pid: 41, reason: "still-running-after-force" }],
+    diagnostics: ["Fixture process did not exit"], triggers: [{ trigger: "worker-aborted", at: "2026-09-03T10:00:01.000Z" }]
+  }, { trigger: "worker-aborted", at: "2026-09-03T10:00:01.000Z" });
+  beginRunCleanup(run, { executionId: "worker-2", stepId: "one", attemptId: "attempt-2", at: "2026-09-03T10:00:02.000Z" });
+  completeRunCleanup(run, "worker-2", { outcome: "not-required", platform: { name: "linux", supported: true }, triggers: [] }, { trigger: "worker-completed", at: "2026-09-03T10:00:02.000Z" });
+
+  assert.equal(run.cleanup.outcome, "incomplete");
+  assert.equal(run.cleanup.executions[1].outcome, "not-required");
+  assert.equal(run.cleanup.executions[1].actions.length, 0);
+  markRunCancelled(run, "2026-09-03T10:00:03.000Z");
+  const state = { ticketRuns: { [ticket.id]: run }, retainedRuns: {} };
+  archiveRun(state, ticket.id);
+  const retained = publicState(state).retainedRuns[`${ticket.id}:${run.runId}`];
+  assert.equal(retained.cleanup.outcome, "incomplete");
+  assert.deepEqual(retained.cleanup.executions[0].unresolved, [{ pid: 41, reason: "still-running-after-force" }]);
+  assert.equal(retained.cleanup.executions[0].ownership.executionId, "worker-1");
+});
+
+test("cleanup settlement retains timestamp-distinct lifecycle triggers while deduplicating redelivery", () => {
+  const run = createTicketRun({ id: "trigger-dedupe", identifier: "TRIGGER" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "worker-1", { outcome: "complete", triggers: [] }, {
+    trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z"
+  });
+  completeRunCleanup(run, "worker-1", { outcome: "complete", triggers: [] }, {
+    trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z"
+  });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "complete",
+    triggers: [{ trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z" }]
+  }, { trigger: "daemon-shutdown", at: "2026-09-03T10:00:03.000Z" });
+  assert.deepEqual(run.cleanup.executions[0].triggers, [
+    { trigger: "worker-launch", at: "2026-09-03T10:00:00.000Z" },
+    { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:01.000Z" },
+    { trigger: "repository-command-timeout", command: "check", at: "2026-09-03T10:00:02.000Z" },
+    { trigger: "daemon-shutdown", at: "2026-09-03T10:00:03.000Z" }
+  ]);
+});
+
+test("late cleanup success cannot erase timeout uncertainty", () => {
+  const run = createTicketRun({ id: "timeout", identifier: "TIMEOUT" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", at: "2026-09-03T10:00:00.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "incomplete", unresolved: [{ reason: "cleanup-wait-timeout" }], diagnostics: ["Cleanup wait timed out"], actions: []
+  }, { trigger: "worker-exit", at: "2026-09-03T10:00:01.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    outcome: "complete", unresolved: [], diagnostics: [], actions: [{ pid: 41, signal: "SIGKILL", status: "sent" }]
+  }, { trigger: "daemon-shutdown", at: "2026-09-03T10:00:02.000Z" });
+  const execution = run.cleanup.executions[0];
+  assert.equal(execution.outcome, "incomplete");
+  assert.deepEqual(execution.unresolved, [{ reason: "cleanup-wait-timeout" }]);
+  assert.deepEqual(execution.diagnostics, ["Cleanup wait timed out"]);
+  assert.deepEqual(execution.actions, [{ pid: 41, signal: "SIGKILL", status: "sent" }]);
+});
+
+test("repeated incomplete settlement deduplicates shared containment evidence", () => {
+  const run = createTicketRun({ id: "duplicate-cleanup", identifier: "DEDUP" }, {}, {});
+  beginRunCleanup(run, { executionId: "worker-1", at: "2026-09-03T10:00:00.000Z" });
+  const sharedEvidence = {
+    outcome: "incomplete",
+    discovered: [{ pid: 41, ppid: 7, startTime: "100" }],
+    actions: [{ pid: 41, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }],
+    unresolved: [{ pid: 41, identity: { ppid: 7, startTime: "100" }, reason: "still-running-after-force" }],
+    diagnostics: ["Fixture process did not exit"]
+  };
+  completeRunCleanup(run, "worker-1", sharedEvidence, { trigger: "repository-command-timeout", at: "2026-09-03T10:00:01.000Z" });
+  completeRunCleanup(run, "worker-1", {
+    ...sharedEvidence,
+    discovered: [...sharedEvidence.discovered, { pid: 42, ppid: 7, startTime: "101" }],
+    actions: [...sharedEvidence.actions, { pid: 42, signal: "SIGKILL", status: "sent", at: "2026-09-03T10:00:02.000Z" }],
+    unresolved: [...sharedEvidence.unresolved, { pid: 42, identity: { ppid: 7, startTime: "101" }, reason: "still-running-after-force" }],
+    diagnostics: [...sharedEvidence.diagnostics, "Late owned process remained"]
+  }, { trigger: "worker-exit", at: "2026-09-03T10:00:02.000Z" });
+
+  const execution = run.cleanup.executions[0];
+  assert.equal(execution.outcome, "incomplete");
+  assert.equal(execution.discovered.length, 2);
+  assert.equal(execution.actions.length, 2);
+  assert.equal(execution.unresolved.length, 2);
+  assert.deepEqual(execution.diagnostics, ["Fixture process did not exit", "Late owned process remained"]);
 });
 
 test("compact run and public state omit artifact bodies", () => {

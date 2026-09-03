@@ -30,6 +30,193 @@ export function localStages() {
   return stages;
 }
 
+export const cleanupOutcomes = Object.freeze(["running", "not-required", "complete", "incomplete", "unsupported"]);
+
+function cleanupOutcome(executions) {
+  const outcomes = executions.map((execution) => execution.outcome);
+  if (outcomes.includes("running")) return "running";
+  if (outcomes.includes("incomplete")) return "incomplete";
+  if (outcomes.includes("unsupported")) return "unsupported";
+  if (outcomes.includes("complete")) return "complete";
+  return "not-required";
+}
+
+/** Normalize durable cleanup without discarding adapter diagnostics or identity evidence. */
+export function normalizeRunCleanup(value = {}) {
+  const executions = Array.isArray(value?.executions) ? value.executions.map((execution) => {
+    const outcome = cleanupOutcomes.includes(execution?.outcome) ? execution.outcome : "incomplete";
+    return {
+      ...structuredClone(execution || {}),
+      executionId: String(execution?.executionId || "legacy-unknown"),
+      outcome,
+      triggers: Array.isArray(execution?.triggers) ? structuredClone(execution.triggers) : [],
+      diagnostics: Array.isArray(execution?.diagnostics) ? structuredClone(execution.diagnostics) : [],
+      unresolved: Array.isArray(execution?.unresolved) ? structuredClone(execution.unresolved) : []
+    };
+  }) : [];
+  return {
+    executions,
+    outcome: cleanupOutcome(executions),
+    updatedAt: value?.updatedAt || null
+  };
+}
+
+export function initializeRunCleanup(run, { legacy = false } = {}) {
+  if (legacy && !Object.hasOwn(run, "cleanup")) {
+    run.cleanup = {
+      executions: [{
+        executionId: "legacy-unrecorded",
+        outcome: "incomplete",
+        ownership: { executionId: "legacy-unrecorded", establishedAt: null },
+        startedAt: null,
+        completedAt: null,
+        triggers: [],
+        discovered: [],
+        actions: [],
+        unresolved: [],
+        diagnostics: ["Cleanup evidence predates durable containment records"]
+      }],
+      outcome: "incomplete",
+      updatedAt: null
+    };
+  } else run.cleanup = normalizeRunCleanup(run.cleanup);
+  return run.cleanup;
+}
+
+function persistedOwnership(ownership, executionId, at) {
+  return {
+    executionId: String(ownership?.executionId || executionId),
+    establishedAt: ownership?.createdAt || at,
+    tokenPresent: Boolean(ownership?.token)
+  };
+}
+
+// A cleanup result may be delivered again after a bounded persistence wait.
+// Deduplicate that exact durable record, but retain timestamp-distinct lifecycle
+// requests even when their trigger payload is otherwise identical.
+function triggerIdentity(entry) {
+  return stableCleanupValueKey(entry || {});
+}
+
+function mergeCleanupTriggers(...groups) {
+  const seen = new Set();
+  return groups.flat().filter((entry) => {
+    const key = triggerIdentity(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function cleanupTriggerEntry(trigger, at) {
+  if (trigger && typeof trigger === "object" && !Array.isArray(trigger)) {
+    const entry = structuredClone(trigger);
+    return { ...entry, at: entry.at ?? at };
+  }
+  return { trigger: typeof trigger === "string" ? trigger : "unspecified", at };
+}
+
+function stableCleanupValueKey(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map(stableCleanupValueKey).join(",")}]`;
+  if (typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${stableCleanupValueKey(item)}`).join(",")}}`;
+  return `${typeof value}:${String(value)}`;
+}
+
+function cleanupProcessKey(process) {
+  if (Number.isInteger(process?.pid) && Number.isInteger(process?.ppid) && typeof process?.startTime === "string") return `process:${process.pid}:${process.ppid}:${process.startTime}`;
+  return stableCleanupValueKey(process);
+}
+
+function mergeCleanupEvidence(prior, reported, key) {
+  const seen = new Set();
+  return [...prior, ...reported].filter((entry) => {
+    const identity = key(entry);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+/** Persist a running execution before its worker gets an opportunity to launch a controlled process. */
+export function beginRunCleanup(run, { executionId, ownership = null, stepId = null, attemptId = null, trigger = "worker-launch", at = new Date().toISOString() } = {}) {
+  if (!executionId) throw new TypeError("cleanup executionId is required");
+  const cleanup = initializeRunCleanup(run);
+  let execution = cleanup.executions.find((item) => item.executionId === executionId);
+  if (!execution) {
+    execution = {
+      executionId,
+      stepId,
+      attemptId,
+      ownership: persistedOwnership(ownership, executionId, at),
+      outcome: "running",
+      startedAt: at,
+      completedAt: null,
+      triggers: [],
+      discovered: [],
+      actions: [],
+      unresolved: [],
+      diagnostics: []
+    };
+    cleanup.executions.push(execution);
+  }
+  execution.triggers.push(cleanupTriggerEntry(trigger, at));
+  cleanup.outcome = cleanupOutcome(cleanup.executions);
+  cleanup.updatedAt = at;
+  return execution;
+}
+
+/** Merge containment evidence into its pre-existing execution record; unknown evidence is uncertainty, never success. */
+export function completeRunCleanup(run, executionId, evidence, triggerOptions = {}) {
+  const options = triggerOptions && typeof triggerOptions === "object" && !Array.isArray(triggerOptions)
+    ? triggerOptions : { trigger: triggerOptions };
+  const at = options.at ?? new Date().toISOString();
+  const trigger = { ...options };
+  delete trigger.at;
+  if (!Object.hasOwn(trigger, "trigger")) trigger.trigger = "worker-exit";
+  const execution = beginRunCleanup(run, { executionId, trigger, at });
+  const reported = evidence && typeof evidence === "object" ? structuredClone(evidence) : null;
+  if (reported) {
+    const priorTriggers = execution.triggers;
+    const priorOutcome = execution.outcome;
+    const priorEvidence = {
+      discovered: execution.discovered || [],
+      actions: execution.actions || [],
+      unresolved: execution.unresolved || [],
+      diagnostics: execution.diagnostics || []
+    };
+    const reportedOutcome = cleanupOutcomes.includes(reported.outcome) && reported.outcome !== "running" ? reported.outcome : "incomplete";
+    const preserveUncertainty = priorOutcome === "incomplete";
+    Object.assign(execution, reported, {
+      executionId,
+      ...(reported.executionId && reported.executionId !== executionId ? { containmentExecutionId: reported.executionId } : {}),
+      ownership: execution.ownership,
+      startedAt: execution.startedAt,
+      triggers: mergeCleanupTriggers(priorTriggers, Array.isArray(reported.triggers) ? reported.triggers : []),
+      // A bounded wait is an unresolved safety condition, not a provisional
+      // success. Late observations may add evidence but cannot erase it.
+      outcome: preserveUncertainty ? "incomplete" : reportedOutcome,
+      // A shared containment promise can be durably settled by a timed-out
+      // command and then again when its worker exits. Keep genuinely late
+      // observations, but collapse the same process, action, uncertainty, or
+      // diagnostic instead of turning one cleanup sequence into duplicate audit evidence.
+      discovered: preserveUncertainty ? mergeCleanupEvidence(priorEvidence.discovered, Array.isArray(reported.discovered) ? reported.discovered : [], cleanupProcessKey) : reported.discovered || [],
+      actions: preserveUncertainty ? mergeCleanupEvidence(priorEvidence.actions, Array.isArray(reported.actions) ? reported.actions : [], stableCleanupValueKey) : reported.actions || [],
+      unresolved: preserveUncertainty ? mergeCleanupEvidence(priorEvidence.unresolved, Array.isArray(reported.unresolved) ? reported.unresolved : [], stableCleanupValueKey) : reported.unresolved || [],
+      diagnostics: preserveUncertainty ? mergeCleanupEvidence(priorEvidence.diagnostics, Array.isArray(reported.diagnostics) ? reported.diagnostics : [], stableCleanupValueKey) : reported.diagnostics || [],
+      completedAt: reported.completedAt || at
+    });
+  } else {
+    execution.outcome = "incomplete";
+    execution.completedAt = at;
+    execution.diagnostics = [...(execution.diagnostics || []), "Worker exited without process-cleanup evidence"];
+  }
+  const cleanup = initializeRunCleanup(run);
+  cleanup.outcome = cleanupOutcome(cleanup.executions);
+  cleanup.updatedAt = at;
+  return execution;
+}
+
 export function createTicketRun(ticket, stageProfiles, extras = {}) {
   const {
     runId = randomUUID(),
@@ -48,6 +235,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     workflow,
     harnessEvidencePolicy = visualEvidencePolicy,
     createdAt = new Date().toISOString(),
+    cleanup,
     ...rest
   } = extras;
   return {
@@ -70,6 +258,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     workflow: workflow || initialWorkflow(),
     harnessEvidencePolicy,
     createdAt,
+    cleanup: normalizeRunCleanup(cleanup),
     ...rest
   };
 }
@@ -948,6 +1137,9 @@ export function compactRun(run, revision = null) {
     lastError: run?.lastError || null,
     workflow: run?.workflow || null,
     proofMap: projectProofMap(run),
+    // Keep cleanup evidence structured in the lightweight inspector response;
+    // it must not be collapsed into lastError because success is not implied.
+    cleanup: normalizeRunCleanup(run?.cleanup),
     revision
   };
 }

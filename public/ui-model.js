@@ -170,6 +170,51 @@ export function stageDetailModel(run, stageId) {
   };
 }
 
+const cleanupOutcomeCopy = new Set(["running", "not-required", "complete", "incomplete", "unsupported"]);
+
+/**
+ * Shapes durable process-containment evidence for the run inspector without
+ * reducing unresolved cleanup to a generic worker error.
+ */
+export function cleanupInspectorModel(run) {
+  const cleanup = run?.cleanup || {};
+  const executions = Array.isArray(cleanup.executions) ? cleanup.executions.map((execution) => ({
+    executionId: String(execution?.executionId || "unknown-execution"),
+    outcome: cleanupOutcomeCopy.has(execution?.outcome) ? execution.outcome : "incomplete",
+    stepId: execution?.stepId || null,
+    attemptId: execution?.attemptId || null,
+    ownership: execution?.ownership || null,
+    platform: execution?.platform || null,
+    startedAt: execution?.startedAt || null,
+    completedAt: execution?.completedAt || null,
+    triggers: Array.isArray(execution?.triggers) ? execution.triggers : [],
+    discovered: Array.isArray(execution?.discovered) ? execution.discovered : [],
+    actions: Array.isArray(execution?.actions) ? execution.actions : [],
+    unresolved: Array.isArray(execution?.unresolved) ? execution.unresolved : [],
+    diagnostics: Array.isArray(execution?.diagnostics) ? execution.diagnostics : []
+  })) : [];
+  const outcome = cleanupOutcomeCopy.has(cleanup.outcome)
+    ? cleanup.outcome
+    : executions.some((execution) => execution.outcome === "incomplete") ? "incomplete"
+      : executions.some((execution) => execution.outcome === "unsupported") ? "unsupported"
+        : executions.some((execution) => execution.outcome === "complete") ? "complete" : "not-required";
+  const labels = {
+    running: "Cleanup in progress",
+    complete: "Cleanup complete",
+    incomplete: "Cleanup incomplete",
+    unsupported: "Cleanup unsupported",
+    "not-required": "No cleanup required"
+  };
+  return {
+    outcome,
+    label: labels[outcome],
+    advisory: outcome === "incomplete" || outcome === "unsupported",
+    updatedAt: cleanup.updatedAt || null,
+    executionCount: executions.length,
+    executions
+  };
+}
+
 export function stepInspectorSummary(step) {
   const attempts = step?.attempts || [];
   const latest = [...attempts].reverse().find((attempt) => attempt.verification) || attempts.at(-1);

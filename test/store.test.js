@@ -91,6 +91,7 @@ test("keeps file-backed artifact bodies out of memory and persisted state", asyn
   }
 });
 
+
 test("server restart marks active work as interrupted and clears dead runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-plan-store-"));
   const file = join(root, "state.json");
@@ -109,12 +110,36 @@ test("server restart marks active work as interrupted and clears dead runs", asy
     assert.equal(state.ticketRuns["run-1"].status, "interrupted");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].status, "interrupted");
     assert.deepEqual(state.ticketRuns["run-1"].activeRuns, {});
+    assert.equal(state.ticketRuns["run-1"].cleanup.outcome, "incomplete");
+    assert.match(state.ticketRuns["run-1"].cleanup.executions[0].diagnostics[0], /predates durable containment/);
     assert.equal(state.ticketRuns["run-2"].status, "interrupted");
     assert.equal(state.ticketRuns["run-2"].merge.status, "interrupted");
     assert.equal(state.ticketRuns["run-2"].recovery.kind, "delivery");
     assert.equal(state.ticketRuns["run-2"].recovery.uncertainExternalActions, false);
     assert.equal(state.ticketRuns["run-3"].recovery.uncertainExternalActions, true);
     assert.match(state.ticketRuns["run-3"].recovery.message, /inspect the forge/i);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("normalizes active and retained cleanup evidence without erasing diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-cleanup-store-"));
+  try {
+    const file = join(root, "state.json");
+    await writeFile(file, JSON.stringify({
+      version: 6, workspace: { cwd: root }, ticketRuns: {
+        active: { status: "paused", plan: { nodes: [] }, cleanup: { executions: [{ executionId: "active-worker", outcome: "unknown", diagnostics: ["adapter lost"], unresolved: [{ pid: 9, reason: "unknown" }] }] } }
+      },
+      retainedRuns: {
+        "old:run": { status: "completed", cleanup: { executions: [{ executionId: "old-worker", outcome: "unsupported", platform: { name: "darwin", supported: false }, diagnostics: ["no adapter"] }] } }
+      }
+    }));
+    const state = await new JsonStore(file, root).init();
+    assert.equal(state.ticketRuns.active.cleanup.outcome, "incomplete");
+    assert.deepEqual(state.ticketRuns.active.cleanup.executions[0].diagnostics, ["adapter lost"]);
+    assert.equal(state.retainedRuns["old:run"].cleanup.outcome, "unsupported");
+    assert.deepEqual(state.retainedRuns["old:run"].cleanup.executions[0].platform, { name: "darwin", supported: false });
   } finally {
     await rm(root, { recursive: true });
   }

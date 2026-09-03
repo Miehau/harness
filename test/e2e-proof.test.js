@@ -80,9 +80,20 @@ test("final proof blocks local integration, streams image and video, then delive
   const calls = { evidence: [] };
   const harness = {
     ...mockHarness(),
+    containmentFactory: ({ executionId }) => ({
+      executionId,
+      ownership: { executionId, token: "proof-check-owner", createdAt: "2026-09-03T10:00:00.000Z" },
+      cleanup: async (trigger) => {
+        calls.cleanupTriggers ||= [];
+        calls.cleanupTriggers.push(trigger);
+        return { executionId, outcome: "not-required", triggers: [trigger], discovered: [], actions: [], unresolved: [], diagnostics: [] };
+      }
+    }),
     runRepositoryChecks: async (input) => {
       calls.lastCheck = input;
-      return { status: "passed", command: "node .agent-plan/verify.mjs", summary: "integration checks passed", output: "", evidence: calls.evidence };
+      const cleanupTrigger = { trigger: "repository-check-exit", command: "node .agent-plan/verify.mjs", at: "2026-09-03T10:00:01.000Z" };
+      const cleanup = await input.containment.cleanup(cleanupTrigger);
+      return { status: "passed", command: "node .agent-plan/verify.mjs", summary: "integration checks passed", output: "", evidence: calls.evidence, cleanup, cleanupTrigger };
     }
   };
   await withDaemon(async (daemon, fixture) => {
@@ -103,6 +114,10 @@ test("final proof blocks local integration, streams image and video, then delive
     assert.equal(await readFile(join(fixture.cwd, "delivered.txt"), "utf8"), "approved\n");
     assert.equal(calls.lastCheck.requireVisualEvidence, true);
     assert.equal(calls.lastCheck.requireVideoEvidence, true);
+    const execution = daemon.store.read().ticketRuns[id].cleanup.executions.find(({ executionId }) => executionId === calls.lastCheck.containment.executionId);
+    const exits = execution.triggers.filter(({ trigger }) => trigger === "repository-check-exit");
+    assert.deepEqual(exits, [{ trigger: "repository-check-exit", command: "node .agent-plan/verify.mjs", at: "2026-09-03T10:00:01.000Z" }]);
+    assert.equal(calls.cleanupTriggers.filter(({ trigger }) => trigger === "repository-check-exit").length, 2, "harness completion and daemon settlement share one durable trigger");
   }, { harness });
 });
 

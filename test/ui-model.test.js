@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { readFile } from "node:fs/promises";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -310,6 +311,26 @@ test("stage details keep the implementation index ordered and split its dependen
     dependencies: { internal: [{ from: "foundation", to: "build", title: "Foundation", status: "accepted" }], external: [] }
   });
   assert.deepEqual(stageDetailModel(run, "verify").dependencies.external, [{ from: "build", to: "verify-ui", title: "Build UI", status: "running" }]);
+});
+
+test("cleanup inspector keeps every durable outcome and marks only advisories as warnings", async () => {
+  const executions = {
+    complete: { executionId: "complete", outcome: "complete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 42, ppid: 7, startTime: "101" }], actions: [{ pid: 42, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }], unresolved: [], diagnostics: [] },
+    incomplete: { executionId: "incomplete", outcome: "incomplete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "run-cancelled", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 43, ppid: 7, startTime: "102" }], actions: [{ pid: 43, signal: "SIGKILL", status: "sent" }], unresolved: [{ pid: 43, reason: "still-running-after-force" }], diagnostics: ["Fixture process did not exit"] },
+    unsupported: { executionId: "unsupported", outcome: "unsupported", platform: { name: "darwin", supported: false, reason: "Safe discovery unavailable" }, triggers: [{ trigger: "daemon-shutdown", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: ["No safe adapter"] },
+    "not-required": { executionId: "none", outcome: "not-required", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: [] }
+  };
+  for (const [outcome, execution] of Object.entries(executions)) {
+    const model = cleanupInspectorModel({ cleanup: { outcome, updatedAt: "2026-09-03T10:00:02.000Z", executions: [execution] } });
+    assert.equal(model.outcome, outcome);
+    assert.equal(model.advisory, ["incomplete", "unsupported"].includes(outcome));
+    assert.deepEqual(model.executions[0].discovered, execution.discovered);
+    assert.deepEqual(model.executions[0].unresolved, execution.unresolved);
+    assert.deepEqual(model.executions[0].diagnostics, execution.diagnostics);
+  }
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(app, /cleanup-advisory/);
+  assert.match(app, /cleanup-inspector \$\{cleanup\.advisory \? "advisory" : "neutral"\}/);
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {

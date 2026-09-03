@@ -1,0 +1,20 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      # The fixture suite has a real /proc adapter only on Linux; this required
+      # job keeps its cancellation, escalation, identity, and leak assertions
+      # from being silently replaced by platform skips.
+      - run: node .agent-plan/verify.mjs

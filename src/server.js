@@ -22,7 +22,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, clearInactiveRuns, compactRun, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -32,6 +32,7 @@ import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill,
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
 import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
+import { createProcessContainment } from "./process-containment.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -174,6 +175,9 @@ export async function createDaemon(options = {}) {
   if (!["git", "jj"].includes(vcsMode)) throw new Error(`Unsupported VCS mode: ${vcsMode}`);
   const dataDir = options.dataDir || process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
   const apiToken = options.apiToken ?? process.env.AGENT_PLAN_API_TOKEN ?? "";
+  const lifecycleCleanupTimeoutMs = Math.max(1, Number(options.lifecycleCleanupTimeoutMs) || 5_000);
+  const workerAbortWaitMs = Math.max(1, Number(options.workerAbortWaitMs) || 1_000);
+  const shutdownTimeoutMs = Math.max(1, Number(options.shutdownTimeoutMs) || 5_000);
   const listen = Boolean(options.listen);
   const useLock = options.lock !== false;
   const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
@@ -203,6 +207,7 @@ const previews = new PreviewManager({ dataDir });
 const clients = new Set();
 const activeSteps = new Map();
 const activeTickets = new Map();
+const activeContainments = new Map();
 const activeMerges = new Set();
 const mergeQueues = new Map();
 let ticketCache = new Map();
@@ -273,15 +278,42 @@ function captureStepActivity(ticketId, stepId, runId) {
 }
 
 async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
+  // A preview and the checks that exercise it share one ownership record, so
+  // cancellation cannot leave a separately-owned dev server behind.
+  const executionId = randomUUID();
+  const containment = containmentForExecution(executionId);
   let preview = null;
   let evidence = [];
   if (required) {
-    preview = await previews.ensure({ id: previewId, cwd, seedState: publicPreviewState(store.read(), ticketId) });
-    if (preview) evidence = await previews.capture(previewId);
+    const runId = await registerContainment(ticketId, executionId, containment, { stepId, trigger: "preview-launch" });
+    try {
+      preview = await previews.ensure({
+        id: previewId,
+        cwd,
+        seedState: publicPreviewState(store.read(), ticketId),
+        containment,
+        // Keep the owning run identity in these callbacks: preview teardown may
+        // settle after a fresh restart has archived that run.
+        onCleanup: (trigger) => settleContainment(ticketId, executionId, containment, trigger, runId),
+        onCleanupSettled: (record) => persistPreviewCleanup(ticketId, runId, previewId, record)
+      });
+      if (preview) evidence = await previews.capture(previewId, { signal });
+    } catch (error) {
+      await settleContainment(ticketId, executionId, containment, "preview-launch-failed", runId);
+      finishContainmentExecution(executionId, containment);
+      throw error;
+    }
   }
   const current = ticketRun(store.read(), ticketId);
-  const checks = await harness.runRepositoryChecks({
-    cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo,
+  const checks = await runContainedRepositoryChecks({
+    ticketId,
+    stepId,
+    cwd,
+    signal,
+    executionId,
+    containment,
+    requireVisualEvidence: required,
+    requireVideoEvidence: requiredVideo,
     // Canonical proof must exercise both API and UI code from the worktree.
     environment: required ? liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId) : {}
   });
@@ -308,6 +340,175 @@ async function update(change, { publish: shouldPublish = true } = {}) {
   return state;
 }
 
+/**
+ * The harness owns signaling, while the daemon owns the run record. Create the
+ * durable record before calling Pi and settle it for every returned or thrown worker outcome.
+ */
+function containmentForExecution(executionId) {
+  const factory = typeof harness.containmentFactory === "function" ? harness.containmentFactory : createProcessContainment;
+  return factory({ executionId });
+}
+
+function cleanupTimeoutEvidence(executionId, label) {
+  return {
+    executionId,
+    outcome: "incomplete",
+    completedAt: new Date().toISOString(),
+    diagnostics: [`Process cleanup did not settle within ${lifecycleCleanupTimeoutMs}ms during ${label}`],
+    unresolved: [{ reason: "cleanup-wait-timeout" }]
+  };
+}
+
+function lifecycleTrigger(trigger, at = new Date().toISOString()) {
+  if (trigger && typeof trigger === "object" && !Array.isArray(trigger)) return { ...trigger, at: trigger.at ?? at };
+  return { trigger: typeof trigger === "string" ? trigger : "unspecified", at };
+}
+
+async function persistContainment(ticketId, runId, executionId, evidence, trigger) {
+  // The daemon's trigger is durable input, not a lookup into shared mutable
+  // containment evidence. In particular, identical concurrent requests differ
+  // by `at` and must both reach exact-record deduplication in completeRunCleanup.
+  const lifecycle = lifecycleTrigger(trigger);
+  await update((state) => {
+    // Cleanup belongs to the process-owning run. A fresh restart may replace
+    // the active ticket ID before a bounded preview cleanup settles, so fall
+    // back to its retained audit record rather than attributing it to the new run.
+    const active = state.ticketRuns[ticketId];
+    const run = active?.runId === runId ? active : state.retainedRuns?.[`${ticketId}:${runId}`];
+    if (run) completeRunCleanup(run, executionId, evidence, lifecycle);
+  }, { publish: false });
+}
+
+async function persistPreviewCleanup(ticketId, runId, previewId, record) {
+  await update((state) => {
+    // Preview cleanup belongs to its original run, including when that run
+    // has been archived by a fresh restart before containment settles.
+    const active = state.ticketRuns[ticketId];
+    const run = active?.runId === runId ? active : state.retainedRuns?.[`${ticketId}:${runId}`];
+    const preview = run?.previews?.[previewId];
+    if (!preview) return;
+    preview.cleanup = record;
+    preview.status = ["incomplete", "unsupported"].includes(record.outcome) ? `cleanup_${record.outcome}` : "stopped";
+  }, { publish: false });
+}
+
+function trackPendingContainment(executionId, operation) {
+  const entry = activeContainments.get(executionId);
+  if (!entry) return;
+  entry.pendingCleanup = operation;
+  entry.pendingCleanupSettled = false;
+  operation.finally(() => {
+    if (entry.pendingCleanup !== operation) return;
+    entry.pendingCleanupSettled = true;
+    if (entry.executionFinished && activeContainments.get(executionId) === entry) activeContainments.delete(executionId);
+  });
+}
+
+function finishContainmentExecution(executionId, containment) {
+  const entry = activeContainments.get(executionId);
+  if (!entry || entry.containment !== containment) return;
+  entry.executionFinished = true;
+  if (entry.pendingCleanupSettled) activeContainments.delete(executionId);
+}
+
+async function settleContainment(ticketId, executionId, containment, trigger, owningRunId = activeContainments.get(executionId)?.runId) {
+  const lifecycle = lifecycleTrigger(trigger);
+  const operation = Promise.resolve().then(() => containment.cleanup(lifecycle)).catch((error) => ({
+    executionId, outcome: "incomplete", completedAt: new Date().toISOString(),
+    diagnostics: [`Process cleanup failed: ${error.message || error}`], unresolved: [{ reason: "cleanup-failed" }]
+  }));
+  trackPendingContainment(executionId, operation);
+  let timer;
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), lifecycleCleanupTimeoutMs); });
+  let evidence;
+  try { evidence = await Promise.race([operation, timeout]); }
+  finally { clearTimeout(timer); }
+  if (evidence) {
+    await persistContainment(ticketId, owningRunId, executionId, evidence, lifecycle);
+    return evidence;
+  }
+  const timeoutEvidence = cleanupTimeoutEvidence(executionId, lifecycle.trigger);
+  await persistContainment(ticketId, owningRunId, executionId, timeoutEvidence, lifecycle);
+  // A timed-out containment is still owned by this daemon. Preserve its
+  // registry entry so shutdown can append a trigger to the same promise.
+  void operation.then((record) => persistContainment(ticketId, owningRunId, executionId, record, lifecycle)).catch(() => {});
+  return timeoutEvidence;
+}
+
+async function cleanupTicketContainments(ticketId, trigger) {
+  const entries = [...activeContainments.values()].filter((entry) => entry.ticketId === ticketId);
+  await Promise.all(entries.map((entry) => settleContainment(ticketId, entry.executionId, entry.containment, trigger, entry.runId)));
+}
+
+async function registerContainment(ticketId, executionId, containment, { stepId = null, attemptId = null, trigger = "worker-launch" } = {}) {
+  const existing = activeContainments.get(executionId);
+  if (existing) {
+    if (existing.ticketId !== ticketId || existing.containment !== containment) throw new Error(`Execution ${executionId} is already owned by another containment`);
+    return existing.runId;
+  }
+  const entry = { ticketId, executionId, containment, runId: null, executionFinished: false, pendingCleanup: null, pendingCleanupSettled: false };
+  activeContainments.set(executionId, entry);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    entry.runId = run.runId;
+    beginRunCleanup(run, { executionId, ownership: containment.ownership, stepId, attemptId, trigger });
+  }, { publish: false });
+  // close() may have started while this registration was queued behind another
+  // worker update. Never allow that late execution to launch a new process.
+  if (closed) {
+    await settleContainment(ticketId, executionId, containment, "daemon-shutdown", entry.runId);
+    finishContainmentExecution(executionId, containment);
+    throw new Error("Daemon is shutting down");
+  }
+  return entry.runId;
+}
+
+function completionTrigger(signal, aborted, completed) {
+  if (!signal?.aborted) return completed;
+  return /timeout/i.test(String(signal.reason?.message || signal.reason || "")) ? "timeout" : aborted;
+}
+
+async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, ...input }) {
+  const executionId = input.executionId || randomUUID();
+  const containment = input.containment || containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { stepId, attemptId });
+  let result;
+  try {
+    result = await harness.runStep({
+      ...input, containment, ticketId, signal,
+      onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
+    });
+    return result;
+  } finally {
+    const trigger = completionTrigger(signal, "worker-aborted", result?.report?.status === "completed" ? "worker-completed" : "worker-exit");
+    await settleContainment(ticketId, executionId, containment, trigger, runId);
+    finishContainmentExecution(executionId, containment);
+  }
+}
+
+async function runContainedRepositoryChecks({ ticketId, stepId = null, signal, ...input }) {
+  const executionId = input.executionId || randomUUID();
+  const containment = input.containment || containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { stepId, trigger: "repository-check-launch" });
+  let result;
+  let failure;
+  try {
+    result = await harness.runRepositoryChecks({ ...input, containment, signal });
+    return result;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    // A PiHarness check has already settled this lifecycle event. Reuse its
+    // timestamped trigger so durable evidence treats this as redelivery, not a
+    // second repository-check exit request.
+    const trigger = result?.cleanupTrigger || failure?.cleanupTrigger
+      || completionTrigger(signal, "repository-check-aborted", "repository-check-exit");
+    await settleContainment(ticketId, executionId, containment, trigger, runId);
+    finishContainmentExecution(executionId, containment);
+  }
+}
+
 function startTicketWork(ticketId, work) {
   if (activeTickets.has(ticketId)) return activeTickets.get(ticketId).promise;
   const controller = new AbortController();
@@ -320,11 +521,20 @@ function startTicketWork(ticketId, work) {
   return promise;
 }
 
+async function waitForWorkerAbort(promise) {
+  let timer;
+  try {
+    await Promise.race([promise.catch(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, workerAbortWaitMs); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cancelTicket(ticketId) {
   const active = activeTickets.get(ticketId);
   if (!active) throw new Error("This run is not active");
   active.controller.abort(new Error("Run cancelled"));
-  await active.promise.catch(() => {});
+  await Promise.all([waitForWorkerAbort(active.promise), cleanupTicketContainments(ticketId, "run-cancelled")]);
   await update((state) => {
     const run = ticketRun(state, ticketId);
     markRunCancelled(run);
@@ -336,7 +546,7 @@ async function pauseTicket(ticketId) {
   const active = activeTickets.get(ticketId);
   if (!active) throw new Error("This run is not active");
   active.controller.abort(new Error("Run paused"));
-  await active.promise.catch(() => {});
+  await Promise.all([waitForWorkerAbort(active.promise), cleanupTicketContainments(ticketId, "run-paused")]);
   let audit;
   const state = await update((draft) => {
     audit = markRunPaused(ticketRun(draft, ticketId));
@@ -380,10 +590,29 @@ function saveStepSession(ticketId, stepId, runId) {
 }
 
 async function stopTicketPreviews(ticketId, reason) {
-  previews.stopMatching(`${ticketId}:`);
+  previews.stopMatching(`${ticketId}:`, { trigger: "preview-stop", reason });
+  await previews.settleMatching(`${ticketId}:`, lifecycleCleanupTimeoutMs);
   await update((state) => {
     const run = state.ticketRuns[ticketId];
-    for (const preview of Object.values(run?.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: reason, stoppedAt: new Date().toISOString() });
+    for (const [id, preview] of Object.entries(run?.previews || {})) {
+      const observed = previews.previewState(id);
+      const status = observed?.status || preview.status;
+      const cleanupPending = status === "stopping";
+      Object.assign(preview, {
+        ...(observed?.cleanup ? { cleanup: observed.cleanup } : cleanupPending ? {
+          cleanup: {
+            outcome: "running",
+            diagnostics: [`Preview cleanup did not settle within ${lifecycleCleanupTimeoutMs}ms; containment remains pending.`],
+            unresolved: [{ reason: "cleanup-wait-timeout" }]
+          }
+        } : {}),
+        // A bounded wait may expire before containment reports a terminal
+        // outcome. Keep that state visible rather than falsely reporting stop.
+        status: cleanupPending || ["cleanup_incomplete", "cleanup_unsupported"].includes(status) ? status : "stopped",
+        stoppedReason: reason,
+        stoppedAt: new Date().toISOString()
+      });
+    }
   });
 }
 
@@ -936,7 +1165,7 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      workflow: initialWorkflow(), createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString()
     };
   });
   return { ticketId: id, state };
@@ -1291,10 +1520,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           forkSessionFile: findForkSession(latest.plan, currentStep),
           feedback: nextFeedback
         });
-        const result = await harness.runStep({
+        const result = await runContainedWorker({
+          ticketId, stepId, attemptId, executionId: workerRunId,
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
-          feedback: nextFeedback, ticketId, runId: latest.runId,
+          feedback: nextFeedback, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
@@ -1602,9 +1832,10 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     plan: current.plan,
     artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
   }).artifacts;
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: step.id,
     cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.handoff,
+    runId: current.runId, profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
   signal?.throwIfAborted();
@@ -1639,13 +1870,14 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
     permission: "write", writeScope: "src,test,public,scripts", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
     expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: step.id,
     cwd: current.workspace.cwd, plan: current.plan, step, artifacts: compactReviewPacket({
       ticket: current.ticket,
       plan: current.plan,
       artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
     }).artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
+    runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
@@ -1968,10 +2200,11 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
     Object.assign(setStage(run, "verify", "active", `Fixing ${findings.length} actionable review finding${findings.length === 1 ? "" : "s"} · round ${round}`), { activity: activity.snapshot() });
   });
   const beforeFix = await snapshotTree(current.workspace.cwd);
-  const result = await harness.runStep({
+  const result = await runContainedWorker({
+    ticketId, stepId: fixStep.id,
     cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [], proofMap: projectProofMap(current),
     images: reviewFixImages(sessionFile, findings, reviewImages), forkSessionFile: null, resumeSessionFile: sessionFile,
-    feedback: sessionFile ? finalReviewFixFeedback(findings) : "", ticketId, runId: current.runId,
+    feedback: sessionFile ? finalReviewFixFeedback(findings) : "", runId: current.runId,
     profile: current.stageProfiles.implementation,
     onEvent: (event) => activity.onEvent(event, "review fixer"),
     onSessionFile: (nextSessionFile) => update((state) => {
@@ -2491,7 +2724,9 @@ async function startFreshRun(ticketId) {
   const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId) : null;
   if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
   const artifact = await restartAuditArtifact(previous, audit);
-  previews.stopMatching(`${ticketId}:`);
+  // Start preview cleanup before archiving. Settlement is bounded, so its
+  // captured run ID also routes any later evidence to the retained run.
+  await stopTicketPreviews(ticketId, "run_fresh_restart");
   await update((state) => {
     const old = ticketRun(state, ticketId);
     old.restartHistory ||= [];
@@ -2518,12 +2753,11 @@ async function restartFrom(ticketId, target) {
     if (restored !== audit.restoredTree) throw new Error("The worktree did not match the selected restart checkpoint");
   }
   const artifact = await restartAuditArtifact(previous, audit);
-  previews.stopMatching(`${ticketId}:`);
+  await stopTicketPreviews(ticketId, "run_restart");
   await update((state) => {
     const run = ticketRun(state, ticketId);
     rewindRun(run, target, at);
     run.artifacts.push(artifact);
-    for (const previewState of Object.values(run.previews || {})) Object.assign(previewState, { status: "stopped", stoppedReason: "run_restart", stoppedAt: at });
   });
   if (target === "stage:explore") await surfaceImmediateFailure(ticketId, continueAfterRequirements(ticketId, ""));
   else if (target === "stage:design") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)));
@@ -3136,22 +3370,41 @@ const sseHeartbeat = setInterval(() => {
 sseHeartbeat.unref();
 
 let closed = false;
-async function close({ exit = false } = {}) {
-  if (closed) return;
-  closed = true;
-  clearInterval(pollTimer);
-  clearInterval(sseHeartbeat);
-  closeSseClients(clients);
-  previews.stopAll();
-  for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
-  await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
-  try { harness.reset(); } catch {}
-  await new Promise((resolve) => {
-    if (!server.listening) return resolve();
-    server.close(() => resolve());
+let closePromise = null;
+function closeHttpServer() {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.();
+      resolve();
+    }, shutdownTimeoutMs);
+    server.close(() => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
-  await daemonLock.release().catch(() => {});
-  if (exit) process.exit(0);
+}
+
+async function close({ exit = false } = {}) {
+  if (closePromise) return closePromise;
+  closed = true;
+  closePromise = (async () => {
+    clearInterval(pollTimer);
+    clearInterval(sseHeartbeat);
+    closeSseClients(clients);
+    for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
+    await Promise.all([
+      ...[...activeTickets.values()].map((active) => waitForWorkerAbort(active.promise)),
+      ...[...new Set([...activeContainments.values()].map((entry) => entry.ticketId))].map((ticketId) => cleanupTicketContainments(ticketId, "daemon-shutdown"))
+    ]);
+    try { harness.reset(); } catch {}
+    previews.stopAll({ trigger: "preview-stop", reason: "daemon-shutdown" });
+    await previews.settleAll(lifecycleCleanupTimeoutMs);
+    await closeHttpServer();
+    await daemonLock.release().catch(() => {});
+    if (exit) process.exit(0);
+  })();
+  return closePromise;
 }
 
 if (listen) {
