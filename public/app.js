@@ -21,6 +21,8 @@ let diffExpanded = false;
 let toastTimer;
 let clearTimer;
 let clearArmed = false;
+let forgetTimer;
+let forgetArmed = null;
 let cleanupArmed = false;
 let retention = { items: [], totalBytes: 0 };
 let trackerSettings = null;
@@ -149,6 +151,7 @@ function ticketCard(ticket) {
       ${view.stages.length ? `<span class="stage-cells">${stages}</span>` : ""}
       <span class="ticket-meta"><span>${escapeHtml(view.stageLabel)}${view.agentCount ? ` · ${view.agentCount} agent${view.agentCount === 1 ? "" : "s"}` : ""}</span><span>${escapeHtml(view.idle)}</span></span>
     </button>
+    ${run && !view.live ? `<div class="ticket-actions"><button class="text-button" type="button" data-forget-ticket="${escapeHtml(ticket.id)}">Forget run</button></div>` : ""}
     ${agents ? `<div class="rail-agents">${agents}</div>` : ""}
   </article>`;
 }
@@ -273,7 +276,7 @@ function renderHeader() {
   const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const action = !run
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
-    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
+    : `${["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id))) ? `<button class="button primary" data-resume-ticket="${escapeHtml(run.id)}">Resume run</button>` : ""}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${preview?.status === "stopped" ? `<span class="branch-pill">preview stopped</span>` : preview ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>` : ""}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = run?.checkpoint?.kind === "step_review"
     ? `<button class="button primary" type="button" data-select-step="${escapeHtml(run.checkpoint.stepId)}">Review step</button>`
     : "";
@@ -1002,6 +1005,27 @@ document.addEventListener("click", async (event) => {
     finally { clearButton.disabled = false; clearButton.textContent = "Clear"; }
     return;
   }
+  const forget = event.target.closest("[data-forget-ticket]");
+  if (forget) {
+    const id = forget.dataset.forgetTicket;
+    if (forgetArmed !== id) {
+      forgetArmed = id;
+      forget.textContent = "Confirm forget";
+      clearTimeout(forgetTimer);
+      forgetTimer = setTimeout(() => { forgetArmed = null; renderTickets(); }, 4000);
+      return;
+    }
+    clearTimeout(forgetTimer);
+    forgetArmed = null;
+    forget.disabled = true;
+    try {
+      const result = await api(`/api/tickets/${encodeURIComponent(id)}/forget`, { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      state = result.state;
+      ticketSources.tickets = ticketSources.tickets.filter((ticket) => ticket.id !== id);
+      selectedStepId = null; selectedStageId = null; selectedArtifactId = null; rememberView(); render(); notify("Run forgotten");
+    } catch (error) { forget.disabled = false; notify(error.message); }
+    return;
+  }
   const railStep = event.target.closest("[data-rail-step]");
   if (railStep) {
     if (railStep.dataset.ticket !== state.selectedTicketId) {
@@ -1045,6 +1069,12 @@ document.addEventListener("click", async (event) => {
   const pause = event.target.closest("[data-pause-ticket]");
   if (pause) {
     try { await api(`/api/tickets/${encodeURIComponent(pause.dataset.pauseTicket)}/pause`, { method: "POST", body: "{}" }); notify("Run paused; session and activity saved"); }
+    catch (error) { notify(error.message); }
+    return;
+  }
+  const cancel = event.target.closest("[data-cancel-ticket]");
+  if (cancel) {
+    try { await api(`/api/tickets/${encodeURIComponent(cancel.dataset.cancelTicket)}/cancel`, { method: "POST", body: "{}" }); notify("Run cancelled"); }
     catch (error) { notify(error.message); }
     return;
   }

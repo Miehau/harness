@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
+import { runRoot } from "../src/retention.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
@@ -123,6 +126,48 @@ test("pausing persists a checkpoint artifact and resumes the saved requirements 
     assert.equal(calls, 2);
     assert.ok(after.pauseHistory[0].resumedAt);
   }, { harness });
+});
+
+test("cancelling an active run stops it through the run endpoint", async () => {
+  let releaseStarted;
+  const started = new Promise((resolve) => { releaseStarted = resolve; });
+  const harness = {
+    ...mockHarness(),
+    async clarifyRequirements({ signal }) {
+      releaseStarted();
+      await new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    }
+  };
+  await withDaemon(async (daemon) => {
+    const ticket = {
+      id: "cancel-ticket", identifier: "CANCEL-1", title: "Cancel this run", description: "Stop it",
+      source: "local", state: { name: "Local", type: "local" }, team: { name: "Local" }
+    };
+    const starting = invoke(daemon, "POST", `/api/tickets/${ticket.id}/start`, { body: { ticket } });
+    await started;
+    const cancelled = await invoke(daemon, "POST", `/api/tickets/${ticket.id}/cancel`, { body: {} });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(cancelled.json, { cancelled: true, ticketId: ticket.id });
+    await starting;
+    assert.equal(daemon.store.read().ticketRuns[ticket.id].status, "cancelled");
+  }, { harness });
+});
+
+test("forgetting a run deletes its state and owned files", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "cancelled", runId: "forget-run" });
+    const run = daemon.store.read().ticketRuns[id];
+    const root = runRoot(daemon.dataDir, run);
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "artifact.txt"), "remove me");
+
+    const unconfirmed = await invoke(daemon, "POST", `/api/tickets/${id}/forget`, { body: {} });
+    assert.equal(unconfirmed.status, 400);
+    const forgotten = await invoke(daemon, "POST", `/api/tickets/${id}/forget`, { body: { confirmed: true } });
+    assert.deepEqual(forgotten.json.forgotten, true);
+    assert.equal(daemon.store.read().ticketRuns[id], undefined);
+    await assert.rejects(stat(root));
+  });
 });
 
 test("requirements answers remain in chat history when the agent replies", async () => {

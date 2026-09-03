@@ -1280,6 +1280,9 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .stage-cells i.now.rev { background: #c49be8; }
 .stage-cells i.now.run { background: #6ea3e8; }
 .ticket-meta { display: flex; justify-content: space-between; gap: 8px; color: #808893; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ticket-actions { display: flex; justify-content: flex-end; padding: 0 8px 8px; }
+.ticket-actions .text-button { color: #b97878; }
+.ticket-actions .text-button:hover { color: #f0a0a0; }
 .rail-agents { display: grid; gap: 3px; padding: 0 8px 8px; border-top: 1px dashed #323842; }
 .rail-agent {
   display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 6px; align-items: center;

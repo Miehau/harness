@@ -2076,6 +2076,19 @@ async function api(request, response, url) {
     const state = await update((draft) => { cleared = clearInactiveRuns(draft, new Set([...activeTickets.keys(), ...activeMerges])); });
     return json(response, 200, { cleared, state });
   }
+  const forget = url.pathname.match(/^\/api\/tickets\/([^/]+)\/forget$/);
+  if (request.method === "POST" && forget) {
+    const id = decodeURIComponent(forget[1]);
+    if (!(await body(request)).confirmed) throw new Error("Confirm permanently forgetting this run");
+    if (activeTickets.has(id) || activeMerges.has(id)) throw new Error("Cancel the active run before forgetting it");
+    const run = ticketRun(store.read(), id);
+    await cleanupRetainedRun({ run, dataDir, previewManager: previews });
+    const state = await update((draft) => {
+      delete draft.ticketRuns[id];
+      if (draft.selectedTicketId === id) draft.selectedTicketId = null;
+    });
+    return json(response, 200, { forgotten: true, ticketId: id, state });
+  }
   if (request.method === "GET" && url.pathname === "/api/retention") {
     return json(response, 200, await retentionInventory(store.read(), dataDir));
   }
