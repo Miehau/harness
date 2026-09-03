@@ -21,7 +21,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, materializeActiveAttempt, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { normalizeStageProfiles } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
@@ -999,6 +999,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
     if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
+    let activeActivity = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
       let vcsChange = null;
@@ -1037,10 +1038,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          current.activeRuns[stepId] = { runId: workerRunId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
+          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
+        activeActivity = activity;
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
         const attemptBaseTree = await snapshotTree(cwd);
         const sessionChoice = selectWorkerSession(currentStep, {
@@ -1095,7 +1097,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: "needs_attention", reason: "worker_report_or_scope_failure", error, phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report: result.report, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
@@ -1117,7 +1124,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: workerGate.kind, reason: "worker_checkpoint", phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report: result.report, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
@@ -1199,7 +1211,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
+          materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+            status: findings.length ? "verification_failed" : "verified", reason: findings.length ? "verification_findings" : "verification_complete", phase: "verification",
+            activity: attemptActivity, rawOutput: result.rawOutput, report: result.report, verification, violations,
+            feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+            artifactRefs: [...artifacts, verificationArtifact].map(({ id, kind, name }) => ({ id, kind, name }))
+          });
           current.artifacts.push(...artifacts, verificationArtifact);
           delete current.activeRuns[stepId];
         });
@@ -1256,18 +1273,10 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const failed = findNode(current.plan, stepId);
         const active = current.activeRuns[stepId] || {};
         const activity = active.activity || {};
-        failed.attempts ||= [];
-        failed.attempts.push({
-          runId: active.runId || null,
-          attemptId: `attempt-${failed.attempts.length + 1}`,
-          startedAt: active.startedAt || new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          status: "failed",
-          events: activity.events || [],
-          activityGroups: activity.groups || [],
-          rawOutput: activity.rawOutput || "",
-          sessionFile: active.sessionFile || failed.sessionFile || null,
-          error: error.message
+        // A post-completion transition can fail after its active record was removed;
+        // only materialize when there is still a mutable worker to snapshot.
+        if (active.runId) materializeActiveAttempt(failed, active, {
+          status: "failed", reason: "worker_failure", error: error.message, phase: "worker_execution", activity
         });
         failed.status = "failed";
         failed.lastError = error.message;
@@ -1276,7 +1285,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         setStage(current, "implement", "blocked", error.message);
       });
     }
-  })().finally(() => activeSteps.delete(key));
+  })().finally(async () => {
+    // Cancellation and shutdown await this worker promise. Flush the coalesced
+    // activity write before either lifecycle path snapshots and clears activeRuns.
+    await activeActivity?.flush();
+    activeSteps.delete(key);
+  });
   activeSteps.set(key, work);
   return work;
 }

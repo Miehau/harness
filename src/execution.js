@@ -162,8 +162,12 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
         lastEventAt = item.at;
         lastEvent = item.label || lastEvent;
         save();
-      } else if (item.type === "text_delta") rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
-      else {
+      } else if (item.type === "text_delta") {
+        rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
+        // Deltas carry the only copy of streamed output while the worker is live.
+        // Use the existing coalescing writer so abort/restart recovery sees its tail.
+        save();
+      } else {
         pushBounded(events, item, eventLimit);
         lastEventAt = item.at;
         lastEvent = item.label || lastEvent;
@@ -185,29 +189,81 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   };
 }
 
+const attemptEventLimit = 200;
+const attemptOutputLimit = 100000;
+
+function boundedAttemptActivity(activity = {}, rawOutput = "") {
+  return {
+    events: structuredClone((activity.events || []).slice(-attemptEventLimit)),
+    activityGroups: structuredClone((activity.groups || []).slice(-attemptEventLimit)),
+    rawOutput: appendBounded("", activity.rawOutput || rawOutput, attemptOutputLimit)
+  };
+}
+
+export function failureDetails(error, { status, reason, phase = "execution" } = {}) {
+  const message = String(error || reason || "");
+  if (!["failed", "needs_attention", "verification_failed", "cancelled", "paused", "interrupted"].includes(status)) {
+    return { kind: null, phase: null, message: null };
+  }
+  const kind = status === "cancelled" ? "cancellation"
+    : status === "paused" || status === "interrupted" ? "interruption"
+    : /provider|model request|rate limit|quota|authentication|api key|timeout/i.test(message) ? "provider"
+    : /check|test|verification/i.test(message) ? "verification"
+    : "execution";
+  return { kind, phase, message: message || null };
+}
+
+// This is the sole conversion from mutable active state into durable history. Callers
+// may add new attempts, but must never mutate an attempt returned by this helper.
+export function snapshotActiveAttempt(step, active = {}, {
+  status, completedAt = new Date().toISOString(), reason = null, error = null, phase = "execution",
+  activity = active.activity || {}, rawOutput = "", report, verification, diff, vcsChange,
+  feedback, violations, artifactRefs = []
+} = {}) {
+  const attemptId = active.attemptId || `attempt-${(step.attempts?.length || 0) + 1}`;
+  const bounded = boundedAttemptActivity(activity, rawOutput);
+  const failure = failureDetails(error, { status, reason, phase });
+  return {
+    runId: active.runId || null,
+    attemptId,
+    startedAt: active.startedAt || activity.startedAt || completedAt,
+    completedAt,
+    status,
+    terminationReason: reason || status,
+    termination: { reason: reason || status, at: completedAt },
+    failureKind: failure.kind,
+    failurePhase: failure.phase,
+    failure,
+    lastEvent: activity.lastEvent || active.lastEvent || "",
+    lastEventAt: activity.lastEventAt || active.lastEventAt || null,
+    ...bounded,
+    sessionFile: active.sessionFile || step.sessionFile || null,
+    ...(report === undefined ? {} : { report: structuredClone(report) }),
+    ...(verification === undefined ? {} : { verification: structuredClone(verification) }),
+    ...(diff === undefined ? {} : { diff: structuredClone(diff) }),
+    ...(vcsChange === undefined ? {} : { vcsChange: structuredClone(vcsChange) }),
+    ...(feedback === undefined ? {} : { feedback }),
+    ...(violations === undefined ? {} : { violations: structuredClone(violations) }),
+    ...(artifactRefs.length ? { artifactRefs: structuredClone(artifactRefs) } : {}),
+    ...(error ? { error: String(error) } : {})
+  };
+}
+
+export function materializeActiveAttempt(step, active, options) {
+  step.attempts ||= [];
+  const attempt = snapshotActiveAttempt(step, active, options);
+  step.attempts.push(attempt);
+  if (attempt.sessionFile) step.sessionFile = attempt.sessionFile;
+  return attempt;
+}
+
 export function markRunCancelled(run, at = new Date().toISOString()) {
   run.status = "cancelled";
   run.cancelledAt = at;
   run.checkpoint = null;
   for (const step of flattenSteps(run.plan)) {
     if (!inFlightStepStatusSet.has(step.status)) continue;
-    const active = run.activeRuns?.[step.id] || {};
-    const activity = active.activity || {};
-    step.attempts ||= [];
-    step.attempts.push({
-      runId: active.runId || null,
-      attemptId: active.attemptId || `attempt-${step.attempts.length + 1}`,
-      startedAt: active.startedAt || at,
-      completedAt: at,
-      status: "cancelled",
-      lastEvent: activity.lastEvent || active.lastEvent || "",
-      lastEventAt: activity.lastEventAt || active.lastEventAt || null,
-      events: activity.events || [],
-      activityGroups: activity.groups || [],
-      rawOutput: activity.rawOutput || "",
-      sessionFile: active.sessionFile || step.sessionFile || null
-    });
-    if (active.sessionFile) step.sessionFile = active.sessionFile;
+    materializeActiveAttempt(step, run.activeRuns?.[step.id] || {}, { status: "cancelled", completedAt: at, reason: "run_cancelled" });
     step.status = "cancelled";
   }
   run.activeRuns = {};
@@ -236,21 +292,7 @@ export function markRunPaused(run, at = new Date().toISOString()) {
   };
   for (const step of steps) {
     if (!inFlightStepStatusSet.has(step.status)) continue;
-    const active = activeRuns[step.id] || {};
-    const activity = active.activity || {};
-    step.attempts ||= [];
-    step.attempts.push({
-      runId: active.runId || null,
-      attemptId: `attempt-${step.attempts.length + 1}`,
-      startedAt: active.startedAt || at,
-      completedAt: at,
-      status: "paused",
-      events: activity.events || [],
-      activityGroups: activity.groups || [],
-      rawOutput: activity.rawOutput || "",
-      sessionFile: active.sessionFile || step.sessionFile || null
-    });
-    if (active.sessionFile) step.sessionFile = active.sessionFile;
+    materializeActiveAttempt(step, activeRuns[step.id] || {}, { status: "paused", completedAt: at, reason: "run_paused" });
     step.status = "interrupted";
   }
   run.status = "paused";
@@ -301,7 +343,8 @@ function resetStagesFrom(run, stageId) {
 
 function resetStep(step) {
   const attempts = step.attempts?.length || 0;
-  Object.assign(step, { status: "ready", attempts: [], artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
+  // A restart changes the live worker state, not its prior durable attempts.
+  Object.assign(step, { status: "ready", artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
   for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
   return attempts;
 }
@@ -309,13 +352,18 @@ function resetStep(step) {
 export function rewindRun(run, target, at = new Date().toISOString()) {
   if (!run?.plan && !["stage:explore", "stage:design"].includes(target)) throw new Error("This run has no plan to restart");
   const previousStages = (run.stages || []).map(({ id, status }) => ({ id, status }));
-  const previousSteps = flattenSteps(run.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }));
+  const previousSteps = flattenSteps(run.plan).map((step) => ({
+    id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null,
+    commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0,
+    attemptHistory: structuredClone(step.attempts || [])
+  }));
   const previousStatus = run.status;
   const previousCheckpoint = run.checkpoint?.kind || null;
   let stageId;
   let restoredTree = null;
   let resetStepIds = [];
   let discardedAttempts = 0;
+  let retainedAttempts = 0;
 
   if (target === "stage:explore" || target === "stage:design") {
     stageId = target.slice(6);
@@ -339,7 +387,10 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
     const reset = steps.slice(Math.max(0, firstIndex));
     resetStepIds = reset.map((step) => step.id);
-    discardedAttempts = reset.reduce((total, step) => total + resetStep(step), 0);
+    // Keep the count for audit compatibility; restart no longer discards attempts.
+    retainedAttempts = reset.reduce((total, step) => total + resetStep(step), 0);
+    // Kept for existing audit readers; none of these durable attempts were discarded.
+    discardedAttempts = 0;
     stageId = "implement";
   }
 
@@ -360,7 +411,8 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     previousSteps,
     restoredTree,
     resetStepIds,
-    discardedAttempts
+    discardedAttempts,
+    retainedAttempts
   };
   run.restartHistory ||= [];
   run.restartHistory.push(audit);

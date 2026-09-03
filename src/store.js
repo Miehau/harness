@@ -2,6 +2,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { flattenSteps } from "./plan.js";
+import { materializeActiveAttempt } from "./execution.js";
 
 function initialState(cwd) {
   return {
@@ -37,6 +39,7 @@ export class JsonStore {
 
   async init() {
     await mkdir(dirname(this.file), { recursive: true });
+    let recovered = false;
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
       if ([3, 4, 5, 6].includes(saved.version)) this.state = saved;
@@ -50,18 +53,27 @@ export class JsonStore {
       for (const run of Object.values(this.state.ticketRuns)) {
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
         run.auto ||= false;
-        run.activeRuns = {};
-        for (const node of run.plan?.nodes || []) {
-          for (const step of node.type === "group" ? node.children : [node]) {
-            if (inFlightStepStatusSet.has(step.status)) step.status = "interrupted";
-          }
+        const activeRuns = run.activeRuns || {};
+        for (const step of flattenSteps(run.plan)) {
+          if (!inFlightStepStatusSet.has(step.status)) continue;
+          materializeActiveAttempt(step, activeRuns[step.id] || {}, {
+            status: "interrupted",
+            completedAt: new Date().toISOString(),
+            reason: "daemon_restart",
+            phase: "daemon_recovery"
+          });
+          step.status = "interrupted";
+          recovered = true;
         }
+        if (Object.keys(activeRuns).length) recovered = true;
+        run.activeRuns = {};
         for (const preview of Object.values(run.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: "daemon_restart" });
         if (inFlightRunStatusSet.has(run.status)) {
           const previousStatus = run.status;
           const previousMergeStatus = run.merge?.status;
           run.status = "interrupted";
           if (inFlightMergeStatusSet.has(run.merge?.status)) run.merge.status = "interrupted";
+          recovered = true;
           run.recovery = {
             kind: previousMergeStatus ? "delivery" : "execution",
             previousStatus,
@@ -79,6 +91,9 @@ export class JsonStore {
       if (error.code !== "ENOENT") throw error;
       await this.save();
     }
+    // Restart recovery is a lifecycle transition, so persist it before the daemon
+    // can expose state or another restart can clear the only active snapshot.
+    if (recovered) await this.save();
     return this.read();
   }
 

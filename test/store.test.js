@@ -12,7 +12,11 @@ test("server restart marks active work as interrupted and clears dead runs", asy
     await writeFile(file, JSON.stringify({
       version: 3, workspace: { cwd: root }, stageProfiles: {}, selectedTicketId: "run-1",
       ticketRuns: {
-        "run-1": { status: "fixing", activeRuns: { step: { runId: "dead" } }, plan: { nodes: [{ id: "step", type: "step", status: "fixing" }] } },
+        "run-1": { status: "fixing", activeRuns: { step: {
+          runId: "dead", attemptId: "attempt-4", startedAt: "2026-09-02T10:00:00.000Z",
+          lastEvent: "Editing", lastEventAt: "2026-09-02T10:01:00.000Z",
+          activity: { rawOutput: "partial output", events: [{ type: "phase", label: "Editing" }] }
+        } }, plan: { nodes: [{ id: "step", type: "step", status: "fixing", attempts: [{ attemptId: "attempt-3", status: "verified" }] }] } },
         "run-2": { status: "merging", merge: { status: "merging" }, plan: { nodes: [] } },
         "run-3": { status: "waiting_for_merge", merge: { status: "waiting_for_merge", externalActionPending: "squash_merge" }, plan: { nodes: [] } }
       }
@@ -23,6 +27,12 @@ test("server restart marks active work as interrupted and clears dead runs", asy
     assert.equal(state.ticketRuns["run-1"].status, "interrupted");
     assert.equal(state.ticketRuns["run-1"].plan.nodes[0].status, "interrupted");
     assert.deepEqual(state.ticketRuns["run-1"].activeRuns, {});
+    assert.deepEqual(state.ticketRuns["run-1"].plan.nodes[0].attempts.map((attempt) => attempt.attemptId), ["attempt-3", "attempt-4"]);
+    assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].status, "interrupted");
+    assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].terminationReason, "daemon_restart");
+    assert.equal(state.ticketRuns["run-1"].plan.nodes[0].attempts[1].rawOutput, "partial output");
+    const reloaded = await new JsonStore(file, root).init();
+    assert.equal(reloaded.ticketRuns["run-1"].plan.nodes[0].attempts.length, 2);
     assert.equal(state.ticketRuns["run-2"].status, "interrupted");
     assert.equal(state.ticketRuns["run-2"].merge.status, "interrupted");
     assert.equal(state.ticketRuns["run-2"].recovery.kind, "delivery");

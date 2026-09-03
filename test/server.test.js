@@ -4,6 +4,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { runRoot } from "../src/retention.js";
+import { JsonStore } from "../src/store.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
 
 test("GET /api/health and compact run omit artifact content", async () => {
@@ -93,6 +94,58 @@ test("workflow stage prompts expose persisted agent input with its stage context
       title: "Design & plan",
       status: "completed"
     }]);
+  }, { harness });
+});
+
+test("provider failure snapshots the active worker before server state is cleared", async () => {
+  const harness = { ...mockHarness(), runStep: async () => { throw new Error("Provider rate limit exceeded"); } };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const response = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry with provider access" } });
+    assert.equal(response.status, 202);
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && !daemon.store.read().ticketRuns[id].plan.nodes[0].attempts.length) await new Promise((resolve) => setTimeout(resolve, 10));
+    const step = daemon.store.read().ticketRuns[id].plan.nodes[0];
+    assert.equal(step.status, "failed");
+    assert.equal(step.attempts.length, 1);
+    assert.equal(step.attempts[0].status, "failed");
+    assert.equal(step.attempts[0].failureKind, "provider");
+    assert.equal(step.attempts[0].terminationReason, "worker_failure");
+    assert.equal(step.attempts[0].attemptId, "attempt-1");
+  }, { harness });
+});
+
+test("streamed worker output survives cancellation and persisted reload", async () => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const harness = {
+    ...mockHarness(),
+    async runStep({ onEvent, signal }) {
+      onEvent({ type: "text_delta", delta: "streamed output tail" });
+      started();
+      await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    }
+  };
+  await withDaemon(async (daemon, { dataDir, cwd }) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", status: "review_ready", permission: "write", writeScope: "src", attempts: [] }] });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review", plan,
+      checkpoint: { id: "review-1", kind: "step_review", stepId: "build", title: "Review: Build" }
+    });
+    const startedRequest = invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/steps/build/changes`, { body: { feedback: "Retry after stream" } });
+    await running;
+    const cancelled = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/cancel`, { body: {} });
+    await startedRequest;
+    assert.equal(cancelled.status, 200);
+    const attempt = daemon.store.read().ticketRuns[id].plan.nodes[0].attempts[0];
+    assert.equal(attempt.rawOutput, "streamed output tail");
+
+    const reloaded = await new JsonStore(join(dataDir, "state-v3.json"), cwd).init();
+    assert.equal(reloaded.ticketRuns[id].plan.nodes[0].attempts[0].rawOutput, "streamed output tail");
   }, { harness });
 });
 
