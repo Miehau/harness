@@ -1175,11 +1175,18 @@ ${diff.patch || "No textual diff"}`;
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
+    const existingFile = (await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).sort().at(-1);
+    let manager;
+    try {
+      manager = existingFile ? SessionManager.open(join(sessionDir, existingFile), sessionDir, cwd) : SessionManager.create(cwd, sessionDir);
+    } catch {
+      manager = SessionManager.create(cwd, sessionDir);
+    }
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
       tools: ["read", "grep", "find", "ls"],
-      sessionManager: SessionManager.create(cwd, sessionDir)
+      sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
     const packet = compactReviewPacket({ ticket, plan, artifacts, diff, checks });
@@ -1224,8 +1231,11 @@ Every reported finding triggers an automatic correction round. Report concrete d
     });
     try {
       signal?.throwIfAborted();
-      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
-      await session.prompt(prompt, { images });
+      const turnPrompt = existingFile
+        ? "Continue the interrupted independent review from the existing conversation. Do not restart repository inspection. Return only the required review JSON."
+        : prompt;
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
+      await session.prompt(turnPrompt, { images: existingFile ? [] : images });
       signal?.throwIfAborted();
       const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
       return {

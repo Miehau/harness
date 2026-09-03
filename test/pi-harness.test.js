@@ -501,6 +501,43 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("an interrupted independent reviewer resumes its durable session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-resume-"));
+  try {
+    const sessionDir = join(root, "pi-sessions", "tickets", "T-1", "run", "reviews", "round-2", "integration");
+    await mkdir(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "saved.jsonl");
+    await writeFile(sessionFile, "persisted review");
+    const opened = [];
+    let prompt;
+    let promptImages;
+    const session = {
+      state: { messages: [] },
+      setSessionName() {},
+      subscribe() { return () => {}; },
+      async prompt(value, options) {
+        prompt = value;
+        promptImages = options.images;
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Resumed","findings":[]}' }] });
+      },
+      dispose() {}
+    };
+    const harness = new PiHarness({ dataDir: root });
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({ fresh: true }), open: (...args) => { opened.push(args); return { resumed: true }; } }
+    });
+    await harness.reviewTicket({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
+      plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }), artifacts: [], diff: { files: [], patch: "" },
+      checks: { status: "passed", summary: "Passed" }, images: [{ data: "large" }], role: "integration", round: 2, runId: "run"
+    });
+    assert.equal(opened[0][0], sessionFile);
+    assert.match(prompt, /Continue the interrupted independent review/);
+    assert.deepEqual(promptImages, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("fresh verification stops after its repository inspection budget", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-verification-budget-"));
   try {
