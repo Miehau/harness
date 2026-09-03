@@ -256,7 +256,7 @@ async function timeline(explicitId, ctx) {
   const run = state.ticketRuns?.[id];
   if (!run) throw new Error("Ticket run not found");
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const stage = (run.stages || []).find((item) => item.status === "active");
+  const stage = (run.stages || []).find((item) => ["active", "paused", "blocked"].includes(item.status));
   const activeStep = steps.find((item) => run.activeRuns?.[item.id])
     || steps.find((item) => ["running", "fixing", "verifying"].includes(item.status));
   const step = activeStep

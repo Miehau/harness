@@ -100,6 +100,21 @@ test("timeline follows an active verification stage instead of an accepted step"
   });
 });
 
+test("timeline keeps a paused verification stage instead of falling back to old step activity", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "old", title: "Old", status: "accepted", attempts: [{ events: [{ type: "tool_start", tool: "write", at: "1" }] }] }] });
+    const stages = [
+      { id: "implement", status: "completed" },
+      { id: "verify", status: "paused", activity: { events: [{ type: "phase", label: "Review fixer paused", at: "2" }] } }
+    ];
+    const id = await seedRun(daemon, { status: "paused", plan, stages });
+    const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
+    assert.equal(timeline.json.stepId, null);
+    assert.equal(timeline.json.stageId, "verify");
+    assert.match(timeline.json.events[0].title, /Review fixer paused/);
+  });
+});
+
 test("timeline follows the stopped step named by the current checkpoint", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [
