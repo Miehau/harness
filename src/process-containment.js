@@ -206,7 +206,7 @@ export class ProcessContainment {
     timeoutMs = 5_000,
     maxCycles = 2,
     now = Date.now,
-    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.())
   } = {}) {
     if (!ownership?.token) throw new TypeError("valid execution ownership is required");
     this.executionId = executionId || ownership.executionId;
