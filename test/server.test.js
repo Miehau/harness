@@ -51,6 +51,19 @@ test("preview diagnostics cannot satisfy missing verification-contract evidence"
   assert.equal(repositoryCheckReview(checks).findings[0].category, "evidence");
 });
 
+test("missing screenshots do not hide a repository failure", () => {
+  const checks = reconcileVisualChecks({
+    status: "failed", command: "node .agent-plan/verify.mjs",
+    summary: "node .agent-plan/verify.mjs failed.", failureHighlights: "not ok 216 - contract composition",
+    evidence: []
+  }, [], { required: true });
+  assert.equal(checks.failureKind, undefined);
+  assert.equal(checks.summary, "node .agent-plan/verify.mjs failed.");
+  const finding = repositoryCheckReview(checks).findings[0];
+  assert.equal(finding.category, "tests");
+  assert.match(finding.suggestedFix, /not ok 216/);
+});
+
 test("resuming a persisted visual step audits the newly available contract scope", () => {
   const run = { plan: normalizePlan({ nodes: [{
     id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test",

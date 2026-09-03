@@ -64,7 +64,8 @@ export function reconcileVisualChecks(checks, evidence = [], { required = false,
   checks.previewEvidence = [...new Map(evidence.map((item) => [item.path, item])).values()];
   const hasImage = checks.evidence.some((item) => item.mediaKind === "image");
   const hasVideo = checks.evidence.some((item) => item.mediaKind === "video");
-  if (required && (!hasImage || (requiredVideo && !hasVideo))) Object.assign(checks, {
+  const repositoryFailed = checks.status === "failed" && checks.failureKind !== "visual-evidence";
+  if (required && !repositoryFailed && (!hasImage || (requiredVideo && !hasVideo))) Object.assign(checks, {
     status: "failed",
     failureKind: "visual-evidence",
     summary: requiredVideo && hasImage
