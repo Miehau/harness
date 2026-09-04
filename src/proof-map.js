@@ -311,7 +311,7 @@ function projectedResult(run, result) {
 export function projectProofMap(run) {
   const stored = run?.proofMap;
   const compatibility = !stored || !Array.isArray(stored.criteria);
-  const proof = compatibility ? initializeProofMap(run?.plan || { nodes: [] }, { approvedAt: run?.planApprovedAt || run?.createdAt }) : structuredClone(stored);
+  const proof = compatibility ? initializeProofMap(run?.plan || { nodes: [] }, { approvedAt: run?.planApprovedAt || run?.createdAt || "1970-01-01T00:00:00.000Z" }) : structuredClone(stored);
   const criteria = (proof.criteria || []).map((criterion) => {
     const current = projectedResult(run, criterion.current || {});
     return { ...criterion, current, history: (criterion.history || []).map((item) => projectedResult(run, item)) };

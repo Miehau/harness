@@ -879,6 +879,25 @@ test("recovers a chronological, detailed trace from a persisted Pi session", asy
   }
 });
 
+test("session traces retain only redacted text and safe reasoning summaries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-redacted-trace-"));
+  const directory = join(root, "pi-sessions");
+  const file = join(directory, "run.jsonl");
+  try {
+    await mkdir(directory);
+    await writeFile(file, JSON.stringify({ type: "message", message: { role: "assistant", timestamp: 1, content: [
+      { type: "thinking", thinkingSignature: JSON.stringify({ summary: [{ text: "Use token=secret_abcdefgh" }] }) },
+      { type: "text", text: "ghp_0123456789abcdefghijklmnop" }
+    ] } }));
+    const trace = await new PiHarness({ dataDir: root }).sessionTrace(file);
+    assert.equal(JSON.stringify(trace).includes("secret_abcdefgh"), false);
+    assert.equal(JSON.stringify(trace).includes("ghp_0123456789abcdefghijklmnop"), false);
+    assert.equal(trace.events[0].type, "reasoning_summary");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("resumed worker sessions send a continuation prompt instead of the full step context", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-resume-prompt-"));
   try {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { eventTimeline, freeTextTicket, preferredStepId } from "../public/ui-model.js";
+import { freeTextTicket } from "../public/ui-model.js";
 
 const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
@@ -8,7 +8,8 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
-  list timeline [ticketId]          Inspector output for the active step
+  list runs [ticketId]              Active and archived run identities for a ticket
+  list timeline [ticketId] [runId]  Inspector output for an active or archived run
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
@@ -65,11 +66,15 @@ async function handleCommand(command, rest, ctx) {
       print(stdout, await backlog(ctx));
       return 0;
     }
-    if (what === "timeline" || what === "execution-timeline") {
-      print(stdout, await timeline(args[0], ctx));
+    if (what === "runs") {
+      print(stdout, await runHistories(args[0], ctx));
       return 0;
     }
-    throw new Error("Usage: agent-plan list backlog|timeline [ticketId]\n" + usage);
+    if (what === "timeline" || what === "execution-timeline") {
+      print(stdout, sanitizeTimeline(await timeline(args[0], args[1], ctx)));
+      return 0;
+    }
+    throw new Error("Usage: agent-plan list backlog|runs [ticketId]|timeline [ticketId] [runId]\n" + usage);
   }
   if (command === "select") {
     const id = rest[0];
@@ -266,37 +271,22 @@ function backlogRow(ticket, run, selectedTicketId) {
   };
 }
 
-async function timeline(explicitId, ctx) {
+async function timeline(explicitId, runId, ctx) {
   const { env, fetchImpl } = ctx;
-  const state = await request("GET", "/api/state", { env, fetchImpl });
+  const state = explicitId ? null : await request("GET", "/api/state", { env, fetchImpl });
   const id = explicitId || state.selectedTicketId;
   if (!id) throw new Error("Pass a ticket id (no selected run)");
-  let run = state.ticketRuns?.[id];
-  if (!run) throw new Error("Ticket run not found");
-  if (id !== state.selectedTicketId) run = await request("GET", "/api/tickets/" + encodeURIComponent(id) + "/run?detail=1", { env, fetchImpl });
-  const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const stage = (run.stages || []).find((item) => ["active", "paused", "blocked"].includes(item.status));
-  const activeStep = steps.find((item) => run.activeRuns?.[item.id])
-    || steps.find((item) => ["running", "fixing", "verifying"].includes(item.status));
-  const step = activeStep
-    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan, run.checkpoint?.stepId)) : null)
-    || null;
-  const events = step
-    ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]
-    : stage?.activity?.events || [];
-  return {
-    ticketId: id,
-    stepId: step?.id || null,
-    stepStatus: step?.status || null,
-    stageId: stage?.id || null,
-    events: eventTimeline(events).map((item) => ({
-      at: item.at || null,
-      title: item.title,
-      tool: item.tool || null,
-      status: item.status,
-      isError: Boolean(item.isError)
-    }))
-  };
+  // The inspector owns focus, lifecycle, redaction, and retention semantics. Keep
+  // this command a transport-only view so its JSON cannot drift from the dashboard.
+  const path = runId
+    ? "/api/tickets/" + encodeURIComponent(id) + "/runs/" + encodeURIComponent(runId) + "/inspection"
+    : "/api/tickets/" + encodeURIComponent(id) + "/inspection";
+  return request("GET", path, { env, fetchImpl });
+}
+
+async function runHistories(explicitId, ctx) {
+  const id = await resolveTicketId(explicitId, ctx);
+  return request("GET", "/api/tickets/" + encodeURIComponent(id) + "/runs", { env: ctx.env, fetchImpl: ctx.fetchImpl });
 }
 
 function aliasAction(value) {
@@ -312,6 +302,21 @@ async function resolveTicketId(explicit, ctx) {
   const id = state.selectedTicketId || Object.keys(state.ticketRuns || {})[0];
   if (!id) throw new Error("Pass a ticket id (no selected run)");
   return id;
+}
+
+const timelineSecretKey = /(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)/i;
+const timelineAuthorization = /\b(?:authorization|proxy-authorization)\s*[=:]\s*[^\r\n]+/gi;
+const timelineSecret = /\b(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const timelinePath = /(^|[^A-Za-z0-9_.@-])(?:~\/|\/[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*|[A-Za-z]:\\[^\s"'`),;]+)/g;
+
+function sanitizeTimeline(value) {
+  if (typeof value === "string") return value
+    .replace(timelineAuthorization, "[redacted]")
+    .replace(timelineSecret, (match) => match.replace(/(?:"[^"]*"|'[^']*'|[^\s,;]+)$/, "[redacted]"))
+    .replace(timelinePath, (_, prefix) => `${prefix}[path]`);
+  if (Array.isArray(value)) return value.map(sanitizeTimeline);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, timelineSecretKey.test(key) ? "[redacted]" : sanitizeTimeline(item)]));
 }
 
 function print(stdout, payload) {

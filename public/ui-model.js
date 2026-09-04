@@ -1,3 +1,74 @@
+export function inspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const explicitStage = stages.find((item) => item.id === selection.stageId) || null;
+  const attempt = attempts.find((item) => item.id === selection.attemptId)
+    || attempts.filter((item) => item.workerId === selection.workerId).at(-1)
+    || (!selection.stageId && attempts.find((item) => item.id === projection?.focus?.attemptId))
+    || null;
+  const worker = workers.find((item) => item.id === (attempt?.workerId || selection.workerId))
+    || (!selection.stageId && workers.find((item) => item.id === projection?.focus?.workerId))
+    || null;
+  const stage = stages.find((item) => item.id === (attempt?.stageId || worker?.stageId || selection.stageId))
+    || (!selection.stageId && stages.find((item) => item.id === projection?.focus?.stageId))
+    || explicitStage;
+  return { stageId: stage?.id || null, workerId: worker?.id || null, attemptId: attempt?.id || null };
+}
+
+// A durable selection wins while it still exists. Only a missing record follows the
+// server-provided focus order (active, actionable, then latest completion).
+export function restoreInspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const hasSelection = Boolean(selection.stageId || selection.workerId || selection.attemptId);
+  const retainedAttempt = attempts.find((item) => item.id === selection.attemptId);
+  const retainedWorker = workers.find((item) => item.id === selection.workerId);
+  const retainedStage = stages.find((item) => item.id === selection.stageId);
+  const retained = selection.attemptId ? retainedAttempt : selection.workerId ? retainedWorker : retainedStage;
+  const resolved = inspectionSelection(projection, retained ? selection : {});
+  return {
+    selection: resolved,
+    preserved: Boolean(retained),
+    disappeared: hasSelection && !retained,
+    reason: retained ? "preserved" : projection?.focus?.reason || "empty"
+  };
+}
+
+export function inspectionTransitionAnnouncement(previous, projection, selection = {}) {
+  if (!previous || !projection) return null;
+  const previousAttempt = (previous.attempts || []).find((item) => item.id === selection.attemptId);
+  const currentAttempt = (projection.attempts || []).find((item) => item.id === selection.attemptId);
+  if (previousAttempt && !currentAttempt) return "The selected record is no longer available; the inspector moved to current work.";
+  if (previousAttempt && currentAttempt && previousAttempt.lifecycle === "active" && currentAttempt.lifecycle !== "active") {
+    return `The selected attempt ${currentAttempt.lifecycle === "completed" ? "completed" : "stopped"}. Retained history is still available.`;
+  }
+  const previousWorker = (previous.workers || []).find((item) => item.id === selection.workerId);
+  const worker = (projection.workers || []).find((item) => item.id === selection.workerId);
+  if (previousWorker && worker && previousWorker.attemptIds.at(-1) !== worker.attemptIds.at(-1)) {
+    const latest = (projection.attempts || []).find((item) => item.id === worker.attemptIds.at(-1));
+    if (latest?.lifecycle === "active") return "A correction attempt started for the selected worker. Earlier attempts remain available.";
+  }
+  return null;
+}
+
+export function inspectionResourceLabel(resource = {}) {
+  return ({ available: "Available", loading: "Loading…", unavailable: "Unavailable", not_retained: "Not retained", not_recorded: "Not recorded", not_started: "Not started", not_yet_available: "Not yet available", not_applicable: "Not applicable", truncated: "Truncated" })[resource.state] || "Unavailable";
+}
+
+export function inspectionSummary({ worker = null, attempt = null } = {}) {
+  const item = attempt || worker;
+  if (!item) return { status: "not_started", latestAction: "Not started", blocker: null, evidence: { state: "not_started" }, nextAction: { kind: "none", label: "No action available" } };
+  return {
+    status: item.status,
+    latestAction: item.latestAction || "No activity recorded",
+    blocker: item.blocker || null,
+    evidence: item.evidence || { state: "not_started" },
+    nextAction: item.nextAction || worker?.nextAction || { kind: "none", label: "No action available" }
+  };
+}
+
 export function executionGraph(plan) {
   const nodes = plan?.nodes || [];
   const owner = new Map();
@@ -122,7 +193,7 @@ export function finalReview(run) {
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,
-      mediaUrl: artifact.mediaUrl || (run?.id && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
+      mediaUrl: artifact.mediaUrl || (run?.id && run?.runId && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
     })).filter((artifact) => artifact.media),
     checks: checks ? { status: checks.status, summary: checks.summary, command: checks.command } : null,
     reviews: reviews.filter((item) => item.role !== "deterministic").map((item) => ({ role: item.role, summary: item.summary }))
@@ -416,6 +487,10 @@ function findingDetails(findings) {
   return findings.map((finding, index) => `### Finding ${index + 1} · ${finding.severity || "issue"}\n\n${finding.claim || "Unspecified finding"}${finding.suggestedFix ? `\n\n**Suggested fix:** ${finding.suggestedFix}` : ""}`).join("\n\n");
 }
 
+function milestoneText(value, fallback = "") {
+  return String(value || fallback).replace(/(^|[\s"'`(])(?:~\/|\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z]:\\[^\s"'`),;]+)/g, "$1[path]");
+}
+
 export function stageMilestones(run, stage) {
   const activity = stage?.activity;
   if (stage?.id === "verify") {
@@ -454,13 +529,13 @@ export function stageMilestones(run, stage) {
       detail: evidence.map((shot) => `- \`${shot.name}\``).join("\n")
     });
     const merge = run?.merge;
-    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository: \`${merge.sourceCwd}\`\n\nTicket branch: \`${merge.branch}\`` });
+    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository selected\n\nTicket branch: \`${merge.branch}\`` });
     if (merge?.startedAt) items.push({ title: "Automated merge started.", status: "merging", at: merge.startedAt, detail: "Git is merging in an isolated integration worktree; the opened repository remains untouched until verification passes." });
-    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${file}\``).join("\n") });
-    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: merge.resolutionArtifact?.content || "Conflicts resolved in the isolated integration worktree." });
-    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: merge.checks?.summary || "Repository checks passed." });
-    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: merge.error });
-    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Repository: \`${run.integration.sourceCwd}\`\n\nCommit: \`${run.integration.commit}\`` });
+    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${milestoneText(file)}\``).join("\n") });
+    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: milestoneText(merge.resolutionArtifact?.content, "Conflicts resolved in the isolated integration worktree.") });
+    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: milestoneText(merge.checks?.summary, "Repository checks passed.") });
+    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: milestoneText(merge.error) });
+    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Commit: \`${run.integration.commit}\`` });
     return items;
   }
   return [];

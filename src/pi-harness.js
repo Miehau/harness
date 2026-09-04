@@ -13,6 +13,7 @@ import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommand
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
+import { redactRecord, redactText, safeReasoningSummary } from "./redaction.js";
 import { createExecutionOwnership, createProcessContainment, environmentForOwnership } from "./process-containment.js";
 
 const exec = promisify(execFile);
@@ -214,6 +215,7 @@ function eventText(value) {
   catch { text = String(value); }
   text ??= String(value ?? "");
   // ponytail: keep SSE/state responsive; the Pi session file remains the unabridged source for unusually large tool results.
+  text = redactText(text);
   if (text.length <= 10000) return text;
   const half = 5000;
   return `${text.slice(0, half)}\n\n[${text.length - (half * 2)} characters omitted]\n\n${text.slice(-half)}`;
@@ -221,12 +223,7 @@ function eventText(value) {
 
 function failureHighlights(output) {
   const lines = String(output || "").split(/\r?\n/);
-  const selected = [];
-  for (let index = 0; index < lines.length; index++) {
-    if (!/^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(lines[index])) continue;
-    selected.push(lines[index].slice(0, 500));
-  }
-  return [...new Set(selected)].slice(-40).join("\n").slice(-4500);
+  return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
 }
 
 function safeEvent(event) {
@@ -647,21 +644,21 @@ export class PiHarness {
       const at = new Date(message.timestamp || entry.timestamp || Date.now()).toISOString();
       if ((after && at < after) || (before && at > before)) continue;
       if (message.role === "user") {
-        trace.prompt = textFromContent(message.content);
+        trace.prompt = redactText(textFromContent(message.content));
         trace.prompts.push({ prompt: trace.prompt, at });
       }
       if (message.role === "assistant") for (const part of message.content || []) {
-        if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, part.text, 100000);
+        if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, redactText(part.text), 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
           try {
-            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) pushBounded(trace.events, { type: "reasoning_summary", detail: summary.text, at }, 200);
+            for (const summary of JSON.parse(part.thinkingSignature).summary || []) if (summary.text) pushBounded(trace.events, { type: "reasoning_summary", detail: safeReasoningSummary(summary.text, 1000), at }, 200);
           } catch {}
         }
         if (part.type === "toolCall") pushBounded(trace.events, { type: "tool_start", tool: part.name, callId: part.id, args: eventText(part.arguments), at }, 200);
       }
       if (message.role === "toolResult") pushBounded(trace.events, { type: "tool_end", tool: message.toolName, callId: message.toolCallId, result: eventText(textFromContent(message.content)), isError: Boolean(message.isError), at }, 200);
     }
-    return trace;
+    return redactRecord(trace);
   }
 
   sdk() {
@@ -729,6 +726,7 @@ export class PiHarness {
     let failure;
     let cleanupTrigger;
     const startedAt = Date.now();
+
     try {
       try { await access(args[0]); }
       catch (error) {

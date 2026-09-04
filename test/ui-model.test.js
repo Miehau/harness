@@ -1,7 +1,57 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+
+test("resolves canonical attempt selection without replacing a retained choice", () => {
+  const projection = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" },
+    stages: [{ id: "stage:implement" }],
+    workers: [{ id: "worker:build", stepId: "build", stageId: "stage:implement" }],
+    attempts: [
+      { id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", status: "failed", latestAction: "Tests failed", evidence: { state: "incomplete" }, blocker: { type: "repository-check", summary: "Tests failed" } },
+      { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", status: "verified", latestAction: "Checks passed", evidence: { state: "complete" } }
+    ]
+  };
+  assert.deepEqual(inspectionSelection(projection, { attemptId: "attempt:build:one" }), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" });
+  assert.deepEqual(inspectionSelection(projection), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" });
+  assert.deepEqual(inspectionSummary({ attempt: projection.attempts[0] }), {
+    status: "failed", latestAction: "Tests failed", blocker: { type: "repository-check", summary: "Tests failed" }, evidence: { state: "incomplete" }, nextAction: { kind: "none", label: "No action available" }
+  });
+  assert.equal(inspectionResourceLabel({ state: "not_retained" }), "Not retained");
+  assert.equal(inspectionResourceLabel({ state: "truncated" }), "Truncated");
+});
+
+test("restores deliberate inspection selection and announces only meaningful attempt changes", () => {
+  const previous = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one", reason: "active" },
+    stages: [{ id: "stage:implement" }], workers: [{ id: "worker:build", stageId: "stage:implement", attemptIds: ["attempt:build:one"] }],
+    attempts: [{ id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  const completed = {
+    ...previous,
+    attempts: [{ ...previous.attempts[0], lifecycle: "completed" }]
+  };
+  assert.deepEqual(restoreInspectionSelection(completed, { attemptId: "attempt:build:one" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.match(inspectionTransitionAnnouncement(previous, completed, { attemptId: "attempt:build:one" }), /completed.*Retained history/i);
+
+  const corrected = {
+    ...completed,
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two", reason: "active" },
+    workers: [{ ...completed.workers[0], attemptIds: ["attempt:build:one", "attempt:build:two"] }],
+    attempts: [...completed.attempts, { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  assert.match(inspectionTransitionAnnouncement(completed, corrected, { workerId: "worker:build" }), /correction attempt started/i);
+  assert.deepEqual(restoreInspectionSelection(corrected, { workerId: "worker:build" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.deepEqual(restoreInspectionSelection(corrected, { attemptId: "attempt:missing" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: false, disappeared: true, reason: "active"
+  });
+});
+
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -188,8 +238,8 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
     merge: {
       status: "integrated", queuedAt: "2026-08-25T10:00:00.000Z", startedAt: "2026-08-25T10:01:00.000Z",
       sourceCwd: "/repo", branch: "codex/ticket", conflicts: ["src/app.js"], resolverStartedAt: "2026-08-25T10:02:00.000Z",
-      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined both state transitions." },
-      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed." }
+      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined /Users/operator/private/repo state transitions." },
+      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed in /Users/operator/private/repo." }
     },
     integration: { sourceCwd: "/repo", commit: "abc123", integratedAt: "2026-08-25T10:05:00.000Z" }, artifacts: []
   }, { id: "handoff", status: "completed" });
@@ -197,6 +247,10 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
     "Added to merge queue.", "Automated merge started.", "Merge conflicts found.",
     "Conflict-resolution agent completed.", "Merged result verified.", "Changes integrated into the working directory."
   ]);
+  const renderedMilestones = milestones.map((item) => item.detail).join("\n");
+  assert.equal(renderedMilestones.includes("/repo"), false);
+  assert.match(milestones[0].detail, /Target repository selected/);
+  assert.match(milestones.at(-1).detail, /Commit: `abc123`/);
 });
 
 test("handoff timeline lists captured visual evidence as proof without inventing shots", () => {
