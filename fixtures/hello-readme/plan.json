@@ -1,0 +1,22 @@
+{
+  "title": "Hello README",
+  "summary": "One documentation ticket to watch bind, checkpoint, worker, and review.",
+  "nodes": [
+    {
+      "id": "write-readme",
+      "type": "ticket",
+      "title": "Write README.md",
+      "description": "Create README.md at the repository root with a one-paragraph explanation that this repo was initialized by Agent Plan Workspace. Do not add application code, dependencies, or CI.",
+      "permission": "write",
+      "writeScope": "README.md",
+      "expectedFiles": ["README.md"],
+      "estimatedChangedLines": 20,
+      "acceptanceCriteria": [
+        "README.md exists at the repository root",
+        "It mentions Agent Plan Workspace",
+        "No other product files were added"
+      ],
+      "dependsOn": []
+    }
+  ]
+}

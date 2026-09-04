@@ -78,6 +78,8 @@ Paused or failed work can also start fresh or restart from a recorded exploratio
 
 The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes or repairs that directory as the zero-state Git repository, seeds a baseline `.gitignore`, renders its own Pi prompts, commits each accepted step, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
 
+A smaller walkthrough lives in `fixtures/hello-readme`: one `write-readme` ticket that only creates `README.md`. Load that path in the dashboard (or `POST /api/local/load` with `{ "path": "fixtures/hello-readme" }`) against an empty working directory if you just want to watch bind, checkpoints, the worker, and review.
+
 Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptance criteria, and dependencies. Runtime fields such as prompts, skills, harnesses, and agent IDs are rejected so framework versions can be compared against the same authored input.
 
 ## Workflow
