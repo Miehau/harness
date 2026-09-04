@@ -511,9 +511,6 @@ async function settleContainment(ticketId, executionId, containment, trigger, ow
   }
   const timeoutEvidence = cleanupTimeoutEvidence(executionId, lifecycle.trigger);
   await persistContainment(ticketId, owningRunId, executionId, timeoutEvidence, lifecycle);
-  // A timed-out containment is still owned by this daemon. Preserve its
-  // registry entry so shutdown can append a trigger to the same promise.
-  void operation.then((record) => persistContainment(ticketId, owningRunId, executionId, record, lifecycle)).catch(() => {});
   return timeoutEvidence;
 }
 
