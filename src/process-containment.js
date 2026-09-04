@@ -206,7 +206,7 @@ export class ProcessContainment {
     timeoutMs = 5_000,
     maxCycles = 2,
     now = Date.now,
-    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.())
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   } = {}) {
     if (!ownership?.token) throw new TypeError("valid execution ownership is required");
     this.executionId = executionId || ownership.executionId;
@@ -271,7 +271,7 @@ export class ProcessContainment {
   async #bounded(operation, label, deadlineAt) {
     const remaining = deadlineAt - this.now();
     if (remaining <= 0) throw new Error(`Cleanup deadline exceeded before ${label}`);
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`Cleanup deadline exceeded during ${label}`)), remaining).unref?.()).catch(() => {});
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`Cleanup deadline exceeded during ${label}`)), remaining)).catch(() => {});
     try { return await Promise.race([Promise.resolve().then(operation), timeout]); }
     finally {}
   }
