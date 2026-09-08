@@ -8,6 +8,7 @@ export const help = `Usage: node .agent-plan/ui.mjs <command> [--url URL] [--scr
   tasks open <id>
   tasks add <description>       Creates a task and starts its workflow
   workspace open                Opens the repository dialog and loads access policy
+  workspace close               Closes the repository dialog
   workspace extra-root <path> <read-only|read/write>
   workspace any on|off
   workspace save-policy
@@ -28,15 +29,20 @@ export function validateJourney(commands, assertions = []) {
     const [noun, verb, value, extra] = command;
     const valid = noun === "tasks" ? (verb === "list" ? command.length === 2 : ["open", "add"].includes(verb) && command.length === 3)
       : noun === "workspace" ? (
-          ["open", "save-policy", "keyboard"].includes(verb) && command.length === 2
+          ["open", "close", "save-policy", "keyboard"].includes(verb) && command.length === 2
           || verb === "any" && command.length === 3 && ["on", "off"].includes(value)
           || verb === "extra-root" && command.length === 4 && ["read-only", "read/write"].includes(extra)
         )
       : ["stage", "tab", "click"].includes(noun) && command.length === 2;
     if (!valid) throw new Error(`Unknown UI command: ${command.join(" ")}`);
   }
-  if (!Array.isArray(assertions) || assertions.length > 50 || assertions.some((assertion) => !assertion || typeof assertion.selector !== "string" || !assertion.selector.trim() || typeof assertion.text !== "string" || !assertion.text.trim())) {
-    throw new Error("Assertions require a selector and non-empty expected text");
+  if (!Array.isArray(assertions) || assertions.length > 50 || assertions.some((assertion) => {
+    if (!assertion || typeof assertion.selector !== "string" || !assertion.selector.trim()) return true;
+    const hasText = typeof assertion.text === "string" && assertion.text.trim();
+    const hasValue = typeof assertion.value === "string" && assertion.value.trim();
+    return !hasText && !hasValue;
+  })) {
+    throw new Error("Assertions require a selector and non-empty expected text or value");
   }
 }
 
@@ -86,6 +92,9 @@ async function navigate(commands, assertions) {
       if (verb === "open") {
         await click("#workspace-settings");
         await wait(() => document.querySelector("#workspace-dialog")?.open && document.querySelector("#access-policy-form")?.dataset.loaded === "true", "workspace access policy loaded");
+      } else if (verb === "close") {
+        await click("#workspace-dialog [data-close-dialog]");
+        await wait(() => !document.querySelector("#workspace-dialog")?.open, "workspace dialog closed");
       } else if (verb === "any") {
         const box = document.querySelector("#access-any");
         box.checked = value === "on";
@@ -127,10 +136,12 @@ async function navigate(commands, assertions) {
       matches[0].click();
     }
   }
-  for (const { selector, text } of assertions) await wait(() => {
-    const matches = [...document.querySelectorAll(selector)].filter(visible);
-    return matches.length === 1 && matches[0].textContent.includes(text);
-  }, `${selector} contains ${JSON.stringify(text)}`);
+  for (const { selector, text, value } of assertions) await wait(() => {
+    const matches = [...document.querySelectorAll(selector)].filter(visible).filter((element) => (
+      (text == null || element.textContent.includes(text)) && (value == null || element.value === value)
+    ));
+    return matches.length === 1;
+  }, `${selector} matches ${JSON.stringify({ text, value })}`);
   return { results, assertions, url: location.href };
 }
 

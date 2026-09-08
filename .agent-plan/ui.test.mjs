@@ -54,6 +54,7 @@ test("UI CLI validates commands and exercises real task navigation and creation"
 
 test("UI CLI opens the workspace policy dialog and reports invalid extra roots", { timeout: 60000 }, async () => {
   assert.throws(() => validateJourney([["workspace", "extra-root", "/tmp/x", "write-only"]]), /Unknown UI command/);
+  assert.doesNotThrow(() => validateJourney([["workspace", "open"]], [{ selector: ".extra-root-path", value: "/tmp/x" }]));
   await withDaemon(async (daemon) => {
     const extra = await mkdtemp(join(tmpdir(), "agent-plan-ui-extra-"));
     try {
@@ -74,6 +75,21 @@ test("UI CLI opens the workspace policy dialog and reports invalid extra roots",
       });
       assert.ok(opened.commands);
       const scenarios = JSON.parse(await readFile(new URL("./ui-scenarios.json", import.meta.url), "utf8"));
+      const savedRootsScenario = scenarios.find((scenario) => scenario.criterion === "The workspace dialog shows primary, extra roots as saved, and the effective restricted or Any access mode.");
+      assert.ok(savedRootsScenario, "ticket-bound proof scenario persists and reloads an extra root");
+      const savedRoots = await runJourney({
+        url,
+        commands: savedRootsScenario.commands.map((command) => command.map((arg) => arg === "$evidenceRoot" ? extra : arg)),
+        assertions: savedRootsScenario.assertions.map((assertion) => ({
+          ...assertion,
+          value: assertion.value === "$evidenceRoot" ? extra : assertion.value
+        }))
+      });
+      assert.ok(savedRoots.assertions);
+      const persistedScenario = scenarios.find((scenario) => scenario.criterion === "Two store primaries keep extra roots only on the project that saved them after re-init.");
+      assert.ok(persistedScenario, "ticket-bound proof scenario exists for project-keyed persisted roots");
+      const persisted = await runJourney({ url, commands: persistedScenario.commands, assertions: persistedScenario.assertions });
+      assert.ok(persisted.assertions);
       const invalidScenario = scenarios.find((scenario) => scenario.criterion.startsWith("Invalid extra roots"));
       const invalid = await runJourney({ url, commands: invalidScenario.commands, assertions: invalidScenario.assertions });
       assert.ok(invalid.assertions);

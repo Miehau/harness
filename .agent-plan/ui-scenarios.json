@@ -1,12 +1,27 @@
 [
   {
     "criterion": "The workspace dialog shows primary, extra roots as saved, and the effective restricted or Any access mode.",
+    "commands": [
+      ["workspace", "open"],
+      ["workspace", "extra-root", "$evidenceRoot", "read-only"],
+      ["workspace", "save-policy"],
+      ["workspace", "close"],
+      ["workspace", "open"]
+    ],
+    "assertions": [
+      { "selector": "#workspace-dialog", "text": "Primary repository (not removable)" },
+      { "selector": "#access-mode-status", "text": "Effective mode: Restricted" },
+      { "selector": ".extra-root-path", "value": "$evidenceRoot" },
+      { "selector": ".extra-root-mode", "value": "read-only" }
+    ]
+  },
+  {
+    "criterion": "Two store primaries keep extra roots only on the project that saved them after re-init.",
     "commands": [["workspace", "open"]],
     "assertions": [
       { "selector": "#workspace-dialog", "text": "Primary repository (not removable)" },
-      { "selector": "#access-mode-status", "text": "Effective mode" },
-      { "selector": "#access-policy-form", "text": "Extra roots" },
-      { "selector": "#access-policy-form", "text": "Any access" }
+      { "selector": "#access-mode-status", "text": "Restricted" },
+      { "selector": "[data-extra-root]", "text": "read-only" }
     ]
   },
   {

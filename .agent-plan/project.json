@@ -25,6 +25,10 @@
       "scripts/seed.mjs",
       "--list"
     ],
+    "capture-proof": [
+      "node",
+      "scripts/capture-ticket-proof.mjs"
+    ],
     "capture-proof-dashboard": [
       "node",
       ".agent-plan/capture-proof-dashboard.mjs"
