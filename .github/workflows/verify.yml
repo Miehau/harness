@@ -13,6 +13,8 @@ jobs:
         with:
           node-version: 22.19.0
           cache: npm
+      - name: Install video verification tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
       # The fixture suite has a real /proc adapter only on Linux; this required
       # job keeps its cancellation, escalation, identity, and leak assertions

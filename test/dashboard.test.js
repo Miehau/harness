@@ -49,7 +49,10 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
         await evaluate(`const artifact = [...document.querySelectorAll('[data-select-artifact]')].find(el => el.textContent.includes('requirements-draft.md')); artifact.click()`);
         await check('document.querySelector("#plan-tree .artifact-preview")?.textContent.includes("Keep the new project simple.")');
         await evaluate(`document.querySelector('[data-clarify] button[type=submit]').click()`);
-        await waitFor(() => assert.ok(exploreEvent), { timeoutMs: 5000 });
+        await waitFor(() => {
+          const run = daemon.store.read().ticketRuns[daemon.store.read().selectedTicketId];
+          assert.ok(exploreEvent, `Exploration did not start: ${run.status}: ${run.lastError || run.checkpoint?.title || "no checkpoint"}`);
+        }, { timeoutMs: 5000 });
         await check('document.querySelector("#inspector h2")?.textContent.includes("Explor")');
         exploreEvent({ type: "text_delta", delta: "Inspecting the initialized repository." });
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Inspecting the initialized repository.")');
