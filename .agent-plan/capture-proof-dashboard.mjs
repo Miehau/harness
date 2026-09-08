@@ -58,6 +58,11 @@ async function captureMobile({ url, out, script }) {
   } finally { chrome.kill("SIGTERM"); }
 }
 
+if (process.env.AGENT_PLAN_CAPTURE_TICKET_ID) {
+  process.stdout.write("Skipping T-PROOF fixture capture during ticket-bound verification\n");
+  process.exit(0);
+}
+
 const root = resolve(new URL("..", import.meta.url).pathname);
 const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-proof-data-"));
 const cwd = await mkdtemp(join(tmpdir(), "agent-plan-proof-cwd-"));
