@@ -20,6 +20,7 @@ import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verific
 import { projectConfigPath } from "./project-config.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
+import { canonicalPrimaryPath, normalizeProjectPolicy, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
@@ -3406,6 +3407,18 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/workspace/pick") return json(response, 200, { cwd: await pickDirectory() });
+  if (request.method === "GET" && url.pathname === "/api/workspace/access-policy") {
+    const state = store.read();
+    return json(response, 200, await readProjectPolicy(state, state.workspace.cwd));
+  }
+  if (request.method === "POST" && url.pathname === "/api/workspace/access-policy") {
+    const input = await body(request);
+    const primaryCwd = store.read().workspace.cwd;
+    const policy = await normalizeProjectPolicy(input, { primaryCwd });
+    const key = await canonicalPrimaryPath(primaryCwd);
+    await update((draft) => { writeProjectPolicy(draft, key, policy); });
+    return json(response, 200, policy);
+  }
   if (request.method === "POST" && url.pathname === "/api/workspace") {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));

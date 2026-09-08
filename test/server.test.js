@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
+import { canonicalPrimaryPath, storedProjectPolicy } from "../src/access-policy.js";
 import { JsonStore } from "../src/store.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
 import { auditHarnessWriteScopes, closeSseClients, createDaemon, deliveryFailureNeedsFix, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
@@ -1468,5 +1469,196 @@ test("stage output is bounded, redacted and readable from retained runs after re
     await reloaded.init();
     assert.equal(Object.values(reloaded.read().retainedRuns)[0].stages[0].activity.rawOutput, "Saved clarification");
     assert.ok((await invoke(daemon, "GET", route("missing"))).status >= 400);
+  });
+});
+
+test("workspace access policy saves per primary and leaves a previous policy unchanged on invalid update", async () => {
+  await withDaemon(async (daemon, { cwd, dataDir }) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-policy-extra-"));
+    const otherPrimary = await mkdtemp(join(tmpdir(), "agent-plan-policy-other-"));
+    const missing = join(extra, "does-not-exist");
+    try {
+      const unset = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(unset.status, 200);
+      assert.deepEqual(unset.json, { mode: "restricted", extraRoots: [] });
+      assert.equal(daemon.store.read().projectPolicies, undefined);
+
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }, { path: extra, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.json.mode, "restricted");
+      assert.equal(saved.json.extraRoots.length, 1);
+      assert.equal(saved.json.extraRoots[0].mode, "read-only");
+      assert.equal(saved.json.extraRoots[0].displayPath, extra);
+
+      const invalidMode = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "write-only" }] }
+      });
+      assert.equal(invalidMode.status, 400);
+      assert.match(invalidMode.json.error, /Unknown extra root mode “write-only”/);
+
+      const conflicting = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }, { path: extra, mode: "read/write" }] }
+      });
+      assert.equal(conflicting.status, 400);
+      assert.match(conflicting.json.error, /different modes/);
+
+      const missingPath = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: missing, mode: "read-only" }] }
+      });
+      assert.equal(missingPath.status, 400);
+      assert.match(missingPath.json.error, /does not exist/);
+
+      const invalidAny = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { mode: "any", extraRoots: [{ path: missing, mode: "read-only" }] }
+      });
+      assert.equal(invalidAny.status, 400);
+      assert.match(invalidAny.json.error, /does not exist/);
+
+      const previous = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(previous.status, 200);
+      assert.equal(previous.json.mode, "restricted");
+      assert.equal(previous.json.extraRoots.length, 1);
+      assert.equal(previous.json.extraRoots[0].mode, "read-only");
+      assert.equal("extraRoots" in daemon.store.read().settings, false);
+
+      const switched = await invoke(daemon, "POST", "/api/workspace", { body: { cwd: otherPrimary } });
+      assert.equal(switched.status, 200);
+      const otherPolicy = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(otherPolicy.json, { mode: "restricted", extraRoots: [] });
+
+      const reloaded = await new JsonStore(join(dataDir, "state-v3.json"), otherPrimary).init();
+      const otherKey = await canonicalPrimaryPath(otherPrimary);
+      assert.equal(Object.keys(reloaded.projectPolicies).length, 1);
+      assert.equal(reloaded.projectPolicies[otherKey], undefined);
+      assert.deepEqual(storedProjectPolicy(reloaded, otherKey), { mode: "restricted", extraRoots: [] });
+      assert.equal(Object.values(reloaded.projectPolicies)[0].extraRoots.length, 1);
+
+      const anySaved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { mode: "any" }
+      });
+      assert.equal(anySaved.status, 200);
+      assert.equal(anySaved.json.mode, "any");
+      assert.deepEqual(anySaved.json.extraRoots, []);
+
+      const afterAny = await new JsonStore(join(dataDir, "state-v3.json"), otherPrimary).init();
+      const originalKey = await canonicalPrimaryPath(cwd);
+      assert.equal(afterAny.projectPolicies[originalKey].mode, "restricted");
+      assert.equal(afterAny.projectPolicies[originalKey].extraRoots.length, 1);
+      assert.equal(afterAny.projectPolicies[otherKey].mode, "any");
+      assert.deepEqual(afterAny.projectPolicies[otherKey].extraRoots, []);
+
+      await invoke(daemon, "POST", "/api/workspace", { body: { cwd } });
+      const restored = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(restored.json.mode, "restricted");
+      assert.equal(restored.json.extraRoots.length, 1);
+      assert.equal(restored.json.extraRoots[0].displayPath, extra);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+      await rm(otherPrimary, { recursive: true, force: true });
+    }
+  });
+});
+
+test("workspace access policy allows sibling extra roots and rejects nested overlap", async () => {
+  await withDaemon(async (daemon) => {
+    const root = await mkdtemp(join(tmpdir(), "agent-plan-policy-siblings-"));
+    const repo = join(root, "repo");
+    const repoTwo = join(root, "repo-two");
+    const nested = join(repo, "src");
+    try {
+      await mkdir(nested, { recursive: true });
+      await mkdir(repoTwo);
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: {
+          extraRoots: [
+            { path: repo, mode: "read-only" },
+            { path: repoTwo, mode: "read/write" }
+          ]
+        }
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.json.extraRoots.length, 2);
+      assert.equal(saved.json.extraRoots[0].displayPath, repo);
+      assert.equal(saved.json.extraRoots[1].displayPath, repoTwo);
+      assert.equal(saved.json.extraRoots[1].mode, "read/write");
+
+      const nestedReject = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: {
+          extraRoots: [
+            { path: repo, mode: "read-only" },
+            { path: nested, mode: "read-only" }
+          ]
+        }
+      });
+      assert.equal(nestedReject.status, 400);
+      assert.match(nestedReject.json.error, /overlap \(ancestor\/descendant\)/);
+      assert.match(nestedReject.json.error, /repo/);
+      assert.match(nestedReject.json.error, /src/);
+
+      const previous = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(previous.status, 200);
+      assert.equal(previous.json.extraRoots.length, 2);
+      assert.equal(previous.json.extraRoots[0].displayPath, repo);
+      assert.equal(previous.json.extraRoots[1].displayPath, repoTwo);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("workspace access policy resolves relative extra roots against the primary directory", async () => {
+  await withDaemon(async (daemon, { cwd }) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-policy-rel-"));
+    try {
+      const rel = relative(cwd, extra);
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: rel, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.json.extraRoots.length, 1);
+      assert.equal(saved.json.extraRoots[0].path, await realpath(extra));
+      assert.equal(saved.json.extraRoots[0].displayPath, rel);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
+  });
+});
+
+test("malformed access policy POST returns 400 and preserves the previous saved policy", async () => {
+  await withDaemon(async (daemon) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-policy-malformed-"));
+    try {
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.json.extraRoots.length, 1);
+      assert.equal(saved.json.extraRoots[0].displayPath, extra);
+
+      const cases = [
+        [null, /must be an object with optional mode and extraRoots, not null/],
+        [[], /must be an object with optional mode and extraRoots, not array/],
+        ["restricted", /must be an object with optional mode and extraRoots, not string/],
+        [true, /must be an object with optional mode and extraRoots, not boolean/],
+        [{ mode: null }, /Access mode must be restricted or any, not null/],
+        [{ extraRoots: null }, /extraRoots must be an array of \{ path, mode \} entries, not null/],
+        [{ extraRoots: [{ path: extra }] }, /Missing extra root mode for .* Use read-only or read\/write/]
+      ];
+      for (const [body, pattern] of cases) {
+        const rejected = await invoke(daemon, "POST", "/api/workspace/access-policy", { body });
+        assert.equal(rejected.status, 400);
+        assert.match(rejected.json.error, pattern);
+      }
+
+      const previous = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(previous.status, 200);
+      assert.equal(previous.json.mode, "restricted");
+      assert.equal(previous.json.extraRoots.length, 1);
+      assert.equal(previous.json.extraRoots[0].displayPath, extra);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
   });
 });

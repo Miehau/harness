@@ -286,6 +286,9 @@ export class JsonStore {
       this.state.stageProfiles = normalizeStageProfiles(this.state.stageProfiles);
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
+      if (this.state.projectPolicies != null && (typeof this.state.projectPolicies !== "object" || Array.isArray(this.state.projectPolicies))) {
+        this.state.projectPolicies = {};
+      }
       for (const run of [...Object.values(this.state.ticketRuns), ...Object.values(this.state.retainedRuns)]) {
         recoverInterruptedCleanup(run);
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
