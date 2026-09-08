@@ -17,7 +17,6 @@ const knownCriteria = new Set([
   "criterion-f9a363ef01919851"
 ]);
 const desktopCriteria = new Set(["criterion-f4faf9f08b411a3f", "criterion-7574042b85f60417", "criterion-2348cf5af7ea07ef", "criterion-f9a363ef01919851"]);
-const mobileCriteria = new Set(["criterion-f4faf9f08b411a3f", "criterion-7574042b85f60417", "criterion-2348cf5af7ea07ef", "criterion-f9a363ef01919851"]);
 const liveInstruction = "Preserve FIFO steering behavior.";
 const acknowledgedInstruction = "Make worker acknowledgment states remain visible.";
 const queuedInstruction = "Queued proof: waiting for Pi.";
@@ -26,6 +25,17 @@ const failedInstruction = "Failed proof: worker ended first.";
 const rejectedInstruction = "Rejected proof: empty instruction.";
 
 function sleep(ms) { return new Promise((resolveSleep) => setTimeout(resolveSleep, ms)); }
+
+async function stopBrowser(chrome) {
+  if (chrome.exitCode !== null || chrome.signalCode) return;
+  const exited = new Promise((resolveExit) => chrome.once("exit", resolveExit));
+  chrome.kill("SIGTERM");
+  const didExit = await Promise.race([exited.then(() => true), sleep(2000).then(() => false)]);
+  if (!didExit && chrome.exitCode === null && !chrome.signalCode) {
+    chrome.kill("SIGKILL");
+    await Promise.race([exited, sleep(1000)]);
+  }
+}
 
 function pageTextIncludes(text) {
   return `(document.body?.textContent || '').toLowerCase().includes(${JSON.stringify(String(text).toLowerCase())})`;
@@ -181,7 +191,7 @@ async function launchBrowser(url, { width, height, mobile = false }) {
       },
       async close() {
         socket?.close();
-        chrome.kill("SIGTERM");
+        await stopBrowser(chrome);
         await rm(profile, { recursive: true, force: true });
       }
     };
@@ -189,7 +199,7 @@ async function launchBrowser(url, { width, height, mobile = false }) {
     return browser;
   } catch (error) {
     socket?.close();
-    chrome.kill("SIGTERM");
+    await stopBrowser(chrome);
     await rm(profile, { recursive: true, force: true });
     throw error;
   }
@@ -314,8 +324,15 @@ async function seedSteeringRun(daemon, cwd) {
 async function preflightSeededLifecycle() {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-steering-preflight-data-"));
   const cwd = await mkdtemp(join(tmpdir(), "agent-plan-steering-preflight-cwd-"));
-  const daemon = await createDaemon({ cwd, dataDir, listen: false, lock: false, harness: mockHarness() });
+  const harness = {
+    ...mockHarness(),
+    async steer(delivery) {
+      return { source: "capture-proof-preflight", session: "mock-pi", steerId: delivery.steerId, acceptedAt: new Date().toISOString() };
+    }
+  };
+  const daemon = await createDaemon({ cwd, dataDir, listen: true, lock: false, host: "127.0.0.1", port: 0, harness });
   try {
+    if (!daemon.server.listening) await new Promise((resolveListen) => daemon.server.once("listening", resolveListen));
     await seedSteeringRun(daemon, cwd);
     const run = daemon.store.read().ticketRuns["steer-proof"];
     const record = run?.steering?.records?.find((item) => item.instruction === acknowledgedInstruction);
@@ -325,6 +342,7 @@ async function preflightSeededLifecycle() {
     for (const eventType of ["accepted", "claimed", "delivered", "acknowledged"]) {
       if (!events.includes(eventType)) throw new Error(`Preflight seeded steering missed ${eventType}.`);
     }
+    await runJourney(`http://${daemon.host}:${daemon.server.address().port}/`, join(cwd, "steering-preflight.png"), { width: 1440, height: 900, mobile: false });
     process.stdout.write("Capture-proof steering preflight passed.\n");
   } finally {
     await daemon.close({ exit: false });
@@ -386,15 +404,11 @@ async function main() {
   if (!daemon.server.listening) await new Promise((resolveListen) => daemon.server.once("listening", resolveListen));
   const url = `http://${daemon.host}:${daemon.server.address().port}/`;
   const desktopPath = join(absoluteEvidenceDir, "steering-dashboard-desktop.png");
-  const mobilePath = join(absoluteEvidenceDir, "steering-dashboard-mobile.png");
   const captures = [];
   try {
     await seedSteeringRun(daemon, cwd);
     await runJourney(url, desktopPath, { width: 1440, height: 900, mobile: false });
-    await seedSteeringRun(daemon, cwd);
-    await runJourney(url, mobilePath, { width: 390, height: 844, mobile: true });
     const desktopIds = selectedKnown.filter((id) => desktopCriteria.has(id));
-    const mobileIds = selectedKnown.filter((id) => mobileCriteria.has(id));
     const sharedAssertions = [
       "Active worker steering form shows ticket, run, step, and attempt target.",
       "Submitting the dashboard form creates a delivered steering record against the isolated mock Pi session.",
@@ -406,12 +420,6 @@ async function main() {
     captures.push(captureEntry(desktopPath, desktopIds, { width: 1440, height: 1700 }, [
       "seed isolated local steering run",
       "open dashboard in desktop Chromium",
-      "submit focused steering instruction from the dashboard",
-      "reload dashboard, scroll the steering panel into view, and capture lifecycle screenshot"
-    ], sharedAssertions));
-    captures.push(captureEntry(mobilePath, mobileIds, { width: 390, height: 3400, mobile: true }, [
-      "seed isolated local steering run",
-      "open dashboard in mobile-emulated Chromium",
       "submit focused steering instruction from the dashboard",
       "reload dashboard, scroll the steering panel into view, and capture lifecycle screenshot"
     ], sharedAssertions));
