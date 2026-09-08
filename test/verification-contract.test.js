@@ -10,9 +10,12 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function runVerification(root, environment = {}) {
   return new Promise((resolveRun, rejectRun) => {
+    const env = { ...process.env };
+    delete env.AGENT_PLAN_EVIDENCE_DIR;
+    Object.assign(env, environment);
     const child = spawn(process.execPath, [join(root, ".agent-plan", "verify.mjs")], {
       cwd: join(root, "outside-repository"),
-      env: { ...process.env, ...environment }
+      env
     });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { normalizePlan } from "../src/plan.js";
 import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { beginJjChange, initializeJjWorkspace } from "../src/jj.js";
+import { persistArtifact } from "../src/artifacts.js";
 import { commitWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
 import { mockHarness, invoke, seedRun, withDaemon } from "./helpers.js";
 
@@ -144,7 +145,11 @@ test("final proof blocks local integration, streams image and video, then delive
     const exits = execution.triggers.filter(({ trigger }) => trigger === "repository-check-exit");
     assert.deepEqual(exits, [{ trigger: "repository-check-exit", command: "node .agent-plan/verify.mjs", at: "2026-09-03T10:00:01.000Z" }]);
     assert.equal(calls.cleanupTriggers.filter(({ trigger }) => trigger === "repository-check-exit").length, 2, "harness completion and daemon settlement share one durable trigger");
-  }, { harness });
+assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_TICKET_ID, id);
+    assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_RUN_ID, "run-1");
+    assert.match(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.deepEqual(daemon.store.read().ticketRuns[id].finalEvidenceArtifactIds, ["media-0", "media-1"]);
+  }, { harness, listen: true });
 });
 
 test("verification restart preserves old final evidence and assigns a fresh review identity", async () => {
@@ -266,20 +271,36 @@ test("requesting proof changes enters the correction loop and returns to final r
   const calls = { evidence: [], fixes: [] };
   const harness = {
     ...mockHarness(),
-    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
+    runRepositoryChecks: async ({ environment }) => ({ ...await freshVisualChecks(calls, environment), output: "api_key=lowercase_secret_abcdefgh" }),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role, proofMap, artifacts }) => ({ role, summary: `${role} passed`, findings: [], criterionResults: independentResults(proofMap, artifacts) }),
+    reviewTicket: async ({ role, proofMap, artifacts }) => {
+      calls.reviewArtifacts = artifacts;
+      return { role, summary: `${role} api_key=lowercase_secret_abcdefgh`, findings: [], criterionResults: independentResults(proofMap, artifacts) };
+    },
     runStep: async ({ step }) => { calls.fixes.push(step.prompt); return { report: { status: "completed", summary: "fixed" }, output: "fixed", events: [], rawOutput: "" }; }
   };
   await withDaemon(async (daemon, fixture) => {
     const { id } = await proofFixture(daemon, fixture, calls);
+const context = await persistArtifact(fixture.dataDir, daemon.store.read().ticketRuns[id].ticket, { name: "architecture.md", content: "# Retained architecture", runId: "run-1", stageId: "design", kind: "architecture" });
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(context); });
     const criterionId = daemon.store.read().ticketRuns[id].proofMap.criteria[0].id;
     const response = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/changes`, { body: { feedback: "The confirmation state is missing from the recording", criterionIds: [criterionId] } });
     assert.equal(response.status, 202);
     const reviewed = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "evidence_review" && run.checkpoint.id !== "proof-1" || run.lastError);
     assert.equal(reviewed.checkpoint?.kind, "evidence_review", reviewed.lastError);
     assert.ok(calls.fixes.some((prompt) => prompt.includes("confirmation state is missing")));
+    assert.equal(calls.fixes.some((prompt) => prompt.includes("lowercase_secret_abcdefgh")), false);
+    assert.equal(calls.reviewArtifacts.find((artifact) => artifact.id === context.id)?.content, "# Retained architecture");
     const stored = daemon.store.read().ticketRuns[id];
-    assert.equal(stored.reviews.some((round) => round.actionableFindings?.some((finding) => finding.category === "human-proof-review")), true);
+    const proofFinding = stored.reviews.flatMap((round) => round.actionableFindings || []).find((finding) => finding.category === "human-proof-review");
+    assert.ok(proofFinding);
+    assert.equal(proofFinding.claim.includes("lowercase_secret_abcdefgh"), false);
+    assert.equal(proofFinding.suggestedFix.includes("lowercase_secret_abcdefgh"), false);
+    assert.equal(JSON.stringify(stored).includes("lowercase_secret_abcdefgh"), false);
+    const publicState = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(publicState.json).includes("lowercase_secret_abcdefgh"), false);
+    const reviewArtifacts = stored.artifacts.filter((artifact) => artifact.kind === "independent-review");
+    const bodies = await Promise.all(reviewArtifacts.map((artifact) => readFile(artifact.path, "utf8")));
+    assert.equal(bodies.some((body) => body.includes("lowercase_secret_abcdefgh")), false);
   }, { harness });
 });

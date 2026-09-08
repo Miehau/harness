@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
+import { inspectionFocus } from "./inspection.js";
+import { boundedText, redactRecord, redactText, safeArtifactMetadata, safeReasoningSummary } from "./redaction.js";
 import { projectProofMap } from "./proof-map.js";
 
 export const visualEvidencePolicy = "contract-only-v1";
@@ -295,7 +297,7 @@ export function pushBounded(items, item, limit) {
 
 function activityGroupMeta(event = {}) {
   if (event.type === "phase") return { title: event.label || "Workflow step", note: "", focus: true };
-  if (event.type === "reasoning_summary") return { title: String(event.detail || "Plan next action").split(/\r?\n/).find((line) => line.trim())?.replace(/[*`]/g, "").slice(0, 120) || "Plan next action", note: event.detail || "", focus: true };
+  if (event.type === "reasoning_summary") return { title: safeReasoningSummary(String(event.detail || "Plan next action").split(/\r?\n/).find((line) => line.trim()) || "Plan next action", 120) || "Plan next action", note: safeReasoningSummary(event.detail || "", 1000), focus: true };
   if (event.type === "thinking") return { title: "Plan next action", note: "", focus: true };
   if (event.type === "agent_error") return { title: "Investigate failure", note: event.label || "", focus: false };
   const tool = event.tool || "";
@@ -339,9 +341,9 @@ export function groupActivityEvents(events = []) {
 
 export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
   const startedAt = existing.startedAt || new Date(now()).toISOString();
-  const events = (existing.events || []).slice(-eventLimit);
-  const prompts = (existing.prompts || []).slice(-20);
-  let rawOutput = appendBounded("", existing.rawOutput, outputLimit);
+  const events = redactRecord((existing.events || []).slice(-eventLimit));
+  const prompts = redactRecord((existing.prompts || []).slice(-20));
+  let rawOutput = appendBounded("", redactText(existing.rawOutput), outputLimit);
   let lastEventAt = existing.lastEventAt || startedAt;
   let lastEvent = existing.lastEvent || "";
   let warning = Boolean(existing.warning);
@@ -372,14 +374,23 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
       const activityKey = actor || "stage";
       if (event.type === "thinking" && timestamp - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
       if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
-      const item = { ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() };
+      const item = redactRecord({ ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() });
       if (item.type === "prompt") {
+        const prompt = boundedText(item.content || item.prompt, 16000);
+        item.content = prompt.value;
+        item.truncated = Boolean(item.truncated) || prompt.truncated;
+        item.total = Math.max(prompt.total, Number(item.total) || 0);
+        delete item.prompt;
         pushBounded(prompts, item, 20);
         lastEventAt = item.at;
         lastEvent = item.label || lastEvent;
         save();
-      } else if (item.type === "text_delta") rawOutput = appendBounded(rawOutput, item.delta, outputLimit);
-      else {
+      } else if (item.type === "text_delta") {
+        rawOutput = appendBounded(rawOutput, redactText(item.delta), outputLimit);
+        // Deltas carry the only copy of streamed output while the worker is live.
+        // Use the existing coalescing writer so abort/restart recovery sees its tail.
+        save();
+      } else {
         pushBounded(events, item, eventLimit);
         lastEventAt = item.at;
         lastEvent = item.label || lastEvent;
@@ -401,12 +412,105 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   };
 }
 
+const attemptEventLimit = 200;
+const attemptOutputLimit = 100000;
+
+function boundedAttemptActivity(activity = {}, rawOutput = "") {
+  return {
+    events: redactRecord(structuredClone((activity.events || []).slice(-attemptEventLimit))),
+    activityGroups: redactRecord(structuredClone((activity.groups || []).slice(-attemptEventLimit))),
+    prompts: (activity.prompts || []).slice(-20).map((item) => {
+      const { prompt: legacyPrompt, ...saved } = item;
+      const bounded = boundedText(saved.content || legacyPrompt, 4000);
+      return redactRecord({
+        ...saved,
+        content: bounded.value,
+        truncated: Boolean(saved.truncated) || bounded.truncated,
+        total: Math.max(bounded.total, Number(saved.total) || 0)
+      });
+    }),
+    rawOutput: appendBounded("", redactText(activity.rawOutput || rawOutput), attemptOutputLimit)
+  };
+}
+
+export function failureDetails(error, { status, reason, phase = "execution" } = {}) {
+  const message = String(error || reason || "");
+  if (!["failed", "needs_attention", "verification_failed", "cancelled", "paused", "interrupted"].includes(status)) {
+    return { kind: null, phase: null, message: null };
+  }
+  const kind = status === "cancelled" ? "cancellation"
+    : status === "paused" || status === "interrupted" ? "interruption"
+    : /provider|model request|rate limit|quota|authentication|api key|timeout/i.test(message) ? "provider"
+    : /check|test|verification/i.test(message) ? "verification"
+    : "execution";
+  return { kind, phase, message: redactText(message) || null };
+}
+
+// This is the sole conversion from mutable active state into durable history. Callers
+// may add new attempts, but must never mutate an attempt returned by this helper.
+export function snapshotActiveAttempt(step, active = {}, {
+  status, completedAt = new Date().toISOString(), reason = null, error = null, phase = "execution",
+  activity = active.activity || {}, rawOutput = "", report, checks, verification, diff, checkDiff, aggregateDiff, vcsChange,
+  feedback, violations, reviewNotes, reviewBudgetResult, artifactRefs = []
+} = {}) {
+  const attemptId = active.attemptId || `attempt-${(step.attempts?.length || 0) + 1}`;
+  const bounded = boundedAttemptActivity(activity, rawOutput);
+  const promptSource = active.prompt || activity.prompts?.at(-1)?.content || activity.prompts?.at(-1)?.prompt || "";
+  const prompt = boundedText(promptSource, 16000);
+  const activityPrompt = activity.prompts?.at(-1);
+  const promptTruncated = Boolean(active.promptTruncated ?? activityPrompt?.truncated) || prompt.truncated;
+  const promptTotal = Math.max(prompt.total, Number(active.promptTotal ?? activityPrompt?.total) || 0);
+  const failure = failureDetails(error, { status, reason, phase });
+  return {
+    runId: active.runId || null,
+    attemptId,
+    startedAt: active.startedAt || activity.startedAt || completedAt,
+    completedAt,
+    status,
+    terminationReason: reason || status,
+    termination: { reason: reason || status, at: completedAt },
+    failureKind: failure.kind,
+    failurePhase: failure.phase,
+    failure,
+    lastEvent: redactText(activity.lastEvent || active.lastEvent || ""),
+    lastEventAt: activity.lastEventAt || active.lastEventAt || null,
+    ...bounded,
+    ...(prompt.value ? { prompt: prompt.value, promptTruncated, promptTotal } : {}),
+    sessionFile: active.sessionFile || step.sessionFile || null,
+    ...(report === undefined ? {} : { report: redactRecord(structuredClone(report)) }),
+    ...(checks === undefined ? {} : { checks: redactRecord(structuredClone(checks)) }),
+    ...(verification === undefined ? {} : { verification: redactRecord(structuredClone(verification)) }),
+    ...(diff === undefined ? {} : { diff: redactRecord(structuredClone(diff)) }),
+    ...(checkDiff === undefined ? {} : { checkDiff: redactRecord(structuredClone(checkDiff)) }),
+    ...(aggregateDiff === undefined ? {} : { aggregateDiff: redactRecord(structuredClone(aggregateDiff)) }),
+    ...(vcsChange === undefined ? {} : { vcsChange: redactRecord(structuredClone(vcsChange)) }),
+    ...(feedback === undefined ? {} : { feedback: redactText(feedback) }),
+    ...(violations === undefined ? {} : { violations: redactRecord(structuredClone(violations)) }),
+    ...(reviewNotes === undefined ? {} : { reviewNotes: redactRecord(structuredClone(reviewNotes)) }),
+    ...(reviewBudgetResult === undefined ? {} : { reviewBudgetResult: redactRecord(structuredClone(reviewBudgetResult)) }),
+    ...(artifactRefs.length ? { artifacts: redactRecord(structuredClone(artifactRefs)), artifactRefs: redactRecord(structuredClone(artifactRefs)) } : {}),
+    ...(error ? { error: redactText(error) } : {})
+  };
+}
+
+export function materializeActiveAttempt(step, active, options) {
+  step.attempts ||= [];
+  const attempt = snapshotActiveAttempt(step, active, options);
+  step.attempts.push(attempt);
+  if (attempt.sessionFile) step.sessionFile = attempt.sessionFile;
+  return attempt;
+}
+
 export function markRunCancelled(run, at = new Date().toISOString()) {
   run.status = "cancelled";
   run.cancelledAt = at;
   run.checkpoint = null;
+  for (const step of flattenSteps(run.plan)) {
+    if (!inFlightStepStatusSet.has(step.status)) continue;
+    materializeActiveAttempt(step, run.activeRuns?.[step.id] || {}, { status: "cancelled", completedAt: at, reason: "run_cancelled" });
+    step.status = "cancelled";
+  }
   run.activeRuns = {};
-  for (const step of flattenSteps(run.plan)) if (inFlightStepStatusSet.has(step.status)) step.status = "cancelled";
   const stage = run.stages.find((item) => item.status === "active");
   if (stage) Object.assign(stage, { status: "blocked", summary: "Run cancelled" });
 }
@@ -432,21 +536,7 @@ export function markRunPaused(run, at = new Date().toISOString()) {
   };
   for (const step of steps) {
     if (!inFlightStepStatusSet.has(step.status)) continue;
-    const active = activeRuns[step.id] || {};
-    const activity = active.activity || {};
-    step.attempts ||= [];
-    step.attempts.push({
-      runId: active.runId || null,
-      attemptId: `attempt-${step.attempts.length + 1}`,
-      startedAt: active.startedAt || at,
-      completedAt: at,
-      status: "paused",
-      events: activity.events || [],
-      activityGroups: activity.groups || [],
-      rawOutput: activity.rawOutput || "",
-      sessionFile: active.sessionFile || step.sessionFile || null
-    });
-    if (active.sessionFile) step.sessionFile = active.sessionFile;
+    materializeActiveAttempt(step, activeRuns[step.id] || {}, { status: "paused", completedAt: at, reason: "run_paused" });
     step.status = "interrupted";
   }
   run.status = "paused";
@@ -502,39 +592,42 @@ function staleProof(run, stepIds, at, reason) {
     if (!selected.has(criterion.stepId)) continue;
     criterion.history ||= [];
     criterion.history.push(structuredClone(criterion.current));
-    // Restart invalidation follows the same durable lifecycle as corrections: a
-    // rejected stale report must not erase the identities that remain invalid.
     criterion.invalidation = { at, evidence: structuredClone(criterion.current?.evidence || []) };
     criterion.current = { ...criterion.current, evidenceValidity: "stale", invalidatedAt: at, invalidationReason: reason };
   }
 }
 
-function attemptSequence(step) {
-  return Math.max(Number(step.attemptSequence) || 0, ...(step.attempts || []).map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
-}
-
-function resetStep(run, step) {
-  const discarded = step.attempts || [];
-  if (discarded.length) {
+function resetStep(run, step, { archiveAttempts = false } = {}) {
+  const attempts = structuredClone(step.attempts || []);
+  // A restart changes live worker state, never durable evidence. Proof-aware
+  // rewinds move superseded attempt evidence to the run archive so its locator
+  // remains resolvable without letting the new worker reuse its attempt ID.
+  if (archiveAttempts && attempts.length) {
     run.archivedAttempts ||= [];
-    run.archivedAttempts.push(...discarded.map((attempt) => ({ stepId: step.id, ...structuredClone(attempt) })));
+    run.archivedAttempts.push(...attempts.map((attempt) => ({ ...attempt, stepId: step.id })));
+    step.attempts = [];
+    step.attemptSequence = Math.max(Number(step.attemptSequence) || 0, ...attempts.map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
   }
-  step.attemptSequence = attemptSequence(step);
-  Object.assign(step, { status: "ready", attempts: [], artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
+  Object.assign(step, { status: "ready", artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
   for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
-  return discarded.length;
+  return { archived: archiveAttempts ? attempts.length : 0, retained: archiveAttempts ? 0 : attempts.length };
 }
 
 export function rewindRun(run, target, at = new Date().toISOString()) {
   if (!run?.plan && !["stage:explore", "stage:design"].includes(target)) throw new Error("This run has no plan to restart");
   const previousStages = (run.stages || []).map(({ id, status }) => ({ id, status }));
-  const previousSteps = flattenSteps(run.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }));
+  const previousSteps = flattenSteps(run.plan).map((step) => ({
+    id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null,
+    commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0,
+    attemptHistory: structuredClone(step.attempts || [])
+  }));
   const previousStatus = run.status;
   const previousCheckpoint = run.checkpoint?.kind || null;
   let stageId;
   let restoredTree = null;
   let resetStepIds = [];
   let discardedAttempts = 0;
+  let retainedAttempts = 0;
 
   if (target === "stage:explore" || target === "stage:design") {
     stageId = target.slice(6);
@@ -566,7 +659,13 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
     const reset = steps.slice(Math.max(0, firstIndex));
     resetStepIds = reset.map((step) => step.id);
-    discardedAttempts = reset.reduce((total, step) => total + resetStep(run, step), 0);
+    // Attempts without proof remain attached to their step for legacy inspection.
+    // Proof-bound evidence moves to the run archive, preserving its immutable
+    // locator while reserving the old attempt ID for the restarted worker.
+    const archiveAttempts = Boolean(run.proofMap?.criteria?.length);
+    const resetCounts = reset.map((step) => resetStep(run, step, { archiveAttempts }));
+    retainedAttempts = resetCounts.reduce((total, count) => total + count.retained, 0);
+    discardedAttempts = resetCounts.reduce((total, count) => total + count.archived, 0);
     staleProof(run, resetStepIds, at, "Step restart restored an earlier implementation checkpoint.");
     stageId = "implement";
   }
@@ -577,7 +676,7 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
   run.activeRuns = {};
   run.lastError = null;
   run.recovery = null;
-  for (const key of ["completedAt", "merge", "integration", "deliveredDiff", "productContextPath"]) delete run[key];
+  for (const key of ["completedAt", "merge", "integration", "deliveredDiff", "productContextPath", "finalEvidenceArtifactIds"]) delete run[key];
   const audit = {
     id: `restart-${(run.restartHistory?.length || 0) + 1}`,
     at,
@@ -588,7 +687,8 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     previousSteps,
     restoredTree,
     resetStepIds,
-    discardedAttempts
+    discardedAttempts,
+    retainedAttempts
   };
   run.restartHistory ||= [];
   run.restartHistory.push(audit);
@@ -1013,9 +1113,70 @@ export function workflowResumeStage(run) {
 }
 
 export function artifactMetadata(artifact) {
-  if (!artifact || typeof artifact !== "object") return artifact;
-  const { content, bodySummary, ...rest } = artifact;
-  return rest;
+  return safeArtifactMetadata(artifact);
+}
+
+function compactActivityEvent(event = {}) {
+  return redactRecord({
+    type: event.type || "activity", tool: event.tool || null, label: boundedText(event.label, 240).value,
+    at: event.at || null, isError: Boolean(event.isError), ...(event.actor ? { actor: boundedText(event.actor, 120).value } : {})
+  });
+}
+
+function publicAttempt(attempt) {
+  const clone = structuredClone(attempt);
+  for (const key of ["rawOutput", "activityGroups", "sessionFile", "prompt", "artifactRefs"]) delete clone[key];
+  if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20)
+    // Short tool-end payloads duplicate durable activity without adding a
+    // supervision signal. Keep only oversized payloads, explicitly bounded.
+    .filter((event) => event.type !== "tool_end" || String(event.output || "").length > 2000)
+    .map((event) => {
+      const compact = compactActivityEvent(event);
+      if (event.type === "tool_end" && typeof event.output === "string") {
+        const output = boundedText(event.output, 2000);
+        compact.output = output.truncated ? `${output.value}\n… output truncated for public state` : output.value;
+      }
+      return compact;
+    });
+  if (clone.report) clone.report = redactRecord({ status: clone.report.status, summary: boundedText(clone.report.summary, 240).value, request: boundedText(clone.report.request, 240).value });
+  if (typeof clone.feedback === "string" && clone.feedback.length > 1000) clone.feedback = `${clone.feedback.slice(0, 1000)}\n… feedback truncated for public state`;
+  if (clone.checks) clone.checks = publicChecks(clone.checks);
+  if (clone.verification) clone.verification = redactRecord({ summary: boundedText(clone.verification.summary, 240).value, findings: clone.verification.findings });
+  if (clone.diff) clone.diff = redactRecord({ available: clone.diff.available, files: clone.diff.files, stat: boundedText(clone.diff.stat, 1000).value });
+  if (clone.checkDiff) clone.checkDiff = redactRecord({ available: clone.checkDiff.available, files: clone.checkDiff.files, stat: boundedText(clone.checkDiff.stat, 1000).value });
+  if (clone.aggregateDiff) clone.aggregateDiff = redactRecord({ available: clone.aggregateDiff.available, files: clone.aggregateDiff.files, stat: boundedText(clone.aggregateDiff.stat, 1000).value });
+  return redactRecord(clone);
+}
+
+function removePrivateLocations(value) {
+  if (Array.isArray(value)) return value.map(removePrivateLocations);
+  if (!value || typeof value !== "object") return value;
+  for (const [key, item] of Object.entries(value)) {
+    if (["path", "cwd", "sourceCwd", "sessionFile", "requirementsSessionFile", "productContextPath", "fixturePath"].includes(key)) delete value[key];
+    else value[key] = removePrivateLocations(item);
+  }
+  return value;
+}
+
+function publicWorkflow(workflow) {
+  if (!workflow) return workflow;
+  return redactRecord({
+    skillName: workflow.skillName || null,
+    status: workflow.status || "idle",
+    stages: (workflow.stages || []).map((stage) => ({ id: stage.id, status: stage.status, title: boundedText(stage.title, 240).value, summary: boundedText(stage.summary, 240).value, createdAt: stage.createdAt || null, updatedAt: stage.updatedAt || null })),
+    checkpoints: (workflow.checkpoints || []).map(publicCheckpoint)
+  });
+}
+
+function publicCheckpoint(checkpoint) {
+  if (!checkpoint) return checkpoint;
+  const { prompt, productContext, finalChecks, media, questions, ...rest } = checkpoint;
+  return redactRecord({ ...rest,
+    title: boundedText(rest.title, 240).value,
+    questions: (questions || []).map((question) => boundedText(question, 240).value),
+    ...(finalChecks ? { finalChecks: { status: finalChecks.status, command: finalChecks.command || null, summary: boundedText(finalChecks.summary, 240).value } } : {}),
+    ...(media ? { media: media.map(safeArtifactMetadata) } : {})
+  });
 }
 
 function publicEvent(event, detailed) {
@@ -1052,57 +1213,64 @@ function publicChecks(checks) {
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
-  clone.proofMap = projectProofMap(run);
+  clone.inspectionFocus = inspectionFocus(run);
+  clone.checkpoint = publicCheckpoint(clone.checkpoint);
+  clone.workflow = publicWorkflow(clone.workflow);
+  clone.lastError = boundedText(clone.lastError, 1000).value || null;
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
-  for (const stage of clone.stages || []) {
-    stage.activity = publicActivity(stage.activity);
-    stage.diff = diffSummary(stage.diff);
+  for (const stage of clone.stages || []) if (stage.activity) {
+    delete stage.activity.prompts;
+    if (Array.isArray(stage.activity.events)) stage.activity.events = stage.activity.events.slice(-20).map(compactActivityEvent);
+    delete stage.activity.groups;
+    delete stage.activity.rawOutput;
   }
+  clone.proofMap = projectProofMap(run);
   for (const step of flattenSteps(clone.plan)) {
-    step.diff = diffSummary(step.diff);
+    delete step.prompt;
+    delete step.productContext;
     if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
-    for (const [index, attempt] of (step.attempts || []).entries()) {
-      const detailed = index === step.attempts.length - 1;
-      const events = detailed
-        ? attempt.events || []
-        : (attempt.events || []).filter((event) => ["usage", "tool_start"].includes(event.type));
-      attempt.events = events.map((event) => publicEvent(event, detailed));
-      delete attempt.activityGroups;
-      delete attempt.rawOutput;
-      if (attempt.checks) attempt.checks = publicChecks(attempt.checks);
-      if (attempt.verification) {
-        delete attempt.verification.rawOutput;
-        delete attempt.verification.checks;
+    if (Array.isArray(step.attempts)) step.attempts = step.attempts.map(publicAttempt);
+    if (step.diff) step.diff = redactRecord({ available: step.diff.available, files: step.diff.files, stat: boundedText(step.diff.stat, 1000).value });
+    delete step.sessionFile;
+  }
+  if (Array.isArray(clone.reviews)) clone.reviews = clone.reviews.map((review) => ({
+    round: review.round, createdAt: review.createdAt, actionableFindings: redactRecord(review.actionableFindings || []),
+    diff: diffSummary(review.diff),
+    reviews: (review.reviews || []).map((item) => ({ role: item.role, summary: boundedText(item.summary, 240).value, checks: item.checks && { status: item.checks.status, command: item.checks.command || null, summary: boundedText(item.checks.summary, 240).value } })),
+    ...(review.fix ? {
+      fix: {
+        ...(review.fix.diff ? { diff: diffSummary(review.fix.diff) } : {}),
+        ...(review.fix.artifact ? (() => {
+          const { bodySummary, path, content, ...artifact } = review.fix.artifact;
+          return { artifact: redactRecord(artifact) };
+        })() : {})
       }
-      if (typeof attempt.feedback === "string" && attempt.feedback.length > 4000) {
-        attempt.feedback = `${attempt.feedback.slice(0, 4000)}\n… feedback truncated; open the saved session for full detail`;
-      }
-      attempt.diff = diffSummary(attempt.diff);
-      attempt.checkDiff = diffSummary(attempt.checkDiff);
-      attempt.aggregateDiff = diffSummary(attempt.aggregateDiff);
-      if (Array.isArray(attempt.artifacts)) attempt.artifacts = attempt.artifacts.map(artifactMetadata);
+    } : {})
+  }));
+  if (clone.deliveredDiff) clone.deliveredDiff = redactRecord({ available: clone.deliveredDiff.available, files: clone.deliveredDiff.files, stat: boundedText(clone.deliveredDiff.stat, 1000).value });
+  if (clone.integration?.diff) clone.integration.diff = redactRecord({ available: clone.integration.diff.available, files: clone.integration.diff.files, stat: boundedText(clone.integration.diff.stat, 1000).value });
+  for (const stage of clone.stages || []) if (stage.diff) stage.diff = redactRecord({ available: stage.diff.available, files: stage.diff.files, stat: boundedText(stage.diff.stat, 1000).value });
+  for (const active of Object.values(clone.activeRuns || {})) {
+    delete active.prompt;
+    delete active.sessionFile;
+    if (active.activity) {
+      delete active.activity.prompts;
+      if (Array.isArray(active.activity.events)) active.activity.events = active.activity.events.slice(-20).map(compactActivityEvent);
+      delete active.activity.groups;
+      delete active.activity.rawOutput;
     }
   }
-  for (const review of clone.reviews || []) {
-    review.diff = diffSummary(review.diff);
-    for (const item of review.reviews || []) if (item.checks) item.checks = publicChecks(item.checks);
-    if (review.fix) {
-      review.fix.diff = diffSummary(review.fix.diff);
-      review.fix.artifact = artifactMetadata(review.fix.artifact);
-    }
-  }
-  return clone;
+  return redactRecord(removePrivateLocations(clone));
 }
 
 export function publicState(state) {
   if (!state) return state;
-  return {
-    ...state,
-    ticketRuns: Object.fromEntries(Object.entries(state.ticketRuns || {}).map(([id, run]) => [
-      id, id === state.selectedTicketId ? publicRun(run) : compactRun(run, state.revision)
-    ])),
-    retainedRuns: Object.fromEntries(Object.entries(state.retainedRuns || {}).map(([id, run]) => [id, compactRun(run, state.revision)]))
-  };
+  const clone = structuredClone(state);
+  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
+    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
+  }
+  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
+  return removePrivateLocations(clone);
 }
 
 export function publicPreviewState(state, ticketId) {
@@ -1133,12 +1301,10 @@ export function compactRun(run, revision = null) {
       state: run.ticket.state ? { id: run.ticket.state.id, name: run.ticket.state.name, type: run.ticket.state.type } : null
     } : null,
     status: run?.status || null,
-    checkpoint: run?.checkpoint || null,
-    lastError: run?.lastError || null,
-    workflow: run?.workflow || null,
+    checkpoint: publicCheckpoint(run?.checkpoint),
+    lastError: boundedText(run?.lastError, 1000).value || null,
+    workflow: publicWorkflow(run?.workflow),
     proofMap: projectProofMap(run),
-    // Keep cleanup evidence structured in the lightweight inspector response;
-    // it must not be collapsed into lastError because success is not implied.
     cleanup: normalizeRunCleanup(run?.cleanup),
     revision
   };

@@ -1,10 +1,106 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { artifactPathInDataDir } from "./artifacts.js";
+import { artifactPathInDataDir, persistArtifact, safeName } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
-import { initializeRunCleanup } from "./execution.js";
+import { flattenSteps } from "./plan.js";
+import { initializeRunCleanup, materializeActiveAttempt } from "./execution.js";
+
+function ensureAttemptIds(run) {
+  let changed = false;
+  for (const step of flattenSteps(run.plan || { nodes: [] })) {
+    for (const [index, attempt] of (step.attempts || []).entries()) {
+      if (!attempt.attemptId) { attempt.attemptId = `attempt-${index + 1}`; changed = true; }
+    }
+    const active = run.activeRuns?.[step.id];
+    if (active && !active.attemptId) { active.attemptId = `active-${active.runId || step.id}`; changed = true; }
+  }
+  return changed;
+}
+
+async function migrateArtifactBodies(run, dataDir) {
+  let changed = false;
+  const artifacts = run.artifacts || [];
+  const legacyArtifacts = artifacts.filter((artifact) => artifact && typeof artifact === "object" && "content" in artifact);
+  const pathCounts = new Map();
+  const idCounts = new Map();
+  const usedIds = new Set(artifacts.filter((artifact) => !legacyArtifacts.includes(artifact)).map((artifact) => artifact?.id).filter(Boolean));
+  const migratedIds = new Map();
+  const artifactPathKey = (artifact) => {
+    const base = safeName(artifact.name || artifact.id || "artifact.md");
+    const filename = base.includes(".") ? base : `${base}.md`;
+    return [artifact.stageId || "legacy", artifact.stepId || "", artifact.attemptId || "", artifact.kind || "agent-output", filename].map(safeName).join(":");
+  };
+  for (const artifact of legacyArtifacts) {
+    const pathKey = artifactPathKey(artifact);
+    pathCounts.set(pathKey, (pathCounts.get(pathKey) || 0) + 1);
+    if (artifact.id) idCounts.set(artifact.id, (idCounts.get(artifact.id) || 0) + 1);
+  }
+  const uniqueId = (base) => {
+    let candidate = base || "legacy-artifact";
+    for (let suffix = 2; usedIds.has(candidate); suffix++) candidate = `${base}-${suffix}`;
+    usedIds.add(candidate);
+    return candidate;
+  };
+  for (const [index, artifact] of legacyArtifacts.entries()) {
+    if (typeof artifact.content === "string") {
+      const pathCollision = pathCounts.get(artifactPathKey(artifact)) > 1;
+      const idCollision = !artifact.id || idCounts.get(artifact.id) > 1 || usedIds.has(artifact.id);
+      const persisted = await persistArtifact(dataDir, run.ticket || { identifier: run.id || "legacy" }, {
+        name: artifact.name || artifact.id || "artifact.md",
+        content: artifact.content,
+        runId: run.runId || "legacy",
+        stageId: artifact.stageId || "legacy",
+        kind: artifact.kind || "agent-output",
+        stepId: artifact.stepId || null,
+        attemptId: artifact.attemptId || null,
+        // Legacy records may share every storage component, including kind. Keep
+        // their original ID in the storage key so migration never overwrites a body.
+        storageKey: pathCollision ? `${artifact.id || "legacy"}-${index + 1}` : null
+      });
+      artifact.path = persisted.path;
+      // Content routes and dashboard selection use IDs, not file paths. A legacy
+      // duplicate therefore needs the same durable identity separation as its body.
+      if (idCollision) {
+        const legacyId = artifact.id;
+        artifact.id = uniqueId(persisted.id);
+        if (legacyId) migratedIds.set(legacyId, [...(migratedIds.get(legacyId) || []), artifact.id]);
+      } else usedIds.add(artifact.id);
+    }
+    delete artifact.content;
+    changed = true;
+  }
+  const remapIds = (ids) => {
+    const seen = new Map();
+    return ids.map((id) => {
+      const replacements = migratedIds.get(id);
+      if (!replacements?.length) return id;
+      const index = seen.get(id) || 0;
+      seen.set(id, index + 1);
+      return replacements[index] || replacements.at(-1);
+    });
+  };
+  if (Array.isArray(run.checkpoint?.evidenceArtifactIds)) {
+    const remapped = remapIds(run.checkpoint.evidenceArtifactIds);
+    if (remapped.some((id, index) => id !== run.checkpoint.evidenceArtifactIds[index])) {
+      run.checkpoint.evidenceArtifactIds = remapped;
+      changed = true;
+    }
+  }
+  if (Array.isArray(run.checkpoint?.media)) {
+    const ids = remapIds(run.checkpoint.media.map((artifact) => artifact.id));
+    if (ids.some((id, index) => id !== run.checkpoint.media[index].id)) {
+      run.checkpoint.media = run.checkpoint.media.map((artifact, index) => ({ ...artifact, id: ids[index] }));
+      changed = true;
+    }
+  }
+  if (Array.isArray(run.pauseHistory)) for (const pause of run.pauseHistory) {
+    const replacement = migratedIds.get(pause.artifactId)?.[0];
+    if (replacement) { pause.artifactId = replacement; changed = true; }
+  }
+  return changed;
+}
 
 function recoverInterruptedCleanup(run, at = new Date().toISOString()) {
   const cleanup = initializeRunCleanup(run, { legacy: true });
@@ -42,7 +138,7 @@ function initialState(cwd) {
 
 const STATE_EVENT_DETAIL_LIMIT = 4000;
 const STATE_PROMPT_LIMIT = 50000;
-const STATE_OUTPUT_LIMIT = 50000;
+const STATE_OUTPUT_LIMIT = 100000;
 const STATE_ARTIFACT_SUMMARY_LIMIT = 1000;
 const STATE_EVENT_COUNT_LIMIT = 100;
 const STATE_PROMPT_COUNT_LIMIT = 10;
@@ -50,6 +146,15 @@ const STATE_PROMPT_COUNT_LIMIT = 10;
 function boundedAuditText(value, limit) {
   if (typeof value !== "string" || value.length <= limit) return value;
   return `${value.slice(0, limit)}\n… state detail truncated to keep the harness responsive`;
+}
+
+// Worker capture already retains a 100 KB tail. Preserve that deliberate
+// bounded window, but compact oversized legacy or malformed output further
+// before it can make a state write unexpectedly large.
+function compactOutput(value) {
+  return typeof value === "string" && value.length > STATE_OUTPUT_LIMIT
+    ? boundedAuditText(value, STATE_PROMPT_LIMIT)
+    : value;
 }
 
 function compactActivity(activity) {
@@ -64,7 +169,7 @@ function compactActivity(activity) {
     content: boundedAuditText(prompt.content, STATE_PROMPT_LIMIT),
     prompt: boundedAuditText(prompt.prompt, STATE_PROMPT_LIMIT)
   }));
-  activity.rawOutput = boundedAuditText(activity.rawOutput, STATE_OUTPUT_LIMIT);
+  activity.rawOutput = compactOutput(activity.rawOutput);
   delete activity.groups;
 }
 
@@ -126,13 +231,15 @@ export function compactPersistedState(state, dataDir = null) {
     for (const node of run.plan?.nodes || []) for (const step of node.type === "group" ? node.children : [node]) {
       compactDiff(step.diff);
       for (const attempt of step.attempts || []) {
+        const eventCount = (attempt.events || []).length;
+        attempt.eventsTotal = Math.max(Number(attempt.eventsTotal) || 0, eventCount);
         attempt.events = (attempt.events || []).slice(-STATE_EVENT_COUNT_LIMIT).map((event) => {
           const compact = { ...event };
           for (const key of ["args", "output", "result", "detail"]) compact[key] = boundedAuditText(compact[key], STATE_EVENT_DETAIL_LIMIT);
           return compact;
         });
-        attempt.rawOutput = boundedAuditText(attempt.rawOutput, STATE_OUTPUT_LIMIT);
-        if (attempt.verification) attempt.verification.rawOutput = boundedAuditText(attempt.verification.rawOutput, STATE_OUTPUT_LIMIT);
+        attempt.rawOutput = compactOutput(attempt.rawOutput);
+        if (attempt.verification) attempt.verification.rawOutput = compactOutput(attempt.verification.rawOutput);
         compactDiff(attempt.diff);
         compactDiff(attempt.checkDiff);
         compactDiff(attempt.aggregateDiff);
@@ -168,6 +275,7 @@ export class JsonStore {
 
   async init() {
     await mkdir(dirname(this.file), { recursive: true });
+    let recovered = false;
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
       if ([3, 4, 5, 6].includes(saved.version)) this.state = saved;
@@ -178,22 +286,33 @@ export class JsonStore {
       this.state.stageProfiles = normalizeStageProfiles(this.state.stageProfiles);
       this.state.ticketRuns ||= {};
       this.state.retainedRuns ||= {};
-      for (const run of Object.values(this.state.ticketRuns)) {
+      for (const run of [...Object.values(this.state.ticketRuns), ...Object.values(this.state.retainedRuns)]) {
         recoverInterruptedCleanup(run);
         run.stageProfiles = normalizeStageProfiles(run.stageProfiles || this.state.stageProfiles);
+        if (await migrateArtifactBodies(run, dirname(this.file))) recovered = true;
+        if (ensureAttemptIds(run)) recovered = true;
         run.auto ||= false;
-        run.activeRuns = {};
-        for (const node of run.plan?.nodes || []) {
-          for (const step of node.type === "group" ? node.children : [node]) {
-            if (inFlightStepStatusSet.has(step.status)) step.status = "interrupted";
-          }
+        const activeRuns = run.activeRuns || {};
+        for (const step of flattenSteps(run.plan || { nodes: [] })) {
+          if (!inFlightStepStatusSet.has(step.status)) continue;
+          materializeActiveAttempt(step, activeRuns[step.id] || {}, {
+            status: "interrupted",
+            completedAt: new Date().toISOString(),
+            reason: "daemon_restart",
+            phase: "daemon_recovery"
+          });
+          step.status = "interrupted";
+          recovered = true;
         }
+        if (Object.keys(activeRuns).length) recovered = true;
+        run.activeRuns = {};
         for (const preview of Object.values(run.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: "daemon_restart" });
         if (inFlightRunStatusSet.has(run.status)) {
           const previousStatus = run.status;
           const previousMergeStatus = run.merge?.status;
           run.status = "interrupted";
           if (inFlightMergeStatusSet.has(run.merge?.status)) run.merge.status = "interrupted";
+          recovered = true;
           run.recovery = {
             kind: previousMergeStatus ? "delivery" : "execution",
             previousStatus,
@@ -214,7 +333,8 @@ export class JsonStore {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    await this.save();
+    // Restart recovery is a lifecycle transition, so persist it before exposure.
+    if (recovered) await this.save();
     return this.read();
   }
 

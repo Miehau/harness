@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 import { initializeProofMap } from "../src/proof-map.js";
 
@@ -246,9 +246,39 @@ test("pausing a run preserves the live attempt and session as an audit checkpoin
   assert.equal(run.plan.nodes[0].sessionFile, "/tmp/worker.jsonl");
   assert.equal(run.plan.nodes[0].attempts[0].sessionFile, "/tmp/worker.jsonl");
   assert.equal(run.plan.nodes[0].attempts[0].rawOutput, "partial");
+  assert.equal(run.plan.nodes[0].attempts[0].terminationReason, "run_paused");
+  assert.equal(run.plan.nodes[0].attempts[0].failureKind, "interruption");
   assert.deepEqual(run.activeRuns, {});
   assert.equal(audit.steps[0].lastEvent, "Editing");
   assert.equal(run.pauseHistory[0].id, "pause-1");
+});
+
+test("terminal snapshots isolate parallel workers and correction history", () => {
+  const plan = normalizePlan({ nodes: [
+    { id: "api", title: "API", status: "running", attempts: [] },
+    { id: "ui", title: "UI", status: "fixing", attempts: [] }
+  ] });
+  const run = {
+    status: "running", checkpoint: null, stages: [{ id: "implement", status: "active", summary: "Parallel work" }], plan,
+    activeRuns: {
+      api: { runId: "worker-api", attemptId: "attempt-1", startedAt: "2026-09-02T10:00:00.000Z", activity: { lastEvent: "Editing API", rawOutput: "api output", events: [{ label: "API" }] } },
+      ui: { runId: "worker-ui", attemptId: "attempt-1", startedAt: "2026-09-02T10:01:00.000Z", activity: { lastEvent: "Editing UI", rawOutput: "ui output", events: [{ label: "UI" }] } }
+    }
+  };
+  markRunCancelled(run, "2026-09-02T10:02:00.000Z");
+  assert.deepEqual(run.plan.nodes.map((step) => [step.attempts[0].attemptId, step.attempts[0].runId, step.attempts[0].rawOutput]), [
+    ["attempt-1", "worker-api", "api output"], ["attempt-1", "worker-ui", "ui output"]
+  ]);
+
+  const prior = structuredClone(run.plan.nodes[0].attempts[0]);
+  materializeActiveAttempt(run.plan.nodes[0], {
+    runId: "worker-api-correction", attemptId: "attempt-2", startedAt: "2026-09-02T10:03:00.000Z",
+    activity: { lastEvent: "Fixing API", rawOutput: "corrected output" }
+  }, { status: "verified", reason: "verification_complete", phase: "verification" });
+  assert.equal(run.plan.nodes[0].attempts.length, 2);
+  assert.deepEqual(run.plan.nodes[0].attempts[0], prior);
+  assert.equal(run.plan.nodes[0].attempts[1].attemptId, "attempt-2");
+  assert.equal(run.plan.nodes[0].attempts[1].rawOutput, "corrected output");
 });
 
 test("failed and paused workflows can resume from their persisted stage", () => {
@@ -327,7 +357,9 @@ test("rewinds a step and every later step to its recorded tree", () => {
   const audit = rewindRun(run, "step:two", "2026-08-27T12:00:00.000Z");
   assert.equal(audit.restoredTree, "after-one");
   assert.deepEqual(audit.resetStepIds, ["two", "three"]);
-  assert.equal(audit.discardedAttempts, 2);
+  assert.equal(audit.discardedAttempts, 0);
+  assert.equal(audit.retainedAttempts, 2);
+  assert.equal(run.plan.nodes[1].attempts.length, 2);
   assert.deepEqual(run.plan.nodes.map((step) => step.status), ["accepted", "ready", "ready"]);
   assert.equal(run.stages.find((stage) => stage.id === "implement").status, "pending");
   assert.equal(run.restartHistory[0].fromCheckpoint, "step_review");
@@ -379,6 +411,21 @@ test("activity capture bounds memory and coalesces pending persistence", async (
   await capture.flush();
   assert.equal(writes, 2);
   assert.equal(maxActiveWrites, 1);
+});
+
+test("activity and attempt snapshots redact secrets before durable persistence", () => {
+  const capture = createActivityCapture({ now: () => 1 });
+  capture.onEvent({ type: "prompt", content: "Use token=secret_abcdefgh", label: "Prompt" });
+  capture.onEvent({ type: "tool_end", result: "Authorization: Bearer abcdefghijklmnop", label: "Done" });
+  capture.onEvent({ type: "text_delta", delta: "ghp_0123456789abcdefghijklmnop" });
+  const activity = capture.snapshot();
+  assert.equal(JSON.stringify(activity).includes("secret_abcdefgh"), false);
+  assert.equal(JSON.stringify(activity).includes("abcdefghijklmnop"), false);
+  const step = normalizePlan({ nodes: [{ id: "one", title: "One" }] }).nodes[0];
+  const attempt = materializeActiveAttempt(step, { attemptId: "attempt-1", activity }, {
+    status: "failed", error: "password=secret_abcdefgh", report: { summary: "token=secret_abcdefgh" }
+  });
+  assert.equal(JSON.stringify(attempt).includes("secret_abcdefgh"), false);
 });
 
 test("groups persisted activity into named repository, change, and verification steps", () => {
