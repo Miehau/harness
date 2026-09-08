@@ -74,7 +74,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
       stepId: artifact.stepId ? clip(artifact.stepId, 200) : null,
       sourceStepTitle: artifact.sourceStepTitle ? clip(artifact.sourceStepTitle, 300) : null,
       path: artifact.path ? clip(artifact.path, 1_000) : null,
-      ...(artifact.kind === "visual-evidence" ? {} : { content: clip(artifact.content || artifact.summary, 4_000) })
+      ...(artifact.kind === "visual-evidence" ? { criterionIds: artifact.criterionIds || [], commands: artifact.commands || [], assertions: artifact.assertions || [], videoPath: artifact.videoPath || null } : { content: clip(artifact.content || artifact.summary, 4_000) })
     }));
 
   const files = clippedStrings(diff.files, 100, 300);
@@ -95,7 +95,9 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
         requirementIds: clippedStrings(step.requirementIds, 100, 100),
         capabilityIds: clippedStrings(step.capabilityIds, 100, 100),
         deltaIds: clippedStrings(step.deltaIds, 100, 100),
-        acceptanceCriteria: clippedStrings(step.acceptanceCriteria, 100, 500)
+        acceptanceCriteria: clippedStrings(step.acceptanceCriteria, 100, 500),
+        requiresVisualEvidence: Boolean(step.requiresVisualEvidence || step.requiresVideoEvidence),
+        requiresVideoEvidence: Boolean(step.requiresVideoEvidence)
       }))
     },
     artifacts: selectedArtifacts,

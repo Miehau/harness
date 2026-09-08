@@ -34,7 +34,9 @@ test("compacts the plan to outcomes and acceptance mappings", () => {
     requirementIds: ["REQ-1"],
     capabilityIds: ["CAP-search"],
     deltaIds: ["DELTA-1"],
-    acceptanceCriteria: ["Matching tickets are returned"]
+    acceptanceCriteria: ["Matching tickets are returned"],
+    requiresVisualEvidence: false,
+    requiresVideoEvidence: false
   });
   assert.equal("prompt" in packet.plan.outcomes[0], false);
   assert.equal("attempts" in packet.plan.outcomes[0], false);

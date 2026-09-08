@@ -15,7 +15,7 @@ import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, 
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, workerWriteScope } from "./pi-harness.js";
+import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
@@ -31,8 +31,9 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
-import { applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
+import { applyIndependentProofReports, applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
 import { createProcessContainment } from "./process-containment.js";
+import { applyVerifyEvidenceGate, planRequiresVisualEvidence, ticketBoundVisualEvidence, verifyStageEvidenceError } from "./visual-evidence.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
@@ -55,7 +56,7 @@ export function repositoryCheckReview(checks) {
       claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
       evidence: [],
       suggestedFix: missingVisualEvidence
-        ? "Configure a preview command or make the verification contract capture the required visual evidence."
+        ? "Make the verification contract write ticket-bound screenshots (and video when required) into AGENT_PLAN_EVIDENCE_DIR with a final-proof-manifest.json for this ticket and run."
         : `Make ${checks.command} pass.${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : `\n\n${checks.output}`}`,
       confidence: "high"
     }] : [],
@@ -63,20 +64,10 @@ export function repositoryCheckReview(checks) {
   };
 }
 
-export function reconcileVisualChecks(checks, evidence = [], { required = false, requiredVideo = false } = {}) {
+export function reconcileVisualChecks(checks, evidence = [], { required = false, requiredVideo = false, ticketId = null, runId = null } = {}) {
   checks.evidence = [...new Map((checks.evidence || []).map((item) => [item.path, item])).values()];
   checks.previewEvidence = [...new Map(evidence.map((item) => [item.path, item])).values()];
-  const hasImage = checks.evidence.some((item) => item.mediaKind === "image");
-  const hasVideo = checks.evidence.some((item) => item.mediaKind === "video");
-  const repositoryFailed = checks.status === "failed" && checks.failureKind !== "visual-evidence";
-  if (required && !repositoryFailed && (!hasImage || (requiredVideo && !hasVideo))) Object.assign(checks, {
-    status: "failed",
-    failureKind: "visual-evidence",
-    summary: requiredVideo && hasImage
-      ? "Visual verification produced no video evidence."
-      : "Visual verification produced no desktop or mobile evidence."
-  });
-  return checks;
+  return applyVerifyEvidenceGate(checks, { required, requiredVideo, ticketId, runId });
 }
 
 export function closeSseClients(clients) {
@@ -112,7 +103,7 @@ export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
     step.scopeChanges ||= [];
     step.scopeChanges.push({
       at, paths, source: "harness",
-      reason: "Visual verification must be able to correct its repository-owned evidence contract."
+      reason: "Feature workers maintain the repository verification, discovery and UI CLI contract."
     });
     changes.push({ stepId: step.id, paths });
   }
@@ -319,9 +310,10 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     requireVisualEvidence: required,
     requireVideoEvidence: requiredVideo,
     // Canonical proof must exercise both API and UI code from the worktree.
-    environment: required ? liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId) : {}
+    environment: required ? { ...liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId), AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(projectProofMap(current).criteria.filter((criterion) => criterion.requiresVisualEvidence && (!stepId || criterion.stepId === stepId)).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }))) } : {}
   });
-  reconcileVisualChecks(checks, evidence, { required, requiredVideo });
+  reconcileVisualChecks(checks, evidence, { required, requiredVideo, ticketId, runId: current.runId });
+  const bound = required ? ticketBoundVisualEvidence(checks.evidence, { ticketId, runId: current.runId, evidenceDir: checks.evidenceDir }) : { bound: false };
   if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
@@ -329,9 +321,10 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     for (const [kind, items] of [["visual-evidence", checks.evidence], ["preview-diagnostic", checks.previewEvidence]]) {
       for (const item of items) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
         id: randomUUID(), name: item.name, path: item.path, kind, stageId: "verify", stepId,
-        mediaType: item.mediaType, mediaKind: item.mediaKind,
+        mediaType: item.mediaType, mediaKind: item.mediaKind, criterionIds: item.criterionIds || [], commands: item.commands || [], assertions: item.assertions || [], videoPath: item.videoPath || null,
         summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        ...(kind === "visual-evidence" && bound.bound ? { boundTicketId: ticketId, boundRunId: current.runId } : {})
       });
     }
   });
@@ -733,9 +726,9 @@ function nextAttemptId(step) {
   return `attempt-${current + 1}`;
 }
 
-function applyStepProof(run, stepId, reports) {
+function applyStepProof(run, stepId, reports, evidence = []) {
   if (!run.proofMap) return;
-  run.proofMap = applyProofReports(run.proofMap, reports, run, { criterionIds: stepCriterionIds(run, stepId) });
+  run.proofMap = applyIndependentProofReports(run.proofMap, reports, run, { criterionIds: stepCriterionIds(run, stepId), mediaIds: run.artifacts.filter((artifact) => evidence.some((item) => item.path === artifact.path)).map(({ id }) => id) });
 }
 
 function explicitCriterionIds(run, candidateIds, { stepId = null } = {}) {
@@ -1177,7 +1170,7 @@ async function loadLocalRun(inputPath) {
   const stageProfiles = currentState.stageProfiles;
   const fixture = await loadLocalFixture(source, inputPath);
   const [contractExists, projectConfigExists] = await Promise.all([
-    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
   const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);
@@ -1637,7 +1630,6 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.lastError = error;
             target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange, rolledBack: runawayDiff });
             current.artifacts.push(...artifacts);
-            applyStepProof(current, stepId, result.report.criterionResults);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
             setStage(current, "implement", "blocked", error);
@@ -1662,7 +1654,6 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.lastError = null;
             target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, checkDiff, vcsChange });
             current.artifacts.push(...artifacts);
-            applyStepProof(current, stepId, result.report.criterionResults);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
             current.checkpoint = { id: randomUUID(), ...workerGate, createdAt: new Date().toISOString() };
@@ -1696,7 +1687,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
             design, diff, output: result.output, checks,
             proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
-            artifacts: ticketRun(store.read(), ticketId).artifacts,
+            artifacts: ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)),
             runId: latest.runId, round,
             focusFindings: verificationFocusFindings(nextFeedback, previousFindings),
             images: await harness.evidenceImages(checks.evidence),
@@ -1752,8 +1743,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.artifacts = [artifacts[0], verificationArtifact];
           target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, checks, verification, diff: attemptDiff, checkDiff, vcsChange });
           current.artifacts.push(...artifacts, verificationArtifact);
-          applyStepProof(current, stepId, result.report.criterionResults);
-          applyStepProof(current, stepId, verification.criterionResults);
+          applyStepProof(current, stepId, verification.criterionResults, checks.evidence);
           delete current.activeRuns[stepId];
         });
         await persistProofSnapshot(ticketId, { stageId: "verify", stepId, attemptId, name: "proof-map-verification.json" });
@@ -2300,6 +2290,18 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
 }
 
 async function completeCleanReview({ ticketId, current, round, checks, diff, activity, signal }) {
+  const eligibility = proofGate(ticketRun(store.read(), ticketId));
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
+  if (planRequiresVisualEvidence(current.plan)) {
+    const blocked = verifyStageEvidenceError({
+      ...current,
+      ticket: current.ticket,
+      runId: current.runId,
+      plan: current.plan,
+      artifacts: (ticketRun(store.read(), ticketId).artifacts || [])
+    }, { media: checks.evidence });
+    if (blocked) throw new Error(blocked);
+  }
   await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
   let contextArtifact = null;
   let contextContent = null;
@@ -2324,7 +2326,9 @@ async function completeCleanReview({ ticketId, current, round, checks, diff, act
   const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
   const media = (ticketRun(store.read(), ticketId).artifacts || [])
     .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
-    .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }) => ({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }));
+    .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId, boundTicketId, boundRunId }) => ({
+      id, name, path, summary, mediaType, mediaKind, stageId, stepId, boundTicketId, boundRunId
+    }));
   const finalChecks = {
     status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
     evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
@@ -2387,7 +2391,7 @@ async function finalReviewLoop(ticketId, signal) {
   });
   const refreshedRun = ticketRun(store.read(), ticketId);
   const cleanReview = recoverableCleanReview(refreshedRun);
-  if (cleanReview) {
+  if (cleanReview && proofGate(refreshedRun).eligible) {
     await completeCleanReview({ ticketId, current: ticketRun(store.read(), ticketId), ...cleanReview, activity, signal });
     return;
   }
@@ -2435,7 +2439,7 @@ async function finalReviewLoop(ticketId, signal) {
     const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
     const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
     const operatorFeedback = [reviewFixConstraints(current), current.pendingEvidenceFeedback || ""].filter(Boolean).join("\n");
-    const reviewArtifacts = await hydrateArtifacts(current.artifacts, dataDir);
+    const reviewArtifacts = await hydrateArtifacts(reviewRun.artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)), dataDir);
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
@@ -2484,7 +2488,12 @@ async function finalReviewLoop(ticketId, signal) {
       run.finalReviewHistory[reviewId] ||= { createdAt };
       run.finalReviewSequence = Math.max(finalReviewSequence(run), round);
       run.reviews.push({ round, reviewId, reviews, finalChecks: structuredClone(finalChecks), actionableFindings: findings, diff, createdAt });
-      if (run.proofMap) for (const review of reviews) run.proofMap = applyProofReports(run.proofMap, review.criterionResults, run);
+      if (run.proofMap) {
+        const mediaIds = run.artifacts.filter((artifact) => (checks.evidence || []).some((item) => item.path === artifact.path)).map(({ id }) => id);
+        run.proofMap = applyIndependentProofReports(run.proofMap, reviews.find((review) => review.role === "requirements")?.criterionResults, run, { mediaIds });
+        // A dissenting reviewer cannot be outvoted by a later success report.
+        for (const review of reviews) run.proofMap = applyProofReports(run.proofMap, (review.criterionResults || []).filter((result) => ["failed", "blocked"].includes(result.status)), run);
+      }
       delete run.pendingReviewAttempt;
       delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
@@ -2528,6 +2537,8 @@ async function finishHandoff(ticketId) {
   if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
   const eligibility = proofGate(current);
   if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
+  const missingEvidence = verifyStageEvidenceError(current);
+  if (missingEvidence) throw new Error(missingEvidence);
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
   const contextContent = current.ticket.source === "local" ? null : (await hydrateArtifact(proposal, dataDir))?.content;
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
@@ -2735,7 +2746,7 @@ async function freshLocalRun(previous, runId) {
   const source = store.read().workspace.cwd;
   const fixture = await loadLocalFixture(source, previous.ticket.fixturePath);
   const [contractExists, projectConfigExists] = await Promise.all([
-    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
   const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);

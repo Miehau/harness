@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const checks = [
   { name: "node scripts/test.mjs", args: ["scripts/test.mjs"] },
-  { name: "node scripts/test.mjs --check", args: ["scripts/test.mjs", "--check"] }
+  { name: "node scripts/test.mjs --check", args: ["scripts/test.mjs", "--check"] },
+  { name: "node --test .agent-plan/ui.test.mjs", args: ["--test", ".agent-plan/ui.test.mjs"] }
 ];
 
 function runCheck({ args }) {
@@ -19,13 +19,13 @@ function runCheck({ args }) {
 }
 
 let failed = false;
-const capturePath = resolve(repositoryRoot, ".agent-plan", "capture-proof-dashboard.mjs");
-if (await stat(capturePath).then(() => true, () => false)) {
-  process.stdout.write("Capturing criterion-proof dashboard evidence\n");
-  const capture = await runCheck({ args: [".agent-plan/capture-proof-dashboard.mjs"] });
+const liveProof = process.env.AGENT_PLAN_EVIDENCE_DIR && process.env.AGENT_PLAN_CAPTURE_TICKET_ID && process.env.AGENT_PLAN_CAPTURE_RUN_ID && process.env.AGENT_PLAN_CAPTURE_URL;
+if (liveProof) {
+  process.stdout.write("Capturing ticket-bound verify evidence\n");
+  const capture = await runCheck({ args: ["scripts/capture-ticket-proof.mjs"] });
   if (capture.error || capture.code !== 0) {
     failed = true;
-    process.stderr.write(`Failed criterion-proof dashboard capture${capture.error ? `: ${capture.error.message}` : ""}\n`);
+    process.stderr.write(`Failed ticket-bound verify capture${capture.error ? `: ${capture.error.message}` : ""}\n`);
   }
 }
 for (const check of checks) {

@@ -182,7 +182,12 @@ export async function runProjectCommand(cwd, name, { signal, execImpl = exec, so
   const argv = config.commands[name];
   if (!argv) throw new Error(`Unknown project command “${name}”; add it to ${projectConfigPath}`);
   validateCommand(name, argv);
-  if (!Array.isArray(args) || args.length > 8 || args.some((argument) => !/^[a-z0-9][a-z0-9._-]*$/i.test(argument))) throw new Error(`Project command “${name}” received unsafe arguments`);
+  // Only the project UI parser accepts text/flags; never forward them to a runtime directly.
+  const uiCommand = name === "ui" && argv.length === 2 && argv[0] === "node" && argv[1] === ".agent-plan/ui.mjs";
+  const validArgument = (argument) => typeof argument === "string" && (uiCommand
+    ? argument.length > 0 && argument.length <= 4096 && !argument.includes("\0")
+    : /^[a-z0-9][a-z0-9._-]*$/i.test(argument));
+  if (!Array.isArray(args) || args.length > (uiCommand ? 16 : 8) || !args.every(validArgument)) throw new Error(`Project command “${name}” received unsafe arguments`);
   const baseEnvironment = await projectEnvironment(cwd, config, { source, execImpl });
   // Ownership augments the deliberately curated command environment; it never
   // substitutes process.env or grants a command access to ambient secrets.

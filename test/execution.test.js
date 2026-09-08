@@ -770,7 +770,7 @@ test("compact run and public state omit artifact bodies", () => {
 
 test("public state fully projects only the selected run", () => {
   const selected = { id: "selected", runId: "r1", status: "running", artifacts: [{ id: "a" }], stages: [], plan: { nodes: [] } };
-  const other = { id: "other", runId: "r2", status: "paused", artifacts: [{ id: "b" }], stages: [], plan: { nodes: [] } };
+  const other = { id: "other", runId: "r2", createdAt: "2026-09-01T00:00:00.000Z", status: "paused", artifacts: [{ id: "b" }], stages: [], plan: { nodes: [] } };
   const published = publicState({ revision: 7, selectedTicketId: "selected", ticketRuns: { selected, other }, retainedRuns: {} });
   assert.ok(Array.isArray(published.ticketRuns.selected.artifacts));
   assert.deepEqual(published.ticketRuns.other, compactRun(other, 7));

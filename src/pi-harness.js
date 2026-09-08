@@ -13,14 +13,25 @@ import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommand
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
+import { prepareVisualEvidence } from "./visual-evidence.js";
 import { createExecutionOwnership, createProcessContainment, environmentForOwnership } from "./process-containment.js";
 
 const exec = promisify(execFile);
 
 const verificationEntry = ".agent-plan/verify.mjs";
+export const verificationContractFiles = [verificationEntry, projectConfigPath, ".agent-plan/feature-map.md", ".agent-plan/ui.mjs", ".agent-plan/ui.test.mjs"];
+export async function verificationContractExists(cwd) {
+  return (await Promise.all(verificationContractFiles.map((path) => access(join(cwd, path)).then(() => true, (error) => {
+    if (error.code !== "ENOENT") throw error;
+    return false;
+  })))).every(Boolean);
+}
+const discoveryInstruction = `Start at .agent-plan/feature-map.md, then read only the relevant feature leaf and owning source. Maintain this progressive map when behavior or navigation changes: a small feature index, directory ownership, and linked leaves explaining purpose, UI entry points, CLI journeys, observable states, and focused tests. Reuse existing feature documentation through links instead of duplicating it.
+Own .agent-plan/ui.mjs as a thin project-specific browser CLI (for example tasks list, tasks add, tasks open). Reuse existing Playwright/browser tooling and selectors; keep browser details inside the CLI. Test real navigation and assertions against an isolated running app in .agent-plan/ui.test.mjs, and include that test in verify.mjs. Expose ui and ui-test as named argv commands in project.json. For an empty or non-UI repository, provide help and a tested explicit UI-unavailable result; add the first real journey with the first UI feature. Do not build speculative commands.
+For each visual acceptance criterion, use the CLI to arrange state, execute the relevant actions, assert the expected result, and capture evidence. Write final-proof-manifest.json into AGENT_PLAN_EVIDENCE_DIR with source live-ticket-run, identity.ticketId and identity.runId from AGENT_PLAN_CAPTURE_TICKET_ID and AGENT_PLAN_CAPTURE_RUN_ID, and captures listing path, criterionIds, commands, and assertions. Use AGENT_PLAN_CAPTURE_CRITERIA (JSON) to select current criterion IDs; never claim a generic screenshot proves unrelated criteria. Record real interaction video when required; never synthesize video from screenshots. The harness validates video decoding and attaches sampled frames; motion/timing still requires human playback review.`;
 export const MAX_VERIFICATION_ACTIONS = 30;
 export const MAX_VERIFICATION_MS = 5 * 60 * 1000;
-const visualProofIdentityInstruction = `For every attached screenshot, verify the rendered page itself identifies the expected ticket and shows a fully loaded state. Compare visible ticket identifier/title and run state with the review packet; filenames, manifests, URLs, and capture-script claims are not proof of identity. Report a high-severity evidence finding when an image shows another ticket, blank or partially rendered content, stale recovery state, or any identity that cannot be verified visibly.`;
+const visualProofIdentityInstruction = `Inspect every attached screenshot and sampled video frame against the acceptance criteria and recorded CLI journey. Verify the expected application, screen, data and fully loaded state visibly; when the product displays ticket identity, compare it with the expected ticket. Filenames, manifests and capture claims alone are not visual proof. Report incorrect, blank, partial, stale or unverifiable states. Video frames establish sampled states only: motion and timing require the recorded assertions and human playback review.`;
 
 export function transientRepositoryCheckFailure(output = "") {
   return /\bENOTEMPTY\b[\s\S]{0,200}\b(?:directory not empty|rmdir|scandir)\b/i.test(String(output));
@@ -97,8 +108,8 @@ Rules:
 - Ordinary planned write steps must use finite write scopes. Do not use "*" or "**" unless reviewBudget.justification explains why the change is genuinely indivisible.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - Default to serial vertical slices. Use a shared-contract plus parallel-conformance shape only when both sides are independently testable, have disjoint write scopes, and parallel execution materially reduces risk or latency. Put cross-branch integration tests in the dependent integration step.
-- Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. If it is missing, the first architecture write step creates it with Node standard-library process calls and includes only ".agent-plan" in its write scope. The entry point must run the repository's relevant tests, lint, type checks, and builds, fail on any failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
-- The verification bootstrap also creates or updates .agent-plan/project.json. Store executable commands as argv arrays in project.json; never make the harness parse prose for commands. Do not combine this bootstrap with product code, docs/architecture.md, AGENTS.md, or other documentation. Add documentation in a separate ticket-specific step only when the approved requirements directly justify it.
+- Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. The first architecture write step establishes missing harness files inside .agent-plan. The entry point must run all repository tests, lint, type checks, builds and the UI CLI tests, propagate every failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
+- The verification bootstrap creates project.json, feature-map.md, ui.mjs and ui.test.mjs inside .agent-plan. Store executable commands as argv arrays in project.json; never parse prose for commands. ${discoveryInstruction} Each feature slice owns its affected map leaves, navigation commands and tests within its declared write scope. Keep writes to shared CLI/index files serial. Bootstrap must not modify product code or agent guidance.
 - Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
 - Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case the verification entry point must capture at least one PNG, JPEG, or WebP screenshot into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling. Set requiresVideoEvidence to true only when acceptance specifically needs interaction proof; that requires both a screenshot and at least one real WebM or MP4. Never turn screenshots into a video.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
@@ -132,7 +143,7 @@ Return ONLY valid JSON:
 }`;
 
 const ticketExplorationInstruction = `The requirements have already been clarified and approved. You may inspect the repository but must not modify it.
-1. Validate the supplied capability ledger against relevant code, tests, conventions, and dependency boundaries.
+1. Start at .agent-plan/feature-map.md if present; read only the relevant feature leaf, directory owners and UI CLI journeys. Validate the supplied capability ledger against relevant code, tests, conventions, and dependency boundaries.
 2. Produce a verified implementation delta with stable CAP-* and DELTA-* IDs, classifying behavior as shipped, partial, missing, or conflicting.
 3. Never silently reinterpret an approved requirement. Report only technical exceptions that require a user decision.
 
@@ -309,8 +320,9 @@ export function stepContext({ plan, step, artifacts, proofMap }) {
 Design from the repository as it exists now, preserve completed outcomes, and leave the smallest sound path for the remaining plan.
 
 ${!outsideContractScope(step.writeScope) ? `
-Own the repository verification contract. If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. For interaction-recording acceptance, make it write a real WebM or MP4 there; never make a video from screenshots. Do not add a dependency only for this wrapper.
-Also own ${projectConfigPath}, keeping commands, allowed environment names/files, and port variables machine-readable. Do not modify architecture or agent-guidance documents unless the approved ticket has a separate, explicit documentation step.
+Own the repository verification contract. ${discoveryInstruction}
+If ${verificationEntry} is missing or incomplete, create or update it using Node standard-library process calls. It must run every project-specific deterministic check through one command: node ${verificationEntry}. For browser-visible acceptance, make it write screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR. For interaction-recording acceptance, make it write a real WebM or MP4 there; never make a video from screenshots. Do not add a dependency only for this wrapper.
+Also own ${projectConfigPath}, keeping commands, allowed environment names/files, and port variables machine-readable. Maintain the feature discovery and UI CLI contract alongside verification. Do not modify unrelated architecture or agent-guidance documents.
 ` : ""}
 
 ### Already completed
@@ -342,6 +354,9 @@ Capability IDs: ${step.capabilityIds?.join(", ") || "none"}
 Implementation delta IDs: ${step.deltaIds?.join(", ") || "none"}
 ${architectureHorizon}
 
+## Feature discovery and maintenance
+${discoveryInstruction}
+
 ## Relevant product context
 ${step.productContext || "No step-specific product context was assigned."}
 
@@ -370,7 +385,7 @@ Work only within the stated permission and write scope. Expected files are a pla
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists) {
   plan = includeVisualVerificationScope(plan);
-  if ((contractExists && projectConfigExists) || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && [step.prompt, ...(step.expectedArtifacts || []), ...(step.acceptanceCriteria || [])].some((value) => String(value).includes(projectConfigPath)))) return plan;
+  if ((contractExists && projectConfigExists) || flattenSteps(plan).some((step) => step.role === "architecture" && step.permission === "write" && !outsideContractScope(step.writeScope) && verificationContractFiles.every((path) => (step.expectedFiles || []).includes(path)))) return plan;
   const id = findContractId(plan);
   const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
   const nodes = structuredClone(plan.nodes);
@@ -380,17 +395,19 @@ export function ensureVerificationContractStep(plan, contractExists, projectConf
     type: "step",
     role: "architecture",
     title: "Establish repository verification contract",
-    description: `Record machine-executable commands, the environment allow-list, and the repository's deterministic verification entry point.`,
-    prompt: `Inspect the repository and create or update ${projectConfigPath} and ${verificationEntry}. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. Do not modify product code, architecture documentation, or agent guidance. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there. When a later step requires video evidence, write a real WebM or MP4 interaction recording; never make a video from screenshots." : "Do not add browser tooling unless a later step requires visual evidence."}`,
+    description: `Establish deterministic checks, progressive feature discovery and a tested project-specific UI CLI.`,
+    prompt: `Inspect the repository and create or update ${projectConfigPath} and ${verificationEntry}. In project.json, store commands as argv arrays, environment variable names under environment.pass, explicitly approved ignored local env files under environment.files, and port variable names under ports.variables. The verification script must use Node standard-library process calls and propagate every failed test, lint, type-check, and build command. ${discoveryInstruction} Do not modify product code, unrelated architecture documentation, or agent guidance. ${visual ? "When AGENT_PLAN_EVIDENCE_DIR is set, use the project's existing browser tooling to write representative screenshots there. When a later step requires video evidence, write a real WebM or MP4 interaction recording; never make a video from screenshots." : "Do not add browser tooling unless a later step requires visual evidence."}`,
     permission: "write",
     writeScope: ".agent-plan",
-    expectedFiles: [projectConfigPath, verificationEntry],
-    estimatedChangedLines: 100,
+    expectedFiles: verificationContractFiles,
+    estimatedChangedLines: 300,
     acceptanceCriteria: [
       `${projectConfigPath} declares executable commands separately from prose`,
-      `node ${verificationEntry} runs the repository's relevant deterministic checks from one stable entry point`
+      `node ${verificationEntry} runs all repository deterministic checks and the UI CLI tests; compare its commands with repository test/build configuration`,
+      `The feature map supports selective discovery of directory owners, behavior and UI journeys`,
+      `The UI CLI exercises and tests a real initial journey when a UI exists, or explicitly reports UI unavailable otherwise`
     ],
-    expectedArtifacts: [projectConfigPath, verificationEntry],
+    expectedArtifacts: verificationContractFiles,
     dependsOn: []
   }, ...nodes] });
 }
@@ -399,7 +416,7 @@ export function workerWriteScope(step) {
   const scope = String(step?.writeScope || "").split(",").map((item) => item.trim()).filter(Boolean);
   // Visual proof is produced by the repository contract, so a visual slice must
   // be able to correct that contract without gaining access to unrelated code.
-  if (step?.permission === "write" && step.requiresVisualEvidence && outsideContractScope(scope.join(","))) scope.push(".agent-plan");
+  if (step?.permission === "write" && outsideContractScope(scope.join(","))) scope.push(".agent-plan");
   return [...new Set(scope)].join(",");
 }
 
@@ -676,14 +693,18 @@ export class PiHarness {
     const modelRuntime = await this.modelRuntimePromise;
     const model = modelRuntime.getModel(profile.provider, profile.model);
     if (!model) throw new Error(`Pi model not found: ${profile.provider}/${profile.model}`);
-    return { modelRuntime, model, thinkingLevel: profile.thinking };
+    const mapped = model.thinkingLevelMap && Object.hasOwn(model.thinkingLevelMap, profile.thinking)
+      ? model.thinkingLevelMap[profile.thinking]
+      : profile.thinking;
+    // A null map entry means this model cannot take a reasoning parameter.
+    return mapped == null ? { modelRuntime, model } : { modelRuntime, model, thinkingLevel: mapped };
   }
 
   async applyProfile(session, profile) {
     if (!profile) return;
     const { model, thinkingLevel } = await this.sessionOptions(profile);
     if (session.model?.provider !== model.provider || session.model?.id !== model.id) await session.setModel(model);
-    session.setThinkingLevel(thinkingLevel);
+    if (thinkingLevel != null) session.setThinkingLevel(thinkingLevel);
   }
 
   configuredPrompt(session, profile, instruction) {
@@ -736,20 +757,8 @@ export class PiHarness {
           result = { status: "failed", command, summary: `${verificationEntry} could not be read.`, output: error.message, evidence: [] };
           return result;
         }
-        let packageJson;
-        try { packageJson = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")); }
-        catch (packageError) {
-          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: packageError.code === "ENOENT" ? "" : packageError.message, evidence: [] };
-          return result;
-        }
-        if (!packageJson.scripts?.test) {
-          const summary = requireVisualEvidence ? `Visual verification requires ${verificationEntry}.` : "No deterministic verification entry point was discovered.";
-          result = { status: requireVisualEvidence ? "failed" : "skipped", command: null, summary, output: "", evidence: [] };
-          return result;
-        }
-        command = "npm test";
-        args = ["test"];
+        result = { status: "failed", command, failureKind: "verification-contract", summary: `Missing ${verificationEntry}; repair the repository verification contract before continuing.`, output: "", evidence: [] };
+        return result;
       }
       let evidenceDir = null;
       if (requireVisualEvidence) {
@@ -762,7 +771,7 @@ export class PiHarness {
         ...(await projectEnvironment(cwd, config)), CI: "1", ...captureEnvironment,
         ...(requireVisualEvidence ? { AGENT_PLAN_EVIDENCE_DIR: evidenceDir } : {})
       });
-      const executable = command === "npm test" ? "npm" : process.execPath;
+      const executable = process.execPath;
       // execFile waits for `close`, which a token-owned descendant can defer by
       // retaining inherited pipes. The controlled runner settles at the child
       // exit or deadline so timeout cleanup below is requested immediately.
@@ -773,15 +782,20 @@ export class PiHarness {
         // descendants require a fresh worker-exit containment cycle.
         executionContainment.beginLaunch?.();
         const { stdout, stderr } = await runner(executable, args, { cwd, signal, timeout: this.repositoryCheckTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: environment, containment: executionContainment });
-        const evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
+        let evidence = (evidenceDir ? await readdir(evidenceDir, { withFileTypes: true }) : [])
           .filter((entry) => entry.isFile())
           .map((entry) => ({ name: entry.name, path: join(evidenceDir, entry.name) }))
           .map((item) => ({ ...item, ...visualEvidenceMedia(item.path) }))
           .filter((item) => item.mediaType);
+        const hasScreenshot = evidence.some((item) => item.mediaKind === "image");
+        evidence = await prepareVisualEvidence(evidence, { evidenceDir, run: (executable, args) => {
+          executionContainment.beginLaunch?.();
+          return runner(executable, args, { cwd, signal, timeout: this.repositoryCheckTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: environment, containment: executionContainment });
+        } });
         const output = eventText(redactCommandOutput([stdout, stderr].filter(Boolean).join("\n"), environment));
-        if (requireVisualEvidence && !evidence.some((item) => item.mediaKind === "image")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-        else if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, durationMs: Date.now() - startedAt };
-        else result = { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, durationMs: Date.now() - startedAt };
+        if (requireVisualEvidence && !hasScreenshot) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no screenshot evidence.`, output, evidence, evidenceDir, durationMs: Date.now() - startedAt };
+        else if (requireVideoEvidence && !evidence.some((item) => item.mediaKind === "video")) result = { status: "failed", failureKind: "visual-evidence", command, summary: `${command} passed but produced no video evidence.`, output, evidence, evidenceDir, durationMs: Date.now() - startedAt };
+        else result = { status: "passed", command, summary: `${command} passed${attempt ? " after retrying a transient filesystem cleanup failure" : ""}${evidence.length ? ` with ${evidence.length} visual artifact${evidence.length === 1 ? "" : "s"}` : ""}.`, output, evidence, evidenceDir, durationMs: Date.now() - startedAt };
         return result;
       } catch (error) {
         const timedOut = error?.code === "ETIMEDOUT" || (error?.killed === true && error?.signal === "SIGTERM");
@@ -938,18 +952,8 @@ export class PiHarness {
       const skillNames = availableSkillNames(session);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketDesignInstruction)}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Design output");
-      let contractExists = true;
-      try { await access(join(cwd, verificationEntry)); }
-      catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        contractExists = false;
-      }
-      let projectConfigExists = true;
-      try { await access(join(cwd, projectConfigPath)); }
-      catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        projectConfigExists = false;
-      }
+      const contractExists = await verificationContractExists(cwd);
+      const projectConfigExists = contractExists;
       let plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists);
       let violations = planReviewViolations(plan);
       if (violations.length) {
@@ -1148,7 +1152,7 @@ ${(proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
 Visual evidence required: ${step.requiresVideoEvidence ? "yes — attach both the screenshot and real WebM or MP4 interaction recording produced by the verification contract" : step.requiresVisualEvidence ? "yes — attach the screenshots produced by the verification contract" : "no"}
 ${images.length ? visualProofIdentityInstruction : ""}
 Eligible captured media IDs (use these as evidence.type=media artifactId values):
-${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifact.stepId || artifact.stepId === step.id)).map((artifact) => `- ${artifact.id}: ${artifact.name}`).join("\n") || "- None"}
+${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifact.stepId || artifact.stepId === step.id)).map((artifact) => `- ${artifact.id}: ${artifact.name} ${JSON.stringify({ criterionIds: artifact.criterionIds, commands: artifact.commands, assertions: artifact.assertions, videoPath: artifact.videoPath })}`).join("\n") || "- None"}
 
 Worker artifact:
 ${output}
@@ -1159,6 +1163,8 @@ ${diff.patch || "No textual diff"}
 
 Deterministic gate:
 ${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }, null, 2)}
+
+Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
 
 Return ONLY JSON:
 {
@@ -1340,6 +1346,8 @@ ${focusFindings.length
     ? "This is a correction review. Re-check every earlier finding against the current repository and inspect regressions directly introduced by its fixes. Report an earlier finding again when it remains unresolved; omit it only after verifying that current code or evidence resolves it. Do not start a new broad audit or expand the review horizon."
     : "This is the initial broad review. Inspect the complete ticket outcome within the charter above."}
 
+The requirements reviewer must return an explicit criterionResults verdict for EVERY approved criterion ID, even on correction rounds. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate.
+
 Return ONLY JSON:
 {
   "summary": "concise independent assessment",
@@ -1377,7 +1385,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
         ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n\nCurrent deterministic gate (authoritative; supersedes every earlier check result in this conversation):\n${JSON.stringify(packet.checks, null, 2)}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\nReturn only the required review JSON.`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
-      await session.prompt(turnPrompt, { images: existingFile ? [] : images });
+      await session.prompt(turnPrompt, { images });
       signal?.throwIfAborted();
       const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
       return {

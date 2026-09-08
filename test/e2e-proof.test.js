@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { ticketProofManifest, visualEvidenceManifestName } from "../src/visual-evidence.js";
 import { promisify } from "node:util";
 import { normalizePlan } from "../src/plan.js";
 import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
@@ -44,9 +45,13 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
   const videoPath = join(mediaDir, "interaction.webm");
   await writeFile(imagePath, "png-proof");
   await writeFile(videoPath, "webm-proof");
+  await writeFile(join(mediaDir, visualEvidenceManifestName), JSON.stringify(ticketProofManifest({
+    ticketId: ticket.id, runId: "run-1",
+    captures: [{ name: "desktop", path: "desktop.png" }, { name: "interaction", path: "interaction.webm" }]
+  })));
   calls.evidence = [
-    { name: "desktop.png", path: imagePath, mediaType: "image/png", mediaKind: "image" },
-    { name: "interaction.webm", path: videoPath, mediaType: "video/webm", mediaKind: "video" }
+    { name: "desktop.png", path: imagePath, mediaType: "image/png", mediaKind: "image", boundTicketId: ticket.id, boundRunId: "run-1" },
+    { name: "interaction.webm", path: videoPath, mediaType: "video/webm", mediaKind: "video", boundTicketId: ticket.id, boundRunId: "run-1" }
   ];
 
   const plan = normalizePlan({ title: "Proof", nodes: [{
@@ -55,7 +60,7 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
     requirementIds: ["REQ-proof"], requiresVideoEvidence: true
   }] });
   plan.nodes[0].status = "accepted";
-  const artifacts = calls.evidence.map((item, index) => ({ ...item, id: `media-${index}`, kind: "visual-evidence", stageId: "verify" }));
+  const artifacts = calls.evidence.map((item, index) => ({ ...item, id: `media-${index}`, kind: "visual-evidence", stageId: "verify", boundTicketId: ticket.id, boundRunId: "run-1" }));
   const finalChecks = { status: "passed", summary: "integration checks passed" };
   const proofMap = verifiedProofMap(plan, { plan, artifacts, finalChecks, proofStorageRoot: dataDir }, [{ type: "check", scope: "final" }]);
   const id = await seedRun(daemon, {
@@ -64,6 +69,27 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
     checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks, evidenceArtifactIds: artifacts.map((item) => item.id), videoRequired: true }
   });
   return { id, imagePath, videoPath };
+}
+
+async function freshVisualChecks(calls, environment = {}) {
+  const directory = await mkdtemp(join(calls.evidence[0].path, "..", "capture-"));
+  const criterionIds = JSON.parse(environment.AGENT_PLAN_CAPTURE_CRITERIA || "[]").map(({ id }) => id);
+  const evidence = await Promise.all(calls.evidence.map(async (item) => {
+    const path = join(directory, item.name);
+    await copyFile(item.path, path);
+    return { ...item, path, criterionIds, commands: [["tasks", "open", "proof-local"]], assertions: [{ selector: "#ticket-header", text: "Proof delivery" }] };
+  }));
+  const framePath = join(directory, "recording-frame.png");
+  await copyFile(evidence[0].path, framePath);
+  evidence.push({ ...evidence[0], name: "recording-frame.png", path: framePath, videoPath: evidence[1].path });
+  return { status: "passed", command: "verify", summary: "new final checks", output: "new output", evidence };
+}
+
+function independentResults(proofMap, artifacts = []) {
+  return proofMap.criteria.map((criterion) => ({
+    criterionId: criterion.id, status: "verified", explanation: { summary: "Fixture independent verification" },
+    evidence: [{ type: "check", scope: "final" }, ...artifacts.filter((artifact) => artifact.criterionIds?.includes(criterion.id)).map(({ id }) => ({ type: "media", artifactId: id }))]
+  }));
 }
 
 async function waitFor(daemon, id, predicate) {
@@ -125,13 +151,11 @@ test("verification restart preserves old final evidence and assigns a fresh revi
   const calls = { evidence: [] };
   const harness = {
     ...mockHarness(),
-    runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "new final checks", output: "new output", evidence: calls.evidence }),
+    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role, proofMap }) => ({
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({
       role, summary: `${role} passed`, findings: [],
-      criterionResults: proofMap.criteria.map((criterion) => ({
-        criterionId: criterion.id, status: "verified", evidence: [{ type: "check", scope: "final" }]
-      }))
+      criterionResults: independentResults(proofMap, artifacts)
     })
   };
   await withDaemon(async (daemon, fixture) => {
@@ -212,7 +236,7 @@ test("accepting a no-change Jujutsu step does not create an empty ticket commit"
     ...mockHarness(),
     runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role }) => ({ role, summary: `${role} passed`, findings: [] })
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({ role, summary: `${role} passed`, findings: [], criterionResults: independentResults(proofMap, artifacts) })
   };
   await withDaemon(async (daemon, { cwd, dataDir }) => {
     await exec("git", ["init", "-q", "-b", "main"], { cwd });
@@ -242,9 +266,9 @@ test("requesting proof changes enters the correction loop and returns to final r
   const calls = { evidence: [], fixes: [] };
   const harness = {
     ...mockHarness(),
-    runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: calls.evidence }),
+    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role }) => ({ role, summary: `${role} passed`, findings: [] }),
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({ role, summary: `${role} passed`, findings: [], criterionResults: independentResults(proofMap, artifacts) }),
     runStep: async ({ step }) => { calls.fixes.push(step.prompt); return { report: { status: "completed", summary: "fixed" }, output: "fixed", events: [], rawOutput: "" }; }
   };
   await withDaemon(async (daemon, fixture) => {

@@ -47,6 +47,8 @@ function criterionSnapshots(plan) {
       stepId: step.id,
       stepTitle: String(step.title || ""),
       stepRequired: step.required !== false,
+      requiresVisualEvidence: step.requiresVisualEvidence || step.requiresVideoEvidence || false,
+      requiresVideoEvidence: step.requiresVideoEvidence || false,
       index,
       text
     } : null;
@@ -260,6 +262,35 @@ export function applyProofReports(map, reports, run, { criterionIds, reportedAt 
     criterion.current = current;
     if (current.status === "verified" && current.evidenceValidity === "valid") delete criterion.invalidation;
   }
+  return next;
+}
+
+/** A verifier must explicitly resolve every assigned criterion with current evidence. */
+export function applyIndependentProofReports(map, reports, run, { criterionIds, mediaIds = [] } = {}) {
+  const assigned = map.criteria.filter((criterion) => !criterionIds || criterionIds.includes(criterion.id));
+  const isInspectedImage = (criterion, artifactId) => {
+    const needsVideo = criterion.requiresVideoEvidence || stepIn(run, criterion.stepId)?.requiresVideoEvidence;
+    return mediaIds.includes(artifactId) && artifactsIn(run).some((artifact) =>
+      artifact.id === artifactId && artifact.mediaKind === "image" && (!needsVideo || artifact.videoPath) && artifact.criterionIds?.includes(criterion.id));
+  };
+  const complete = assigned.flatMap((criterion) => {
+    const matches = (Array.isArray(reports) ? reports : []).filter((report) => report?.criterionId === criterion.id);
+    if (!matches.length) return [{ criterionId: criterion.id, status: "blocked", explanation: { summary: "Independent reviewer omitted this criterion verdict." } }];
+    return matches.map((report) => {
+      const visual = criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence;
+      const inspected = (Array.isArray(report.evidence) ? report.evidence : []).some((item) => item?.type === "media" && isInspectedImage(criterion, item.artifactId));
+      if (report.status === "verified" && visual && !inspected) return {
+        criterionId: criterion.id, status: "blocked", explanation: { summary: "Visual criterion needs inspected current images (sampled recording frames for video) from a CLI journey mapped to this criterion." }
+      };
+      return report;
+    });
+  });
+  let next = applyProofReports(map, complete, run, { criterionIds: assigned.map(({ id }) => id) });
+  const missingMedia = next.criteria.filter((criterion) => assigned.some(({ id }) => id === criterion.id)
+    && (criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence)
+    && criterion.current.status === "verified"
+    && !criterion.current.evidence.some((item) => item.type === "media" && item.validity === "valid" && isInspectedImage(criterion, item.artifactId)));
+  if (missingMedia.length) next = applyProofReports(next, missingMedia.map(({ id }) => ({ criterionId: id, status: "blocked", explanation: { summary: "Inspected visual evidence is missing or stale." } })), run);
   return next;
 }
 

@@ -3,10 +3,34 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, verificationContractFiles, verificationContractExists, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
+
+test("session options omit thinking when the model cannot take reasoningEffort", async () => {
+  const harness = new PiHarness({ dataDir: tmpdir() });
+  harness.sdk = async () => ({
+    ModelRuntime: {
+      create: async () => ({
+        getModel: (provider, id) => ({
+          id, provider,
+          thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium" }
+        })
+      })
+    }
+  });
+  const omitted = await harness.sessionOptions({ provider: "xai", model: "grok-build-0.1", thinking: "off" });
+  assert.equal(Object.hasOwn(omitted, "thinkingLevel"), false);
+  const mapped = await harness.sessionOptions({ provider: "xai", model: "grok-4.3", thinking: "medium" });
+  assert.equal(mapped.thinkingLevel, "medium");
+  const calls = [];
+  await harness.applyProfile({
+    model: { provider: "xai", id: "grok-build-0.1" },
+    setThinkingLevel: (level) => calls.push(level)
+  }, { provider: "xai", model: "grok-build-0.1", thinking: "off" });
+  assert.deepEqual(calls, []);
+});
 
 test("commit messages always explain why and name the requirement", () => {
   assert.equal(formatCommitMessage({ subject: "feat: add task board", why: "Users need a visible queue.", requirement: "REQ-board — tasks are displayed" }, {}), "feat: add task board\n\nWhy: Users need a visible queue.\nRequirement: REQ-board — tasks are displayed");
@@ -147,9 +171,27 @@ test("existing projects get one focused verification contract before feature wor
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
   assert.match(plan.nodes[0].prompt, /project\.json/);
-  assert.deepEqual(plan.nodes[0].expectedArtifacts, [".agent-plan/project.json", ".agent-plan/verify.mjs"]);
+  assert.deepEqual(plan.nodes[0].expectedArtifacts, verificationContractFiles);
+  assert.match(plan.nodes[0].prompt, /progressive map/);
+  assert.match(plan.nodes[0].prompt, /Test real navigation/);
   assert.doesNotMatch(plan.nodes[0].prompt, /docs\/architecture\.md|AGENTS\.md/);
   assert.equal(ensureVerificationContractStep(plan, true), plan);
+});
+
+test("bootstrap detects missing discovery and UI files in an otherwise configured repository", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harness-bootstrap-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    for (const path of verificationContractFiles.slice(0, 2)) await writeFile(join(root, path), "configured");
+    assert.equal(await verificationContractExists(root), false);
+    const plan = normalizePlan({ nodes: [{ id: "feature", title: "Feature", permission: "write", writeScope: "src" }] });
+    const bootstrapped = ensureVerificationContractStep(plan, await verificationContractExists(root), true);
+    assert.deepEqual(bootstrapped.nodes[1].dependsOn, [bootstrapped.nodes[0].id]);
+    for (const path of verificationContractFiles.slice(2)) await writeFile(join(root, path), "configured");
+    assert.equal(await verificationContractExists(root), true);
+    assert.equal(ensureVerificationContractStep(bootstrapped, true, true), bootstrapped);
+    assert.match(stepContext({ plan: bootstrapped, step: bootstrapped.nodes[1], artifacts: [] }), /Maintain this progressive map when behavior or navigation changes/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("existing verification contracts remain correctable by visual steps", () => {
@@ -202,14 +244,18 @@ test("review fixer context stays focused when historical artifacts are large", (
   assert.ok(prompt.length < 10000);
 });
 
-test("runs the repository's root npm test script as a deterministic gate", async () => {
+test("requires the canonical verification script even when npm test exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-checks-"));
   try {
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node -e \"process.exit(0)\"" } }));
     const harness = new PiHarness({ dataDir: root });
+    assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "failed");
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "process.exitCode = 0;");
     assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "passed");
 
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node -e \"process.exit(1)\"" } }));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "process.exitCode = 1;");
     assert.equal((await harness.runRepositoryChecks({ cwd: root })).status, "failed");
   } finally {
     await rm(root, { recursive: true });
@@ -220,6 +266,8 @@ test("retries one transient filesystem cleanup race without spending a correctio
   const root = await mkdtemp(join(tmpdir(), "pi-check-retry-"));
   try {
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), 'import "../verify.mjs";');
     await writeFile(join(root, "verify.mjs"), `
       import { readFileSync, writeFileSync } from "node:fs";
       const path = new URL("count", import.meta.url);
@@ -242,6 +290,8 @@ test("bounded repository failure output retains both context and the final faili
   const root = await mkdtemp(join(tmpdir(), "pi-check-output-"));
   try {
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node verify.mjs" } }));
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), 'import "../verify.mjs";');
     await writeFile(join(root, "verify.mjs"), `
       console.log("BEGIN-CONTEXT:" + "a".repeat(6000));
       console.log("not ok 237 - preserves the proof record");
@@ -320,20 +370,8 @@ test("prefers the repository verification contract and discovers image and video
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "ignored.txt"), "not evidence");
     `);
     const harness = new PiHarness({ dataDir });
-    const result = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
-    assert.equal(result.status, "passed");
-    assert.equal(result.command, "node .agent-plan/verify.mjs");
-    assert.deepEqual(result.evidence.map(({ name, mediaType, mediaKind }) => ({ name, mediaType, mediaKind })), [
-      { name: "interaction.webm", mediaType: "video/webm", mediaKind: "video" },
-      { name: "page.png", mediaType: "image/png", mediaKind: "image" }
-    ]);
-    const images = await harness.evidenceImages(result.evidence);
-    assert.equal(images.length, 1);
-    assert.equal(images[0].mimeType, "image/png");
-    assert.equal(images[0].type, "image");
-    assert.equal(typeof images[0].data, "string");
-    assert.equal("source" in images[0], false);
-    assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "passed");
+    const invalid = await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true });
+    assert.equal(invalid.status, "failed", "a file named .webm is not a playable recording");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
@@ -341,6 +379,11 @@ test("prefers the repository verification contract and discovers image and video
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
     `);
+    const screenshot = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(screenshot.status, "passed");
+    const images = await harness.evidenceImages(screenshot.evidence);
+    assert.equal(images.length, 1);
+    assert.equal(images[0].mimeType, "image/png");
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
     await writeFile(join(root, ".agent-plan", "verify.mjs"), `
@@ -454,7 +497,7 @@ test("repository-check discovery settles containment when no command can launch"
       cleanup: async (trigger) => { cleanupTrigger = trigger; return { executionId: "empty-check", outcome: "not-required", actions: [] }; }
     };
     const result = await new PiHarness({ dataDir: root }).runRepositoryChecks({ cwd: root, containment });
-    assert.equal(result.status, "skipped");
+    assert.equal(result.status, "failed");
     assert.equal(result.cleanup.outcome, "not-required");
     assert.equal(cleanupTrigger.trigger, "repository-check-exit");
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -759,7 +802,7 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
     assert.match(prompt, /A late child can escape cleanup/);
     assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
     assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
-    assert.match(prompt, /verify the rendered page itself identifies the expected ticket/);
+    assert.match(prompt, /expected application, screen, data and fully loaded state/);
     assert.match(prompt, /Operator evidence and correction constraints/);
     assert.match(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
     assert.match(prompt, /Do not repeat a finding directly contradicted/);
@@ -803,11 +846,11 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.match(prompt, /Current deterministic gate \(authoritative; supersedes every earlier check result/);
     assert.match(prompt, /"status": "passed"/);
     assert.match(prompt, /"summary": "Passed"/);
-    assert.match(prompt, /filenames, manifests, URLs, and capture-script claims are not proof of identity/);
-    assert.match(prompt, /another ticket, blank or partially rendered content, stale recovery state/);
+    assert.match(prompt, /Filenames, manifests and capture claims alone are not visual proof/);
+    assert.match(prompt, /incorrect, blank, partial, stale or unverifiable states/);
     assert.match(prompt, /New operator final-proof feedback/);
     assert.match(prompt, /blank status pill and clipped mobile worker row/);
-    assert.deepEqual(promptImages, []);
+    assert.deepEqual(promptImages, [{ data: "large" }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -84,9 +84,11 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     async verifyStep({ proofMap }) {
       return {
         summary: "verification finished",
-        criterionResults: proofMap.criteria
-          .filter((criterion) => criterion.current.evidenceValidity === "stale")
-          .map((criterion) => checkResult(criterion.id)),
+        criterionResults: proofMap.criteria.flatMap((criterion, index) => {
+          if (workerRuns === 1 && index === 2) return [];
+          if (workerRuns < 3 && index === 3) return [{ criterionId: criterion.id, status: "verified", summary: "prose is not proof" }];
+          return [checkResult(criterion.id)];
+        }),
         findings: [], rawOutput: "", sessionFile: null
       };
     },
@@ -113,7 +115,7 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     const firstReview = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review");
     assert.equal(firstReview.proofMap.compatibility, false);
     assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.text), ["Persists canonical evidence", "Retains unaffected proof", "Requires re-verification after a correction", "Rejects prose-only claims"]);
-    assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "not_yet_verified", "not_yet_verified"]);
+    assert.deepEqual(firstReview.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "blocked", "not_yet_verified"]);
     assert.equal(new Set(firstReview.proofMap.criteria.map((criterion) => criterion.id)).size, 4);
     assert.match(firstReview.proofMap.criteria[3].current.explanation.summary, /resolvable run evidence/);
 
@@ -130,7 +132,8 @@ test("approved proof survives omitted and prose claims, selective correction, fi
     const reverified = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.proofMap.criteria[2].current.evidenceValidity === "valid");
     assert.deepEqual(reverified.proofMap.criteria.map((criterion) => criterion.current.status), ["verified", "verified", "verified", "not_yet_verified"]);
     assert.deepEqual(staleSnapshots[1], [correctedCriterion, omittedCriterion]);
-    assert.equal(reverified.proofMap.criteria[1].history.length, unaffectedHistoryLength, "unaffected proof is retained without invalidation");
+    assert.ok(reverified.proofMap.criteria[1].history.length > unaffectedHistoryLength, "the independent reviewer explicitly reconfirms unaffected proof");
+    assert.equal(reverified.proofMap.criteria[1].history.some((result) => result.evidenceValidity === "stale"), false);
     assert.equal(reverified.proofMap.criteria[0].history.some((result) => result.evidenceValidity === "stale"), true);
     assert.equal(reverified.proofMap.criteria[2].history.some((result) => result.evidenceValidity === "stale"), true);
 
@@ -215,18 +218,18 @@ test("resuming a worker checkpoint invalidates omitted proof before the worker c
     assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } })).status, 202);
     const paused = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "needs_input");
     const criterionId = paused.proofMap.criteria[0].id;
-    assert.equal(paused.proofMap.criteria[0].current.evidenceValidity, "valid");
+    assert.equal(paused.proofMap.criteria[0].current.evidenceValidity, "missing", "worker claims alone cannot verify a criterion");
 
     assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/clarify`, { body: { answers: "Apply the correction" } })).status, 202);
     const resumed = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review");
     assert.deepEqual(resumedStaleCriteria, [criterionId]);
-    assert.equal(resumed.proofMap.criteria[0].current.evidenceValidity, "stale");
+    assert.equal(resumed.proofMap.criteria[0].current.status, "blocked", "omitted independent verdict blocks acceptance");
     assert.equal(await readFile(join(workspace.cwd, "baseline.txt"), "utf8"), "corrected after feedback\n");
     assert.ok(daemon.store.read().ticketRuns[id].artifacts.some((artifact) => artifact.name === "proof-map-worker-resume-correction.json"));
 
     const acceptance = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} });
     assert.equal(acceptance.status, 400);
-    assert.match(acceptance.json.error, /evidence_stale/);
+    assert.match(acceptance.json.error, /status_blocked/);
   }, { harness });
 });
 

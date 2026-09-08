@@ -6,6 +6,23 @@ import { join } from "node:path";
 import { loadProjectConfig, normalizeProjectConfig, projectEnvironment, runProjectCommand } from "../src/project-config.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
+test("UI command forwards literal text and flags only to the canonical project parser", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ui-project-command-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { ui: ["node", ".agent-plan/ui.mjs"], test: ["node", "test.js"] } }));
+    let forwarded;
+    const args = ["tasks", "add", "Keep $HOME and `text` literal", "--url", "http://127.0.0.1:4317"];
+    const execImpl = async (command, argv) => { assert.equal(command, "node"); forwarded = argv; return { stdout: "done", stderr: "" }; };
+    await runProjectCommand(root, "ui", { args, execImpl, source: {} });
+    assert.deepEqual(forwarded, [".agent-plan/ui.mjs", ...args]);
+    await assert.rejects(runProjectCommand(root, "ui", { args: ["bad\0text"], execImpl }), /unsafe arguments/);
+    await assert.rejects(runProjectCommand(root, "test", { args, execImpl }), /unsafe arguments/);
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { ui: ["node"] } }));
+    await assert.rejects(runProjectCommand(root, "ui", { args: ["--eval"], execImpl }), /unsafe arguments/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("detects conventional package commands when no contract exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "project-config-"));
   try {

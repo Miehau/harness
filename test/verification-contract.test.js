@@ -32,6 +32,7 @@ async function createFixture() {
   ]);
   await Promise.all([
     writeFile(join(root, ".agent-plan", "verify.mjs"), contract),
+    writeFile(join(root, ".agent-plan", "ui.test.mjs"), 'import test from "node:test"; test("fixture UI", () => {});'),
     writeFile(join(root, "scripts", "test.mjs"), `import { appendFile } from "node:fs/promises";
 
 const phase = process.argv.includes("--check") ? "syntax" : "tests";

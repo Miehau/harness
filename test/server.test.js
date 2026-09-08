@@ -52,6 +52,19 @@ test("delivery recovery fixes repository defects but not provider failures", () 
   assert.equal(deliveryFailureNeedsFix("fetch failed"), false);
 });
 
+test("unbound screenshots cannot pass a ticket-bound visual check", () => {
+  const checks = reconcileVisualChecks({
+    status: "passed",
+    command: "node .agent-plan/verify.mjs",
+    summary: "node .agent-plan/verify.mjs passed with 1 visual artifact.",
+    evidence: [{ name: "desktop.png", path: "/tmp/desktop.png", mediaKind: "image" }]
+  }, [], { required: true, ticketId: "ticket-1", runId: "run-2" });
+  assert.equal(checks.status, "failed");
+  assert.equal(checks.failureKind, "visual-evidence");
+  assert.match(checks.summary, /ticket-bound/);
+  assert.equal(repositoryCheckReview(checks).findings[0].category, "evidence");
+});
+
 test("preview diagnostics cannot satisfy missing verification-contract evidence", () => {
   const checks = reconcileVisualChecks({
     status: "failed",
@@ -95,7 +108,7 @@ test("resuming a persisted visual step audits the newly available contract scope
   assert.deepEqual(run.plan.nodes[0].expectedFiles, ["public/app.js", ".agent-plan"]);
   assert.deepEqual(run.plan.nodes[0].scopeChanges[0], {
     at: "2026-09-03T10:15:00.000Z", paths: [".agent-plan"], source: "harness",
-    reason: "Visual verification must be able to correct its repository-owned evidence contract."
+    reason: "Feature workers maintain the repository verification, discovery and UI CLI contract."
   });
   assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:20:00.000Z"), []);
 });
@@ -762,6 +775,29 @@ test("final proof approval rejects pathless visual-evidence locators", async () 
     const approval = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
     assert.equal(approval.status, 400);
     assert.match(approval.json.error, /status_not_yet_verified/);
+  });
+});
+
+test("final proof approval blocks UI tickets without ticket-bound screenshots", async () => {
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{
+      id: "build", title: "Build", status: "accepted", requiresVisualEvidence: true, acceptanceCriteria: ["Visible"]
+    }] });
+    const map = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+    const finalChecks = { status: "passed", command: "node .agent-plan/verify.mjs", summary: "passed" };
+    const proofMap = applyProofReports(map, [{
+      criterionId: map.criteria[0].id, status: "verified", evidence: [{ type: "check", scope: "final" }]
+    }], { plan, artifacts: [], finalChecks }, { reportedAt: "2026-09-10T11:00:00.000Z" });
+    const id = await seedRun(daemon, {
+      plan, proofMap, finalChecks, status: "awaiting_evidence_review",
+      checkpoint: {
+        id: "final-proof", kind: "evidence_review", finalChecks,
+        media: [{ id: "screen", kind: "visual-evidence", name: "desktop.png", path: "/tmp/unbound-desktop.png", mediaKind: "image" }]
+      }
+    });
+    const approval = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(approval.status, 400, approval.text);
+    assert.match(approval.json.error, /ticket-bound/);
   });
 });
 

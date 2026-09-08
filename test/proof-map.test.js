@@ -3,11 +3,41 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyProofReports, criterionId, initializeProofMap, invalidateProof, normalizeProofResult, projectProofMap, proofEligibility, resolveEvidence } from "../src/proof-map.js";
+import { applyIndependentProofReports, applyProofReports, criterionId, initializeProofMap, invalidateProof, normalizeProofResult, projectProofMap, proofEligibility, resolveEvidence } from "../src/proof-map.js";
 import { normalizePlan } from "../src/plan.js";
 
 const approvedAt = "2026-09-10T10:00:00.000Z";
 const reportedAt = "2026-09-10T11:00:00.000Z";
+
+test("independent verdicts cannot inherit worker claims or use unrelated or stale visual proof", async () => {
+  const root = await mkdtemp(join(tmpdir(), "independent-proof-"));
+  try {
+    const plan = normalizePlan({ nodes: [{ id: "ui", title: "UI", requiresVisualEvidence: true, acceptanceCriteria: ["Shows the saved task"] }] });
+    const map = initializeProofMap(plan);
+    const id = map.criteria[0].id;
+    const path = join(root, "saved.png");
+    await writeFile(path, "image fixture");
+    const run = { plan, proofStorageRoot: root, finalChecks: { status: "passed" }, artifacts: [{ id: "image", path, kind: "visual-evidence", mediaKind: "image", criterionIds: [id], createdAt: "2026-01-01T00:00:00Z" }] };
+    const report = { criterionId: id, status: "verified", explanation: { summary: "Saved task is visible" }, evidence: [{ type: "check", scope: "final" }, { type: "media", artifactId: "image" }] };
+    const worker = applyProofReports(map, [report], run);
+    const omitted = applyIndependentProofReports(worker, [], run, { mediaIds: ["image"] });
+    assert.equal(omitted.criteria[0].current.status, "blocked");
+    assert.match(omitted.criteria[0].current.explanation.summary, /omitted/);
+    assert.equal(applyIndependentProofReports(map, [report], run, { mediaIds: [] }).criteria[0].current.status, "blocked");
+    const verified = applyIndependentProofReports(map, [report], run, { mediaIds: ["image"] });
+    assert.equal(proofEligibility(verified).eligible, true);
+    plan.nodes[0].requiresVideoEvidence = true;
+    assert.equal(proofEligibility(applyIndependentProofReports(map, [report], run, { mediaIds: ["image"] })).eligible, false);
+    run.artifacts[0].videoPath = join(root, "recording.webm");
+    assert.equal(proofEligibility(applyIndependentProofReports(map, [report], run, { mediaIds: ["image"] })).eligible, true);
+    plan.nodes[0].requiresVideoEvidence = false;
+    run.artifacts[0].criterionIds = ["unrelated"];
+    assert.equal(applyIndependentProofReports(map, [report], run, { mediaIds: ["image"] }).criteria[0].current.status, "blocked");
+    run.artifacts[0].criterionIds = [id];
+    const stale = invalidateProof(verified, [id], { invalidatedAt: "2026-02-01T00:00:00Z" });
+    assert.equal(proofEligibility(applyIndependentProofReports(stale, [report], run, { mediaIds: ["image"] })).eligible, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 function fixture() {
   const plan = normalizePlan({ nodes: [
