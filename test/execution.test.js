@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 import { initializeProofMap } from "../src/proof-map.js";
@@ -838,4 +842,33 @@ test("public state keeps retained audits compact", () => {
   const retained = { id: "old", runId: "run-old", status: "completed", createdAt: "2026-01-01T00:00:00.000Z", artifacts: [{ content: "x".repeat(10000) }] };
   const published = publicState({ revision: 4, ticketRuns: {}, retainedRuns: { "old:run-old": retained } });
   assert.deepEqual(published.retainedRuns["old:run-old"], compactRun(retained, 4));
+});
+
+test("createTicketRun freezes access so later Any-access policy cannot enlarge it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-run-access-"));
+  const primary = join(root, "project");
+  const extra = join(root, "shared");
+  try {
+    await mkdir(primary);
+    await mkdir(extra);
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write" }]
+      }, { primaryCwd: primary })
+    });
+    const run = createTicketRun({ id: "freeze", identifier: "FREEZE" }, {}, { access });
+    access.mode = "any";
+    access.extraRoots.length = 0;
+    assert.equal(run.access.mode, "restricted");
+    assert.equal(run.access.extraRoots.length, 1);
+    assert.notEqual(run.access, access);
+    const later = createTicketRun({ id: "next", identifier: "NEXT" }, {}, {
+      access: await freezeRunAccess({ primaryCwd: primary, policy: { mode: "any", extraRoots: [] } })
+    });
+    assert.equal(later.access.mode, "any");
+    assert.deepEqual(later.access.extraRoots, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

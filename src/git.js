@@ -4,6 +4,7 @@ import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { resolveAccessPath, writeScopeAllows } from "./access-policy.js";
 
 const exec = promisify(execFile);
 
@@ -225,7 +226,14 @@ export function outsideWriteScope(files, writeScope) {
   return files.filter((file) => !prefixes.some((prefix) => file === prefix || file.startsWith(`${prefix}/`)));
 }
 
-export async function assertScopedWrite(cwd, inputPath, writeScope) {
+export async function assertScopedWrite(cwd, inputPath, writeScope, options = {}) {
+  if (options?.access) {
+    const resolved = await resolveAccessPath(options.access, inputPath, { cwd, intent: "write" });
+    if (!await writeScopeAllows(resolved, writeScope)) {
+      throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
+    }
+    return resolved.absolute;
+  }
   const root = resolve(cwd);
   const absolute = resolve(root, String(inputPath || "").replace(/^@/, ""));
   const repositoryPath = relative(root, absolute).split(sep).join("/");

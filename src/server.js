@@ -20,7 +20,7 @@ import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verific
 import { projectConfigPath } from "./project-config.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
-import { canonicalPrimaryPath, normalizeProjectPolicy, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
+import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
@@ -1145,18 +1145,28 @@ async function mirrorCheckpoint(ticketId) {
   }
 }
 
+async function snapshotWorkspaceAccess(state = store.read()) {
+  return freezeRunAccess({
+    primaryCwd: state.workspace.cwd,
+    policy: await readProjectPolicy(state, state.workspace.cwd)
+  });
+}
+
 async function beginTicket(ticket, { automaticAdmission = false, awaitWork = true } = {}) {
   if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
+  const access = await snapshotWorkspaceAccess();
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
-    if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
+    if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) {
+      state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission, access });
+    }
   });
   await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id), { awaitWork });
   return ticket.id;
 }
 
-function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
-  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId, proofStorageRoot: dataDir });
+function newTicketRun(ticket, stageProfiles, extras = {}) {
+  return createTicketRun(ticket, stageProfiles, { ...extras, proofStorageRoot: dataDir });
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {
@@ -1468,6 +1478,10 @@ async function loadLocalRun(inputPath) {
       }, null, 2)
     })
   ]);
+  const access = await freezeRunAccess({
+    primaryCwd: source,
+    policy: await readProjectPolicy(currentState, source)
+  });
   const state = await update((draft) => {
     draft.selectedTicketId = id;
     draft.ticketRuns[id] = {
@@ -1477,7 +1491,8 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString(),
+      access
     };
   });
   return { ticketId: id, state };
@@ -3019,7 +3034,7 @@ async function restartAuditArtifact(run, audit) {
   });
 }
 
-async function freshLocalRun(previous, runId) {
+async function freshLocalRun(previous, runId, access) {
   const source = store.read().workspace.cwd;
   const fixture = await loadLocalFixture(source, previous.ticket.fixturePath);
   const [contractExists, projectConfigExists] = await Promise.all([
@@ -3050,7 +3065,7 @@ async function freshLocalRun(previous, runId) {
       prompt: fixture.feature, createdAt: new Date().toISOString()
     },
     plan, stageProfiles: structuredClone(previous.stageProfiles), artifacts, activeRuns: {}, auto: false,
-    sessionFile: null, lastError: null, createdAt: new Date().toISOString()
+    sessionFile: null, lastError: null, createdAt: new Date().toISOString(), access
   };
 }
 
@@ -3065,7 +3080,8 @@ async function startFreshRun(ticketId) {
     previousStages: previous.stages.map(({ id, status }) => ({ id, status })),
     previousSteps: flattenSteps(previous.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }))
   };
-  const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId) : null;
+  const access = await snapshotWorkspaceAccess();
+  const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId, access) : null;
   if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
   const artifact = await restartAuditArtifact(previous, audit);
   // Start preview cleanup before archiving. Settlement is bounded, so its
@@ -3077,7 +3093,7 @@ async function startFreshRun(ticketId) {
     old.restartHistory.push(audit);
     old.artifacts.push(artifact);
     archiveRun(state, ticketId);
-    state.ticketRuns[ticketId] = fixture || newTicketRun(old.ticket, old.stageProfiles, { runId: audit.nextRunId });
+    state.ticketRuns[ticketId] = fixture || newTicketRun(old.ticket, old.stageProfiles, { runId: audit.nextRunId, access });
     state.ticketRuns[ticketId].startedFreshFrom = { runId: old.runId, auditArtifactId: artifact.id, at };
     state.selectedTicketId = ticketId;
   });

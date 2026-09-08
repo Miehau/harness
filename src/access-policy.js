@@ -1,7 +1,9 @@
-import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const extraRootModes = new Set(["read-only", "read/write"]);
+export const PRIMARY_ROOT_ID = "primary";
 
 export function defaultAccessPolicy() {
   return { mode: "restricted", extraRoots: [] };
@@ -69,6 +71,17 @@ function pathSegmentOverlap(left, right) {
   const leftPrefix = left.endsWith(sep) ? left : `${left}${sep}`;
   const rightPrefix = right.endsWith(sep) ? right : `${right}${sep}`;
   return right.startsWith(leftPrefix) || left.startsWith(rightPrefix);
+}
+
+function pathContained(child, parent) {
+  if (!child || !parent) return false;
+  if (child === parent) return true;
+  const prefix = parent.endsWith(sep) ? parent : `${parent}${sep}`;
+  return child.startsWith(prefix);
+}
+
+function extraRootId(canonicalPath) {
+  return `r-${createHash("sha256").update(String(canonicalPath || "")).digest("hex").slice(0, 8)}`;
 }
 
 function extraRootEntry(entry, index) {
@@ -151,4 +164,237 @@ export function writeProjectPolicy(state, canonicalPrimary, policy) {
       displayPath: root.displayPath
     }))
   };
+}
+
+function cloneRoot(root, fallbackId, fallbackMode) {
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const path = typeof root.path === "string" ? root.path : "";
+  const mode = root.mode === "read/write" || root.mode === "read-only"
+    ? root.mode
+    : (fallbackMode === "read/write" ? "read/write" : "read-only");
+  return {
+    id: typeof root.id === "string" && root.id ? root.id : fallbackId,
+    path,
+    displayPath: typeof root.displayPath === "string" && root.displayPath ? root.displayPath : path,
+    mode
+  };
+}
+
+export function defaultRunAccess({ workspace = null, createdAt = null } = {}) {
+  const cwd = workspace?.cwd || null;
+  return {
+    mode: "restricted",
+    primary: cwd ? {
+      id: PRIMARY_ROOT_ID,
+      path: cwd,
+      displayPath: workspace.displayPath || cwd,
+      mode: "read/write"
+    } : null,
+    extraRoots: [],
+    frozenAt: createdAt || null
+  };
+}
+
+export function cloneRunAccess(access, { workspace = null, createdAt = null } = {}) {
+  if (!access || typeof access !== "object" || Array.isArray(access)) {
+    return defaultRunAccess({ workspace, createdAt });
+  }
+  return {
+    mode: access.mode === "any" ? "any" : "restricted",
+    primary: cloneRoot(access.primary, PRIMARY_ROOT_ID, "read/write"),
+    extraRoots: Array.isArray(access.extraRoots)
+      ? access.extraRoots.map((root) => cloneRoot(root, extraRootId(root?.path || ""), "read-only")).filter(Boolean)
+      : [],
+    frozenAt: access.frozenAt || createdAt || null
+  };
+}
+
+// Run access is frozen at ticket-run creation. Later projectPolicies or workspace
+// edits must not enlarge that snapshot; revocation is cancel/restart.
+//
+// File tools enforce this freeze with realpath + path-segment allow-list.
+// Named project commands are not a filesystem sandbox: runProjectCommand only
+// constrains argv and environment, and subprocesses can still touch arbitrary
+// host paths. Do not describe argv/env checks as OS isolation.
+export async function freezeRunAccess({ primaryCwd, policy, frozenAt = new Date().toISOString() } = {}) {
+  const primaryPath = await canonicalPrimaryPath(primaryCwd);
+  const normalized = policy && typeof policy === "object" && !Array.isArray(policy) ? policy : defaultAccessPolicy();
+  return cloneRunAccess({
+    mode: normalized.mode === "any" ? "any" : "restricted",
+    primary: {
+      id: PRIMARY_ROOT_ID,
+      path: primaryPath,
+      displayPath: typeof primaryCwd === "string" && primaryCwd.trim() ? primaryCwd.trim() : primaryPath,
+      mode: "read/write"
+    },
+    extraRoots: Array.isArray(normalized.extraRoots) ? normalized.extraRoots.map((root) => ({
+      id: extraRootId(root.path),
+      path: root.path,
+      mode: root.mode === "read/write" ? "read/write" : "read-only",
+      displayPath: root.displayPath || root.path
+    })) : [],
+    frozenAt
+  });
+}
+
+export function frozenRoots(access) {
+  const roots = [];
+  if (access?.primary?.path) {
+    roots.push({
+      id: access.primary.id || PRIMARY_ROOT_ID,
+      path: access.primary.path,
+      displayPath: access.primary.displayPath || access.primary.path,
+      mode: "read/write",
+      kind: "primary"
+    });
+  }
+  for (const root of access?.extraRoots || []) {
+    roots.push({
+      id: root.id || extraRootId(root.path || ""),
+      path: root.path,
+      displayPath: root.displayPath || root.path,
+      mode: root.mode === "read/write" ? "read/write" : "read-only",
+      kind: "extra"
+    });
+  }
+  return roots;
+}
+
+function findContainingRoot(access, candidate) {
+  if (!candidate) return null;
+  for (const root of frozenRoots(access)) {
+    if (candidate === root.path || pathContained(candidate, root.path)) return root;
+  }
+  return null;
+}
+
+export async function applyFrozenAccess(access) {
+  if (!access || typeof access !== "object" || Array.isArray(access)) {
+    throw new Error("Frozen run access is missing");
+  }
+  if (!access.primary?.path) throw new Error("Frozen run access is missing the primary repository");
+  for (const root of frozenRoots(access)) {
+    const label = root.kind === "primary" ? "Primary repository" : "Extra root";
+    const display = root.displayPath || root.path;
+    const canonical = await realDirectory(root.path, label, display);
+    if (canonical !== root.path) {
+      throw new Error(`${label} ${quote(display)} no longer matches the frozen path`);
+    }
+  }
+  return access;
+}
+
+async function existingAncestor(absolute) {
+  let existing = absolute;
+  while (true) {
+    try {
+      await lstat(existing);
+      return existing;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw error;
+      existing = parent;
+    }
+  }
+}
+
+async function canonicalizeScopePath(absolute) {
+  const ancestor = await existingAncestor(absolute);
+  const info = await lstat(ancestor);
+  if (info.isSymbolicLink()) {
+    return ancestor === absolute ? ancestor : resolve(ancestor, relative(ancestor, absolute));
+  }
+  const realExisting = await realpath(ancestor);
+  return ancestor === absolute ? realExisting : resolve(realExisting, relative(ancestor, absolute));
+}
+
+function posixRelative(from, to) {
+  const value = relative(from, to).split(sep).join("/");
+  if (isAbsolute(value) || value === ".." || value.startsWith("../")) return null;
+  return value;
+}
+
+export async function resolveAccessPath(access, inputPath, { cwd, intent = "read" } = {}) {
+  await applyFrozenAccess(access);
+  const raw = String(inputPath || "").replace(/^@/, "");
+  if (malformedPath(raw)) throw new Error("Path is missing or malformed");
+  const base = cwd || access.primary?.path;
+  if (!isAbsolute(raw) && (typeof base !== "string" || !base)) throw new Error("Path must be absolute when no workspace root is available");
+  const absolute = isAbsolute(raw) ? resolve(raw) : resolve(base, raw);
+  const writing = intent !== "read";
+  const ancestor = writing ? await existingAncestor(absolute) : absolute;
+  let realExisting;
+  try {
+    realExisting = await realpath(ancestor);
+  } catch (error) {
+    let isLink = false;
+    try { isLink = (await lstat(ancestor)).isSymbolicLink(); } catch {}
+    if (isLink) throw new Error(`Path ${quote(raw)} is outside the frozen directory allow-list`);
+    throw error;
+  }
+  const intendedReal = writing && ancestor !== absolute
+    ? resolve(realExisting, relative(ancestor, absolute))
+    : realExisting;
+  const root = findContainingRoot(access, realExisting);
+  if (access.mode !== "any" && !root) {
+    throw new Error(`Path ${quote(raw)} is outside the frozen directory allow-list`);
+  }
+  if (root) {
+    const escaped = relative(root.path, realExisting);
+    if (isAbsolute(escaped) || escaped === ".." || escaped.startsWith(`..${sep}`)) {
+      throw new Error(`Path ${quote(raw)} is outside the frozen directory allow-list`);
+    }
+  }
+  if (writing && root?.mode === "read-only") {
+    throw new Error(`Write blocked in read-only extra root ${quote(root.displayPath || root.path)}: ${raw}`);
+  }
+  const relativePath = root ? posixRelative(root.path, intendedReal) ?? posixRelative(root.path, absolute) : null;
+  return { absolute, realPath: intendedReal, root, relativePath, intent };
+}
+
+function stripScopePath(value) {
+  return String(value || "").trim().replace(/\/\*\*$/, "").replace(/\/\*$/, "").replace(/^\.\//, "");
+}
+
+export function parseWriteScopeEntry(entry) {
+  const trimmed = stripScopePath(entry);
+  if (!trimmed) return null;
+  if (isAbsolute(trimmed)) return { kind: "absolute", path: resolve(trimmed) };
+  const qualified = trimmed.match(/^root:([^:]+):(.*)$/);
+  if (qualified) {
+    const relativePath = stripScopePath(qualified[2]);
+    return {
+      kind: "root",
+      rootId: qualified[1],
+      relativePath: relativePath === "*" || relativePath === "**" ? "" : relativePath
+    };
+  }
+  return { kind: "root", rootId: PRIMARY_ROOT_ID, relativePath: trimmed };
+}
+
+function relativeInScope(relativePath, prefix) {
+  if (relativePath == null) return false;
+  if (!prefix) return true;
+  return relativePath === prefix || relativePath.startsWith(`${prefix}/`);
+}
+
+export async function writeScopeAllows(resolved, writeScope) {
+  const raw = String(writeScope || "").trim();
+  if (raw === "*" || raw === "**") return resolved?.root?.id === PRIMARY_ROOT_ID;
+  for (const entry of raw.split(",").map(parseWriteScopeEntry).filter(Boolean)) {
+    if (entry.kind === "absolute") {
+      const target = resolved?.realPath;
+      if (!target) continue;
+      let scopeReal;
+      try { scopeReal = await canonicalizeScopePath(entry.path); }
+      catch { continue; }
+      if (target === scopeReal || pathContained(target, scopeReal)) return true;
+      continue;
+    }
+    if (entry.kind === "root" && resolved?.root?.id === entry.rootId && relativeInScope(resolved.relativePath, entry.relativePath)) {
+      return true;
+    }
+  }
+  return false;
 }

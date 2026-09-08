@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { storedProjectPolicy } from "./access-policy.js";
+import { cloneRunAccess, storedProjectPolicy } from "./access-policy.js";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
@@ -240,6 +240,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     harnessEvidencePolicy = visualEvidencePolicy,
     createdAt = new Date().toISOString(),
     cleanup,
+    access = null,
     ...rest
   } = extras;
   return {
@@ -263,6 +264,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     harnessEvidencePolicy,
     createdAt,
     cleanup: normalizeRunCleanup(cleanup),
+    access: cloneRunAccess(access, { workspace, createdAt }),
     ...rest
   };
 }

@@ -12,7 +12,7 @@ node src/cli.js access show
 node src/cli.js access set '{"mode":"restricted","extraRoots":[]}'
 ```
 
-`tasks add` submits New → Task description → Start workflow and starts real work. `workspace open` loads the current project's policy into `#workspace-dialog` (primary, extra roots as saved, Restricted or Any access). `workspace save-policy` submits only on that explicit control; closing the dialog does not persist. Use the isolated mocked daemon in `ui.test.mjs` for tests. Other commands navigate through rendered UI; missing or ambiguous controls fail. Never enable Any access against the operator checkout; seed extra roots in a temp daemon.
+`tasks add` submits New → Task description → Start workflow and starts real work. `workspace open` loads the current project's policy into `#workspace-dialog` (primary, extra roots as saved, Restricted or Any access). `workspace save-policy` submits only on that explicit control; closing the dialog does not persist. Starting a ticket freezes the then-current policy onto that run, so later Any-access or extra-root edits do not enlarge it. Use the isolated mocked daemon in `ui.test.mjs` for tests. Other commands navigate through rendered UI; missing or ambiguous controls fail. Never enable Any access against the operator checkout; seed extra roots in a temp daemon.
 
 A journey runs in one browser session. Example:
 
