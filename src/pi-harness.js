@@ -305,7 +305,87 @@ export function formatCommitMessage(value, step) {
   return `${commitField(value?.subject, `feat: ${step.title}`)}\n\nWhy: ${commitField(value?.why, step.description || step.title)}\nRequirement: ${commitField(value?.requirement, fallbackRequirement)}`;
 }
 
-export function stepContext({ plan, step, artifacts, proofMap }) {
+function describeConfiguredRepositories(repositories = []) {
+  if (!repositories.length) return "";
+  return `Configured repositories:\n${repositories.map((repo) => `- ${repo.id || repo.repositoryId || "primary"} (${repo.displayPath || repo.sourceCwd || repo.id || repo.repositoryId || "primary"}): ${repo.kind || repo.evidenceKind || "git"} ${repo.mode || "read/write"}`).join("\n")}\nWrite scopes use root:<repositoryId>:<relativePath> for extra roots; unqualified paths stay primary-only.\n`;
+}
+
+function formatRepositoryProof(diff = {}, checks = {}) {
+  const repos = diff.repositories || checks.repositories || [];
+  if (!repos.length) {
+    return {
+      files: (diff.files || []).join(", ") || "none",
+      diff: diff.patch || "No textual diff",
+      gate: { status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }
+    };
+  }
+  return {
+    files: (diff.files || []).join(", ") || "none",
+    diff: repos.map((item) => `# ${item.repositoryId} (${item.displayPath})\n${item.patch || (item.files || []).join(", ") || "No textual diff"}${item.error ? `\nerror: ${item.error}` : ""}`).join("\n\n"),
+    gate: {
+      status: checks?.status || "unknown",
+      command: checks?.command || null,
+      summary: checks?.summary || "",
+      failedRepositories: checks?.failedRepositories || [],
+      repositories: (checks.repositories || []).map((item) => ({
+        repositoryId: item.repositoryId,
+        displayPath: item.displayPath,
+        status: item.status,
+        command: item.command,
+        summary: item.summary
+      }))
+    }
+  };
+}
+
+export function enrichReviewPacket(packet, { diff = {}, checks = {} } = {}) {
+  const repositories = [];
+  const seen = new Set();
+  for (const item of [...(diff.repositories || []), ...(checks.repositories || [])]) {
+    const id = item.repositoryId || item.id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const check = (checks.repositories || []).find((row) => (row.repositoryId || row.id) === id);
+    const labeled = (diff.repositories || []).find((row) => (row.repositoryId || row.id) === id) || item;
+    repositories.push({
+      repositoryId: id,
+      displayPath: labeled.displayPath || check?.displayPath || id,
+      evidenceKind: labeled.evidenceKind || labeled.kind || "git",
+      files: (labeled.files || []).slice(0, 100),
+      patch: String(labeled.patch || "").slice(0, 30_000),
+      error: labeled.error || null,
+      status: check?.status || null,
+      command: check?.command || null,
+      summary: check?.summary || null
+    });
+  }
+  const joinedPatch = repositories.map((item) => item.patch).filter(Boolean).join("\n");
+  const canonicalPatch = packet.canonicalDiff?.patch;
+  return {
+    ...packet,
+    ...(repositories.length ? { repositories } : {}),
+    canonicalDiff: {
+      ...packet.canonicalDiff,
+      ...((!canonicalPatch || canonicalPatch === "No textual diff") && joinedPatch ? { patch: joinedPatch.slice(0, 60_000) } : {}),
+      ...(diff.error ? { error: diff.error } : {})
+    },
+    checks: {
+      ...packet.checks,
+      ...(checks.failedRepositories ? { failedRepositories: checks.failedRepositories } : {}),
+      ...(checks.repositories ? {
+        repositories: checks.repositories.map((item) => ({
+          repositoryId: item.repositoryId || item.id,
+          displayPath: item.displayPath,
+          status: item.status,
+          command: item.command,
+          summary: item.summary
+        }))
+      } : {})
+    }
+  };
+}
+
+export function stepContext({ plan, step, artifacts, proofMap, repositories = [] }) {
   const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
     .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
@@ -344,7 +424,7 @@ Harness: ${step.harness}
 Context policy: ${step.contextPolicy}
 Permission: ${step.permission}
 Write scope: ${workerWriteScope(step) || "none"}
-Expected files: ${step.expectedFiles?.join(", ") || "none specified"}
+${describeConfiguredRepositories(repositories)}Expected files: ${step.expectedFiles?.join(", ") || "none specified"}
 Estimated changed lines: ${step.estimatedChangedLines || "not estimated"}
 Review budget: ${step.reviewBudget ? `${step.reviewBudget.maxFiles} files / ${step.reviewBudget.maxChangedLines} changed lines${step.reviewBudget.justification ? ` (${step.reviewBudget.justification})` : ""}` : "default"}
 Skills requested: ${step.skills?.join(", ") || "none"}
@@ -1421,6 +1501,7 @@ ${design}
 Slice: ${step.title}
 Step permission: ${step.permission}
 Write scope: ${workerWriteScope(step) || "none"}
+${describeConfiguredRepositories(diff.repositories || access?.repositories || [])}
 Expected worker artifacts: ${step.expectedArtifacts.join(", ") || "none"}
 Acceptance criteria:
 ${step.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}
@@ -1436,12 +1517,12 @@ ${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifa
 Worker artifact:
 ${output}
 
-Changed files: ${diff.files.join(", ") || "none"}
+Changed files: ${formatRepositoryProof(diff, checks).files}
 Diff:
-${diff.patch || "No textual diff"}
+${formatRepositoryProof(diff, checks).diff}${diff?.error ? `\nerror: ${diff.error}` : ""}
 
 Deterministic gate:
-${JSON.stringify({ status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }, null, 2)}
+${JSON.stringify(formatRepositoryProof(diff, checks).gate, null, 2)}
 
 Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
 
@@ -1602,7 +1683,10 @@ ${diff.patch || "No textual diff"}`;
       sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
-    const packet = { ...compactReviewPacket({ ticket, plan, artifacts, diff, checks }), proofMap: proofMap || null };
+    const packet = {
+      ...enrichReviewPacket(compactReviewPacket({ ticket, plan, artifacts, diff, checks }), { diff, checks }),
+      proofMap: proofMap || null
+    };
     const prompt = this.configuredPrompt(session, profile, `# Independent ${role} review
 
 ${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
@@ -1764,7 +1848,7 @@ ${stripFrontmatter(content).trim()}
           : "";
       const prompt = resumeSessionFile
         ? continuation
-        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap })), continuation].filter(Boolean).join("\n\n");
+        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap, repositories })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });
       signal?.throwIfAborted();

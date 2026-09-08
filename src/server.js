@@ -9,18 +9,18 @@ import { promisify } from "node:util";
 import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 import { admissionCandidates } from "./admission.js";
-import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
+import { aggregateProofDiffs, combineRepositoryChecks, diffFileSnapshots, diffTrees, extraProofRoots, labelDiff, labelRepositoryDiffs, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotProofPath, snapshotTree } from "./git.js";
 import { deliveryForRemote, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
+import { ensureVerificationContractStep, enrichReviewPacket, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
-import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
+import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, parseWriteScopeEntry, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, diffRepositoryTrees, ensureTicketWorktree, filesOutsideWriteScope, gitRepositoriesForStep, integrateBranch, mergeRepositoryDiff, needsLocalWorkspaceRepair, repairZeroStateWorkspace, restoreRepositoryTrees, snapshotRepositoryTrees } from "./worktrees.js";
@@ -50,6 +50,8 @@ function cliOption(name, fallback, argv = process.argv.slice(2)) {
 
 export function repositoryCheckReview(checks) {
   const missingVisualEvidence = checks.failureKind === "visual-evidence";
+  const failed = checks.failedRepositories || [];
+  const where = failed.length ? ` in ${failed.map((item) => item.displayPath || item.repositoryId).join(", ")}` : "";
   const failureDiagnostic = String(checks.failureHighlights || "").trim().slice(-1500);
   return {
     role: "deterministic",
@@ -57,8 +59,8 @@ export function repositoryCheckReview(checks) {
     findings: checks.status === "failed" ? [{
       severity: "blocking",
       category: missingVisualEvidence ? "evidence" : "tests",
-      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
-      evidence: [],
+      claim: missingVisualEvidence ? checks.summary : `Repository check failed${where}: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
+      evidence: failed.map((item) => ({ file: item.displayPath || item.repositoryId, line: 1 })),
       suggestedFix: missingVisualEvidence
         ? "Make the verification contract write ticket-bound screenshots (and video when required) into AGENT_PLAN_EVIDENCE_DIR with a final-proof-manifest.json for this ticket and run."
         : `Make ${checks.command} pass.${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : `\n\n${checks.output}`}`,
@@ -330,22 +332,6 @@ function retainChecks(checks) {
   return retained;
 }
 
-function repositoryCheckReview(checks) {
-  return {
-    role: "deterministic",
-    summary: checks.summary,
-    findings: checks.status === "failed" ? [{
-      severity: "blocking",
-      category: "tests",
-      claim: `Repository check failed: ${checks.command}`,
-      evidence: [],
-      suggestedFix: `Make ${checks.command} pass.\n\n${checks.output}`,
-      confidence: "high"
-    }] : [],
-    checks
-  };
-}
-
 function finalProofCaptureEnvironment(ticketId) {
   const run = ticketRun(store.read(), ticketId);
   const address = server.address();
@@ -398,6 +384,7 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     environment: required ? { ...liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId), AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(projectProofMap(current).criteria.filter((criterion) => criterion.requiresVisualEvidence && (!stepId || criterion.stepId === stepId)).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }))) } : {}
   });
   reconcileVisualChecks(checks, evidence, { required, requiredVideo, ticketId, runId: current.runId });
+  checks.repositoryId ||= "primary";
   const bound = required ? ticketBoundVisualEvidence(checks.evidence, { ticketId, runId: current.runId, evidenceDir: checks.evidenceDir }) : { bound: false };
   if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -414,6 +401,64 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     }
   });
   return retainChecks(checks);
+}
+
+async function snapshotProofRootMap(run, step) {
+  const snapshots = {};
+  for (const root of extraProofRoots(run, step)) snapshots[root.id] = await snapshotProofPath(root.path);
+  return snapshots;
+}
+
+function labeledProofRootDiffs(run, step, before, after) {
+  return extraProofRoots(run, step).map((root) => labelDiff(
+    diffFileSnapshots(before?.[root.id], after?.[root.id]),
+    root,
+    { evidenceKind: root.kind === "external" ? "external" : "nongit" }
+  ));
+}
+
+function repositoryBaselines(run, repos) {
+  const trees = {};
+  for (const repo of repos || []) {
+    const id = repo.id || "primary";
+    trees[id] = repo.baselineTree || (id === "primary" ? run.baselineTree : null);
+  }
+  return trees;
+}
+
+function extraReposForChecks(repos, diffs, writeScope = "") {
+  const scoped = String(writeScope || "").split(",").map((item) => parseWriteScopeEntry(item)).filter(Boolean);
+  return (repos || []).filter((repo) => {
+    const id = repo.id || "primary";
+    if (id === "primary" || !repo.cwd) return false;
+    if ((diffs?.[id]?.files || []).length) return true;
+    return scoped.some((entry) => entry.kind === "root" && entry.rootId === id);
+  });
+}
+
+async function runChangedRepositoryChecks({ ticketId, previewId, signal, required, requiredVideo = false, stepId = null, repositories, diffs, writeScope = "" }) {
+  const repos = repositories || [];
+  const primary = repos.find((repo) => (repo.id || "primary") === "primary") || repos[0];
+  const extras = extraReposForChecks(repos, diffs, writeScope);
+  const targets = [primary, ...extras].filter(Boolean);
+  const results = [];
+  for (const repo of targets) {
+    const id = repo.id || "primary";
+    const isPrimary = id === "primary";
+    const raw = isPrimary
+      ? await runChecksWithPreview({ ticketId, previewId, cwd: repo.cwd, signal, required, requiredVideo, stepId })
+      : retainChecks(await runContainedRepositoryChecks({
+        ticketId, stepId, cwd: repo.cwd, signal,
+        requireVisualEvidence: false, requireVideoEvidence: false, environment: {}
+      }));
+    results.push({
+      ...raw,
+      repositoryId: id,
+      displayPath: repo.displayPath || repo.sourceCwd || id,
+      kind: repo.kind || (isPrimary ? "primary" : "extra")
+    });
+  }
+  return combineRepositoryChecks(results);
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
@@ -790,21 +835,28 @@ function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = 
   return [...(step.attempts || [])].reverse().map((attempt) => attempt.verification?.checks || attempt.checks).find(Boolean) || step.checks || null;
 }
 
+function withProofPatch(diff) {
+  if (!diff || typeof diff !== "object") return diff;
+  if (typeof diff.patch === "string") return diff;
+  const patch = (diff.repositories || []).map((item) => item.patch).filter(Boolean).join("\n");
+  return { ...diff, patch };
+}
+
 function canonicalDiffOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
   if (scope === "final") return reviewId
-    ? run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null
-    : run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null;
+    ? withProofPatch(run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null)
+    : withProofPatch(run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null);
   if (!stepId) throw new Error("Step diff requires a step ID");
   const step = findNode(run.plan, stepId);
   if (!step) throw new Error("Step not found");
   if (scope === "attempt") {
     if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
-    return run.attemptDiffHistory?.[stepId]?.[attemptId]
+    return withProofPatch(run.attemptDiffHistory?.[stepId]?.[attemptId]
       || ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff
-      || null;
+      || null);
   }
   if (scope !== "step") throw new Error("Unknown diff scope");
-  return step.diff || null;
+  return withProofPatch(step.diff || null);
 }
 
 function nextAttemptId(step) {
@@ -1841,12 +1893,17 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
       let beforeTrees = await snapshotRepositoryTrees(repos);
       let beforeTree = beforeTrees.primary || await snapshotTree(stepCwd);
       if (beforeTree) beforeTrees.primary ||= beforeTree;
+      const beforeProofRoots = await snapshotProofRootMap(run, step);
       const stepBaseTree = step.baseTree || beforeTree;
       const stepBaseTrees = step.baseTrees || { ...beforeTrees };
+      const stepBaseProofRoots = step.baseProofRoots || beforeProofRoots;
       await update((state) => {
-        const target = findNode(ticketRun(state, ticketId).plan, stepId);
+        const current = ticketRun(state, ticketId);
+        const target = findNode(current.plan, stepId);
         target.baseTree ||= stepBaseTree;
         target.baseTrees ||= stepBaseTrees;
+        target.baseProofRoots ||= stepBaseProofRoots;
+        current.baselineProofRoots ||= beforeProofRoots;
       });
       let rollbackFeedback = "";
       if (step.baseTree && beforeTree) {
@@ -1919,10 +1976,16 @@ const result = await runContainedWorker({
 const report = redactRecord(result.report);
         const workerTrees = await snapshotRepositoryTrees(attemptRepos);
         const workerTree = workerTrees.primary || await snapshotTree(cwd);
-        let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
+        const workerProofRoots = await snapshotProofRootMap(latest, currentStep);
+        const attemptDiffs = await diffRepositoryTrees(attemptRepos, attemptBaseTrees, workerTrees);
+        let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "", repositories: [], failedRepositories: [] };
         if (currentStep.permission === "write" && report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
-          checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
+          checks = await runChangedRepositoryChecks({
+            ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal,
+            required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId,
+            repositories: attemptRepos, diffs: attemptDiffs, writeScope: workerWriteScope(currentStep)
+          });
         }
         attemptEvidence.checks = checks;
         signal?.throwIfAborted();
@@ -1934,12 +1997,20 @@ const report = redactRecord(result.report);
         }
         const afterTrees = await snapshotRepositoryTrees(attemptRepos);
         const afterTree = afterTrees.primary || await snapshotTree(cwd);
+        const afterProofRoots = await snapshotProofRootMap(ticketRun(store.read(), ticketId), currentStep);
         const repositoryDiffs = await diffRepositoryTrees(attemptRepos, stepBaseTrees, afterTrees);
-        const diff = mergeRepositoryDiff(attemptRepos, repositoryDiffs);
-        const attemptDiffs = await diffRepositoryTrees(attemptRepos, attemptBaseTrees, workerTrees);
-        const attemptDiff = mergeRepositoryDiff(attemptRepos, attemptDiffs);
+        const proofDiffs = [
+          ...labelRepositoryDiffs(attemptRepos, repositoryDiffs),
+          ...labeledProofRootDiffs(latest, currentStep, stepBaseProofRoots, afterProofRoots)
+        ];
+        const diff = aggregateProofDiffs(proofDiffs);
+        const attemptProofDiffs = [
+          ...labelRepositoryDiffs(attemptRepos, attemptDiffs),
+          ...labeledProofRootDiffs(latest, currentStep, beforeProofRoots, workerProofRoots)
+        ];
+        const attemptDiff = aggregateProofDiffs(attemptProofDiffs);
         const checkDiffs = await diffRepositoryTrees(attemptRepos, workerTrees, afterTrees);
-        const checkDiff = mergeRepositoryDiff(attemptRepos, checkDiffs);
+        const checkDiff = aggregateProofDiffs(labelRepositoryDiffs(attemptRepos, checkDiffs));
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
         const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
@@ -1952,8 +2023,8 @@ const report = redactRecord(result.report);
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: currentStep.expectedArtifacts[0] || `${currentStep.id}-result.md`, content: result.output, kind: "agent-output" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "prompt.md", content: result.prompt, kind: "agent-prompt" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "context.json", content: JSON.stringify({ profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation, contextPolicy: currentStep.contextPolicy, permission: currentStep.permission, writeScope: currentStep.writeScope, skills: currentStep.skills, references: currentStep.references, requirementIds: currentStep.requirementIds, capabilityIds: currentStep.capabilityIds, deltaIds: currentStep.deltaIds, productContext: currentStep.productContext, artifacts: contextArtifacts.map(({ id, name, path }) => ({ id, name, path })) }, null, 2), kind: "context-manifest" }),
-          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
-          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch || "", kind: "git-diff" }),
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch || "", kind: "git-attempt-diff" })
         ];
 Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, report);
@@ -2719,8 +2790,15 @@ async function finalReviewLoop(ticketId, signal) {
   const started = ticketRun(store.read(), ticketId);
   const removedReviewArtifacts = await cleanupLegacyReviewArtifacts(started.workspace.cwd);
   const activity = captureStageActivity(ticketId, "verify", started.runId);
-  const implementationTree = await snapshotTree(started.workspace.cwd);
-  const implementationDiff = await diffTrees(started.workspace.cwd, started.baselineTree, implementationTree);
+  const implementationRepos = gitRepositoriesForStep(started);
+  const implementationTrees = await snapshotRepositoryTrees(implementationRepos);
+  const implementationTree = implementationTrees.primary || implementationTrees[implementationRepos[0]?.id || "primary"];
+  const implementationDiffs = await diffRepositoryTrees(implementationRepos, repositoryBaselines(started, implementationRepos), implementationTrees);
+  const implementationProofRoots = await snapshotProofRootMap(started, null);
+  const implementationDiff = aggregateProofDiffs([
+    ...labelRepositoryDiffs(implementationRepos, implementationDiffs),
+    ...labeledProofRootDiffs(started, null, started.baselineProofRoots || implementationProofRoots, implementationProofRoots)
+  ]);
   const verificationBaseTree = started.stages.find((stage) => stage.id === "verify")?.baseTree || implementationTree;
   await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -2774,11 +2852,23 @@ async function finalReviewLoop(ticketId, signal) {
     let verificationDiff = savedAttempt?.verificationDiff;
     if (!savedAttempt) {
       activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+      const combinedRepos = gitRepositoriesForStep(current);
+      const preCheckTrees = await snapshotRepositoryTrees(combinedRepos);
+      const changedVsBaseline = await diffRepositoryTrees(combinedRepos, repositoryBaselines(current, combinedRepos), preCheckTrees);
+      checks = await runChangedRepositoryChecks({
+        ticketId, previewId: `${ticketId}:combined`, signal,
+        required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence),
+        requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence),
+        repositories: combinedRepos, diffs: changedVsBaseline
+      });
       signal?.throwIfAborted();
-      const afterTree = await snapshotTree(current.workspace.cwd);
-      diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
-      verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+      const afterTrees = await snapshotRepositoryTrees(combinedRepos);
+      const afterProofRoots = await snapshotProofRootMap(current, null);
+      diff = aggregateProofDiffs([
+        ...labelRepositoryDiffs(combinedRepos, await diffRepositoryTrees(combinedRepos, repositoryBaselines(current, combinedRepos), afterTrees)),
+        ...labeledProofRootDiffs(current, null, current.baselineProofRoots || afterProofRoots, afterProofRoots)
+      ]);
+      verificationDiff = aggregateProofDiffs(labelRepositoryDiffs(combinedRepos, await diffRepositoryTrees(combinedRepos, { ...repositoryBaselines(current, combinedRepos), primary: verificationBaseTree }, afterTrees)));
       await update((state) => {
         ticketRun(state, ticketId).pendingReviewAttempt = { round, checks, diff, verificationDiff, createdAt: new Date().toISOString() };
       });
@@ -3322,11 +3412,16 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), decodeURIComponent(reviewPacket[1]));
     const latestReview = run.reviews?.at(-1);
     const checks = latestReview?.reviews?.find((review) => review.role === "deterministic")?.checks || run.finalChecks || {};
-    return json(response, 200, compactReviewPacket({
+    const packetDiff = [
+      run.deliveredDiff,
+      latestReview?.diff,
+      ...flattenSteps(run.plan).flatMap((step) => [step.diff, ...[...(step.attempts || [])].reverse().map((attempt) => attempt.diff)])
+    ].find((diff) => diff && (diff.patch || diff.repositories?.length || diff.files?.length)) || {};
+    return json(response, 200, enrichReviewPacket(compactReviewPacket({
       ticket: run.ticket, plan: run.plan, artifacts: run.artifacts,
-      diff: run.deliveredDiff || latestReview?.diff || {}, checks,
+      diff: packetDiff, checks,
       proofMap: projectProofMap(run)
-    }));
+    }), { diff: packetDiff, checks }));
   }
   const ticketInspection = url.pathname.match(/^\/api\/tickets\/([^/]+)\/inspection$/);
   if (request.method === "GET" && ticketInspection) {

@@ -603,3 +603,80 @@ test("access show and set round-trip the current project policy as JSON", async 
     }
   });
 });
+
+test("timeline and review packet name both repositories when A and B changed", async () => {
+  await withDaemon(async (daemon) => {
+    const extraId = "r-repob";
+    const plan = normalizePlan({
+      title: "A and B",
+      nodes: [{
+        id: "build", title: "Build", status: "review_ready", permission: "write",
+        writeScope: `one-a.txt,root:${extraId}:one-b.txt`,
+        expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+        acceptanceCriteria: ["Lands in A and B"],
+        attempts: [{
+          attemptId: "attempt-1", status: "verified", startedAt: "2026-09-03T10:01:00.000Z", completedAt: "2026-09-03T10:02:00.000Z",
+          report: { status: "completed", summary: "done" },
+          verification: {
+            checks: {
+              status: "passed", command: "verify", summary: "passed",
+              repositories: [
+                { repositoryId: "primary", displayPath: "repo-a", status: "passed", command: "verify-a", summary: "A passed" },
+                { repositoryId: extraId, displayPath: "repo-b", status: "passed", command: "verify-b", summary: "B passed" }
+              ],
+              failedRepositories: []
+            }
+          },
+          diff: {
+            available: true,
+            files: ["one-a.txt", `root:${extraId}:one-b.txt`],
+            patch: "# repository primary (repo-a)\n+from-a\n# repository r-repob (repo-b)\n+from-b\n",
+            repositories: [
+              { repositoryId: "primary", displayPath: "repo-a", evidenceKind: "git", available: true, files: ["one-a.txt"], patch: "diff --git a/one-a.txt b/one-a.txt\n+from-a\n" },
+              { repositoryId: extraId, displayPath: "repo-b", evidenceKind: "git", available: true, files: ["one-b.txt"], patch: "diff --git a/one-b.txt b/one-b.txt\n+from-b\n" }
+            ]
+          }
+        }]
+      }]
+    });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review",
+      access: {
+        mode: "restricted",
+        primary: { id: "primary", displayPath: "repo-a", mode: "read/write" },
+        extraRoots: [{ id: extraId, displayPath: "repo-b", mode: "read/write", path: "/tmp/repo-b" }]
+      },
+      repositories: [
+        { id: "primary", kind: "primary", displayPath: "repo-a" },
+        { id: extraId, kind: "extra", displayPath: "repo-b" }
+      ],
+      plan,
+      reviews: [{
+        round: 1,
+        diff: {
+          available: true,
+          files: ["one-a.txt", `root:${extraId}:one-b.txt`],
+          patch: "# repository primary (repo-a)\n+from-a\n# repository r-repob (repo-b)\n+from-b\n",
+          repositories: [
+            { repositoryId: "primary", displayPath: "repo-a", evidenceKind: "git", files: ["one-a.txt"], patch: "diff --git a/one-a.txt b/one-a.txt\n+from-a\n" },
+            { repositoryId: extraId, displayPath: "repo-b", evidenceKind: "git", files: ["one-b.txt"], patch: "diff --git a/one-b.txt b/one-b.txt\n+from-b\n" }
+          ]
+        },
+        reviews: [{ role: "deterministic", checks: { status: "passed", command: "verify" } }]
+      }]
+    });
+    const timeline = await assertCanonicalTimeline(daemon, id);
+    assert.deepEqual(timeline.repositories.map((item) => item.displayPath), ["repo-a", "repo-b"]);
+    assert.equal(JSON.stringify(timeline).includes("repo-a"), true);
+    assert.equal(JSON.stringify(timeline).includes("repo-b"), true);
+    const packet = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/review-packet`);
+    assert.equal(packet.status, 200, packet.text);
+    assert.equal(packet.json.repositories.length, 2);
+    assert.deepEqual(packet.json.repositories.map((item) => [item.repositoryId, item.displayPath]), [
+      ["primary", "repo-a"],
+      [extraId, "repo-b"]
+    ]);
+    assert.match(packet.json.canonicalDiff.patch, /from-a/);
+    assert.match(packet.json.canonicalDiff.patch, /from-b/);
+  });
+});

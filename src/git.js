@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { resolveAccessPath, writeScopeAllows } from "./access-policy.js";
+import { frozenRoots, parseWriteScopeEntry, PRIMARY_ROOT_ID, resolveAccessPath, writeScopeAllows } from "./access-policy.js";
 
 const exec = promisify(execFile);
 
@@ -253,4 +253,246 @@ export async function assertScopedWrite(cwd, inputPath, writeScope, options = {}
   const escaped = relative(realRoot, realExisting);
   if (isAbsolute(escaped) || escaped === ".." || escaped.startsWith(`..${sep}`)) throw new Error(`Write blocked through a symlink outside the workspace: ${inputPath}`);
   return absolute;
+}
+
+const skippedProofDirs = new Set([".git", ".jj", "node_modules"]);
+const PROOF_PATCH_LIMIT = 600_000;
+const PROOF_FILE_LIMIT = 2_000;
+const PROOF_TEXT_LIMIT = 256_000;
+
+export function repositoryIdentity(repo = {}) {
+  const repositoryId = repo.repositoryId || repo.id || PRIMARY_ROOT_ID;
+  return {
+    repositoryId,
+    displayPath: repo.displayPath || repo.sourceCwd || repo.path || repositoryId,
+    kind: repo.kind || repo.evidenceKind || (repositoryId === PRIMARY_ROOT_ID ? "primary" : "extra")
+  };
+}
+
+export function labelDiff(diff, repo, extras = {}) {
+  return {
+    ...(diff && typeof diff === "object" ? diff : { available: false, files: [], patch: "", stat: "" }),
+    ...repositoryIdentity(repo),
+    evidenceKind: extras.evidenceKind || extras.kind || (repo?.kind === "nongit" || repo?.kind === "external" ? repo.kind : "git")
+  };
+}
+
+export function labelRepositoryDiffs(repos = [], diffs = {}) {
+  return (repos || []).map((repo) => {
+    const id = repo.id || PRIMARY_ROOT_ID;
+    return labelDiff(diffs[id] || { available: false, files: [], patch: "", stat: "" }, repo, { evidenceKind: "git" });
+  });
+}
+
+export function extraProofRoots(run, step = null) {
+  const gitIds = new Set((run?.repositories || []).map((repo) => repo.id || PRIMARY_ROOT_ID));
+  const roots = [];
+  for (const root of frozenRoots(run?.access).filter((item) => item.kind === "extra" && item.mode === "read/write")) {
+    if (gitIds.has(root.id)) continue;
+    roots.push({
+      id: root.id,
+      displayPath: root.displayPath || root.path,
+      path: root.path,
+      kind: "nongit",
+      mode: "read/write"
+    });
+  }
+  if (run?.access?.mode !== "any" || !step) return roots;
+  for (const entry of String(step.writeScope || "").split(",").map((item) => parseWriteScopeEntry(item)).filter(Boolean)) {
+    if (entry.kind !== "absolute") continue;
+    const contained = frozenRoots(run.access).some((root) => {
+      const path = root.path;
+      return entry.path === path || entry.path.startsWith(`${path}${sep}`) || path.startsWith(`${entry.path}${sep}`);
+    });
+    if (contained) continue;
+    roots.push({
+      id: `ext-${createHash("sha256").update(entry.path).digest("hex").slice(0, 8)}`,
+      displayPath: entry.path,
+      path: entry.path,
+      kind: "external",
+      mode: "read/write"
+    });
+  }
+  return roots;
+}
+
+function qualifyProofPath(repositoryId, path) {
+  return !repositoryId || repositoryId === PRIMARY_ROOT_ID ? path : `root:${repositoryId}:${path}`;
+}
+
+function fileHunk(path, beforeText, afterText) {
+  const beforeLines = String(beforeText ?? "").split("\n");
+  const afterLines = String(afterText ?? "").split("\n");
+  if (beforeText == null) return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${afterLines.length} @@\n${afterLines.map((line) => `+${line}`).join("\n")}\n`;
+  if (afterText == null) return `diff --git a/${path} b/${path}\ndeleted file mode 100644\n--- a/${path}\n+++ /dev/null\n@@ -1,${beforeLines.length} +0,0 @@\n${beforeLines.map((line) => `-${line}`).join("\n")}\n`;
+  return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,${beforeLines.length} +1,${afterLines.length} @@\n${beforeLines.map((line) => `-${line}`).join("\n")}\n${afterLines.map((line) => `+${line}`).join("\n")}\n`;
+}
+
+async function recordProofFile(files, rel, absolute) {
+  const buf = await readFile(absolute);
+  const binary = buf.includes(0);
+  files[rel] = {
+    hash: createHash("sha256").update(buf).digest("hex"),
+    size: buf.length,
+    binary,
+    content: binary || buf.length > PROOF_TEXT_LIMIT ? null : buf.toString("utf8")
+  };
+}
+
+export async function snapshotDirectory(root) {
+  const files = {};
+  let error = null;
+  async function walk(dir, rel) {
+    if (error) return;
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); }
+    catch (caught) {
+      error = caught.message;
+      return;
+    }
+    for (const entry of entries) {
+      if (error) return;
+      if (skippedProofDirs.has(entry.name) || entry.isSymbolicLink()) continue;
+      const abs = join(dir, entry.name);
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await walk(abs, nextRel);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (Object.keys(files).length >= PROOF_FILE_LIMIT) {
+        error = "output_limit: non-Git proof snapshot exceeded 2000 files";
+        return;
+      }
+      try { await recordProofFile(files, nextRel, abs); }
+      catch (caught) { error = caught.message; }
+    }
+  }
+  await walk(root, "");
+  return { root, files, error };
+}
+
+export async function snapshotProofPath(target) {
+  try {
+    const info = await stat(target);
+    if (info.isDirectory()) return snapshotDirectory(target);
+    const files = {};
+    await recordProofFile(files, basename(target), target);
+    return { root: target, files, error: null };
+  } catch (caught) {
+    if (caught.code === "ENOENT") return { root: target, files: {}, error: null, missing: true };
+    return { root: target, files: {}, error: caught.message };
+  }
+}
+
+export function diffFileSnapshots(before = {}, after = {}) {
+  const beforeFiles = before?.files || {};
+  const afterFiles = after?.files || {};
+  const names = [...new Set([...Object.keys(beforeFiles), ...Object.keys(afterFiles)])].sort();
+  const files = [];
+  const fileStats = [];
+  const parts = [];
+  let additions = 0;
+  let deletions = 0;
+  let error = before?.error || after?.error || null;
+  for (const name of names) {
+    const left = beforeFiles[name];
+    const right = afterFiles[name];
+    if (left?.hash && right?.hash && left.hash === right.hash) continue;
+    files.push(name);
+    if (left?.binary || right?.binary || (left && left.content == null && !left.missing) || (right && right.content == null && !right.missing)) {
+      parts.push(`diff --git a/${name} b/${name}\nBinary file ${name} changed\n`);
+      fileStats.push({ path: name, additions: 0, deletions: 0, binary: true });
+      continue;
+    }
+    const hunk = fileHunk(name, left ? left.content : null, right ? right.content : null);
+    const plus = right ? String(right.content || "").split("\n").length : 0;
+    const minus = left ? String(left.content || "").split("\n").length : 0;
+    additions += plus;
+    deletions += minus;
+    fileStats.push({ path: name, additions: plus, deletions: minus, binary: false });
+    parts.push(hunk);
+  }
+  const patch = parts.join("");
+  if (patch.length > PROOF_PATCH_LIMIT) {
+    error = error || "output_limit: non-Git or external proof exceeded the retained size";
+  }
+  return {
+    available: files.length > 0,
+    files,
+    fileStats,
+    patch: patch.length > PROOF_PATCH_LIMIT ? "" : patch,
+    truncated: patch.length > PROOF_PATCH_LIMIT,
+    stat: `${files.length} file${files.length === 1 ? "" : "s"} changed`,
+    additions,
+    deletions,
+    changedLines: additions + deletions,
+    error
+  };
+}
+
+export function aggregateProofDiffs(labeled = []) {
+  const records = (labeled || []).filter(Boolean);
+  const files = [];
+  const fileStats = [];
+  const patchParts = [];
+  const errors = [];
+  let additions = 0;
+  let deletions = 0;
+  let available = false;
+  for (const diff of records) {
+    const id = diff.repositoryId || PRIMARY_ROOT_ID;
+    if (diff.error) errors.push(`${diff.displayPath || id}: ${diff.error}`);
+    if (diff.truncated) errors.push(`${diff.displayPath || id}: output_limit: repository diff exceeded the retained size`);
+    if (diff.available || (diff.files || []).length || diff.patch) available = true;
+    for (const file of diff.files || []) files.push(qualifyProofPath(id, file));
+    for (const row of diff.fileStats || []) fileStats.push({ ...row, path: qualifyProofPath(id, row.path) });
+    additions += Number(diff.additions || 0);
+    deletions += Number(diff.deletions || 0);
+    if (diff.patch) patchParts.push(`# repository ${id} (${diff.displayPath || id})\n${diff.patch}`);
+    else if ((diff.files || []).length) errors.push(`${diff.displayPath || id}: output_limit: changed files were recorded without a retained patch`);
+  }
+  const patch = patchParts.join("\n");
+  const truncated = patch.length > PROOF_PATCH_LIMIT;
+  if (truncated) errors.push("output_limit: combined proof diff exceeded the retained size; per-repository records remain");
+  return {
+    available,
+    files,
+    fileStats,
+    patch: truncated ? patch.slice(0, PROOF_PATCH_LIMIT) : patch,
+    truncated,
+    stat: records.map((diff) => `${diff.displayPath || diff.repositoryId}: ${diff.stat || `${(diff.files || []).length} files`}`).join("\n"),
+    additions,
+    deletions,
+    changedLines: additions + deletions,
+    repositories: records,
+    error: errors[0] || null,
+    errors: errors.length ? errors : undefined
+  };
+}
+
+export function combineRepositoryChecks(results = []) {
+  const records = (results || []).filter(Boolean);
+  if (!records.length) return { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "", repositories: [], failedRepositories: [] };
+  const failed = records.filter((item) => item.status === "failed");
+  const failedRepositories = failed.map((item) => ({
+    repositoryId: item.repositoryId || PRIMARY_ROOT_ID,
+    displayPath: item.displayPath || item.repositoryId || PRIMARY_ROOT_ID,
+    status: item.status
+  }));
+  if (records.length === 1) {
+    return { ...records[0], repositories: records, failedRepositories };
+  }
+  return {
+    status: failed.length ? "failed" : (records.every((item) => item.status === "passed") ? "passed" : records[0].status || "unknown"),
+    command: records.map((item) => `${item.displayPath || item.repositoryId}: ${item.command || ""}`).join("\n"),
+    summary: failed.length
+      ? `Repository checks failed in ${failed.map((item) => item.displayPath || item.repositoryId).join(", ")}`
+      : records.map((item) => item.summary).filter(Boolean).join("\n"),
+    output: records.map((item) => `## ${item.displayPath || item.repositoryId} (${item.repositoryId || PRIMARY_ROOT_ID})\n${item.output || ""}`).join("\n\n"),
+    evidence: records.flatMap((item) => item.evidence || []),
+    durationMs: records.reduce((total, item) => total + (Number(item.durationMs) || 0), 0),
+    repositories: records,
+    failedRepositories
+  };
 }

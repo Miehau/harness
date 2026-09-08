@@ -31,6 +31,19 @@ test("reports missing visual evidence instead of mislabeling passing checks", ()
   assert.doesNotMatch(review.findings[0].suggestedFix, /Make .* pass|238 tests passed/);
 });
 
+test("repository check failures name the repository that failed", () => {
+  const review = repositoryCheckReview({
+    status: "failed",
+    command: "verify-a\nverify-b",
+    summary: "Repository checks failed in repo-b",
+    output: "no-b",
+    failedRepositories: [{ repositoryId: "r-b", displayPath: "repo-b", status: "failed" }]
+  });
+  assert.equal(review.findings[0].category, "tests");
+  assert.match(review.findings[0].claim, /repo-b/);
+  assert.equal(review.findings[0].evidence[0].file, "repo-b");
+});
+
 test("daemon shutdown ends open event streams before closing the server", () => {
   let ended = 0;
   const clients = new Set([
@@ -2100,5 +2113,143 @@ test("retrying accept after a persisted primary commit still finishes extra with
     await rm(dataDir, { recursive: true, force: true });
     await rm(primary, { recursive: true, force: true });
     await rm(extra, { recursive: true, force: true });
+  }
+});
+
+test("combined repository checks fail when B fails even if A passed", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-ab-check-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-ab-check-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-ab-check-b-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    const ticket = { id: "ab-check", identifier: "TEXT-check", title: "Checks", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    assert.ok(extraRepo?.cwd);
+    const primaryCwd = await realpath(workspace.cwd);
+    const harness = multiRepoHarness(() => ({
+      primary: { name: "one-a.txt", content: "from-a" },
+      extra: { name: "one-b.txt", content: "from-b" }
+    }));
+    harness.runRepositoryChecks = async ({ cwd }) => {
+      if (await realpath(cwd) === primaryCwd) {
+        return { status: "passed", command: "verify-a", summary: "A passed", output: "ok-a", evidence: [] };
+      }
+      return { status: "failed", command: "verify-b", summary: "B failed", output: "no-b", evidence: [] };
+    };
+    daemon = await createDaemon({ cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git", harness });
+    const plan = normalizePlan({
+      title: "Checks",
+      nodes: [{
+        id: "one", title: "One", permission: "write",
+        writeScope: `one-a.txt,root:${extraId}:one-b.txt`,
+        expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+        acceptanceCriteria: ["A and B change"]
+      }]
+    });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_approval",
+      checkpoint: { id: "cp", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
+    assert.equal(approved.status, 202, approved.text);
+    await waitForRun(daemon, id, (run) => ["needs_attention", "paused"].includes(run.status) || run.checkpoint?.kind === "needs_attention", 20_000);
+    const inspection = await invoke(daemon, "GET", `/api/tickets/${id}/inspection`);
+    assert.equal(inspection.status, 200, inspection.text);
+    assert.equal(inspection.json.workers[0].blocker.type, "repository-check");
+    assert.match(inspection.json.workers[0].blocker.summary, /repo-b/);
+    const failedAttempt = [...inspection.json.attempts].reverse().find((attempt) => attempt.resources?.checks?.failedRepositories?.length);
+    assert.equal(failedAttempt.resources.checks.failedRepositories[0].repositoryId, extraId);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+  }
+});
+
+test("non-Git extra roots and Any-access writes stay in proof instead of being dropped", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-nongit-proof-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-nongit-a-"));
+  const nongit = await mkdtemp(join(tmpdir(), "agent-plan-nongit-notes-"));
+  const external = await mkdtemp(join(tmpdir(), "agent-plan-nongit-ext-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await writeFile(join(nongit, "notes.txt"), "before\n");
+    await writeFile(join(external, "outside.txt"), "before\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        mode: "any",
+        extraRoots: [{ path: nongit, mode: "read/write", displayPath: "notes-root" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    const ticket = { id: "nongit-proof", identifier: "TEXT-nongit", title: "Notes", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    daemon = await createDaemon({
+      cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git",
+      harness: {
+        ...multiRepoHarness(() => ({ primary: { name: "one-a.txt", content: "from-a" } })),
+        async runStep({ cwd }) {
+          await writeFile(join(cwd, "one-a.txt"), "from-a");
+          await writeFile(join(nongit, "notes.txt"), "after-nongit\n");
+          await writeFile(join(external, "outside.txt"), "after-external\n");
+          return {
+            report: { status: "completed", summary: "one done", artifact: "ok" },
+            output: "ok", prompt: "p", rawOutput: "ok", sessionFile: null, reviewNotes: []
+          };
+        }
+      }
+    });
+    const plan = normalizePlan({
+      title: "Notes",
+      nodes: [{
+        id: "one", title: "One", permission: "write",
+        writeScope: `one-a.txt,root:${extraId}:notes.txt,${external}`,
+        expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+        acceptanceCriteria: ["Notes and external writes are retained"]
+      }]
+    });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_approval",
+      checkpoint: { id: "cp", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
+    assert.equal(approved.status, 202, approved.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "one");
+    const diff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=step&stepId=one`);
+    assert.equal(diff.status, 200, diff.text);
+    const files = diff.json.files || [];
+    const patch = String(diff.json.patch || (diff.json.repositories || []).map((item) => item.patch).filter(Boolean).join("\n"));
+    assert.equal(files.some((file) => String(file).includes("notes.txt")), true, JSON.stringify(diff.json));
+    assert.equal(files.some((file) => String(file).includes("outside.txt")), true, JSON.stringify(diff.json));
+    assert.match(patch, /after-nongit/);
+    assert.match(patch, /after-external/);
+    const kinds = (diff.json.repositories || []).map((item) => item.evidenceKind || item.kind);
+    assert.equal(kinds.includes("nongit"), true);
+    assert.equal(kinds.includes("external"), true);
+    const inspection = await invoke(daemon, "GET", `/api/tickets/${id}/inspection`);
+    assert.equal(inspection.json.repositories.some((item) => item.displayPath === "notes-root"), true);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(nongit, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
   }
 });
