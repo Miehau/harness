@@ -14,6 +14,6 @@ test("a stopped run can override one stage profile without rewriting its audit",
 
     const state = await invoke(daemon, "GET", "/api/state");
     assert.equal(state.json.ticketRuns[id].stageProfiles.verification.model, "gpt-5.6-terra");
-    assert.equal(state.json.ticketRuns[id].stageProfiles.implementation.model, "gpt-5.6-terra");
+    assert.equal(state.json.ticketRuns[id].stageProfiles.implementation.model, "grok-build-0.1");
   });
 });

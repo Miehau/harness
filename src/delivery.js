@@ -3,6 +3,16 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
+function checkFailureFeedback(check, log = "") {
+  const highlights = String(log).split(/\r?\n/).filter((line) =>
+    /not ok\b|FAIL(?:ED)?\b|\b(?:error|expected|actual|AssertionError|ERR_)\b/i.test(line)
+  ).slice(-80).join("\n").slice(-6000);
+  return {
+    id: `check:${check.id}`,
+    body: [`GitHub check "${check.name}" failed (${check.conclusion}).`, highlights, check.details_url].filter(Boolean).join("\n\n")
+  };
+}
+
 function repositoryFromRemote(remote) {
   const match = String(remote).match(/(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)[/:](.+?)(?:\.git)?$/i);
   if (!match) throw new Error(`Unsupported origin URL: ${remote}`);
@@ -63,12 +73,18 @@ export class GitHubDelivery {
       ...(comments || []).filter((comment) => comment.body).map((comment) => ({ id: `comment:${comment.id}`, body: comment.body, path: comment.path, line: comment.line || comment.original_line, author: comment.user?.login }))
     ];
     const checkRuns = checks?.check_runs || [];
+    const failedChecks = checkRuns.filter((check) => check.status === "completed" && !["success", "neutral", "skipped"].includes(check.conclusion));
+    const checkFeedback = await Promise.all(failedChecks.map(async (check) => {
+      let log = "";
+      try { log = await this.api.request(`${root}/actions/jobs/${check.id}/logs`); } catch {}
+      return checkFailureFeedback(check, log);
+    }));
     const hasStatuses = (statuses?.statuses || []).length > 0;
     const pending = checkRuns.some((check) => check.status !== "completed") || (hasStatuses && statuses.state === "pending");
     const failed = checkRuns.some((check) => check.status === "completed" && !["success", "neutral", "skipped"].includes(check.conclusion)) || (hasStatuses && ["failure", "error"].includes(statuses.state));
     return {
       headSha: pull.head.sha,
-      feedback,
+      feedback: [...feedback, ...checkFeedback],
       checks: failed ? "failed" : pending ? "pending" : "passed",
       mergeable: !pull.draft && pull.mergeable === true,
       ready: !pull.draft && pull.mergeable === true && !failed && !pending && !feedback.length,
@@ -162,27 +178,36 @@ export async function remoteContext(cwd, execImpl = exec) {
 }
 
 export async function pushTicketBranch(cwd, branch, execImpl = exec) {
-  await git(cwd, ["push", "--set-upstream", "origin", branch], execImpl);
+  await git(cwd, ["push", "--force-with-lease", "--set-upstream", "origin", branch], execImpl);
 }
 
-export async function rebaseOntoRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
-  await git(cwd, ["fetch", "origin", base], execImpl);
+export async function unmergedPaths(cwd, execImpl = exec) {
+  return (await git(cwd, ["diff", "--name-only", "--diff-filter=U"], execImpl)).split("\n").filter(Boolean);
+}
+
+export async function reconcileWithRemote(cwd, base, { resolveConflicts, execImpl = exec } = {}) {
+  let activeMerge = false;
+  try { await git(cwd, ["rev-parse", "--verify", "MERGE_HEAD"], execImpl); activeMerge = true; }
+  catch {}
   let failure;
-  try { await git(cwd, ["rebase", `origin/${base}`], execImpl); }
-  catch (error) { failure = error; }
-  while (failure) {
-    const conflicts = (await git(cwd, ["diff", "--name-only", "--diff-filter=U"], execImpl)).split("\n").filter(Boolean);
-    if (!conflicts.length || !resolveConflicts) throw failure;
-    try {
-      await resolveConflicts({ cwd, conflicts });
-      await git(cwd, ["add", "--all"], execImpl);
-      failure = null;
-      try { await git(cwd, ["-c", "core.editor=true", "rebase", "--continue"], execImpl); }
-      catch (error) { failure = error; }
-    } catch (error) {
-      await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
-      throw error;
+  if (!activeMerge) {
+    // Ticket worktrees are disposable delivery branches. Restart interrupted
+    // legacy rebases and merge the reviewed branch tip once instead.
+    await git(cwd, ["rebase", "--abort"], execImpl).catch(() => {});
+    await git(cwd, ["fetch", "origin", base], execImpl);
+    try { await git(cwd, ["merge", "--no-edit", `origin/${base}`], execImpl); }
+    catch (error) { failure = error; }
+  }
+  if (failure || activeMerge) {
+    const conflicts = await unmergedPaths(cwd, execImpl);
+    if (activeMerge && !conflicts.length) {
+      await git(cwd, ["-c", "core.editor=true", "merge", "--continue"], execImpl);
+      return { commit: await git(cwd, ["rev-parse", "HEAD"], execImpl) };
     }
+    if (!conflicts.length || !resolveConflicts) throw failure || new Error("An active merge still needs conflict resolution");
+    await resolveConflicts({ cwd, conflicts });
+    await git(cwd, ["add", "--all"], execImpl);
+    await git(cwd, ["-c", "core.editor=true", "merge", "--continue"], execImpl);
   }
   return { commit: await git(cwd, ["rev-parse", "HEAD"], execImpl) };
 }

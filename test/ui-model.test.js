@@ -1,6 +1,56 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { artifactsForStage, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, parseDiff, preferredStageId, preferredStepId, recentActivity, restartOptions, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
+import { readFile } from "node:fs/promises";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
+
+test("resolves canonical attempt selection without replacing a retained choice", () => {
+  const projection = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" },
+    stages: [{ id: "stage:implement" }],
+    workers: [{ id: "worker:build", stepId: "build", stageId: "stage:implement" }],
+    attempts: [
+      { id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", status: "failed", latestAction: "Tests failed", evidence: { state: "incomplete" }, blocker: { type: "repository-check", summary: "Tests failed" } },
+      { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", status: "verified", latestAction: "Checks passed", evidence: { state: "complete" } }
+    ]
+  };
+  assert.deepEqual(inspectionSelection(projection, { attemptId: "attempt:build:one" }), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" });
+  assert.deepEqual(inspectionSelection(projection), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" });
+  assert.deepEqual(inspectionSummary({ attempt: projection.attempts[0] }), {
+    status: "failed", latestAction: "Tests failed", blocker: { type: "repository-check", summary: "Tests failed" }, evidence: { state: "incomplete" }, nextAction: { kind: "none", label: "No action available" }
+  });
+  assert.equal(inspectionResourceLabel({ state: "not_retained" }), "Not retained");
+  assert.equal(inspectionResourceLabel({ state: "truncated" }), "Truncated");
+});
+
+test("restores deliberate inspection selection and announces only meaningful attempt changes", () => {
+  const previous = {
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one", reason: "active" },
+    stages: [{ id: "stage:implement" }], workers: [{ id: "worker:build", stageId: "stage:implement", attemptIds: ["attempt:build:one"] }],
+    attempts: [{ id: "attempt:build:one", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  const completed = {
+    ...previous,
+    attempts: [{ ...previous.attempts[0], lifecycle: "completed" }]
+  };
+  assert.deepEqual(restoreInspectionSelection(completed, { attemptId: "attempt:build:one" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.match(inspectionTransitionAnnouncement(previous, completed, { attemptId: "attempt:build:one" }), /completed.*Retained history/i);
+
+  const corrected = {
+    ...completed,
+    focus: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two", reason: "active" },
+    workers: [{ ...completed.workers[0], attemptIds: ["attempt:build:one", "attempt:build:two"] }],
+    attempts: [...completed.attempts, { id: "attempt:build:two", workerId: "worker:build", stageId: "stage:implement", lifecycle: "active" }]
+  };
+  assert.match(inspectionTransitionAnnouncement(completed, corrected, { workerId: "worker:build" }), /correction attempt started/i);
+  assert.deepEqual(restoreInspectionSelection(corrected, { workerId: "worker:build" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: true, disappeared: false, reason: "preserved"
+  });
+  assert.deepEqual(restoreInspectionSelection(corrected, { attemptId: "attempt:missing" }), {
+    selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: false, disappeared: true, reason: "active"
+  });
+});
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -175,13 +225,20 @@ test("review stage becomes a findings-and-fixes timeline", () => {
   assert.match(milestones[2].detail, /Persisted completion/);
 });
 
+test("review stage names an active fixer and repeats the issues being corrected", () => {
+  const stage = { id: "verify", status: "active", updatedAt: "2026-09-03T10:00:00.000Z" };
+  const items = stageMilestones({ status: "fixing", reviews: [{ createdAt: stage.updatedAt, actionableFindings: [{ severity: "high", claim: "Scope expansion bypasses the approved plan" }] }] }, stage);
+  assert.equal(items.at(-1).title, "Focused correction in progress.");
+  assert.match(items.at(-1).detail, /Scope expansion bypasses the approved plan/);
+});
+
 test("handoff timeline exposes merge queue, conflict resolution, verification, and integration", () => {
   const milestones = stageMilestones({
     merge: {
       status: "integrated", queuedAt: "2026-08-25T10:00:00.000Z", startedAt: "2026-08-25T10:01:00.000Z",
       sourceCwd: "/repo", branch: "codex/ticket", conflicts: ["src/app.js"], resolverStartedAt: "2026-08-25T10:02:00.000Z",
-      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined both state transitions." },
-      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed." }
+      resolverCompletedAt: "2026-08-25T10:03:00.000Z", resolutionArtifact: { content: "Combined /Users/operator/private/repo state transitions." },
+      verifiedAt: "2026-08-25T10:04:00.000Z", checks: { status: "passed", summary: "npm test passed in /Users/operator/private/repo." }
     },
     integration: { sourceCwd: "/repo", commit: "abc123", integratedAt: "2026-08-25T10:05:00.000Z" }, artifacts: []
   }, { id: "handoff", status: "completed" });
@@ -189,6 +246,10 @@ test("handoff timeline exposes merge queue, conflict resolution, verification, a
     "Added to merge queue.", "Automated merge started.", "Merge conflicts found.",
     "Conflict-resolution agent completed.", "Merged result verified.", "Changes integrated into the working directory."
   ]);
+  const renderedMilestones = milestones.map((item) => item.detail).join("\n");
+  assert.equal(renderedMilestones.includes("/repo"), false);
+  assert.match(milestones[0].detail, /Target repository selected/);
+  assert.match(milestones.at(-1).detail, /Commit: `abc123`/);
 });
 
 test("handoff timeline lists captured visual evidence as proof without inventing shots", () => {
@@ -216,6 +277,37 @@ test("final review keeps supported visual proof and its final check summary", ()
   assert.deepEqual(review.proof.map((item) => item.media), ["image", "video"]);
   assert.deepEqual(review.checks, { status: "passed", summary: "node scripts/test.mjs", command: undefined });
   assert.deepEqual(review.reviews, [{ role: "integration", summary: "No issues found" }]);
+});
+
+test("proof presentation preserves ordered history and makes typed evidence actionable", () => {
+  const run = {
+    id: "ticket/a", proofMap: {
+      compatibility: false, approvedAt: "2026-09-10T10:00:00.000Z", criteria: [
+        { id: "one", stepId: "build", stepTitle: "Build", index: 0, text: "Works", current: { status: "verified", evidenceValidity: "valid", evidence: [{ type: "check", scope: "step", stepId: "build" }] }, history: [{ status: "unresolved", evidenceValidity: "missing" }] },
+        { id: "two", stepId: "build", stepTitle: "Build", index: 1, text: "Still works", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "diff", scope: "step", stepId: "build" }] }, history: [] },
+        { id: "three", stepId: "visual", stepTitle: "Visual", index: 0, text: "Looks right", current: { status: "verified", evidenceValidity: "missing", evidence: [{ type: "media", artifactId: "screen" }] }, history: [] },
+        { id: "four", stepId: "visual", stepTitle: "Visual", index: 1, text: "Explains failure", current: { status: "failed", evidenceValidity: "missing", evidence: [] }, history: [] },
+        { id: "five", stepId: "visual", stepTitle: "Visual", index: 2, text: "Waiting", current: { status: "unresolved", evidenceValidity: "missing", evidence: [] }, history: [] }
+      ]
+    }
+  };
+  const all = proofMapView(run);
+  assert.deepEqual(all.criteria.map((criterion) => [criterion.id, criterion.state, criterion.history.length]), [
+    ["one", "verified", 1], ["two", "stale", 0], ["three", "missing-evidence", 0], ["four", "failed", 0], ["five", "not_yet_verified", 0]
+  ]);
+  assert.equal(all.criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=step&stepId=build");
+  assert.deepEqual(proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[0], current: { ...run.proofMap.criteria[0].current, evidence: [{ type: "check", scope: "attempt", stepId: "build", attemptId: "attempt-2" }] } }] } }).criteria[0].evidence[0].route, "/api/tickets/ticket%2Fa/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2");
+  assert.deepEqual(all.criteria.slice(2).map((criterion) => [criterion.resultLabel, criterion.evidenceLabel]), [["Verified", "Evidence missing"], ["Failed", "Evidence missing"], ["Not yet verified", "Evidence missing"]]);
+  assert.equal(all.criteria[1].evidence[0].tab, "diff");
+  assert.equal(all.criteria[1].evidence[0].route, "/api/tickets/ticket%2Fa/proof/diff?scope=step&stepId=build");
+  const attemptDiffRoute = (attemptId) => proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[1], current: { ...run.proofMap.criteria[1].current, evidence: [{ type: "diff", scope: "attempt", stepId: "build", attemptId }] } }] } }).criteria[0].evidence[0].route;
+  assert.equal(attemptDiffRoute("attempt-1"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-1");
+  assert.equal(attemptDiffRoute("attempt-2"), "/api/tickets/ticket%2Fa/proof/diff?scope=attempt&stepId=build&attemptId=attempt-2");
+  assert.equal(all.criteria[2].evidence[0].mediaUrl, "/api/tickets/ticket%2Fa/artifacts/screen/media");
+  const missing = proofMapView({ ...run, proofMap: { ...run.proofMap, criteria: [{ ...run.proofMap.criteria[2], current: { ...run.proofMap.criteria[2].current, evidence: [{ type: "media", artifactId: "screen", validity: "missing", reason: "missing_evidence" }] } }] } }).criteria[0].evidence[0];
+  assert.deepEqual([missing.unavailable, missing.route, missing.mediaUrl, missing.label], [true, undefined, undefined, "Evidence unavailable: missing evidence"]);
+  assert.equal(all.eligibility.blockingReasons[0].criterionId, "two");
+  assert.equal(proofMapView(run, { stepId: "build" }).criteria.length, 2);
 });
 
 test("free text becomes a local ticket without losing the original request", () => {
@@ -272,6 +364,32 @@ test("stage details keep the implementation index ordered and split its dependen
     dependencies: { internal: [{ from: "foundation", to: "build", title: "Foundation", status: "accepted" }], external: [] }
   });
   assert.deepEqual(stageDetailModel(run, "verify").dependencies.external, [{ from: "build", to: "verify-ui", title: "Build UI", status: "running" }]);
+});
+
+test("cleanup inspector keeps every durable outcome and marks only advisories as warnings", async () => {
+  const executions = {
+    complete: { executionId: "complete", outcome: "complete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 42, ppid: 7, startTime: "101" }], actions: [{ pid: 42, signal: "SIGTERM", status: "sent", at: "2026-09-03T10:00:01.000Z" }], unresolved: [], diagnostics: [] },
+    incomplete: { executionId: "incomplete", outcome: "incomplete", platform: { name: "linux", supported: true }, triggers: [{ trigger: "run-cancelled", at: "2026-09-03T10:00:00.000Z" }], discovered: [{ pid: 43, ppid: 7, startTime: "102" }], actions: [{ pid: 43, signal: "SIGKILL", status: "sent" }], unresolved: [{ pid: 43, reason: "still-running-after-force" }], diagnostics: ["Fixture process did not exit"] },
+    unsupported: { executionId: "unsupported", outcome: "unsupported", platform: { name: "darwin", supported: false, reason: "Safe discovery unavailable" }, triggers: [{ trigger: "daemon-shutdown", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: ["No safe adapter"] },
+    "not-required": { executionId: "none", outcome: "not-required", platform: { name: "linux", supported: true }, triggers: [{ trigger: "worker-completed", at: "2026-09-03T10:00:00.000Z" }], discovered: [], actions: [], unresolved: [], diagnostics: [] }
+  };
+  for (const [outcome, execution] of Object.entries(executions)) {
+    const model = cleanupInspectorModel({ cleanup: { outcome, updatedAt: "2026-09-03T10:00:02.000Z", executions: [execution] } });
+    assert.equal(model.outcome, outcome);
+    assert.equal(model.advisory, outcome === "incomplete");
+    assert.deepEqual(model.executions[0].discovered, execution.discovered);
+    assert.deepEqual(model.executions[0].unresolved, execution.unresolved);
+    assert.deepEqual(model.executions[0].diagnostics, execution.diagnostics);
+  }
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.equal(cleanupInspectorModel({
+    cleanup: {
+      outcome: "incomplete",
+      executions: [{ executionId: "legacy-unrecorded", outcome: "incomplete", unresolved: [], actions: [] }]
+    }
+  }).advisory, false);
+  assert.match(app, /cleanup-advisory/);
+  assert.match(app, /cleanup-inspector \$\{cleanup\.advisory \? "advisory" : "neutral"\}/);
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {

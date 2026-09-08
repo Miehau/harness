@@ -4,8 +4,9 @@ import { defaultStageProfiles, normalizeStageProfiles, stagePrompt } from "../sr
 
 test("stage profiles accept editable model, reasoning, and prompt values", () => {
   const profiles = normalizeStageProfiles({
-    implementation: { model: "gpt-5.6-luna", thinking: "low", prompt: "Keep it tiny." }
+    implementation: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "low", prompt: "Keep it tiny." }
   });
+  assert.equal(profiles.implementation.provider, "openai-codex");
   assert.equal(profiles.implementation.model, "gpt-5.6-luna");
   assert.equal(profiles.implementation.thinking, "low");
   const prompt = stagePrompt(profiles.implementation, "Locked contract.");
@@ -23,4 +24,16 @@ test("stage prompts do not repeat configured guidance already present in an inst
 
 test("stage profiles reject invalid reasoning levels", () => {
   assert.throws(() => normalizeStageProfiles({ implementation: { model: "gpt-5.6-terra", thinking: "maximum" } }), /invalid reasoning/);
+});
+
+test("stage profiles keep provider across normalize and accept provider/model refs", () => {
+  const profiles = normalizeStageProfiles({
+    handoff: { model: "xai/grok-build-0.1", thinking: "medium", prompt: "Ship it." }
+  });
+  assert.equal(profiles.handoff.provider, "xai");
+  assert.equal(profiles.handoff.model, "grok-build-0.1");
+  const again = normalizeStageProfiles(profiles);
+  assert.equal(again.handoff.provider, "xai");
+  assert.equal(again.implementation.provider, defaultStageProfiles().implementation.provider);
+  assert.equal(again.implementation.model, defaultStageProfiles().implementation.model);
 });

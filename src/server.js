@@ -1,28 +1,30 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
+import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 import { admissionCandidates } from "./admission.js";
 import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
-import { deliveryForRemote, pushTicketBranch, rebaseOntoRemote, remoteContext, safeSyncLocal } from "./delivery.js";
+import { deliveryForRemote, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { ensureVerificationContractStep, formatTicketHorizon, PiHarness } from "./pi-harness.js";
+import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
-import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations } from "./plan.js";
+import { compactReviewPacket } from "./review-packet.js";
+import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
 import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
-import { actionableFindings, archiveRun, clearInactiveRuns, compactRun, createActivityCapture, createTicketRun, findingsFingerprint, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, publicState, resumeStage, rewindRun, selectWorkerSession, shouldPauseCorrection, supervisorReviewCheckpoint, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
-import { normalizeStageProfiles } from "./profiles.js";
+import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
+import { dashboardModelProviders, normalizeStageProfiles, parseModelRef } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
 import { cleanupRetainedRun, retentionInventory } from "./retention.js";
 import { acquireDaemonLock } from "./daemon-lock.js";
@@ -30,15 +32,138 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
-import { acknowledgeSteering, beginStepAttempt, claimNextSteering, failSteering, markSteeringDelivered, recoverSteeringClaims, releaseSteeringClaim, submitSteering, targetMatches } from "./steering.js";
+import { acknowledgeSteering, claimNextSteering, failSteering, markSteeringDelivered, recoverSteeringClaims, releaseSteeringClaim, submitSteering, targetMatches } from "./steering.js";
+import { projectInspection } from "./inspection.js";
+import { applyIndependentProofReports, applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
+import { createProcessContainment } from "./process-containment.js";
+import { applyVerifyEvidenceGate, planRequiresVisualEvidence, ticketBoundVisualEvidence, verifyStageEvidenceError } from "./visual-evidence.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
 const runFile = promisify(execFile);
 const publicDir = join(here, "public");
 const packageMetadata = JSON.parse(await readFile(join(here, "package.json"), "utf8"));
+const maxProofFeedbackLength = 4000;
 function cliOption(name, fallback, argv = process.argv.slice(2)) {
   const index = argv.indexOf(name);
   return index >= 0 ? argv[index + 1] : fallback;
+}
+
+export function repositoryCheckReview(checks) {
+  const missingVisualEvidence = checks.failureKind === "visual-evidence";
+  const failureDiagnostic = String(checks.failureHighlights || "").trim().slice(-1500);
+  return {
+    role: "deterministic",
+    summary: checks.summary,
+    findings: checks.status === "failed" ? [{
+      severity: "blocking",
+      category: missingVisualEvidence ? "evidence" : "tests",
+      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
+      evidence: [],
+      suggestedFix: missingVisualEvidence
+        ? "Make the verification contract write ticket-bound screenshots (and video when required) into AGENT_PLAN_EVIDENCE_DIR with a final-proof-manifest.json for this ticket and run."
+        : `Make ${checks.command} pass.${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : `\n\n${checks.output}`}`,
+      confidence: "high"
+    }] : [],
+    checks
+  };
+}
+
+export function reconcileVisualChecks(checks, evidence = [], { required = false, requiredVideo = false, ticketId = null, runId = null } = {}) {
+  checks.evidence = [...new Map((checks.evidence || []).map((item) => [item.path, item])).values()];
+  checks.previewEvidence = [...new Map(evidence.map((item) => [item.path, item])).values()];
+  return applyVerifyEvidenceGate(checks, { required, requiredVideo, ticketId, runId });
+}
+
+export function closeSseClients(clients) {
+  for (const client of clients) {
+    try { client.response.end(); } catch {}
+  }
+  clients.clear();
+}
+
+export function settleScheduledDelivery(scheduled) {
+  return Promise.resolve(scheduled).then(({ promise }) => promise).catch(() => {});
+}
+
+export function deliveryFeedbackReferences(feedback = []) {
+  return [...new Set(feedback.flatMap((item) => [...`${item.path || ""}\n${item.body || ""}`
+    .matchAll(/(?:^|[\/\s'"(])((?:src|test|public|scripts|\.agent-plan)\/[a-z0-9._/-]+)/gi)]
+    .map((match) => match[1])))];
+}
+
+export function deliveryFailureNeedsFix(message = "") {
+  return /SyntaxError|ReferenceError|AssertionError|\bERR_[A-Z_]+\b|Failure highlights:|\bnot ok\b/i.test(String(message));
+}
+
+export function auditHarnessWriteScopes(run, at = new Date().toISOString()) {
+  const changes = [];
+  for (const step of flattenSteps(run?.plan)) {
+    const before = String(step.writeScope || "");
+    const after = workerWriteScope(step);
+    if (after === before) continue;
+    const paths = after.split(",").filter((path) => !before.split(",").includes(path));
+    step.writeScope = after;
+    step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
+    step.scopeChanges ||= [];
+    step.scopeChanges.push({
+      at, paths, source: "harness",
+      reason: "Feature workers maintain the repository verification, discovery and UI CLI contract."
+    });
+    changes.push({ stepId: step.id, paths });
+  }
+  return changes;
+}
+
+function finalReviewSequence(run) {
+  const sequence = (value) => Number(String(value || "").match(/^final-review-(\d+)$/)?.[1]) || 0;
+  return Math.max(
+    Number(run.finalReviewSequence) || 0,
+    ...(run.reviews || []).flatMap((review) => [Number(review.round) || 0, sequence(review.reviewId)]),
+    ...Object.keys(run.finalCheckHistory || {}).map(sequence),
+    ...Object.keys(run.finalDiffHistory || {}).map(sequence),
+    0
+  );
+}
+
+function migrateFinalProofLocators(run) {
+  const reviews = run.reviews || [];
+  let nextSequence = finalReviewSequence(run);
+  const knownIds = new Set([
+    ...Object.keys(run.finalCheckHistory || {}),
+    ...Object.keys(run.finalDiffHistory || {}),
+    ...reviews.map((review) => review.reviewId).filter(Boolean)
+  ]);
+  for (const review of reviews) {
+    const checks = review.finalChecks || review.reviews?.find((item) => item.role === "deterministic")?.checks;
+    if (!checks) continue;
+    const roundId = Number(review.round) ? `final-review-${Number(review.round)}` : null;
+    let reviewId = review.reviewId || (roundId && !knownIds.has(roundId) ? roundId : null);
+    while (!reviewId) reviewId = `final-review-${++nextSequence}`;
+    knownIds.add(reviewId);
+    review.reviewId = reviewId;
+    review.finalChecks ||= structuredClone(checks);
+    run.finalCheckHistory ||= {};
+    run.finalCheckHistory[reviewId] ||= structuredClone(review.finalChecks);
+    if (review.diff) {
+      run.finalDiffHistory ||= {};
+      run.finalDiffHistory[reviewId] ||= structuredClone(review.diff);
+    }
+    run.finalReviewHistory ||= {};
+    run.finalReviewHistory[reviewId] ||= { createdAt: review.createdAt || null };
+  }
+  run.finalReviewSequence = Math.max(nextSequence, finalReviewSequence(run));
+  if (!reviews.length || !run.proofMap?.criteria) return;
+  const reviewFor = (reportedAt) => reviews.filter((review) => review.reviewId && (!reportedAt || !review.createdAt || review.createdAt <= reportedAt)).at(-1) || reviews.find((review) => review.reviewId) || null;
+  const migrateResult = (result) => {
+    if (!result?.evidence) return;
+    const reviewId = reviewFor(result.reportedAt)?.reviewId;
+    if (!reviewId) return;
+    result.evidence = result.evidence.map((locator) => (locator?.scope === "final" && !locator.reviewId ? { ...locator, reviewId } : locator));
+  };
+  for (const criterion of run.proofMap.criteria) {
+    migrateResult(criterion.current);
+    for (const result of criterion.history || []) migrateResult(result);
+  }
 }
 
 export async function createDaemon(options = {}) {
@@ -49,11 +174,22 @@ export async function createDaemon(options = {}) {
   if (!["git", "jj"].includes(vcsMode)) throw new Error(`Unsupported VCS mode: ${vcsMode}`);
   const dataDir = options.dataDir || process.env.AGENT_PLAN_DATA_DIR || join(homedir(), ".agent-plan-workspace");
   const apiToken = options.apiToken ?? process.env.AGENT_PLAN_API_TOKEN ?? "";
+  const lifecycleCleanupTimeoutMs = Math.max(1, Number(options.lifecycleCleanupTimeoutMs) || 5_000);
+  const workerAbortWaitMs = Math.max(1, Number(options.workerAbortWaitMs) || 1_000);
+  const shutdownTimeoutMs = Math.max(1, Number(options.shutdownTimeoutMs) || 5_000);
   const listen = Boolean(options.listen);
   const useLock = options.lock !== false;
   const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
   const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
   await store.init();
+  // Stored runs predate proofStorageRoot. Migrate them once so evidence adoption
+  // and every later projection use the daemon's canonical storage boundary.
+  await store.update((state) => {
+    for (const bucket of [state.ticketRuns, state.retainedRuns]) for (const run of Object.values(bucket || {})) {
+      run.proofStorageRoot ||= dataDir;
+      migrateFinalProofLocators(run);
+    }
+  });
 
 const credentialStore = new CredentialStore(join(dataDir, "credentials.json"));
 let savedCredentials = await credentialStore.load();
@@ -70,6 +206,7 @@ const previews = new PreviewManager({ dataDir });
 const clients = new Set();
 const activeSteps = new Map();
 const activeTickets = new Map();
+const activeContainments = new Map();
 const activeMerges = new Set();
 const steeringDrainTimers = new Map();
 const mergeQueues = new Map();
@@ -104,15 +241,27 @@ function publish(event) {
 function publishState(state = store.read()) { publish({ type: "state", state: publicState(state) }); }
 
 function publishStepEvent(ticketId, stepId, runId, event) {
-  publish({ channel: "run", ticketId, stepId, runId, ...event });
-  if (!["prompt", "phase", "tool_start", "tool_end", "agent_error"].includes(event.type)) return;
+  const publicEvent = redactRecord(event);
+  if (publicEvent.type === "prompt") {
+    const prompt = boundedText(publicEvent.content || publicEvent.prompt, 16000);
+    publicEvent.content = prompt.value;
+    publicEvent.truncated = Boolean(publicEvent.truncated) || prompt.truncated;
+    publicEvent.total = Math.max(prompt.total, Number(publicEvent.total) || 0);
+    delete publicEvent.prompt;
+  }
+  publish({ channel: "run", ticketId, stepId, runId, ...publicEvent });
+  if (!["prompt", "phase", "tool_start", "tool_end", "agent_error"].includes(publicEvent.type)) return;
   update((state) => {
     const active = state.ticketRuns[ticketId]?.activeRuns?.[stepId];
     if (!active || active.runId !== runId) return;
-    if (event.type === "prompt") active.prompt = event.content;
-    active.lastEvent = event.label;
+    if (publicEvent.type === "prompt") Object.assign(active, {
+      prompt: publicEvent.content,
+      promptTruncated: publicEvent.truncated,
+      promptTotal: publicEvent.total
+    });
+    active.lastEvent = redactText(publicEvent.label);
     active.lastEventAt = new Date().toISOString();
-    active.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
+    active.warning = publicEvent.type === "agent_error" || (publicEvent.type === "tool_end" && publicEvent.isError);
   }, { publish: false }).catch(() => {});
 }
 
@@ -140,6 +289,48 @@ function captureStepActivity(ticketId, stepId, runId) {
   });
 }
 
+function retainDurableRecord(value, limit = 16000) {
+  const bound = (item) => {
+    if (typeof item === "string") return boundedText(item, limit).value;
+    if (Array.isArray(item)) return item.map(bound);
+    if (!item || typeof item !== "object") return item;
+    return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, bound(child)]));
+  };
+  return bound(redactRecord(value));
+}
+
+function retainProofFeedback(value) {
+  // Feedback is persisted while corrections run, so redact before the durable
+  // assignment rather than relying on the later final-review projection.
+  return boundedText(redactText(value), maxProofFeedbackLength).value.trim();
+}
+
+function retainWorkflowContinuation(result) {
+  const retained = retainDurableRecord(result);
+  // Session locations are opaque operational handles; all model-controlled fields
+  // must pass through the durable redaction boundary before workflow state uses them.
+  return { result: retained, sessionFile: result?.sessionFile || null };
+}
+
+function retainReviewRecord(review) {
+  const retained = retainDurableRecord(review);
+  // Keep the operational handle separate so verify-stage prompt inspection can read
+  // the review session after persistence; public projections deliberately omit it.
+  return { ...retained, sessionFile: review?.sessionFile || null };
+}
+
+function retainChecks(checks) {
+  const retained = retainDurableRecord(checks);
+  // Evidence paths are operational references, not harness output. Keep them so
+  // preview and proof flows can still resolve their captured media after sanitizing
+  // every textual check field that can contain command output or credentials.
+  retained.evidence = (checks.evidence || []).map((item) => ({
+    ...retainDurableRecord(item),
+    ...(typeof item?.path === "string" ? { path: item.path } : {})
+  }));
+  return retained;
+}
+
 function repositoryCheckReview(checks) {
   return {
     role: "deterministic",
@@ -156,34 +347,247 @@ function repositoryCheckReview(checks) {
   };
 }
 
+function finalProofCaptureEnvironment(ticketId) {
+  const run = ticketRun(store.read(), ticketId);
+  const address = server.address();
+  if (!run?.runId || !address || typeof address === "string") return {};
+  return {
+    AGENT_PLAN_CAPTURE_URL: `http://127.0.0.1:${address.port}`,
+    AGENT_PLAN_CAPTURE_TICKET_ID: ticketId,
+    AGENT_PLAN_CAPTURE_RUN_ID: run.runId
+  };
+}
+
 async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
+  // A preview and the checks that exercise it share one ownership record, so
+  // cancellation cannot leave a separately-owned dev server behind.
+  const executionId = randomUUID();
+  const containment = containmentForExecution(executionId);
   let preview = null;
   let evidence = [];
   if (required) {
-    preview = await previews.ensure({ id: previewId, cwd });
-    if (preview) evidence = await previews.capture(previewId);
+    const runId = await registerContainment(ticketId, executionId, containment, { stepId, trigger: "preview-launch" });
+    try {
+      preview = await previews.ensure({
+        id: previewId,
+        cwd,
+        seedState: publicPreviewState(store.read(), ticketId),
+        containment,
+        // Keep the owning run identity in these callbacks: preview teardown may
+        // settle after a fresh restart has archived that run.
+        onCleanup: (trigger) => settleContainment(ticketId, executionId, containment, trigger, runId),
+        onCleanupSettled: (record) => persistPreviewCleanup(ticketId, runId, previewId, record)
+      });
+      if (preview) evidence = await previews.capture(previewId, { signal });
+    } catch (error) {
+      await settleContainment(ticketId, executionId, containment, "preview-launch-failed", runId);
+      finishContainmentExecution(executionId, containment);
+      throw error;
+    }
   }
-  const checks = await harness.runRepositoryChecks({ cwd, signal, requireVisualEvidence: required, requireVideoEvidence: requiredVideo });
-  checks.evidence = [...new Map([...(checks.evidence || []), ...evidence].map((item) => [item.path, item])).values()];
-  if (required && !checks.evidence.length) Object.assign(checks, { status: "failed", summary: "Visual verification produced no desktop or mobile evidence." });
-  if (preview || checks.evidence.length) await update((state) => {
+  const current = ticketRun(store.read(), ticketId);
+  const checks = await runContainedRepositoryChecks({
+    ticketId,
+    stepId,
+    cwd,
+    signal,
+    executionId,
+    containment,
+    requireVisualEvidence: required,
+    requireVideoEvidence: requiredVideo,
+    // Canonical proof must exercise both API and UI code from the worktree.
+    environment: required ? { ...liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId), AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(projectProofMap(current).criteria.filter((criterion) => criterion.requiresVisualEvidence && (!stepId || criterion.stepId === stepId)).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }))) } : {}
+  });
+  reconcileVisualChecks(checks, evidence, { required, requiredVideo, ticketId, runId: current.runId });
+  const bound = required ? ticketBoundVisualEvidence(checks.evidence, { ticketId, runId: current.runId, evidenceDir: checks.evidenceDir }) : { bound: false };
+  if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
     run.previews ||= {};
     if (preview) run.previews[previewId] = preview;
-    for (const item of checks.evidence) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
-      id: randomUUID(), name: item.name, path: item.path, kind: "visual-evidence", stageId: "verify", stepId,
-      mediaType: item.mediaType, mediaKind: item.mediaKind,
-      summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
-      createdAt: new Date().toISOString()
-    });
+    for (const [kind, items] of [["visual-evidence", checks.evidence], ["preview-diagnostic", checks.previewEvidence]]) {
+      for (const item of items) if (!run.artifacts.some((artifact) => artifact.path === item.path)) run.artifacts.push({
+        id: randomUUID(), name: item.name, path: item.path, kind, stageId: "verify", stepId,
+        mediaType: item.mediaType, mediaKind: item.mediaKind, criterionIds: item.criterionIds || [], commands: item.commands || [], assertions: item.assertions || [], videoPath: item.videoPath || null,
+        summary: item.viewport ? `${item.viewport.width}×${item.viewport.height} · ${item.url}` : item.mediaType,
+        createdAt: new Date().toISOString(),
+        ...(kind === "visual-evidence" && bound.bound ? { boundTicketId: ticketId, boundRunId: current.runId } : {})
+      });
+    }
   });
-  return checks;
+  return retainChecks(checks);
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
-  const state = await store.update(change);
+  const state = await store.update(change, { snapshot: false });
   if (shouldPublish) publishState(state);
   return state;
+}
+
+/**
+ * The harness owns signaling, while the daemon owns the run record. Create the
+ * durable record before calling Pi and settle it for every returned or thrown worker outcome.
+ */
+function containmentForExecution(executionId) {
+  const factory = typeof harness.containmentFactory === "function" ? harness.containmentFactory : createProcessContainment;
+  return factory({ executionId });
+}
+
+function cleanupTimeoutEvidence(executionId, label) {
+  return {
+    executionId,
+    outcome: "incomplete",
+    completedAt: new Date().toISOString(),
+    diagnostics: [`Process cleanup did not settle within ${lifecycleCleanupTimeoutMs}ms during ${label}`],
+    unresolved: [{ reason: "cleanup-wait-timeout" }]
+  };
+}
+
+function lifecycleTrigger(trigger, at = new Date().toISOString()) {
+  if (trigger && typeof trigger === "object" && !Array.isArray(trigger)) return { ...trigger, at: trigger.at ?? at };
+  return { trigger: typeof trigger === "string" ? trigger : "unspecified", at };
+}
+
+async function persistContainment(ticketId, runId, executionId, evidence, trigger) {
+  // The daemon's trigger is durable input, not a lookup into shared mutable
+  // containment evidence. In particular, identical concurrent requests differ
+  // by `at` and must both reach exact-record deduplication in completeRunCleanup.
+  const lifecycle = lifecycleTrigger(trigger);
+  await update((state) => {
+    // Cleanup belongs to the process-owning run. A fresh restart may replace
+    // the active ticket ID before a bounded preview cleanup settles, so fall
+    // back to its retained audit record rather than attributing it to the new run.
+    const active = state.ticketRuns[ticketId];
+    const run = active?.runId === runId ? active : state.retainedRuns?.[`${ticketId}:${runId}`];
+    if (run) completeRunCleanup(run, executionId, evidence, lifecycle);
+  }, { publish: false });
+}
+
+async function persistPreviewCleanup(ticketId, runId, previewId, record) {
+  await update((state) => {
+    // Preview cleanup belongs to its original run, including when that run
+    // has been archived by a fresh restart before containment settles.
+    const active = state.ticketRuns[ticketId];
+    const run = active?.runId === runId ? active : state.retainedRuns?.[`${ticketId}:${runId}`];
+    const preview = run?.previews?.[previewId];
+    if (!preview) return;
+    preview.cleanup = record;
+    preview.status = record.outcome === "incomplete" ? "cleanup_incomplete" : "stopped";
+  }, { publish: false });
+}
+
+function trackPendingContainment(executionId, operation) {
+  const entry = activeContainments.get(executionId);
+  if (!entry) return;
+  entry.pendingCleanup = operation;
+  entry.pendingCleanupSettled = false;
+  operation.finally(() => {
+    if (entry.pendingCleanup !== operation) return;
+    entry.pendingCleanupSettled = true;
+    if (entry.executionFinished && activeContainments.get(executionId) === entry) activeContainments.delete(executionId);
+  });
+}
+
+function finishContainmentExecution(executionId, containment) {
+  const entry = activeContainments.get(executionId);
+  if (!entry || entry.containment !== containment) return;
+  entry.executionFinished = true;
+  if (entry.pendingCleanupSettled) activeContainments.delete(executionId);
+}
+
+async function settleContainment(ticketId, executionId, containment, trigger, owningRunId = activeContainments.get(executionId)?.runId) {
+  const lifecycle = lifecycleTrigger(trigger);
+  const operation = Promise.resolve().then(() => containment.cleanup(lifecycle)).catch((error) => ({
+    executionId, outcome: "incomplete", completedAt: new Date().toISOString(),
+    diagnostics: [`Process cleanup failed: ${error.message || error}`], unresolved: [{ reason: "cleanup-failed" }]
+  }));
+  trackPendingContainment(executionId, operation);
+  let timer;
+  let doResolve;
+  const timeout = new Promise((resolve) => { doResolve = resolve; timer = setTimeout(() => resolve(null), lifecycleCleanupTimeoutMs); });
+  let evidence;
+  try { evidence = await Promise.race([operation, timeout]); }
+  finally { clearTimeout(timer); if (doResolve) { doResolve(null); doResolve = null; } }
+  if (evidence) {
+    await persistContainment(ticketId, owningRunId, executionId, evidence, lifecycle);
+    return evidence;
+  }
+  const timeoutEvidence = cleanupTimeoutEvidence(executionId, lifecycle.trigger);
+  await persistContainment(ticketId, owningRunId, executionId, timeoutEvidence, lifecycle);
+  return timeoutEvidence;
+}
+
+async function cleanupTicketContainments(ticketId, trigger) {
+  const entries = [...activeContainments.values()].filter((entry) => entry.ticketId === ticketId);
+  await Promise.all(entries.map((entry) => settleContainment(ticketId, entry.executionId, entry.containment, trigger, entry.runId)));
+}
+
+async function registerContainment(ticketId, executionId, containment, { stepId = null, attemptId = null, trigger = "worker-launch" } = {}) {
+  const existing = activeContainments.get(executionId);
+  if (existing) {
+    if (existing.ticketId !== ticketId || existing.containment !== containment) throw new Error(`Execution ${executionId} is already owned by another containment`);
+    return existing.runId;
+  }
+  const entry = { ticketId, executionId, containment, runId: null, executionFinished: false, pendingCleanup: null, pendingCleanupSettled: false };
+  activeContainments.set(executionId, entry);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    entry.runId = run.runId;
+    beginRunCleanup(run, { executionId, ownership: containment.ownership, stepId, attemptId, trigger });
+  }, { publish: false });
+  // close() may have started while this registration was queued behind another
+  // worker update. Never allow that late execution to launch a new process.
+  if (closed) {
+    await settleContainment(ticketId, executionId, containment, "daemon-shutdown", entry.runId);
+    finishContainmentExecution(executionId, containment);
+    throw new Error("Daemon is shutting down");
+  }
+  return entry.runId;
+}
+
+function completionTrigger(signal, aborted, completed) {
+  if (!signal?.aborted) return completed;
+  return /timeout/i.test(String(signal.reason?.message || signal.reason || "")) ? "timeout" : aborted;
+}
+
+async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, ...input }) {
+  const executionId = input.executionId || randomUUID();
+  const containment = input.containment || containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { stepId, attemptId });
+  let result;
+  try {
+    result = await harness.runStep({
+      ...input, containment, ticketId, attemptId, signal,
+      onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
+    });
+    return result;
+  } finally {
+    const trigger = completionTrigger(signal, "worker-aborted", result?.report?.status === "completed" ? "worker-completed" : "worker-exit");
+    await settleContainment(ticketId, executionId, containment, trigger, runId);
+    finishContainmentExecution(executionId, containment);
+  }
+}
+
+async function runContainedRepositoryChecks({ ticketId, stepId = null, signal, ...input }) {
+  const executionId = input.executionId || randomUUID();
+  const containment = input.containment || containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { stepId, trigger: "repository-check-launch" });
+  let result;
+  let failure;
+  try {
+    result = await harness.runRepositoryChecks({ ...input, containment, signal });
+    return result;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    // A PiHarness check has already settled this lifecycle event. Reuse its
+    // timestamped trigger so durable evidence treats this as redelivery, not a
+    // second repository-check exit request.
+    const trigger = result?.cleanupTrigger || failure?.cleanupTrigger
+      || completionTrigger(signal, "repository-check-aborted", "repository-check-exit");
+    await settleContainment(ticketId, executionId, containment, trigger, runId);
+    finishContainmentExecution(executionId, containment);
+  }
 }
 
 function startTicketWork(ticketId, work) {
@@ -198,11 +602,21 @@ function startTicketWork(ticketId, work) {
   return promise;
 }
 
+async function waitForWorkerAbort(promise) {
+  let timer;
+  let resolveTimer;
+  try {
+    await Promise.race([promise.catch(() => {}), new Promise((resolve) => { resolveTimer = resolve; timer = setTimeout(resolve, workerAbortWaitMs); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cancelTicket(ticketId) {
   const active = activeTickets.get(ticketId);
   if (!active) throw new Error("This run is not active");
   active.controller.abort(new Error("Run cancelled"));
-  await active.promise.catch(() => {});
+  await Promise.all([waitForWorkerAbort(active.promise), cleanupTicketContainments(ticketId, "run-cancelled")]);
   await update((state) => {
     const run = ticketRun(state, ticketId);
     markRunCancelled(run);
@@ -214,7 +628,7 @@ async function pauseTicket(ticketId) {
   const active = activeTickets.get(ticketId);
   if (!active) throw new Error("This run is not active");
   active.controller.abort(new Error("Run paused"));
-  await active.promise.catch(() => {});
+  await Promise.all([waitForWorkerAbort(active.promise), cleanupTicketContainments(ticketId, "run-paused")]);
   let audit;
   const state = await update((draft) => {
     audit = markRunPaused(ticketRun(draft, ticketId));
@@ -257,11 +671,80 @@ function saveStepSession(ticketId, stepId, runId) {
   };
 }
 
+async function startOperatorPreview(ticketId) {
+  const state = store.read();
+  const run = ticketRun(state, ticketId);
+  const cwd = run.workspace?.cwd || state.workspace?.cwd;
+  if (!cwd) throw new Error("Worktree is not ready");
+  const previewId = `${ticketId}:operator`;
+  const executionId = randomUUID();
+  const containment = containmentForExecution(executionId);
+  const runId = await registerContainment(ticketId, executionId, containment, { trigger: "preview-launch" });
+  try {
+    const preview = await previews.ensure({
+      id: previewId,
+      cwd,
+      seedState: publicPreviewState(store.read(), ticketId),
+      containment,
+      onCleanup: (trigger) => settleContainment(ticketId, executionId, containment, trigger, runId),
+      onCleanupSettled: (record) => persistPreviewCleanup(ticketId, runId, previewId, record)
+    });
+    if (!preview) throw new Error("No preview or start command is configured for this repository");
+    await update((draft) => {
+      const current = ticketRun(draft, ticketId);
+      current.previews ||= {};
+      current.previews[previewId] = preview;
+    });
+    return preview;
+  } catch (error) {
+    await settleContainment(ticketId, executionId, containment, "preview-launch-failed", runId);
+    finishContainmentExecution(executionId, containment);
+    throw error;
+  }
+}
+
+async function stopOperatorPreview(ticketId) {
+  const previewId = `${ticketId}:operator`;
+  previews.stop(previewId, { trigger: "preview-stop", reason: "operator-stop" });
+  await previews.settleMatching(previewId, lifecycleCleanupTimeoutMs);
+  await update((draft) => {
+    const run = ticketRun(draft, ticketId);
+    const preview = run?.previews?.[previewId];
+    const observed = previews.previewState(previewId);
+    if (!preview) return;
+    Object.assign(preview, {
+      ...(observed?.cleanup ? { cleanup: observed.cleanup } : {}),
+      status: observed?.status === "cleanup_incomplete" ? "cleanup_incomplete" : "stopped",
+      stoppedReason: "operator-stop",
+      stoppedAt: new Date().toISOString()
+    });
+  });
+}
+
 async function stopTicketPreviews(ticketId, reason) {
-  previews.stopMatching(`${ticketId}:`);
+  previews.stopMatching(`${ticketId}:`, { trigger: "preview-stop", reason });
+  await previews.settleMatching(`${ticketId}:`, lifecycleCleanupTimeoutMs);
   await update((state) => {
     const run = state.ticketRuns[ticketId];
-    for (const preview of Object.values(run?.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: reason, stoppedAt: new Date().toISOString() });
+    for (const [id, preview] of Object.entries(run?.previews || {})) {
+      const observed = previews.previewState(id);
+      const status = observed?.status || preview.status;
+      const cleanupPending = status === "stopping";
+      Object.assign(preview, {
+        ...(observed?.cleanup ? { cleanup: observed.cleanup } : cleanupPending ? {
+          cleanup: {
+            outcome: "running",
+            diagnostics: [`Preview cleanup did not settle within ${lifecycleCleanupTimeoutMs}ms; containment remains pending.`],
+            unresolved: [{ reason: "cleanup-wait-timeout" }]
+          }
+        } : {}),
+        // A bounded wait may expire before containment reports a terminal
+        // outcome. Keep that state visible rather than falsely reporting stop.
+        status: cleanupPending || status === "cleanup_incomplete" ? status : "stopped",
+        stoppedReason: reason,
+        stoppedAt: new Date().toISOString()
+      });
+    }
   });
 }
 
@@ -426,20 +909,115 @@ async function deliverSteering(ticketId, steerId) {
   }
 }
 
+function stepCriterionIds(run, stepId) {
+  return (run.proofMap?.criteria || []).filter((criterion) => criterion.stepId === stepId).map((criterion) => criterion.id);
+}
+
+function proofGate(run, options) {
+  const proof = projectProofMap(run);
+  // Compatibility projections make legacy proof gaps visible, but must not impose
+  // a gate that did not exist when the run reached its human review checkpoint.
+  return proof.compatibility ? { eligible: true, blockingReasons: [] } : proofEligibility(proof, options);
+}
+
+function proofGateError(eligibility) {
+  return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""} [${reason.code}]: ${reason.message}`).join("; ")}`;
+}
+
+function archivedAttempt(run, stepId, attemptId) {
+  return [...(run.archivedAttempts || [])].reverse().find((attempt) => attempt.stepId === stepId && attempt.attemptId === attemptId) || null;
+}
+
+function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
+  if (scope === "final") return reviewId
+    ? run.finalCheckHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.finalChecks || null
+    : run.finalChecks || run.checkpoint?.finalChecks || run.reviews?.at(-1)?.reviews?.find((review) => review.role === "deterministic")?.checks || null;
+  if (!stepId) throw new Error("Step check output requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId) throw new Error("Attempt check output requires an attempt ID");
+    const attempt = (step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId);
+    return attempt?.verification?.checks || attempt?.checks || null;
+  }
+  if (scope !== "step") throw new Error("Unknown check-output scope");
+  return [...(step.attempts || [])].reverse().map((attempt) => attempt.verification?.checks || attempt.checks).find(Boolean) || step.checks || null;
+}
+
+function canonicalDiffOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
+  if (scope === "final") return reviewId
+    ? run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null
+    : run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null;
+  if (!stepId) throw new Error("Step diff requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
+    return run.attemptDiffHistory?.[stepId]?.[attemptId]
+      || ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff
+      || null;
+  }
+  if (scope !== "step") throw new Error("Unknown diff scope");
+  return step.diff || null;
+}
+
+function nextAttemptId(step) {
+  const current = Math.max(Number(step.attemptSequence) || 0, ...(step.attempts || []).map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
+  return `attempt-${current + 1}`;
+}
+
+function applyStepProof(run, stepId, reports, evidence = []) {
+  if (!run.proofMap) return;
+  run.proofMap = applyIndependentProofReports(run.proofMap, reports, run, { criterionIds: stepCriterionIds(run, stepId), mediaIds: run.artifacts.filter((artifact) => evidence.some((item) => item.path === artifact.path)).map(({ id }) => id) });
+}
+
+function explicitCriterionIds(run, candidateIds, { stepId = null } = {}) {
+  const known = new Set((run.proofMap?.criteria || []).filter((criterion) => !stepId || criterion.stepId === stepId).map((criterion) => criterion.id));
+  const selected = [...new Set((Array.isArray(candidateIds) ? candidateIds : []).map(String))];
+  const unknown = selected.filter((id) => !known.has(id));
+  if (unknown.length) throw new Error(`Unknown or unrelated criterion IDs: ${unknown.join(", ")}`);
+  return selected;
+}
+
+async function persistProofSnapshot(ticketId, { stageId = "proof", stepId = null, attemptId = null, name = "proof-map.json" } = {}) {
+  const run = ticketRun(store.read(), ticketId);
+  if (!run.proofMap) return null;
+  const artifact = await persistArtifact(dataDir, run.ticket, {
+    runId: run.runId, stageId, stepId, attemptId, name, kind: "proof-map",
+    content: JSON.stringify(run.proofMap, null, 2)
+  });
+  await update((state) => {
+    const current = state.ticketRuns[ticketId];
+    if (current?.runId === run.runId && current.proofMap) current.artifacts.push(artifact);
+  });
+  return artifact;
+}
+
 async function promptsForStage(run, stage) {
   const prompts = [];
   const seen = new Set();
+  let retainedTraces = 0;
+  let availableTraces = 0;
   const add = ({ prompt, content, at, actor, title, status }) => {
-    const value = String(prompt || content || "").trim();
+    const value = boundedText(prompt || content || "", 16000).value.trim();
     if (!value || seen.has(value)) return;
     seen.add(value);
     prompts.push({ prompt: value, at: at || null, title: title || actor || stage.title, status: status || stage.status });
   };
   for (const prompt of stage.activity?.prompts || []) add(prompt);
-  const trace = async (sessionFile, meta = {}, bounds = {}) => {
+  const trace = async (sessionFile, meta = {}, bounds = {}, tolerateUnavailable = false) => {
     if (!sessionFile) return;
-    const saved = await harness.sessionTrace(sessionFile, bounds);
-    for (const prompt of saved.prompts || (saved.prompt ? [{ prompt: saved.prompt }] : [])) add({ ...prompt, ...meta });
+    retainedTraces++;
+    try {
+      const saved = await harness.sessionTrace(sessionFile, bounds);
+      availableTraces++;
+      for (const prompt of saved.prompts || (saved.prompt ? [{ prompt: saved.prompt }] : [])) add({ ...prompt, ...meta });
+    } catch (error) {
+      // A persisted review handle can outlive its local session file. Prompt
+      // inspection remains useful in that case, so only its optional review
+      // trace is marked unavailable rather than returning an unrelated 400.
+      if (!tolerateUnavailable) throw error;
+    }
   };
   const bounds = { after: stage.activity?.startedAt, before: stage.activity?.completedAt };
   if (stage.id === "requirements") await trace(run.requirementsSessionFile, {}, bounds);
@@ -451,10 +1029,176 @@ async function promptsForStage(run, stage) {
   }
   if (stage.id === "verify") {
     for (const review of run.reviews || []) for (const item of review.reviews || []) {
-      await trace(item.sessionFile, { title: `${item.role} review · round ${review.round}`, status: "completed" });
+      await trace(item.sessionFile, { title: `${item.role} review · round ${review.round}`, status: "completed" }, bounds, true);
     }
   }
-  return prompts.sort((left, right) => String(left.at || "").localeCompare(String(right.at || "")));
+  return {
+    prompts: prompts.sort((left, right) => String(left.at || "").localeCompare(String(right.at || ""))),
+    trace: {
+      state: !retainedTraces ? "not_retained" : availableTraces ? (availableTraces === retainedTraces ? "available" : "partially_available") : "unavailable",
+      retained: retainedTraces,
+      available: availableTraces
+    }
+  };
+}
+
+function runForIdentity(state, ticketId, runId) {
+  const current = state.ticketRuns?.[ticketId];
+  if (current?.runId === runId) return current;
+  const retained = Object.values(state.retainedRuns || {}).find((run) => run.id === ticketId && run.runId === runId);
+  if (retained) return retained;
+  throw new Error("Run not found");
+}
+
+function artifactForIdentity(state, ticketId, runId, artifactId) {
+  const run = runId ? runForIdentity(state, ticketId, runId) : ticketRun(state, ticketId);
+  const artifact = (run.artifacts || []).find((item) => item.id === artifactId);
+  if (!artifact) throw new Error("Artifact not found");
+  return { run, artifact };
+}
+
+function inspectionHistories(state, ticketId) {
+  const current = state.ticketRuns?.[ticketId];
+  const histories = [
+    ...(current ? [{ run: current, archived: false }] : []),
+    ...Object.values(state.retainedRuns || {}).filter((run) => run.id === ticketId).map((run) => ({ run, archived: true }))
+  ];
+  if (!histories.length) throw new Error("Ticket run not found");
+  return histories.sort((left, right) => Number(left.archived) - Number(right.archived) || String(right.run.createdAt || "").localeCompare(String(left.run.createdAt || "")) || String(right.run.runId || "").localeCompare(String(left.run.runId || ""))).map(({ run, archived }) => ({
+    ...compactRun(run, state.revision), archived,
+    createdAt: run.createdAt || null,
+    completedAt: run.completedAt || null,
+    attemptCount: flattenSteps(run.plan).reduce((count, step) => count + (step.attempts?.length || 0), 0)
+  }));
+}
+
+async function artifactContent(artifact, limit = 20000) {
+  if (!artifact) return null;
+  // Media stays behind the existing media endpoint; textual views read only a bounded prefix.
+  if (artifact.kind === "visual-evidence" || artifact.mediaType || visualEvidenceMedia(artifact.name)) return null;
+  if (typeof artifact?.content === "string") {
+    const source = String(artifact.content);
+    return { content: redactText(source.slice(0, limit + 4096)), truncated: source.length > limit + 4096 };
+  }
+  const path = artifactPathForOpen([artifact], artifact?.id, dataDir);
+  if (!path) return null;
+  try {
+    const handle = await open(path, "r");
+    try {
+      const size = (await handle.stat()).size;
+      const length = Math.min(size, limit + 4096);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, 0);
+      return { content: redactText(buffer.toString("utf8")), truncated: size > length };
+    } finally { await handle.close(); }
+  } catch { return null; }
+}
+
+async function artifactText(artifact, limit = 100000) {
+  return (await artifactContent(artifact, limit))?.content || "";
+}
+
+async function hydrateArtifacts(artifacts, limit = 60000) {
+  // Older call sites passed the storage root as the second argument. It is not
+  // a byte bound; keep those retained artifact reads at the safe default.
+  const boundedLimit = Number.isFinite(limit) ? limit : 60000;
+  return Promise.all((artifacts || []).map(async (artifact) => {
+    const content = boundedText(await artifactText(artifact, boundedLimit), boundedLimit);
+    return { ...artifact, content: content.value, ...(content.truncated ? { truncated: true } : {}) };
+  }));
+}
+
+function fallback(artifact) {
+  return artifact ? { artifact: safeArtifactMetadata(artifact) } : {};
+}
+
+function textDetail(saved, limit, unavailable, artifact = null) {
+  const content = typeof saved === "string" ? saved : saved?.content;
+  if (content == null || content === "") return { state: unavailable, ...fallback(artifact) };
+  const bounded = boundedText(content, limit);
+  const truncated = bounded.truncated || Boolean(saved?.truncated);
+  const total = Math.max(bounded.total, Number(saved?.total) || 0);
+  return {
+    state: truncated ? "truncated" : "available", content: bounded.value,
+    returned: bounded.value.length, total,
+    ...(truncated ? fallback(artifact) : {})
+  };
+}
+
+function detailActivityEvent(event = {}) {
+  const item = redactRecord({ type: event.type || "activity", tool: event.tool || null, callId: event.callId || null, label: boundedText(event.label, 240).value, at: event.at || null, actor: boundedText(event.actor, 120).value || null, isError: Boolean(event.isError) });
+  if (item.type === "thinking") return item;
+  if (event.type === "reasoning_summary") return { ...item, detail: boundedText(event.detail, 1000).value };
+  for (const key of ["args", "detail", "result"]) if (event[key] != null) item[key] = boundedText(event[key], 2000).value;
+  return item;
+}
+
+async function attemptDetails(run, step, attempt, { active = false } = {}) {
+  const artifacts = (run.artifacts || []).filter((artifact) => artifact.stepId === step.id && artifact.attemptId === attempt.attemptId);
+  const byKind = (kind) => artifacts.find((artifact) => artifact.kind === kind) || null;
+  const promptArtifact = byKind("agent-prompt");
+  const outputArtifact = byKind("agent-output");
+  const diffArtifact = byKind("git-attempt-diff") || byKind("git-diff");
+  const verificationArtifact = byKind("step-verification");
+  const savedPrompt = (content, truncated = false, total = 0) => content ? { content: redactText(content), truncated: Boolean(truncated), total: Number(total) || 0 } : null;
+  const lastPrompt = attempt.prompts?.at(-1) || attempt.activity?.prompts?.at(-1);
+  const prompt = await artifactContent(promptArtifact, 16000)
+    || savedPrompt(typeof attempt.prompt === "string" ? attempt.prompt : attempt.prompt?.content, attempt.promptTruncated ?? attempt.prompt?.truncated, attempt.promptTotal ?? attempt.prompt?.total)
+    || savedPrompt(lastPrompt?.content || lastPrompt?.prompt, lastPrompt?.truncated, lastPrompt?.total);
+  const activity = attempt.events || attempt.activity?.events || [];
+  const activityItems = activity.slice(-100).map(detailActivityEvent);
+  const rawOutput = redactText(attempt.rawOutput || attempt.activity?.rawOutput || "");
+  const output = await artifactContent(outputArtifact, 20000) || rawOutput;
+  const artifactItems = await Promise.all(artifacts.map(async (artifact) => {
+    const content = await artifactContent(artifact, 12000);
+    return { ...safeArtifactMetadata(artifact), ...textDetail(content, 12000, "not_retained", artifact) };
+  }));
+  const traceFile = attempt.sessionFile || null;
+  let trace = null;
+  if (traceFile) {
+    try { trace = redactRecord(await harness.sessionTrace(traceFile, { after: attempt.startedAt, before: attempt.completedAt })); }
+    catch { trace = null; }
+  }
+  const traceOutput = trace && boundedText(trace.rawOutput || "", 20000);
+  const tracePrompts = trace?.prompts || [];
+  const traceEvents = trace?.events || [];
+  const traceContent = trace && {
+    prompts: tracePrompts.slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })),
+    events: traceEvents.slice(-100).map(detailActivityEvent),
+    rawOutput: traceOutput.value
+  };
+  const traceTruncated = Boolean(traceContent && (traceOutput.truncated || tracePrompts.length > 20 || traceEvents.length > 100));
+  const traceState = traceContent ? traceTruncated ? "truncated" : "available" : "unavailable";
+  const diff = redactRecord(run.attemptDiffHistory?.[step.id]?.[attempt.attemptId] || attempt.diff || {});
+  const checks = redactRecord(attempt.verification?.checks || attempt.checks || {});
+  const checkOutput = boundedText(checks.output || "", 16000);
+  const terminationReason = boundedText(redactText(attempt.termination?.reason || attempt.terminationReason || ""), 240).value || null;
+  const terminationAt = attempt.termination?.at || attempt.completedAt || null;
+  const failureKind = boundedText(redactText(attempt.failure?.kind || attempt.failureKind || ""), 120).value || null;
+  const failurePhase = boundedText(redactText(attempt.failure?.phase || attempt.failurePhase || ""), 120).value || null;
+  const failureMessage = boundedText(redactText(attempt.failure?.message || attempt.error || ""), 1000).value || null;
+  return {
+    ticketId: run.id,
+    runId: run.runId,
+    stepId: step.id,
+    attemptId: attempt.attemptId,
+    terminationReason,
+    termination: terminationReason || terminationAt ? { reason: terminationReason, at: terminationAt } : null,
+    failureKind,
+    failurePhase,
+    failure: failureKind || failurePhase || failureMessage ? { kind: failureKind, phase: failurePhase, message: failureMessage } : null,
+    prompt: textDetail(prompt, 16000, active ? "not_yet_available" : "not_retained", promptArtifact),
+    activity: { state: Math.max(activity.length, Number(attempt.eventsTotal) || 0) > 100 ? "truncated" : activity.length ? "available" : active ? "not_yet_available" : "not_retained", items: activityItems, returned: activityItems.length, total: Math.max(activity.length, Number(attempt.eventsTotal) || 0) },
+    output: textDetail(output, 20000, active ? "not_yet_available" : outputArtifact ? "unavailable" : "not_retained", outputArtifact),
+    artifacts: { state: artifactItems.length ? "available" : "not_retained", items: artifactItems, count: artifactItems.length },
+    diff: diff.patch ? { state: boundedText(diff.patch, 20000).state, files: diff.files || [], stat: diff.stat || "", content: boundedText(diff.patch, 20000).value, ...(diff.patch.length > 20000 ? fallback(diffArtifact) : {}) } : { state: diffArtifact ? "unavailable" : "not_retained", ...fallback(diffArtifact) },
+    checks: Object.keys(checks).length ? { state: checkOutput.state, status: checks.status || null, command: checks.command || null, summary: checks.summary || "", output: checkOutput.value, returned: checkOutput.value.length, total: checkOutput.total, ...(checkOutput.truncated ? fallback(verificationArtifact) : {}) } : { state: "not_retained" },
+    trace: traceContent ? {
+      state: traceState, content: traceContent,
+      returned: { prompts: traceContent.prompts.length, events: traceContent.events.length, output: traceOutput.value.length },
+      total: { prompts: tracePrompts.length, events: traceEvents.length, output: traceOutput.total }
+    } : { state: traceFile ? "unavailable" : "not_retained" }
+  };
 }
 
 function skillSession(state, run) {
@@ -478,19 +1222,26 @@ function pauseIfWorkflowBlocked(run) {
   return true;
 }
 
-async function surfaceImmediateFailure(ticketId, work) {
+async function surfaceImmediateFailure(ticketId, work, { awaitWork = true } = {}) {
+  const activeTicket = activeTickets.get(ticketId);
   const tracked = Promise.resolve(work).catch(async (error) => {
+    // Cancellation is resolved by its lifecycle owner. Do not begin a durable
+    // failure write after that owner has started daemon cleanup.
+    if (activeTicket?.controller.signal.aborted) return;
     await update((state) => {
       const run = state.ticketRuns[ticketId];
       if (!run || run.lastError) return;
       run.status = earlyFailureStatusSet.has(run.status) ? "failed" : "needs_attention";
-      run.lastError = error.message;
+      run.lastError = redactText(error.message);
     });
   });
   await new Promise((resolve) => setImmediate(resolve));
   const run = store.read().ticketRuns?.[ticketId];
   if (run && ["failed", "needs_attention"].includes(run.status) && run.lastError) throw new Error(run.lastError);
-  return tracked;
+if (awaitWork) return tracked;
+  // The caller only waits through the first event-loop turn so an immediate
+  // launch failure can reach the HTTP response.
+  void tracked;
 }
 
 function setStage(run, id, status, summary = "") {
@@ -545,23 +1296,23 @@ async function mirrorCheckpoint(ticketId) {
   } catch (error) {
     await update((state) => {
       const current = state.ticketRuns[ticketId];
-      if (current) current.trackerSyncError = `Could not mirror checkpoint: ${error.message}`;
+      if (current) current.trackerSyncError = `Could not mirror checkpoint: ${redactText(error.message)}`;
     });
   }
 }
 
-async function beginTicket(ticket, { automaticAdmission = false } = {}) {
+async function beginTicket(ticket, { automaticAdmission = false, awaitWork = true } = {}) {
   if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
     if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
   });
-  await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id));
+  await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id), { awaitWork });
   return ticket.id;
 }
 
 function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
-  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId });
+  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId, proofStorageRoot: dataDir });
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {
@@ -592,7 +1343,7 @@ async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId 
   });
   if (source === "dashboard" && trackerBacked(before.ticket)) {
     trackers.comment(before.ticket, `Answer (dashboard):\n\n${answers || "Approved without changes."}\n\n[agent-plan-answer:${checkpoint.id}]`).catch(async (error) => {
-      await update((state) => { if (state.ticketRuns[ticketId]) state.ticketRuns[ticketId].trackerSyncError = `Could not mirror dashboard answer: ${error.message}`; });
+      await update((state) => { if (state.ticketRuns[ticketId]) state.ticketRuns[ticketId].trackerSyncError = `Could not mirror dashboard answer: ${redactText(error.message)}`; });
     });
   }
   if (isWorkflowRunCheckpoint(checkpoint)) await surfaceImmediateFailure(ticketId, continueWorkflowThenResume(ticketId, checkpoint, answers));
@@ -605,17 +1356,17 @@ async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId 
 async function continueWorkflowThenResume(ticketId, checkpoint, answers) {
   try {
     const run = ticketRun(store.read(), ticketId);
-    const activation = await harness.continueWorkflow({
+    const continued = retainWorkflowContinuation(await harness.continueWorkflow({
       ...skillSession(store.read(), run),
       checkpoint,
       response: String(answers || "Approved"),
       profile: run.stageProfiles.architecture
-    });
+    }));
     await update((state) => {
       const current = ticketRun(state, ticketId);
       current.workflow = initialWorkflow(current.workflow);
-      applyWorkflowContinuation(current.workflow, checkpoint.id, answers, activation);
-      if (activation.sessionFile) current.sessionFile = activation.sessionFile;
+      applyWorkflowContinuation(current.workflow, checkpoint.id, answers, continued.result);
+      if (continued.sessionFile) current.sessionFile = continued.sessionFile;
       applyPendingWorkflowGate(current);
     });
     const latest = ticketRun(store.read(), ticketId);
@@ -628,7 +1379,7 @@ async function continueWorkflowThenResume(ticketId, checkpoint, answers) {
       const current = state.ticketRuns[ticketId];
       if (!current) return;
       current.status = "needs_attention";
-      current.lastError = error.message;
+      current.lastError = redactText(error.message);
     });
     return;
   }
@@ -644,12 +1395,13 @@ async function resumeTicketPipeline(ticketId) {
   if (stage === "requirements_review") {
     const draft = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "requirements-draft");
     if (!run.checkpoint && draft) {
+const prompt = await artifactText(draft);
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_requirements";
         current.checkpoint = {
           id: randomUUID(), kind: "requirements_review", title: "Approve ticket requirements",
-          prompt: draft.content, questions: [], createdAt: new Date().toISOString()
+prompt, questions: [], createdAt: new Date().toISOString()
         };
         setStage(current, "requirements", "blocked", "Requirement approval needed before repository access");
       });
@@ -661,11 +1413,12 @@ async function resumeTicketPipeline(ticketId) {
   if (stage === "design") return startTicketWork(ticketId, (signal) => designTicket(ticketId, "Continue after the supervisor workflow gate.", signal));
   if (stage === "plan_approval") {
     if (!run.checkpoint) {
+const design = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "architecture");
+      const prompt = await artifactText(design);
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_approval";
-        const design = [...(current.artifacts || [])].reverse().find((artifact) => artifact.kind === "architecture");
-        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: design?.content || "", createdAt: new Date().toISOString() };
+        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt, createdAt: new Date().toISOString() };
         setStage(current, "design", "blocked", "Plan ready for approval");
       });
     }
@@ -688,23 +1441,23 @@ async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
           current.status = "reviewing";
           setStage(current, "implement", "active", `Supervisor continuing review of ${step.title}`);
         });
-        const continued = await harness.continueWorkflow({
+        const continued = retainWorkflowContinuation(await harness.continueWorkflow({
           ...skillSession(store.read(), run),
           checkpoint,
           response: feedback,
           profile: run.stageProfiles.architecture,
           signal
-        });
+        }));
         await update((state) => {
           const current = ticketRun(state, ticketId);
           current.workflow = initialWorkflow(current.workflow);
           if (continued.sessionFile) current.sessionFile = continued.sessionFile;
           const target = findNode(current.plan, checkpoint.stepId);
-          if (target) target.supervisorReview = { reply: continued.reply, error: null, at: new Date().toISOString() };
+          if (target) target.supervisorReview = { reply: continued.result.reply, error: null, at: new Date().toISOString() };
         });
         const latest = ticketRun(store.read(), ticketId);
         const currentStep = findNode(latest.plan, checkpoint.stepId);
-        const nextGate = supervisorReviewCheckpoint(currentStep, continued);
+        const nextGate = supervisorReviewCheckpoint(currentStep, continued.result);
         if (nextGate) {
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -739,11 +1492,20 @@ async function resumeStepCheckpoint(ticketId, checkpoint, answers) {
           const current = state.ticketRuns[ticketId];
           if (!current) return;
           current.status = "needs_attention";
-          current.lastError = error.message;
-          setStage(current, "implement", "blocked", error.message);
+          current.lastError = redactText(error.message);
+          setStage(current, "implement", "blocked", redactText(error.message));
         });
       }
     });
+  }
+  // A worker may edit again after this checkpoint, so its prior proof cannot
+  // establish acceptance when the resumed report omits a criterion.
+  if (checkpoint.source === "worker") {
+    await update((state) => {
+      const current = ticketRun(state, ticketId);
+      if (current.proofMap) current.proofMap = invalidateProof(current.proofMap, stepCriterionIds(current, checkpoint.stepId), { reason: "Worker checkpoint resumed with user feedback." });
+    });
+    await persistProofSnapshot(ticketId, { stageId: "implement", stepId: checkpoint.stepId, name: "proof-map-worker-resume-correction.json" });
   }
   await update((state) => {
     const current = ticketRun(state, ticketId);
@@ -775,7 +1537,7 @@ async function syncTrackerAnswers() {
         .find(Boolean);
       if (answer) await acceptCheckpointAnswer(run.id, answer, "tracker");
     } catch (error) {
-      await update((state) => { if (state.ticketRuns[run.id]) state.ticketRuns[run.id].trackerSyncError = `Could not read tracker answers: ${error.message}`; });
+      await update((state) => { if (state.ticketRuns[run.id]) state.ticketRuns[run.id].trackerSyncError = `Could not read tracker answers: ${redactText(error.message)}`; });
     }
   }));
 }
@@ -829,7 +1591,7 @@ async function loadLocalRun(inputPath) {
   const stageProfiles = currentState.stageProfiles;
   const fixture = await loadLocalFixture(source, inputPath);
   const [contractExists, projectConfigExists] = await Promise.all([
-    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
   const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);
@@ -871,7 +1633,7 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      workflow: initialWorkflow(), createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString()
     };
   });
   return { ticketId: id, state };
@@ -933,7 +1695,7 @@ async function prepareTicket(ticketId) {
       const current = state.ticketRuns[ticketId];
       if (current) {
         current.status = "failed";
-        current.lastError = error.message;
+        current.lastError = redactText(error.message);
         if (activity) current.stages.find((stage) => stage.id === "requirements").activity = activity.snapshot();
       }
     });
@@ -993,7 +1755,11 @@ async function continueAfterRequirements(ticketId, answers) {
     const draft = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements-draft");
     const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
     if ((!approved && !draft) || !productContext) throw new Error("Requirements draft or product context snapshot not found");
-    const requirements = approved?.content || `${draft.content}\n\n## User clarification\nApproved without changes.`;
+const [retainedRequirements, productContextBody] = await Promise.all([
+      artifactText(approved || draft), artifactText(productContext)
+    ]);
+    if (!retainedRequirements) throw new Error("Approved requirements content was not retained");
+    const requirements = approved ? retainedRequirements : `${retainedRequirements}\n\n## User clarification\nApproved without changes.`;
     const ticketHorizon = formatTicketHorizon(run.ticket, [
       ...ticketCache.values(),
       ...Object.values(before.ticketRuns).map((ticketRun) => ticketRun.ticket)
@@ -1029,13 +1795,13 @@ async function continueAfterRequirements(ticketId, answers) {
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
-        productContext: productContext.content, requirements, profile: run.stageProfiles.exploration,
+productContext: productContextBody, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"),
         onSessionFile: saveRunSession(ticketId), signal
       }),
       harness.lookAheadTickets({
         cwd: before.workspace.cwd, ticket: run.ticket, runId: run.runId,
-        productContext: productContext.content, requirements, ticketHorizon, profile: run.stageProfiles.exploration,
+productContext: productContextBody, requirements, ticketHorizon, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "ticket look-ahead"), signal
       })
     ]);
@@ -1079,7 +1845,7 @@ async function continueAfterRequirements(ticketId, answers) {
       const current = state.ticketRuns[ticketId];
       if (current) {
         current.status = "failed";
-        current.lastError = error.message;
+        current.lastError = redactText(error.message);
         if (activity) current.stages.find((stage) => stage.id === activityStage).activity = activity.snapshot();
       }
     });
@@ -1095,8 +1861,12 @@ async function designTicket(ticketId, answers, signal) {
   const requirements = [...run.artifacts].reverse().find((artifact) => artifact.kind === "requirements");
   const productContext = [...run.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
   const exploration = [...run.artifacts].reverse().find((artifact) => artifact.kind === "implementation-delta");
-  const ticketLookAhead = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead")?.content || "No nearby ticket implications were found.";
+const ticketLookAheadArtifact = [...run.artifacts].reverse().find((artifact) => artifact.kind === "ticket-lookahead");
   if (!requirements || !productContext || !exploration) throw new Error("Approved requirements, product context, and implementation delta are required before design");
+  const [requirementsBody, productContextBody, explorationBody, ticketLookAheadBody] = await Promise.all([
+    hydrateArtifact(requirements, dataDir), hydrateArtifact(productContext, dataDir), hydrateArtifact(exploration, dataDir), hydrateArtifact(ticketLookAheadArtifact, dataDir)
+  ]);
+  const ticketLookAhead = ticketLookAheadBody?.content || "No nearby ticket implications were found.";
   if (executionBlockedByWorkflow(run)) {
     await update((draft) => { pauseIfWorkflowBlocked(ticketRun(draft, ticketId)); });
     await mirrorCheckpoint(ticketId);
@@ -1117,30 +1887,35 @@ async function designTicket(ticketId, answers, signal) {
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
-      productContext: productContext.content, requirements: requirements.content, exploration: exploration.content, ticketLookAhead, answers,
+productContext: productContextBody.content, requirements: requirementsBody.content, exploration: explorationBody.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
       onSessionFile: saveRunSession(ticketId), signal
     });
     signal?.throwIfAborted();
+    // The planner response becomes durable both as an artifact and as plan/checkpoint
+    // state. Retain one redacted, bounded representation for every model-controlled
+    // field so no original response can bypass the durable redaction boundary.
+    const designArtifact = retainDurableRecord(result.artifact);
+    const designPlan = retainDurableRecord(result.plan);
     const artifact = await persistArtifact(dataDir, run.ticket, {
-      runId: run.runId, name: "design.md", content: result.artifact, stageId: "design", kind: "architecture"
+      runId: run.runId, name: "design.md", content: designArtifact, stageId: "design", kind: "architecture"
     });
     await update((draft) => {
       const current = ticketRun(draft, ticketId);
       current.sessionFile = result.sessionFile;
-      current.plan = result.plan;
+      current.plan = designPlan;
       current.artifacts.push(artifact);
       current.status = "awaiting_approval";
       setStage(current, "design", "blocked", "Plan ready for approval").activity = activity.snapshot();
-      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: result.artifact, createdAt: new Date().toISOString() };
+      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: designArtifact, createdAt: new Date().toISOString() };
     });
   } catch (error) {
     if (signal?.aborted) return;
     await update((draft) => {
       const current = ticketRun(draft, ticketId);
       current.status = "failed";
-      current.lastError = error.message;
-      setStage(current, "design", "blocked", error.message).activity = activity.snapshot();
+      current.lastError = redactText(error.message);
+      setStage(current, "design", "blocked", redactText(error.message)).activity = activity.snapshot();
     });
   }
 }
@@ -1148,6 +1923,7 @@ async function designTicket(ticketId, answers, signal) {
 async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
   const key = `${ticketId}:${stepId}`;
   if (activeSteps.has(key)) return activeSteps.get(key);
+  let activeActivity = null;
   const work = (async () => {
     signal?.throwIfAborted();
     const beforeState = store.read();
@@ -1155,6 +1931,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
     if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
+    let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
       let vcsChange = null;
@@ -1162,53 +1939,75 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         vcsChange = await beginJjChange(stepCwd, { changeId: step.vcsChange?.changeId, title: step.title });
         await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).vcsChange = vcsChange; });
       }
-      const beforeTree = await snapshotTree(stepCwd);
+      let beforeTree = await snapshotTree(stepCwd);
       const stepBaseTree = step.baseTree || beforeTree;
       await update((state) => {
         const target = findNode(ticketRun(state, ticketId).plan, stepId);
         target.baseTree ||= stepBaseTree;
       });
-      let nextFeedback = feedback;
-      const priorVerification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification || {};
-      if (!nextFeedback && step.status === "interrupted") {
-        const findings = actionableFindings([priorVerification]);
-        if (findings.length) nextFeedback = `Resume the interrupted correction for these verified issues:\n\n${JSON.stringify(findings, null, 2)}`;
+      let rollbackFeedback = "";
+      if (step.baseTree && beforeTree) {
+        const existingDiff = await diffTrees(stepCwd, step.baseTree, beforeTree);
+        const existingBudget = diffReviewBudget(step, existingDiff);
+        if (reviewBudgetRequiresRollback(existingBudget)) {
+          beforeTree = await restoreTree(stepCwd, step.baseTree);
+          rollbackFeedback = `The harness rolled back a runaway prior diff before this attempt: ${existingBudget.reasons.join("; ")}. Re-implement this slice from its clean step checkpoint with focused edits; do not copy whole files from another worktree.`;
+          await update((state) => {
+            const target = findNode(ticketRun(state, ticketId).plan, stepId);
+            target.rollbackHistory ||= [];
+            target.rollbackHistory.push({ at: new Date().toISOString(), reason: rollbackFeedback, diff: existingDiff, reviewBudgetResult: existingBudget });
+            target.diff = null;
+            target.reviewBudgetResult = null;
+          });
+        }
       }
+      let nextFeedback = feedback || rollbackFeedback;
+      const priorVerification = [...(step.attempts || [])].reverse().find((attempt) => attempt.verification)?.verification || {};
+      if (!nextFeedback && step.status === "interrupted") nextFeedback = interruptedStepFeedback(step);
       let previousFindings = actionableFindings([priorVerification]);
       let previousFingerprint = findingsFingerprint(previousFindings);
-      for (let round = (step.attempts?.length || 0) + 1; ; round++) {
+      for (let round = nextCorrectionRound(step); ; round++) {
         signal?.throwIfAborted();
         const latest = ticketRun(store.read(), ticketId);
         const currentStep = findNode(latest.plan, stepId);
         const workerRunId = randomUUID();
         const startedAt = new Date().toISOString();
-        let attemptId;
-        const contextArtifacts = [
+        const reusableAttempt = currentStep.status === "interrupted" && currentStep.activeAttempt?.id && currentStep.activeAttempt.status === "interrupted";
+        const attemptId = reusableAttempt ? currentStep.activeAttempt.id : nextAttemptId(currentStep);
+        attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
+        const contextArtifacts = await hydrateArtifacts([
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
           ...dependencyArtifacts(latest.plan, currentStep)
-        ];
+        ], dataDir);
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
-          const attempt = beginStepAttempt(current, stepId, { workerRunId, resume: target.status === "interrupted" });
-          attemptId = attempt.id;
+          const reuse = target.status === "interrupted" && target.activeAttempt?.id === attemptId && target.activeAttempt.status === "interrupted";
+          target.activeAttempt = {
+            ...(reuse ? target.activeAttempt : {}), id: attemptId, status: "active",
+            startedAt: target.activeAttempt?.startedAt || startedAt, resumedAt: reuse ? startedAt : null, workerRunId
+          };
+          const sequence = Number(String(attemptId).match(/^attempt-(\d+)$/)?.[1]) || Number(target.attemptSequence) || 0;
+          target.attemptSequence = Math.max(Number(target.attemptSequence) || 0, sequence);
           target.status = nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          Object.assign(current.activeRuns[stepId], { lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" });
+          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
+        activeActivity = activity;
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
         const attemptBaseTree = await snapshotTree(cwd);
         const sessionChoice = selectWorkerSession(currentStep, {
           forkSessionFile: findForkSession(latest.plan, currentStep),
           feedback: nextFeedback
         });
-        const result = await harness.runStep({
-          cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, images: [],
+        const result = await runContainedWorker({
+          ticketId, stepId, attemptId, executionId: workerRunId,
+          cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
-          feedback: nextFeedback, ticketId, runId: latest.runId,
+          feedback: nextFeedback, runId: latest.runId,
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
@@ -1251,31 +2050,37 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           attemptId,
           signal
         });
+        Object.assign(attemptEvidence, { report: result.report, rawOutput: result.rawOutput || "", sessionFile: result.sessionFile || null });
         signal?.throwIfAborted();
-        const acknowledgedSteerIds = [...new Set((result.report.acknowledgedSteerIds || []).map(String).filter(Boolean))];
+        const report = redactRecord(result.report);
+        const acknowledgedSteerIds = [...new Set((report.acknowledgedSteerIds || []).map(String).filter(Boolean))];
         if (acknowledgedSteerIds.length) await update((state) => {
           const current = ticketRun(state, ticketId);
           for (const steerId of acknowledgedSteerIds) {
             const record = current.steering?.records?.find((item) => item.id === steerId);
             if (!record || record.runId !== current.runId || record.stepId !== stepId || record.attemptId !== attemptId) continue;
             acknowledgeSteering(current, steerId, {
-              evidence: { source: "worker_report", workerRunId, summary: result.report.summary, acknowledgedSteerIds }
+              evidence: { source: "worker_report", workerRunId, summary: report.summary, acknowledgedSteerIds }
             });
           }
         });
+        const workerTree = await snapshotTree(cwd);
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
-        if (currentStep.permission === "write" && result.report.status === "completed") {
+        if (currentStep.permission === "write" && report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
           checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
         }
+        attemptEvidence.checks = checks;
         signal?.throwIfAborted();
         if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
         const afterTree = await snapshotTree(cwd);
         const diff = await diffTrees(cwd, stepBaseTree, afterTree);
-        const attemptDiff = await diffTrees(cwd, attemptBaseTree, afterTree);
+        const attemptDiff = await diffTrees(cwd, attemptBaseTree, workerTree);
+        const checkDiff = await diffTrees(cwd, workerTree, afterTree);
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
-        const violations = currentStep.permission !== "write" ? diff.files : outsideWriteScope(diff.files, currentStep.writeScope);
+        const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
+        const violations = currentStep.permission !== "write" ? attemptDiff.files : outsideWriteScope(attemptDiff.files, workerWriteScope(currentStep));
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
@@ -1285,7 +2090,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
-        const workerGate = workerReportCheckpoint(currentStep, result.report);
+        Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
+        const workerGate = workerReportCheckpoint(currentStep, report);
         if (steeringCheckpointPending(ticketRun(store.read(), ticketId))) {
           const attemptActivity = activity.snapshot();
           await update((state) => {
@@ -1300,7 +2106,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             if (vcsChange) target.vcsChange = vcsChange;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_input", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+            materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: "needs_input", reason: "steering_checkpoint", phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report, verification: { checks }, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             setStage(current, "implement", "blocked", current.checkpoint.title);
@@ -1308,13 +2119,19 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await mirrorCheckpoint(ticketId);
           return;
         }
-        if (violations.length || (result.report.status !== "completed" && !workerGate)) {
-          const error = violations.length ? `Changes outside permission or write scope: ${violations.join(", ")}` : (result.report.request || result.report.summary);
+        if (runawayDiff) await restoreTree(cwd, stepBaseTree);
+        if (violations.length || runawayDiff || (report.status !== "completed" && !workerGate)) {
+          const error = redactText(violations.length
+            ? `Changes outside permission or write scope: ${violations.join(", ")}`
+            : runawayDiff
+              ? `Runaway diff rolled back to the step checkpoint: ${reviewBudget.reasons.join("; ")}`
+              : (report.request || report.summary || "Worker needs attention"));
           const attemptActivity = activity.snapshot();
           await update((state) => {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
+            target.checks = checks;
             target.diff = diff;
             target.reviewNotes = reviewNotes;
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1323,12 +2140,18 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: "needs_attention", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: "needs_attention", reason: "worker_report_or_scope_failure", error, phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report, verification: { checks }, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
             setStage(current, "implement", "blocked", error);
           });
+          await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-worker.json" });
           return;
         }
         if (workerGate) {
@@ -1337,6 +2160,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = workerGate.kind;
+            target.checks = checks;
             target.diff = diff;
             target.reviewNotes = reviewNotes;
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1345,25 +2169,32 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
-            target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: workerGate.kind, events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, diff: attemptDiff, vcsChange });
+materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: workerGate.kind, reason: "worker_checkpoint", phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report, verification: { checks }, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = workerGate.kind === "needs_input" ? "awaiting_input" : "awaiting_approval";
             current.checkpoint = { id: randomUUID(), ...workerGate, createdAt: new Date().toISOString() };
             setStage(current, "implement", "blocked", workerGate.title);
           });
+          await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-worker.json" });
           await mirrorCheckpoint(ticketId);
           return;
         }
         await update((state) => {
           const current = ticketRun(state, ticketId);
+          findNode(current.plan, stepId).status = "verifying";
           current.status = "verifying";
           current.activeRuns[stepId].lastEvent = `Fresh verification round ${round}`;
           current.activeRuns[stepId].lastEventAt = new Date().toISOString();
           current.activeRuns[stepId].warning = false;
           setStage(current, "implement", "active", `Fresh verification: ${currentStep.title}`);
         });
-        const design = [...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture")?.content || "";
+const design = await artifactText([...latest.artifacts].reverse().find((artifact) => artifact.kind === "architecture"));
         activity.onEvent({ type: "phase", label: `Verifying ${currentStep.title}` });
         const deterministicReview = repositoryCheckReview(checks);
         const verification = deterministicReview.findings.length ? {
@@ -1375,8 +2206,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
-            design, diff, output: result.output, checks, runId: latest.runId, round,
-            focusFindings: round > 1 ? previousFindings : [],
+            design, diff, output: result.output, checks,
+            proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
+            artifacts: ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)),
+            runId: latest.runId, round,
+            focusFindings: verificationFocusFindings(nextFeedback, previousFindings),
             images: await harness.evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
             onEvent: activity.onEvent,
@@ -1395,16 +2229,16 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         if (!findings.length && latest.sessionFile) {
           try {
             activity.onEvent({ type: "phase", label: "Supervisor reviewing worker report" });
-            supervisorReview = await harness.reviewWorkerReport({
+            supervisorReview = retainDurableRecord(await harness.reviewWorkerReport({
               cwd: latest.workspace.cwd, sessionFile: latest.sessionFile, sessionKey: `${latest.ticket.id}-${latest.runId}`,
-              step: currentStep, report: result.report, diff,
+              step: currentStep, report, diff,
               profile: latest.stageProfiles.architecture,
               onEvent: activity.onEvent,
               signal
-            });
+            }));
           } catch (error) {
             if (signal?.aborted) throw error;
-            supervisorReview = { reply: error.message, checkpoints: [], error: error.message };
+            supervisorReview = { reply: redactText(error.message), checkpoints: [], error: redactText(error.message) };
           }
         }
         const supervisorGate = supervisorReviewCheckpoint(currentStep, supervisorReview);
@@ -1419,6 +2253,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
+          target.checks = checks;
           target.diff = diff;
           target.reviewNotes = reviewNotes;
           target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
@@ -1427,10 +2262,17 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
-          target.attempts.push({ runId: workerRunId, attemptId, startedAt, completedAt: new Date().toISOString(), status: findings.length ? "verification_failed" : "verified", events: attemptActivity.events, activityGroups: attemptActivity.groups, rawOutput: attemptActivity.rawOutput || result.rawOutput, report: result.report, violations, feedback: nextFeedback || null, verification, diff: attemptDiff, vcsChange });
+materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+            status: findings.length ? "verification_failed" : "verified", reason: findings.length ? "verification_findings" : "verification_complete", phase: "verification",
+            activity: attemptActivity, rawOutput: result.rawOutput, report, verification, violations,
+            feedback: nextFeedback || null, diff: attemptDiff, checkDiff, aggregateDiff: diff, vcsChange, reviewNotes, reviewBudgetResult: reviewBudget,
+            artifactRefs: [...artifacts, verificationArtifact].map(({ id, kind, name }) => ({ id, kind, name }))
+          });
           current.artifacts.push(...artifacts, verificationArtifact);
+          applyStepProof(current, stepId, verification.criterionResults, checks.evidence);
           delete current.activeRuns[stepId];
         });
+        await persistProofSnapshot(ticketId, { stageId: "verify", stepId, attemptId, name: "proof-map-verification.json" });
         if (supervisorGate && !findings.length) {
           await update((state) => {
             const current = ticketRun(state, ticketId);
@@ -1458,69 +2300,90 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         }
         const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
         if (decision.pause) {
+          const pauseReason = correctionPauseReason(decision.reason, findings);
           await update((state) => {
             const current = ticketRun(state, ticketId);
             const target = findNode(current.plan, stepId);
             target.status = "needs_attention";
-            target.lastError = decision.reason;
+            target.lastError = pauseReason;
             current.status = "needs_attention";
-            current.lastError = decision.reason;
+            current.lastError = pauseReason;
             current.checkpoint = {
               id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
-              prompt: decision.reason, stepId, source: "verification", createdAt: new Date().toISOString()
+              prompt: pauseReason, stepId, source: "verification", createdAt: new Date().toISOString()
             };
-            setStage(current, "implement", "blocked", decision.reason);
+            setStage(current, "implement", "blocked", pauseReason);
           });
           return;
         }
+        // The next correction may change any criterion on this step. Invalidate all
+        // of them so an omitted follow-up report cannot retain pre-fix proof.
+        await update((state) => {
+          const current = ticketRun(state, ticketId);
+          if (current.proofMap) current.proofMap = invalidateProof(current.proofMap, stepCriterionIds(current, stepId), { reason: "Automatic correction after verification findings." });
+        });
+        await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-automatic-correction.json" });
         previousFingerprint = decision.fingerprint;
         previousFindings = findings;
         nextFeedback = `Fresh verification found these actionable issues. Fix them with the smallest focused change, then run deterministic checks:\n\n${JSON.stringify(findings, null, 2)}`;
       }
     } catch (error) {
       if (signal?.aborted) return;
+      const providerWait = providerWaitCheckpoint(error);
       await update((state) => {
         const current = ticketRun(state, ticketId);
         const failed = findNode(current.plan, stepId);
         const active = current.activeRuns[stepId] || {};
         const activity = active.activity || {};
-        failed.attempts ||= [];
+        const preserveSteeringCheckpoint = steeringCheckpointPending(current);
+        const failedAt = new Date().toISOString();
         // A worker failure belongs to the logical attempt that accepted steering;
         // never invent a sequential ID that would orphan its delivery ledger.
         const attemptId = active.attemptId || failed.activeAttempt?.id;
-        if (attemptId) {
-          failed.activeAttempt = {
-            ...(failed.activeAttempt || {}), id: attemptId, status: "failed", workerRunId: null,
-            startedAt: failed.activeAttempt?.startedAt || active.startedAt || null, failedAt: new Date().toISOString()
-          };
-          failed.attempts.push({
-            runId: active.runId || null,
-            attemptId,
-            startedAt: active.startedAt || new Date().toISOString(),
-            completedAt: new Date().toISOString(),
-            status: "failed",
-            events: activity.events || [],
-            activityGroups: activity.groups || [],
-            rawOutput: activity.rawOutput || "",
-            sessionFile: active.sessionFile || failed.sessionFile || null,
-            error: error.message
-          });
-        }
-        const preserveSteeringCheckpoint = steeringCheckpointPending(current);
-        failed.status = preserveSteeringCheckpoint ? "needs_input" : "failed";
-        failed.lastError = error.message;
+        if (attemptId) failed.activeAttempt = {
+          ...(failed.activeAttempt || {}), id: attemptId,
+          status: preserveSteeringCheckpoint || providerWait ? "interrupted" : "failed",
+          workerRunId: null,
+          startedAt: failed.activeAttempt?.startedAt || active.startedAt || null,
+          ...(providerWait ? { interruptedAt: failedAt } : { failedAt })
+        };
+        // A post-completion transition can fail after its active record was removed;
+        // only materialize when there is still a mutable worker to snapshot.
+        if (active.runId) materializeActiveAttempt(failed, active, {
+          status: preserveSteeringCheckpoint ? "needs_input" : providerWait ? "interrupted" : "failed",
+          reason: preserveSteeringCheckpoint ? "steering_checkpoint_worker_failure" : "worker_failure",
+          error: error.message, phase: "worker_execution", activity, rawOutput: attemptEvidence?.rawOutput || "", report: attemptEvidence?.report,
+          ...(attemptEvidence?.checks ? { checks: attemptEvidence.checks, verification: { checks: attemptEvidence.checks } } : {}),
+          ...(attemptEvidence?.diff ? { diff: attemptEvidence.diff } : {}),
+          ...(attemptEvidence?.checkDiff ? { checkDiff: attemptEvidence.checkDiff } : {}),
+          ...(attemptEvidence?.aggregateDiff ? { aggregateDiff: attemptEvidence.aggregateDiff } : {}),
+          ...(attemptEvidence?.reviewNotes ? { reviewNotes: attemptEvidence.reviewNotes } : {}),
+          ...(attemptEvidence?.reviewBudgetResult ? { reviewBudgetResult: attemptEvidence.reviewBudgetResult } : {}),
+          ...(attemptEvidence?.artifacts ? { artifactRefs: attemptEvidence.artifacts.map(({ id, kind, name }) => ({ id, kind, name })) } : {})
+        });
+        if (attemptEvidence?.aggregateDiff) failed.diff = attemptEvidence.aggregateDiff;
+        if (attemptEvidence?.reviewNotes) failed.reviewNotes = attemptEvidence.reviewNotes;
+        failed.status = preserveSteeringCheckpoint ? "needs_input" : providerWait ? "interrupted" : "failed";
+        failed.lastError = redactText(error.message);
         delete current.activeRuns[stepId];
         if (preserveSteeringCheckpoint) {
           // The withheld instruction is an operator decision that remains valid
           // even when its bound worker fails before the decision is answered.
           setStage(current, "implement", "blocked", current.checkpoint.title);
         } else {
-          current.status = "needs_attention";
-          setStage(current, "implement", "blocked", error.message);
+          current.status = providerWait ? "paused" : "needs_attention";
+          current.lastError = redactText(error.message);
+          current.checkpoint = { id: randomUUID(), ...(providerWait || { kind: "needs_attention", title: `Step failed: ${failed.title}`, prompt: redactText(error.message) }), stepId, source: "execution", createdAt: new Date().toISOString() };
+          setStage(current, "implement", providerWait ? "paused" : "blocked", redactText(error.message));
         }
       });
     }
-  })().finally(() => activeSteps.delete(key));
+  })().finally(async () => {
+    // Cancellation and shutdown await this worker promise. Flush the coalesced
+    // activity write before either lifecycle path snapshots and clears activeRuns.
+    await activeActivity?.flush();
+    activeSteps.delete(key);
+  });
   activeSteps.set(key, work);
   return work;
 }
@@ -1546,9 +2409,14 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
     expectedArtifacts: [`merge-conflict-resolution-${attempt}.md`], acceptanceCriteria: ["Every Git conflict is resolved", "Verified behavior from both branches is preserved"],
     dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
-  const result = await harness.runStep({
-    cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.implementation,
+const artifacts = compactReviewPacket({
+    ticket: current.ticket, plan: current.plan,
+    artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir)
+  }).artifacts;
+  const result = await runContainedWorker({
+    ticketId, stepId: step.id, cwd, plan: current.plan, step, artifacts, proofMap: projectProofMap(current), images: [], forkSessionFile: null,
+    resumeSessionFile: current.merge?.resolverSessionFile || null, feedback: "", runId: current.runId, profile: current.stageProfiles.handoff,
+    onSessionFile: (sessionFile) => update((state) => { ticketRun(state, ticketId).merge.resolverSessionFile = sessionFile; }),
     onEvent: (event) => activity.onEvent(event, "merge conflict resolver"), signal
   });
   signal?.throwIfAborted();
@@ -1559,7 +2427,7 @@ async function resolveMergeConflicts(ticketId, { cwd, conflicts, activity, signa
   await update((state) => {
     const run = ticketRun(state, ticketId);
     run.artifacts.push(artifact);
-    Object.assign(run.merge, { resolverCompletedAt: new Date().toISOString(), resolutionArtifact: artifact });
+    Object.assign(run.merge, { resolverCompletedAt: new Date().toISOString(), resolutionArtifact: artifact, resolverSessionFile: null });
   });
 }
 
@@ -1571,20 +2439,23 @@ function waitForDelivery(milliseconds, signal) {
   });
 }
 
-async function fixRemoteFeedback(ticketId, feedback, signal) {
+async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback") {
   const current = ticketRun(store.read(), ticketId);
   const beforeTree = await snapshotTree(current.workspace.cwd);
+  const references = deliveryFeedbackReferences(feedback);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
-    title: "Address remote review feedback", description: "Apply the smallest change that resolves concrete pull-request feedback.",
-    prompt: `Address these remote review comments. Preserve approved behavior and avoid unrelated changes:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
+    title: `Address ${reason}`, description: `Apply the smallest change that resolves concrete ${reason}.`,
+    prompt: `Address these ${reason}. Read every referenced failing file before editing. Preserve approved behavior, remove unverified experiments from earlier failed delivery passes, and avoid unrelated changes. After the final edit, run focused tests with project_command name "test" and safe filename-filter args; never edit verification configuration just to create a command:\n\n${feedback.map((item) => `- ${item.path ? `${item.path}${item.line ? `:${item.line}` : ""}: ` : ""}${item.body}`).join("\n")}`,
     contextPolicy: "seeded", harness: "pi", agentId: `remote-review-fixer:${current.ticket.identifier}`,
-    permission: "write", writeScope: "*", skills: [], references: [], requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
-    expectedArtifacts: ["remote-review-fix.md"], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
+    permission: "write", writeScope: "src,test,public,scripts", skills: [], references, requirementIds: [], capabilityIds: [], deltaIds: [], productContext: "Only resolve the concrete remote review feedback.",
+    expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
-  const result = await harness.runStep({
-    cwd: current.workspace.cwd, plan: current.plan, step, artifacts: current.artifacts, images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
-    ticketId, runId: current.runId, profile: current.stageProfiles.implementation, signal,
+const result = await runContainedWorker({
+    ticketId, stepId: step.id, cwd: current.workspace.cwd, plan: current.plan, step,
+    artifacts: compactReviewPacket({ ticket: current.ticket, plan: current.plan, artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir) }).artifacts,
+    proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
+    runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
@@ -1592,7 +2463,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
   const afterTree = await snapshotTree(current.workspace.cwd);
   const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
-  const commit = await commitWorkspace(current.workspace.cwd, `fix: address remote review feedback\n\nWhy: The reviewed change must resolve concrete maintainer feedback before merge.\nRequirement: ${current.ticket.identifier}`);
+  const commit = await commitWorkspace(current.workspace.cwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
     runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
   });
@@ -1602,7 +2473,7 @@ async function fixRemoteFeedback(ticketId, feedback, signal) {
     run.merge.feedbackFixes ||= [];
     run.merge.feedbackFixes.push({ feedback, diff, artifact, commit, createdAt: new Date().toISOString() });
   });
-  return commit;
+  return { commit, checks };
 }
 
 async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
@@ -1627,17 +2498,36 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       run.status = resumedChange ? "waiting_for_checks" : "rebasing";
       run.recovery = null;
       run.checkpoint = null;
-      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Rebasing onto origin/${base}`);
+      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling with origin/${base}`);
     });
-    const rebase = () => rebaseOntoRemote(current.workspace.cwd, base, {
+    const reconcile = () => reconcileWithRemote(current.workspace.cwd, base, {
       resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
     });
     let checks = current.merge?.checks || null;
     let change = resumedChange;
+    let awaitingHeadAfterPush = null;
+    if ((await unmergedPaths(current.workspace.cwd)).length) await reconcile();
+    if (current.merge?.externalActionPending === "push_feedback_revision") {
+      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
+    }
     if (!change) {
-      await rebase();
+      if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
+        const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
+          || String(current.lastError).slice(-4500);
+        ({ checks } = await fixRemoteFeedback(ticketId, [{
+          id: `delivery-recovery-${attempt}`,
+          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
+        }], signal, "persisted delivery verification failure"));
+      }
+      await reconcile();
       checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-      if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+      if (checks.status === "failed") {
+        ({ checks } = await fixRemoteFeedback(ticketId, [{
+          id: `post-rebase-check-${attempt}`,
+          body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
+        }], signal, "post-rebase verification failures"));
+      }
       await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
       await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
       change = await forge.create({
@@ -1653,11 +2543,28 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       });
     }
 
+    if (change) {
+      const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd: current.workspace.cwd });
+      if (!status.trim()) {
+        const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd: current.workspace.cwd });
+        const reconciled = await reconcile();
+        if (reconciled.commit !== before.trim()) {
+          await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+          awaitingHeadAfterPush = before.trim();
+        }
+      }
+    }
+
     let mergeResult = null;
     let lastRebaseHead = null;
     for (;;) {
       signal?.throwIfAborted();
       const delivery = await forge.status(change);
+      if (awaitingHeadAfterPush === delivery.headSha) {
+        await waitForDelivery(20000, signal);
+        continue;
+      }
+      awaitingHeadAfterPush = null;
       const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
       const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
       await update((state) => {
@@ -1669,10 +2576,20 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
       if (feedback.length) {
         await fixRemoteFeedback(ticketId, feedback, signal);
-        await rebase();
+        await reconcile();
+        await update((state) => {
+          const merge = ticketRun(state, ticketId).merge;
+          merge.feedbackIds.push(...feedback.map((item) => item.id));
+          merge.externalActionPending = "push_feedback_revision";
+        });
         await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
+        awaitingHeadAfterPush = delivery.headSha;
         await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
-        await update((state) => { ticketRun(state, ticketId).merge.feedbackIds.push(...feedback.map((item) => item.id)); });
+        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
+        continue;
+      }
+      if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
+        await waitForDelivery(20000, signal);
         continue;
       }
       if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
@@ -1684,7 +2601,7 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
       }
       if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
         lastRebaseHead = delivery.headSha;
-        await rebase();
+        await reconcile();
         await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
         continue;
       }
@@ -1721,10 +2638,13 @@ async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal }
   })().catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
       const run = ticketRun(state, ticketId);
+      const previousStatus = run.status;
+      const previousMergeStatus = run.merge?.status || null;
       run.status = "needs_attention";
-      run.lastError = error.message;
-      if (run.merge) Object.assign(run.merge, { status: "failed", error: error.message, failedAt: new Date().toISOString() });
-      setStage(run, "handoff", "blocked", error.message);
+run.lastError = redactText(error.message);
+      if (run.merge) Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
+      run.recovery = { kind: "delivery", previousStatus, previousMergeStatus, uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending), message: "Delivery failed before completion. Resume will retry from the persisted delivery state." };
+      setStage(run, "handoff", "blocked", redactText(error.message));
     });
     await mirrorExecutionBlocker(ticketId, error);
     throw error;
@@ -1834,19 +2754,144 @@ async function scheduleTicketIntegration(ticketId, { diff, contextContent = null
   const tracked = queued.promise.catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
       const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "failed", error: error.message, failedAt: new Date().toISOString() });
+      Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
       run.status = "needs_attention";
-      run.lastError = error.message;
-      setStage(run, "handoff", "blocked", error.message);
+      run.lastError = redactText(error.message);
+      setStage(run, "handoff", "blocked", redactText(error.message));
     });
     throw error;
   }).finally(() => activeMerges.delete(ticketId));
   return { position: queued.position, promise: tracked };
 }
 
+async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, restartFeedback = "", reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
+  const current = ticketRun(store.read(), ticketId);
+  const fixArtifactName = `review-fixes-round-${round}.md`;
+  const fixStep = finalReviewFixStep(round, findings, rootCauseClusters, restartFeedback);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.status = "fixing";
+    Object.assign(setStage(run, "verify", "active", `Fixing ${findings.length} actionable review finding${findings.length === 1 ? "" : "s"} · round ${round}`), { activity: activity.snapshot() });
+  });
+  const beforeFix = await snapshotTree(current.workspace.cwd);
+  const result = await runContainedWorker({
+    ticketId, stepId: fixStep.id,
+    cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [], proofMap: projectProofMap(current),
+    images: reviewFixImages(sessionFile, findings, reviewImages), forkSessionFile: null, resumeSessionFile: sessionFile,
+    feedback: sessionFile ? finalReviewFixFeedback(findings) : "", runId: current.runId,
+    profile: current.stageProfiles.implementation,
+    onEvent: (event) => activity.onEvent(event, "review fixer"),
+    onSessionFile: (nextSessionFile) => update((state) => {
+      const run = ticketRun(state, ticketId);
+      const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+      review.fix = { ...review.fix, sessionFile: nextSessionFile, rootCauseClusters, startedAt: review.fix?.startedAt || new Date().toISOString() };
+    }),
+    signal
+  });
+  signal?.throwIfAborted();
+  const afterFix = await snapshotTree(current.workspace.cwd);
+  const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
+  const verificationDiffAfterFix = await diffTrees(current.workspace.cwd, verificationBaseTree, afterFix);
+  if (result.report.status !== "completed") {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+      Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
+      review.fix = { ...review.fix, report: result.report, diff: fixDiff, rootCauseClusters, sessionFile: result.sessionFile || review.fix?.sessionFile || sessionFile, createdAt: new Date().toISOString() };
+      run.status = "needs_attention";
+      run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
+    });
+    return false;
+  }
+  const fixArtifact = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: fixArtifactName, content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
+  });
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    const review = run.reviews.find((item) => item.round === round) || run.reviews.at(-1);
+    run.artifacts.push(fixArtifact);
+    review.fix = { ...review.fix, report: result.report, diff: fixDiff, artifact: fixArtifact, rootCauseClusters, sessionFile: result.sessionFile || review.fix?.sessionFile || sessionFile };
+    run.status = "reviewing";
+    Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
+  });
+  return true;
+}
+
+async function completeCleanReview({ ticketId, current, round, checks, diff, activity, signal }) {
+  const eligibility = proofGate(ticketRun(store.read(), ticketId));
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
+  if (planRequiresVisualEvidence(current.plan)) {
+    const blocked = verifyStageEvidenceError({
+      ...current,
+      ticket: current.ticket,
+      runId: current.runId,
+      plan: current.plan,
+      artifacts: (ticketRun(store.read(), ticketId).artifacts || [])
+    }, { media: checks.evidence });
+    if (blocked) throw new Error(blocked);
+  }
+  await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
+  let contextArtifact = null;
+  let contextContent = null;
+  let handoffActivity = null;
+  if (current.ticket.source !== "local") {
+    const currentContextArtifact = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
+    const currentContext = currentContextArtifact ? (await hydrateArtifact(currentContextArtifact, dataDir)).content : "";
+    const contextArtifacts = await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)), dataDir);
+    handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
+    contextContent = await harness.updateProductContext({
+      cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
+      artifacts: contextArtifacts,
+      diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
+    });
+    signal?.throwIfAborted();
+    if (!contextContent.trim()) throw new Error("Product context update was empty");
+    contextArtifact = await persistArtifact(dataDir, current.ticket, {
+      runId: current.runId, name: "product-context-update.md", content: contextContent,
+      stageId: "handoff", kind: "product-context-update"
+    });
+  }
+  const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
+  const media = (ticketRun(store.read(), ticketId).artifacts || [])
+    .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
+    .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId, boundTicketId, boundRunId }) => ({
+      id, name, path, summary, mediaType, mediaKind, stageId, stepId, boundTicketId, boundRunId
+    }));
+  const finalChecks = {
+    status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
+    evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
+  };
+  const videoRequired = flattenSteps(current.plan).some((step) => step.requiresVideoEvidence);
+  if (current.ticket.source === "local") {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
+      setStage(run, "handoff", "blocked", "Review final proof before integration");
+      run.status = "awaiting_evidence_review";
+      run.checkpoint = {
+        id: randomUUID(), kind: "evidence_review", title: "Review final proof before integration",
+        prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, createdAt: new Date().toISOString()
+      };
+    });
+    return;
+  }
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.artifacts.push(contextArtifact);
+    setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
+    setStage(run, "handoff", "blocked", "Review final proof before remote merge").activity = handoffActivity.snapshot();
+    run.status = "awaiting_evidence_review";
+    run.checkpoint = {
+      id: randomUUID(), kind: "evidence_review", title: "Review final proof before remote merge",
+      prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, productContext: contextContent, createdAt: new Date().toISOString()
+    };
+  });
+}
+
 async function finalReviewLoop(ticketId, signal) {
   signal?.throwIfAborted();
   const started = ticketRun(store.read(), ticketId);
+  const removedReviewArtifacts = await cleanupLegacyReviewArtifacts(started.workspace.cwd);
   const activity = captureStageActivity(ticketId, "verify", started.runId);
   const implementationTree = await snapshotTree(started.workspace.cwd);
   const implementationDiff = await diffTrees(started.workspace.cwd, started.baselineTree, implementationTree);
@@ -1858,26 +2903,81 @@ async function finalReviewLoop(ticketId, signal) {
     run.status = "reviewing";
     run.checkpoint = null;
     run.reviews ||= [];
+    if (removedReviewArtifacts.length) (run.harnessMigrations ||= []).push({
+      at: new Date().toISOString(), kind: "legacy-review-artifact-cleanup", files: removedReviewArtifacts
+    });
+    const latestReview = run.reviews.at(-1);
+    if (latestReview) {
+      const previous = latestReview.actionableFindings || [];
+      const refreshed = refreshedReviewFindings(latestReview);
+      if (storedFindingsFingerprint(refreshed) !== storedFindingsFingerprint(previous)) {
+        latestReview.actionableFindings = refreshed;
+        latestReview.findingsRefreshedAt = new Date().toISOString();
+        if (latestReview.fix?.report?.status === "completed" && reviewScopeExpanded(previous, refreshed)) delete latestReview.fix.report;
+      }
+    }
   });
-  const firstRound = Math.max(0, ...(started.reviews || []).map((review) => Number(review.round) || 0)) + 1;
-  let previousFingerprint = findingsFingerprint(started.reviews?.at(-1)?.actionableFindings || []);
+  const refreshedRun = ticketRun(store.read(), ticketId);
+  const cleanReview = recoverableCleanReview(refreshedRun);
+  if (cleanReview && proofGate(refreshedRun).eligible) {
+    await completeCleanReview({ ticketId, current: ticketRun(store.read(), ticketId), ...cleanReview, activity, signal });
+    return;
+  }
+  const pendingFix = pendingReviewFix(refreshedRun.reviews);
+  if (pendingFix) {
+    const current = ticketRun(store.read(), ticketId);
+    const savedImages = await harness.evidenceImages((current.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence"));
+    const rootCauseClusters = unaddressedReviewClusters(current.reviews);
+    const restartFeedback = [reviewFixConstraints(current), pendingFix.restartFeedback].filter(Boolean).join("\n");
+    if (!await applyFinalReviewFix({ ticketId, ...pendingFix, restartFeedback, reviewImages: savedImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
+  }
+  const resumed = ticketRun(store.read(), ticketId);
+  // The sequence, unlike the display round list, survives verification restarts
+  // and keeps final evidence locators immutable for the run.
+  const firstRound = finalReviewSequence(resumed) + 1;
+  const previousReview = resumed.reviews?.at(-1);
+  let previousFingerprint = previousReview?.fix?.report?.status === "completed"
+    ? findingsFingerprint(previousReview.actionableFindings || [])
+    : "";
   for (let round = firstRound; ; round++) {
     signal?.throwIfAborted();
     const current = ticketRun(store.read(), ticketId);
-    activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-    const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+    const savedAttempt = pendingReviewAttempt(current, round);
+    let checks = savedAttempt?.checks;
+    let diff = savedAttempt?.diff;
+    let verificationDiff = savedAttempt?.verificationDiff;
+    if (!savedAttempt) {
+      activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
+      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+      signal?.throwIfAborted();
+      const afterTree = await snapshotTree(current.workspace.cwd);
+      diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
+      verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+      await update((state) => {
+        ticketRun(state, ticketId).pendingReviewAttempt = { round, checks, diff, verificationDiff, createdAt: new Date().toISOString() };
+      });
+    } else {
+      activity.onEvent({ type: "thinking", label: `Resuming independent reviewers · round ${round}` }, "checks");
+    }
     const reviewImages = await harness.evidenceImages(checks.evidence);
+    // runChecksWithPreview adopts captured media first; refresh before constructing
+    // review packets so reviewers receive the canonical media IDs.
+    const reviewRun = ticketRun(store.read(), ticketId);
     signal?.throwIfAborted();
-    const afterTree = await snapshotTree(current.workspace.cwd);
-    const diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
-    const verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback);
+    const focusFindings = [...actionableFindings((current.reviews || []).map((review) => ({ findings: review.actionableFindings || [] }))), ...humanEvidenceFinding];
+    const operatorFeedback = [reviewFixConstraints(current), current.pendingEvidenceFeedback || ""].filter(Boolean).join("\n");
+    const reviewArtifacts = await hydrateArtifacts(reviewRun.artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)), dataDir);
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
       plan: current.plan,
-      artifacts: current.artifacts,
+      artifacts: reviewArtifacts,
       diff,
       checks,
+      proofMap: projectProofMap(reviewRun),
+      focusFindings,
+      operatorFeedback,
       images: reviewImages,
       role,
       round,
@@ -1885,7 +2985,7 @@ async function finalReviewLoop(ticketId, signal) {
       profile: current.stageProfiles.verification,
       onEvent: (event) => activity.onEvent(event, role),
       signal
-    })))];
+    })))].map(retainReviewRecord);
     signal?.throwIfAborted();
     const persisted = [];
     for (const review of reviews) {
@@ -1897,140 +2997,87 @@ async function finalReviewLoop(ticketId, signal) {
         kind: "independent-review"
       }));
     }
-    const humanEvidenceFinding = current.pendingEvidenceFeedback ? [{
-      severity: "blocking", category: "human-proof-review", claim: current.pendingEvidenceFeedback,
-      evidence: [], suggestedFix: current.pendingEvidenceFeedback, confidence: "high"
-    }] : [];
-    const findings = [...actionableFindings(reviews), ...humanEvidenceFinding];
+const reviewId = `final-review-${round}`;
+    const finalChecks = {
+      status: checks.status, command: checks.command || null, summary: checks.summary || "", output: checks.output || "", durationMs: checks.durationMs || null,
+      evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
+    };
+    const findings = humanEvidenceFinding.length ? humanEvidenceFinding : actionableFindings(reviews);
     await update((state) => {
       const run = ticketRun(state, ticketId);
+      const createdAt = new Date().toISOString();
       run.artifacts.push(...persisted);
-      run.reviews.push({ round, reviews, actionableFindings: findings, diff, createdAt: new Date().toISOString() });
+      run.finalChecks = finalChecks;
+      run.finalCheckHistory ||= {};
+      run.finalCheckHistory[reviewId] ||= structuredClone(finalChecks);
+      run.finalDiffHistory ||= {};
+      run.finalDiffHistory[reviewId] ||= structuredClone(diff);
+      run.finalReviewHistory ||= {};
+      run.finalReviewHistory[reviewId] ||= { createdAt };
+      run.finalReviewSequence = Math.max(finalReviewSequence(run), round);
+      run.reviews.push({ round, reviewId, reviews, finalChecks: structuredClone(finalChecks), actionableFindings: findings, diff, createdAt });
+      if (run.proofMap) {
+        const mediaIds = run.artifacts.filter((artifact) => (checks.evidence || []).some((item) => item.path === artifact.path)).map(({ id }) => id);
+        run.proofMap = applyIndependentProofReports(run.proofMap, reviews.find((review) => review.role === "requirements")?.criterionResults, run, { mediaIds });
+        // A dissenting reviewer cannot be outvoted by a later success report.
+        for (const review of reviews) run.proofMap = applyProofReports(run.proofMap, (review.criterionResults || []).filter((result) => ["failed", "blocked"].includes(result.status)), run);
+      }
+      delete run.pendingReviewAttempt;
       delete run.pendingEvidenceFeedback;
       Object.assign(run.stages.find((stage) => stage.id === "verify"), { activity: activity.snapshot(), diff: verificationDiff });
     });
+    await persistProofSnapshot(ticketId, { stageId: "verify", attemptId: `round-${round}`, name: "proof-map-final-review.json" });
     if (!findings.length) {
-      await commitWorkspace(current.workspace.cwd, `fix: resolve independent review findings\n\nWhy: The accepted ticket must pass the final combined review.\nRequirement: ${flattenSteps(current.plan).flatMap((step) => step.requirementIds).filter((id, index, all) => all.indexOf(id) === index).join(", ") || "Complete every approved ticket requirement"}`);
-      let contextArtifact = null;
-      let contextContent = null;
-      let handoffActivity = null;
-      if (current.ticket.source !== "local") {
-        const currentContext = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot")?.content || "";
-        handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
-        contextContent = await harness.updateProductContext({
-          cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
-          artifacts: current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)),
-          diff, runId: current.runId, profile: current.stageProfiles.handoff, onEvent: handoffActivity.onEvent, signal
-        });
-        signal?.throwIfAborted();
-        if (!contextContent.trim()) throw new Error("Product context update was empty");
-        contextArtifact = await persistArtifact(dataDir, current.ticket, {
-          runId: current.runId, name: "product-context-update.md", content: contextContent,
-          stageId: "handoff", kind: "product-context-update"
-        });
-      }
-      const finalEvidencePaths = new Set((checks.evidence || []).map((item) => item.path));
-      const media = (ticketRun(store.read(), ticketId).artifacts || [])
-        .filter((artifact) => artifact.kind === "visual-evidence" && finalEvidencePaths.has(artifact.path))
-        .map(({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }) => ({ id, name, path, summary, mediaType, mediaKind, stageId, stepId }));
-      const finalChecks = {
-        status: checks.status, command: checks.command || null, summary: checks.summary || "", durationMs: checks.durationMs || null,
-        evidence: (checks.evidence || []).map(({ name, path, viewport, url }) => ({ name, path, viewport, url }))
-      };
-      const videoRequired = flattenSteps(current.plan).some((step) => step.requiresVideoEvidence);
-      if (current.ticket.source === "local") {
-        await update((state) => {
-          const run = ticketRun(state, ticketId);
-          setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-          setStage(run, "handoff", "blocked", "Review final proof before integration");
-          run.status = "awaiting_evidence_review";
-          run.checkpoint = {
-            id: randomUUID(), kind: "evidence_review", title: "Review final proof before integration",
-            prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, createdAt: new Date().toISOString()
-          };
-        });
-        return;
-      }
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        run.artifacts.push(contextArtifact);
-        setStage(run, "verify", "completed", `Clean after ${round} independent review round${round === 1 ? "" : "s"}`).activity = activity.snapshot();
-        setStage(run, "handoff", "blocked", "Review final proof before remote merge").activity = handoffActivity.snapshot();
-        run.status = "awaiting_evidence_review";
-        run.checkpoint = {
-          id: randomUUID(), kind: "evidence_review", title: "Review final proof before remote merge",
-          prompt: finalChecks.summary, finalChecks, media, evidenceArtifactIds: media.map((artifact) => artifact.id), videoRequired, productContext: contextContent, createdAt: new Date().toISOString()
-        };
-      });
+await completeCleanReview({ ticketId, current, round, checks, diff, activity, signal });
       return;
     }
-    const decision = shouldPauseCorrection({ round, findings, previousFingerprint });
+    const reviewsWithCurrent = [...(current.reviews || []), { round, actionableFindings: findings }];
+    const decision = shouldPauseCorrection({ round: correctionWindowRound(round, reviewsWithCurrent, current.correctionWindowStartRound), findings, previousFingerprint });
     if (decision.pause) {
+      const pauseReason = correctionPauseReason(decision.reason, findings);
       await update((state) => {
         const run = ticketRun(state, ticketId);
         run.status = "needs_attention";
-        run.lastError = decision.reason;
+        run.lastError = pauseReason;
         run.checkpoint = {
           id: randomUUID(), kind: "needs_attention", title: "Correction stalled",
-          prompt: decision.reason, source: "verification", createdAt: new Date().toISOString()
+          prompt: pauseReason, source: "verification", createdAt: new Date().toISOString()
         };
-        setStage(run, "verify", "blocked", decision.reason).activity = activity.snapshot();
+        setStage(run, "verify", "blocked", pauseReason).activity = activity.snapshot();
       });
       return;
     }
     previousFingerprint = decision.fingerprint;
-    const fixStep = {
-      id: `review-fix-${round}`,
-      title: `Fix final review findings — round ${round}`,
-      prompt: `Correct these independently verified actionable findings:\n\n${JSON.stringify(findings, null, 2)}\n\nKeep the fix focused. Add or update regression coverage where practical and run the relevant deterministic checks.`,
-      contextPolicy: "seeded", harness: "pi", agentId: `review-fixer:round-${round}`,
-      permission: "write", writeScope: "**", skills: [], references: [],
-      expectedArtifacts: [`review-fixes-round-${round}.md`],
-      acceptanceCriteria: findings.map((finding) => finding.claim), dependsOn: [], required: true,
-      status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
-    };
-    const beforeFix = await snapshotTree(current.workspace.cwd);
-    const result = await harness.runStep({
-      cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: current.artifacts,
-      images: reviewImages, forkSessionFile: null, resumeSessionFile: null, feedback: "", ticketId, runId: current.runId,
-      profile: current.stageProfiles.implementation,
-      onEvent: (event) => activity.onEvent(event, "review fixer"),
-      signal
-    });
-    signal?.throwIfAborted();
-    const afterFix = await snapshotTree(current.workspace.cwd);
-    const fixDiff = await diffTrees(current.workspace.cwd, beforeFix, afterFix);
-    const verificationDiffAfterFix = await diffTrees(current.workspace.cwd, verificationBaseTree, afterFix);
-    if (result.report.status !== "completed") {
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(setStage(run, "verify", "blocked", result.report.request || result.report.summary || "Review fixer needs attention"), { diff: verificationDiffAfterFix });
-        run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, createdAt: new Date().toISOString() };
-        run.status = "needs_attention";
-        run.checkpoint = { id: randomUUID(), kind: "review_blocked", title: "Review fixer needs attention", findings, createdAt: new Date().toISOString() };
-      });
-      return;
-    }
-    const fixArtifact = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: fixStep.expectedArtifacts[0], content: result.output, stageId: `review-round-${round}`, kind: "review-fix"
-    });
+// Final findings can affect cross-step integration. Preserve all prior proof as
+    // stale before the fixer edits, requiring the following review to re-establish it.
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.artifacts.push(fixArtifact);
-      run.reviews.at(-1).fix = { report: result.report, diff: fixDiff, artifact: fixArtifact };
-      Object.assign(setStage(run, "verify", "active", `Review round ${round + 1} follows focused fixes`), { activity: activity.snapshot(), diff: verificationDiffAfterFix });
+      if (run.proofMap) run.proofMap = invalidateProof(run.proofMap, run.proofMap.criteria.map((criterion) => criterion.id), { reason: "Automatic final-review correction." });
     });
+    await persistProofSnapshot(ticketId, { stageId: "verify", attemptId: `round-${round}`, name: "proof-map-final-automatic-correction.json" });
+    const rootCauseClusters = unaddressedReviewClusters(reviewsWithCurrent);
+    if (!await applyFinalReviewFix({ ticketId, round, findings, restartFeedback: reviewFixConstraints(current), reviewImages, verificationBaseTree, activity, signal, rootCauseClusters })) return;
   }
 }
 
 async function finishHandoff(ticketId) {
   const current = ticketRun(store.read(), ticketId);
   if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
+  const eligibility = proofGate(current);
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
+  const missingEvidence = verifyStageEvidenceError(current);
+  if (missingEvidence) throw new Error(missingEvidence);
   const proposal = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-update");
-  const contextContent = current.ticket.source === "local" ? null : proposal?.content;
+const contextContent = current.ticket.source === "local" ? null : await artifactText(proposal);
   if (current.ticket.source !== "local" && !contextContent) throw new Error("Product-context proposal not found");
+  // Integration clears the actionable checkpoint. Retain only its artifact IDs so
+  // completed inspection can still distinguish this approved proof from stale media.
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.finalEvidenceArtifactIds = [...new Set(run.checkpoint.evidenceArtifactIds || [])];
+  });
   const queued = await scheduleTicketIntegration(ticketId, { diff: current.reviews?.at(-1)?.diff, contextContent });
-  queued.promise.catch(() => {});
+  void settleScheduledDelivery(queued);
 }
 
 async function ensureLocalWorkspace(ticketId) {
@@ -2059,6 +3106,8 @@ async function acceptStep(ticketId, stepId) {
   const current = ticketRun(store.read(), ticketId);
   const step = findNode(current.plan, stepId);
   if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
+  const eligibility = proofGate(current, { stepId });
+  if (!eligibility.eligible) throw new Error(proofGateError(eligibility));
   const message = step.commitMessage || `feat: ${step.title}\n\nWhy: ${step.description || step.title}\nRequirement: ${step.requirementIds.join(", ") || step.acceptanceCriteria.join("; ") || "Complete the approved execution-plan slice"}`;
   let commit;
   let vcsChange = step.vcsChange || null;
@@ -2087,6 +3136,17 @@ async function acceptStep(ticketId, stepId) {
     run.status = "running";
     run.checkpoint = null;
   });
+}
+
+function approvedScopePaths(values) {
+  const paths = [...new Set((Array.isArray(values) ? values : []).map((value) => normalize(String(value).replaceAll("\\", "/")).replace(/^\.\//, "")))];
+  if (!paths.length || paths.length > 10) throw new Error("Approve between one and ten explicit repository paths");
+  for (const path of paths) {
+    if (!path || path === "." || path === ".." || path.startsWith("../") || isAbsolute(path) || path.includes(",") || /[*?[\]{}]/.test(path)) {
+      throw new Error(`Scope expansion must name an explicit repository-relative path: ${path}`);
+    }
+  }
+  return paths;
 }
 
 async function advanceTicket(ticketId, signal) {
@@ -2124,7 +3184,8 @@ async function advanceTicket(ticketId, signal) {
       setStage(current, "implement", "active", batch.length > 1 ? `Running ${batch.length} tickets in parallel` : `Running ${batch[0].title}`);
     });
     await Promise.all(batch.map((step) => executeStep(ticketId, step.id, { signal })));
-    if (ticketRun(store.read(), ticketId).auto) return advanceTicket(ticketId, signal);
+    const afterBatch = ticketRun(store.read(), ticketId);
+    if (afterBatch.auto && !terminalRunStatusSet.has(afterBatch.status)) return advanceTicket(ticketId, signal);
     return;
   }
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
@@ -2158,7 +3219,7 @@ async function mirrorExecutionBlocker(ticketId, error) {
   if (!trackerBacked(run?.ticket)) return;
   const digest = createHash("sha256").update(error.message).digest("hex").slice(0, 12);
   await trackerAction(ticketId, `blocker:${digest}`, (ticket) => trackers.comment(ticket,
-    `Agent Plan Workspace paused this run and needs attention.\n\n${error.message}\n\nResume from the local dashboard after resolving the blocker.`
+    `Agent Plan Workspace paused this run and needs attention.\n\n${redactText(error.message)}\n\nResume from the local dashboard after resolving the blocker.`
   )).catch(() => {});
 }
 
@@ -2185,15 +3246,17 @@ async function runTicket(ticketId) {
       await advanceTicket(ticketId, signal);
     } catch (error) {
       if (signal.aborted) return;
+      const providerWait = providerWaitCheckpoint(error);
       await update((state) => {
         const run = state.ticketRuns[ticketId];
         if (!run) return;
-        run.status = "needs_attention";
-        run.lastError = error.message;
+run.status = providerWait ? "paused" : "needs_attention";
+        run.lastError = redactText(error.message);
+        if (providerWait) run.checkpoint = { id: randomUUID(), ...providerWait, source: "execution", createdAt: new Date().toISOString() };
         const activeStage = run.stages.find((stage) => stage.status === "active");
-        if (activeStage) { activeStage.status = "blocked"; activeStage.summary = error.message; }
+        if (activeStage) { activeStage.status = providerWait ? "paused" : "blocked"; activeStage.summary = redactText(error.message); }
       });
-      await mirrorExecutionBlocker(ticketId, error);
+      if (!providerWait) await mirrorExecutionBlocker(ticketId, error);
     }
   });
 }
@@ -2217,7 +3280,7 @@ async function freshLocalRun(previous, runId) {
   const source = store.read().workspace.cwd;
   const fixture = await loadLocalFixture(source, previous.ticket.fixturePath);
   const [contractExists, projectConfigExists] = await Promise.all([
-    stat(join(source, ".agent-plan/verify.mjs")).then(() => true, () => false),
+    verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
   const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists);
@@ -2262,7 +3325,9 @@ async function startFreshRun(ticketId) {
   const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId) : null;
   if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
   const artifact = await restartAuditArtifact(previous, audit);
-  previews.stopMatching(`${ticketId}:`);
+  // Start preview cleanup before archiving. Settlement is bounded, so its
+  // captured run ID also routes any later evidence to the retained run.
+  await stopTicketPreviews(ticketId, "run_fresh_restart");
   await update((state) => {
     const old = ticketRun(state, ticketId);
     old.restartHistory ||= [];
@@ -2289,15 +3354,18 @@ async function restartFrom(ticketId, target) {
     if (restored !== audit.restoredTree) throw new Error("The worktree did not match the selected restart checkpoint");
   }
   const artifact = await restartAuditArtifact(previous, audit);
-  previews.stopMatching(`${ticketId}:`);
+  await stopTicketPreviews(ticketId, "run_restart");
   await update((state) => {
     const run = ticketRun(state, ticketId);
     rewindRun(run, target, at);
     run.artifacts.push(artifact);
-    for (const previewState of Object.values(run.previews || {})) Object.assign(previewState, { status: "stopped", stoppedReason: "run_restart", stoppedAt: at });
   });
   if (target === "stage:explore") await surfaceImmediateFailure(ticketId, continueAfterRequirements(ticketId, ""));
   else if (target === "stage:design") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => designTicket(ticketId, "Restart design from the persisted exploration.", signal)));
+  // Verification is only restartable after every step is accepted. Resume its
+  // final-review loop directly so stale proof is replaced by a new final record
+  // rather than re-entering implementation scheduling.
+  else if (target === "stage:verify") await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => finalReviewLoop(ticketId, signal)));
   else await surfaceImmediateFailure(ticketId, runTicket(ticketId));
   return audit;
 }
@@ -2308,10 +3376,64 @@ async function api(request, response, url) {
   const compactTicketRun = url.pathname.match(/^\/api\/tickets\/([^/]+)\/run$/);
   if (request.method === "GET" && compactTicketRun) {
     const state = store.read();
-    return json(response, 200, compactRun(ticketRun(state, decodeURIComponent(compactTicketRun[1])), state.revision));
+    const run = ticketRun(state, decodeURIComponent(compactTicketRun[1]));
+    return json(response, 200, url.searchParams.get("detail") === "1" ? publicRun(run) : compactRun(run, state.revision));
+  }
+  const proofCheckOutput = url.pathname.match(/^\/api\/tickets\/([^/]+)\/proof\/check-output$/);
+  if (request.method === "GET" && proofCheckOutput) {
+    const run = ticketRun(store.read(), decodeURIComponent(proofCheckOutput[1]));
+    const checks = canonicalCheckOutput(run, {
+      scope: url.searchParams.get("scope") || "step",
+      stepId: url.searchParams.get("stepId"),
+      attemptId: url.searchParams.get("attemptId"),
+      reviewId: url.searchParams.get("reviewId")
+    });
+    if (!checks) throw new Error("Check output not found");
+    return json(response, 200, checks);
+  }
+  const proofDiff = url.pathname.match(/^\/api\/tickets\/([^/]+)\/proof\/diff$/);
+  if (request.method === "GET" && proofDiff) {
+    const run = ticketRun(store.read(), decodeURIComponent(proofDiff[1]));
+    const diff = canonicalDiffOutput(run, {
+      scope: url.searchParams.get("scope") || "step",
+      stepId: url.searchParams.get("stepId"),
+      attemptId: url.searchParams.get("attemptId"),
+      reviewId: url.searchParams.get("reviewId")
+    });
+    if (!diff) throw new Error("Diff not found");
+    return json(response, 200, diff);
+  }
+  const reviewPacket = url.pathname.match(/^\/api\/tickets\/([^/]+)\/review-packet$/);
+  if (request.method === "GET" && reviewPacket) {
+    const run = ticketRun(store.read(), decodeURIComponent(reviewPacket[1]));
+    const latestReview = run.reviews?.at(-1);
+    const checks = latestReview?.reviews?.find((review) => review.role === "deterministic")?.checks || run.finalChecks || {};
+    return json(response, 200, compactReviewPacket({
+      ticket: run.ticket, plan: run.plan, artifacts: run.artifacts,
+      diff: run.deliveredDiff || latestReview?.diff || {}, checks,
+      proofMap: projectProofMap(run)
+    }));
+  }
+  const ticketInspection = url.pathname.match(/^\/api\/tickets\/([^/]+)\/inspection$/);
+  if (request.method === "GET" && ticketInspection) {
+    const state = store.read();
+    return json(response, 200, projectInspection(ticketRun(state, decodeURIComponent(ticketInspection[1])), { revision: state.revision }));
+  }
+  const ticketRunHistories = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs$/);
+  if (request.method === "GET" && ticketRunHistories) {
+    const state = store.read();
+    const ticketId = decodeURIComponent(ticketRunHistories[1]);
+    return json(response, 200, { ticketId, revision: state.revision, runs: inspectionHistories(state, ticketId) });
+  }
+  const runInspection = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/inspection$/);
+  if (request.method === "GET" && runInspection) {
+    const state = store.read();
+    return json(response, 200, projectInspection(runForIdentity(state, decodeURIComponent(runInspection[1]), decodeURIComponent(runInspection[2])), { revision: state.revision }));
   }
   if (request.method === "GET" && url.pathname === "/api/models") {
-    const models = await harness.models("openai-codex");
+    const catalog = await harness.models();
+    const preferred = catalog.filter((model) => dashboardModelProviders.includes(model.provider));
+    const models = preferred.length ? preferred : catalog;
     const providers = [...new Set(models.map((model) => model.provider).filter(Boolean))];
     return json(response, 200, {
       models,
@@ -2332,14 +3454,14 @@ async function api(request, response, url) {
     const ticketSources = await refreshTrackers({ admit: false });
     return json(response, 200, { settings: publicTrackerSettings(savedCredentials), ticketSources });
   }
-  const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/open$/);
+  const openArtifact = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/artifacts\/([^/]+)\/open$/);
   if (request.method === "POST" && openArtifact) {
-    if (process.platform !== "darwin") throw new Error("Opening artifacts in Zed currently requires macOS");
-    const run = ticketRun(store.read(), decodeURIComponent(openArtifact[1]));
-    const path = artifactPathForOpen(run.artifacts, decodeURIComponent(openArtifact[2]), dataDir);
+if (process.platform !== "darwin") throw new Error("Opening artifacts in their default application currently requires macOS");
+    const { run } = artifactForIdentity(store.read(), decodeURIComponent(openArtifact[1]), openArtifact[2] && decodeURIComponent(openArtifact[2]), decodeURIComponent(openArtifact[3]));
+    const path = artifactPathForOpen(run.artifacts, decodeURIComponent(openArtifact[3]), dataDir);
     const file = path ? await stat(path).catch(() => null) : null;
     if (!file?.isFile()) throw new Error("Artifact file not found");
-    await runFile("open", ["-a", "Zed", path]);
+    await runFile("open", [path]);
     return json(response, 200, { opened: true });
   }
   if (request.method === "POST" && url.pathname === "/api/queue/clear") {
@@ -2383,31 +3505,56 @@ async function api(request, response, url) {
     }
     return json(response, 200, { cleaned, inventory: await retentionInventory(store.read(), dataDir), state: store.read() });
   }
-  const artifactMedia = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)\/media$/);
+  const attemptDetail = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/steps\/([^/]+)\/attempts\/([^/]+)\/details$/);
+  if (request.method === "GET" && attemptDetail) {
+    const state = store.read();
+    const run = runForIdentity(state, decodeURIComponent(attemptDetail[1]), decodeURIComponent(attemptDetail[2]));
+    const step = findNode(run.plan, decodeURIComponent(attemptDetail[3]));
+    const attemptId = decodeURIComponent(attemptDetail[4]);
+    const retained = step?.attempts?.find((item, index) => (item.attemptId || `attempt-${index + 1}`) === attemptId);
+    const archived = (run.archivedAttempts || []).find((item) => item.stepId === step?.id && item.attemptId === attemptId);
+    const active = run.activeRuns?.[step?.id];
+    const activeAttempt = active && (active.attemptId || `active-${active.runId || step.id}`) === attemptId
+      ? { ...active, attemptId }
+      : null;
+    const attempt = retained
+      ? { ...retained, attemptId: retained.attemptId || attemptId }
+      : archived ? { ...archived, attemptId }
+        : activeAttempt;
+    if (!attempt) throw new Error("Attempt not found");
+    return json(response, 200, await attemptDetails(run, step, attempt, { active: Boolean(activeAttempt) }));
+  }
+  const artifactMedia = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/artifacts\/([^/]+)\/media$/);
   if (request.method === "GET" && artifactMedia) {
-    const run = ticketRun(store.read(), decodeURIComponent(artifactMedia[1]));
-    const artifactId = decodeURIComponent(artifactMedia[2]);
-    const artifact = (run.artifacts || []).find((item) => item.id === artifactId);
+    const artifactId = decodeURIComponent(artifactMedia[3]);
+    const { run, artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifactMedia[1]), artifactMedia[2] && decodeURIComponent(artifactMedia[2]), artifactId);
     const path = artifactPathForOpen(run.artifacts, artifactId, dataDir);
-    const media = artifact?.kind === "visual-evidence" && visualEvidenceMedia(artifact.name || path);
+    const media = artifact.kind === "visual-evidence" && visualEvidenceMedia(artifact.name || path);
     if (!path || !media) throw new Error("Visual evidence not found");
     response.writeHead(200, { "content-type": media.mediaType, "cache-control": "no-store", "x-content-type-options": "nosniff" });
     response.end(await readFile(path));
     return;
   }
-  const artifactGet = url.pathname.match(/^\/api\/tickets\/([^/]+)\/artifacts\/([^/]+)$/);
+  const artifactContentRoute = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/artifacts\/([^/]+)\/content$/);
+  if (request.method === "GET" && artifactContentRoute) {
+    const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifactContentRoute[1]), artifactContentRoute[2] && decodeURIComponent(artifactContentRoute[2]), decodeURIComponent(artifactContentRoute[3]));
+    return json(response, 200, { artifact: safeArtifactMetadata(artifact), ...textDetail(await artifactContent(artifact, 20000), 20000, "not_retained", artifact) });
+  }
+  const artifactGet = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/artifacts\/([^/]+)$/);
   if (request.method === "GET" && artifactGet) {
-    const run = ticketRun(store.read(), decodeURIComponent(artifactGet[1]));
-    const artifact = (run.artifacts || []).find((item) => item.id === decodeURIComponent(artifactGet[2]));
-    if (!artifact) throw new Error("Artifact not found");
-    return json(response, 200, artifact);
+const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifactGet[1]), artifactGet[2] && decodeURIComponent(artifactGet[2]), decodeURIComponent(artifactGet[3]));
+    return json(response, 200, safeArtifactMetadata(artifact));
   }
   const sessionTrace = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/session-trace$/);
   if (request.method === "GET" && sessionTrace) {
     const run = ticketRun(store.read(), decodeURIComponent(sessionTrace[1]));
     const step = findNode(run.plan, decodeURIComponent(sessionTrace[2]));
     if (!step) throw new Error("Step not found");
-    return json(response, 200, await harness.sessionTrace(step.sessionFile));
+    const trace = redactRecord(await harness.sessionTrace(step.sessionFile));
+    const rawOutput = boundedText(trace.rawOutput || "", 20000);
+    return json(response, 200, { state: rawOutput.state, content: {
+      prompts: (trace.prompts || []).slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })), events: (trace.events || []).slice(-100).map(detailActivityEvent), rawOutput: rawOutput.value
+    } });
   }
   const steering = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steering$/);
   if (request.method === "GET" && steering) {
@@ -2451,12 +3598,22 @@ async function api(request, response, url) {
     return json(response, 200, steeringResponse(record, outcome.paused ? { nextCondition: "Resume this paused run manually; the correction remains queued for its saved attempt." } : {}));
   }
 
-  const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)\/stages\/([^/]+)\/prompts$/);
-  if (request.method === "GET" && stagePrompts) {
-    const run = ticketRun(store.read(), decodeURIComponent(stagePrompts[1]));
-    const stage = run.stages.find((item) => item.id === decodeURIComponent(stagePrompts[2]));
+  const stageOutput = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/stages\/([^/]+)\/output$/);
+  if (request.method === "GET" && stageOutput) {
+    const run = runForIdentity(store.read(), decodeURIComponent(stageOutput[1]), decodeURIComponent(stageOutput[2]));
+    const stage = run.stages.find((item) => item.id === decodeURIComponent(stageOutput[3]));
     if (!stage) throw new Error("Stage not found");
-    return json(response, 200, { prompts: await promptsForStage(run, stage) });
+    const output = redactText(stage.activity?.rawOutput || "");
+    return json(response, 200, { state: output ? "available" : "not_retained", content: output.slice(-100000), retainedTail: true });
+  }
+  const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/stages\/([^/]+)\/prompts$/);
+  if (request.method === "GET" && stagePrompts) {
+    const run = stagePrompts[2]
+      ? runForIdentity(store.read(), decodeURIComponent(stagePrompts[1]), decodeURIComponent(stagePrompts[2]))
+      : ticketRun(store.read(), decodeURIComponent(stagePrompts[1]));
+    const stage = run.stages.find((item) => item.id === decodeURIComponent(stagePrompts[3]));
+    if (!stage) throw new Error("Stage not found");
+    return json(response, 200, await promptsForStage(run, stage));
   }
   const reviewMapRoute = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/review-map$/);
   if (request.method === "POST" && reviewMapRoute) {
@@ -2506,9 +3663,15 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), ticketId);
     if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing its stage profile");
     if (!run.stageProfiles?.[profileId]) throw new Error("Unknown stage profile");
+    const parsed = parseModelRef(input.model, input.provider || run.stageProfiles[profileId].provider);
     const profiles = normalizeStageProfiles({
       ...run.stageProfiles,
-      [profileId]: { ...run.stageProfiles[profileId], model: input.model, thinking: input.thinking }
+      [profileId]: {
+        ...run.stageProfiles[profileId],
+        provider: parsed.provider || input.provider || run.stageProfiles[profileId].provider,
+        model: parsed.model,
+        thinking: input.thinking
+      }
     });
     await harness.validateProfiles({ [profileId]: profiles[profileId] });
     await update((draft) => {
@@ -2516,6 +3679,19 @@ async function api(request, response, url) {
       ticketRun(draft, ticketId).stageProfiles[profileId] = profiles[profileId];
     });
     return json(response, 200, { ticketId, profile: profiles[profileId] });
+  }
+  const ticketPreview = url.pathname.match(/^\/api\/tickets\/([^/]+)\/preview$/);
+  if (request.method === "POST" && ticketPreview) {
+    const ticketId = decodeURIComponent(ticketPreview[1]);
+    ticketRun(store.read(), ticketId);
+    const action = (await body(request)).action || "start";
+    if (action === "stop") {
+      await stopOperatorPreview(ticketId);
+      return json(response, 200, { ticketId, preview: store.read().ticketRuns[ticketId]?.previews?.[`${ticketId}:operator`] || null });
+    }
+    if (action !== "start") throw new Error("Preview action must be start or stop");
+    const preview = await startOperatorPreview(ticketId);
+    return json(response, 200, { ticketId, preview });
   }
   if (request.method === "GET" && url.pathname === "/api/tickets") {
     return json(response, 200, await refreshTrackers());
@@ -2560,7 +3736,7 @@ async function api(request, response, url) {
     const id = decodeURIComponent(start[1]);
     const input = await body(request);
     const ticket = ticketCache.get(id) || input.ticket;
-    await beginTicket(ticket);
+    await beginTicket(ticket, { awaitWork: false });
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -2568,7 +3744,7 @@ async function api(request, response, url) {
   if (request.method === "POST" && select) {
     const id = decodeURIComponent(select[1]);
     const state = await update((draft) => { draft.selectedTicketId = id; }, { publish: false });
-    const selection = { selectedTicketId: id, revision: state.revision };
+    const selection = { selectedTicketId: id, revision: state.revision, run: state.ticketRuns[id] ? publicRun(state.ticketRuns[id]) : null };
     publish({ type: "selection", ...selection });
     return json(response, 200, selection);
   }
@@ -2614,19 +3790,43 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), id);
     if (run.recovery?.kind === "delivery") {
       if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
-      const contextContent = [...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")?.content || null;
+const contextContent = await artifactText([...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")) || null;
       const diff = run.reviews?.at(-1)?.diff || null;
-      scheduleTicketIntegration(id, { diff, contextContent }).catch(() => {});
+      void settleScheduledDelivery(scheduleTicketIntegration(id, { diff, contextContent }));
       return json(response, 202, { accepted: true, ticketId: id, recovery: "delivery" });
     }
     const stage = resumeStage(run);
     if (!["run", "requirements", "explore", "design"].includes(stage)) throw new Error("This run cannot be resumed from its current stage");
-    if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => { prepareRunResume(ticketRun(state, id)); });
-    if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id));
+    if (["cancelled", "needs_attention", "failed", "paused"].includes(run.status)) await update((state) => {
+      const current = ticketRun(state, id);
+      auditHarnessWriteScopes(current);
+      auditVisualEvidencePolicy(current);
+      prepareRunResume(current);
+    });
+    if (stage === "requirements") await surfaceImmediateFailure(id, prepareTicket(id), { awaitWork: false });
     else if (stage === "explore") await surfaceImmediateFailure(id, continueAfterRequirements(id, ""));
     else if (stage === "design") await surfaceImmediateFailure(id, startTicketWork(id, (signal) => designTicket(id, "Resume the interrupted design.", signal)));
     else await surfaceImmediateFailure(id, runTicket(id));
     return json(response, 202, { accepted: true, ticketId: id });
+  }
+
+  const restartFixer = url.pathname.match(/^\/api\/tickets\/([^/]+)\/review-fix\/restart$/);
+  if (request.method === "POST" && restartFixer) {
+    const id = decodeURIComponent(restartFixer[1]);
+    const input = await body(request);
+    const before = ticketRun(store.read(), id);
+    if (!before.workspace?.cwd) throw new Error("No fixer worktree is available to inspect");
+    const currentTree = await snapshotTree(before.workspace.cwd);
+    const verificationBaseTree = before.stages.find((stage) => stage.id === "verify")?.baseTree || before.baselineTree;
+    const inheritedDiff = await diffTrees(before.workspace.cwd, verificationBaseTree, currentTree);
+    let restarted;
+    await update((state) => {
+      const run = ticketRun(state, id);
+      restarted = restartReviewFixSession(run, input.reason, inheritedDiff.files);
+      setStage(run, "verify", "active", `Restarting final-review fixer · round ${restarted.round}`);
+    });
+    await surfaceImmediateFailure(id, runTicket(id));
+    return json(response, 202, { accepted: true, ticketId: id, round: restarted.round });
   }
 
   const restart = url.pathname.match(/^\/api\/tickets\/([^/]+)\/restart$/);
@@ -2698,13 +3898,22 @@ async function api(request, response, url) {
     const violations = planReviewViolations(run.plan);
     if (violations.length) throw new Error(`Split or justify oversized plan steps before approval: ${violations.join("; ")}`);
     const input = await body(request);
+    const approvedAt = new Date().toISOString();
+    const proofMap = run.proofMap || initializeProofMap(run.plan, { approvedAt });
+    const proofArtifact = run.proofMap ? null : await persistArtifact(dataDir, run.ticket, {
+      runId: run.runId, stageId: "design", name: "proof-map-approved.json", kind: "proof-map",
+      content: JSON.stringify(proofMap, null, 2)
+    });
     await update((state) => {
       const current = ticketRun(state, id);
       current.auto = input.auto === undefined ? Boolean(current.automaticAdmission) : Boolean(input.auto);
       current.status = "awaiting_approval";
       current.ticketSnapshot = structuredClone(current.ticket);
       current.trackerRevision = current.ticket.updatedAt || null;
-      current.planApprovedAt = new Date().toISOString();
+      current.planApprovedAt ||= approvedAt;
+      current.proofStorageRoot ||= dataDir;
+      current.proofMap ||= proofMap;
+      if (proofArtifact) current.artifacts.push(proofArtifact);
       current.lastError = null;
     });
     await surfaceImmediateFailure(id, runTicket(id));
@@ -2722,18 +3931,31 @@ async function api(request, response, url) {
   if (request.method === "POST" && changeEvidence) {
     const id = decodeURIComponent(changeEvidence[1]);
     const input = await body(request);
-    const feedback = String(input.feedback || "").trim();
+    const feedback = retainProofFeedback(input.feedback);
     if (!feedback) throw new Error("Describe the final-proof changes required before continuing");
     const run = ticketRun(store.read(), id);
     if (run.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting changes");
+    const checkpoint = run.checkpoint;
+    const affectedCriterionIds = explicitCriterionIds(run, input.criterionIds);
+    if (run.proofMap && !affectedCriterionIds.length) throw new Error("Identify at least one affected criterion before requesting proof changes");
     await update((state) => {
       const current = ticketRun(state, id);
+      if (affectedCriterionIds.length) current.proofMap = invalidateProof(current.proofMap, affectedCriterionIds, { reason: feedback });
       current.pendingEvidenceFeedback = feedback;
+      (current.evidenceFeedbackHistory ||= []).push({
+        feedback,
+        checkpointId: checkpoint.id,
+        evidenceArtifactIds: checkpoint.evidenceArtifactIds || [],
+        createdAt: new Date().toISOString()
+      });
       current.checkpoint = null;
       current.status = "reviewing";
       setStage(current, "verify", "active", "Addressing final proof review feedback");
     });
-    await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)));
+if (affectedCriterionIds.length) await persistProofSnapshot(id, { stageId: "verify", name: "proof-map-final-correction.json" });
+    // Final review can run for minutes. The feedback is already redacted and durable,
+    // so acknowledge this asynchronous correction immediately.
+    await surfaceImmediateFailure(id, startTicketWork(id, (signal) => finalReviewLoop(id, signal)), { awaitWork: false });
     return json(response, 202, { accepted: true, ticketId: id });
   }
 
@@ -2744,6 +3966,65 @@ async function api(request, response, url) {
     const id = decodeURIComponent(approveContext[1]);
     await finishHandoff(id);
     return json(response, 200, { accepted: true, ticketId: id });
+  }
+
+  const stepScope = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/scope$/);
+  if (request.method === "POST" && stepScope) {
+    const ticketId = decodeURIComponent(stepScope[1]);
+    const stepId = decodeURIComponent(stepScope[2]);
+    const input = await body(request);
+    const paths = approvedScopePaths(input.paths);
+    const reason = String(input.reason || "").trim();
+    if (!reason) throw new Error("Explain why the approved scope must expand");
+    if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing a step scope");
+    const state = await update((draft) => {
+      const run = ticketRun(draft, ticketId);
+      const step = findNode(run.plan, stepId);
+      if (!step || !["needs_attention", "needs_input", "awaiting_approval", "failed", "interrupted"].includes(step.status)) throw new Error("Only a stopped blocked step can receive a scope expansion");
+      const existing = step.writeScope.split(",").map((path) => path.trim()).filter(Boolean);
+      step.writeScope = [...new Set([...existing, ...paths])].join(",");
+      step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
+      step.scopeChanges ||= [];
+      const change = { at: new Date().toISOString(), paths, reason, source: "operator" };
+      step.scopeChanges.push(change);
+      const note = `Approved scope expansion: ${paths.join(", ")} — ${reason}`;
+      step.lastError = [step.lastError, note].filter(Boolean).join("\n\n");
+      run.lastError = [run.lastError, note].filter(Boolean).join("\n\n");
+      if (run.checkpoint?.stepId === stepId) run.checkpoint.prompt = [run.checkpoint.prompt, note].filter(Boolean).join("\n\n");
+    });
+    const step = findNode(ticketRun(state, ticketId).plan, stepId);
+    return json(response, 200, { ticketId, stepId, writeScope: step.writeScope, expectedFiles: step.expectedFiles, scopeChange: step.scopeChanges.at(-1) });
+  }
+
+  const stepWaiver = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/waive$/);
+  if (request.method === "POST" && stepWaiver) {
+    const ticketId = decodeURIComponent(stepWaiver[1]);
+    const stepId = decodeURIComponent(stepWaiver[2]);
+    const input = await body(request);
+    const reason = String(input.reason || "").trim();
+    if (!reason) throw new Error("Explain why the verifier finding is false or outside this slice");
+    if (activeTickets.has(ticketId)) throw new Error("Pause the run before waiving a verifier finding");
+    const state = await update((draft) => {
+      const run = ticketRun(draft, ticketId);
+      const step = findNode(run.plan, stepId);
+      if (!step || step.status !== "needs_attention" || run.checkpoint?.stepId !== stepId || run.checkpoint?.source !== "verification") {
+        throw new Error("Only a stopped verifier finding can be waived");
+      }
+      const attempt = [...(step.attempts || [])].reverse().find((item) => item.verification);
+      if (!attempt) throw new Error("No verifier finding is available to waive");
+      const waiver = { at: new Date().toISOString(), reason, source: "operator", findings: actionableFindings([attempt?.verification]) };
+      attempt.verificationDisposition = { status: "waived", at: waiver.at, reason, source: waiver.source };
+      step.verificationWaivers ||= [];
+      step.verificationWaivers.push(waiver);
+      step.status = "review_ready";
+      step.lastError = null;
+      run.status = "awaiting_step_review";
+      run.lastError = null;
+      run.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `Review after verification waiver: ${step.title}`, prompt: reason, createdAt: waiver.at };
+      setStage(run, "implement", "blocked", `Verifier finding waived for review: ${reason}`);
+    });
+    const step = findNode(ticketRun(state, ticketId).plan, stepId);
+    return json(response, 200, { ticketId, stepId, status: step.status, waiver: step.verificationWaivers.at(-1) });
   }
 
   const stepDecision = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steps\/([^/]+)\/(accept|changes)$/);
@@ -2765,13 +4046,17 @@ async function api(request, response, url) {
         ? input.noteRequests
         : [...(Array.isArray(input.noteIds) ? input.noteIds : []), input.noteId].map((id) => ({ id, feedback: input.feedback }));
       const feedback = reviewNoteFeedback(step.reviewNotes, noteRequests, input.feedback);
+      const affectedCriterionIds = explicitCriterionIds(current, input.criterionIds, { stepId });
+      if (current.proofMap && !affectedCriterionIds.length) throw new Error("Identify at least one affected criterion before requesting changes");
       await update((state) => {
         const run = ticketRun(state, ticketId);
+        if (affectedCriterionIds.length) run.proofMap = invalidateProof(run.proofMap, affectedCriterionIds, { reason: feedback });
         delete findNode(run.plan, stepId).workspaceCommit;
         run.status = "running";
         run.checkpoint = null;
         setStage(run, "implement", "active", `Revising ${step.title}`);
       });
+      if (affectedCriterionIds.length) await persistProofSnapshot(ticketId, { stageId: "implement", stepId, name: "proof-map-step-correction.json" });
       await surfaceImmediateFailure(ticketId, startTicketWork(ticketId, (signal) => executeStep(ticketId, stepId, { feedback, signal })));
       return json(response, 202, { accepted: true, ticketId, stepId });
     }
@@ -2783,7 +4068,7 @@ async function api(request, response, url) {
         await update((state) => {
           const run = ticketRun(state, ticketId);
           run.status = "needs_attention";
-          run.lastError = error.message;
+          run.lastError = redactText(error.message);
         });
       }
     }));
@@ -2801,23 +4086,43 @@ const sseHeartbeat = setInterval(() => {
 sseHeartbeat.unref();
 
 let closed = false;
-async function close({ exit = false } = {}) {
-  if (closed) return;
-  closed = true;
-  clearInterval(pollTimer);
-  clearInterval(sseHeartbeat);
-  for (const timer of steeringDrainTimers.values()) clearTimeout(timer);
-  steeringDrainTimers.clear();
-  for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
-  await Promise.all([...activeTickets.values()].map((active) => active.promise.catch(() => {})));
-  try { harness.reset(); } catch {}
-  previews.stopAll();
-  await new Promise((resolve) => {
-    if (!server.listening) return resolve();
-    server.close(() => resolve());
+let closePromise = null;
+function closeHttpServer() {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.();
+      resolve();
+    }, shutdownTimeoutMs);
+    server.close(() => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
-  await daemonLock.release().catch(() => {});
-  if (exit) process.exit(0);
+}
+
+async function close({ exit = false } = {}) {
+  if (closePromise) return closePromise;
+  closed = true;
+  closePromise = (async () => {
+    clearInterval(pollTimer);
+    clearInterval(sseHeartbeat);
+    for (const timer of steeringDrainTimers.values()) clearTimeout(timer);
+    steeringDrainTimers.clear();
+    closeSseClients(clients);
+    for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
+    await Promise.all([
+      ...[...activeTickets.values()].map((active) => waitForWorkerAbort(active.promise)),
+      ...[...new Set([...activeContainments.values()].map((entry) => entry.ticketId))].map((ticketId) => cleanupTicketContainments(ticketId, "daemon-shutdown"))
+    ]);
+    try { harness.reset(); } catch {}
+    previews.stopAll({ trigger: "preview-stop", reason: "daemon-shutdown" });
+    await previews.settleAll(lifecycleCleanupTimeoutMs);
+    await closeHttpServer();
+    await daemonLock.release().catch(() => {});
+    if (exit) process.exit(0);
+  })();
+  return closePromise;
 }
 
 if (listen) {

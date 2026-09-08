@@ -17,6 +17,7 @@ function normalizeReviewBudget(raw = {}) {
 
 function excludedFromReviewBudget(path) {
   return /(^|\/)(?:dist|build|coverage|vendor|generated)(?:\/|$)/i.test(path)
+    || /^\.agent-plan\/(?:evidence\/|project\.json$|verify\.mjs$)/i.test(path)
     || /(^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/i.test(path);
 }
 
@@ -119,6 +120,11 @@ export function diffReviewBudget(step, diff) {
     reasons,
     exceeded: reasons.length > 0 && !budget.justification
   };
+}
+
+export function reviewBudgetRequiresRollback(result, multiplier = 2) {
+  return Number(result?.files || 0) > Number(result?.maxFiles || 0) * multiplier
+    || Number(result?.changedLines || 0) > Number(result?.maxChangedLines || 0) * multiplier;
 }
 
 export function normalizePlan(raw) {
@@ -243,7 +249,9 @@ export function blockingReasons(plan, step) {
 
 export function dependencyArtifacts(plan, step) {
   return dependencySteps(plan, step).flatMap((dependency) =>
-    (dependency.artifacts || []).map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title }))
+    (dependency.artifacts || [])
+      .filter((artifact) => artifact.kind !== "step-verification")
+      .map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title }))
   );
 }
 

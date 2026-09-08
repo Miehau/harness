@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { eventTimeline, freeTextTicket, preferredStepId } from "../public/ui-model.js";
+import { parseModelRef } from "./profiles.js";
+import { freeTextTicket } from "../public/ui-model.js";
 
 const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
@@ -8,18 +9,24 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
-  list timeline [ticketId]          Inspector output for the active step
+  list runs [ticketId]              Active and archived run identities for a ticket
+  list timeline [ticketId] [runId]  Inspector output for an active or archived run
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
+  revise-proof <ticketId> <feedback> Request final-proof corrections from the agent
+  restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
   revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
   steer <instruction> [ticketId] [--step <stepId>] Queue one focused instruction for an active worker
+  waive <stepId> <ticketId> <reason> Reject a false verifier finding and return to review
+  scope-add <stepId> <ticketId> <path> <reason> Approve one audited file-scope expansion
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
+  preview start|stop [ticketId]     Start or stop the ticket live preview
   answer <ticketId> <text|--approve> Approve or answer an open question
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
@@ -62,11 +69,15 @@ async function handleCommand(command, rest, ctx) {
       print(stdout, await backlog(ctx));
       return 0;
     }
-    if (what === "timeline" || what === "execution-timeline") {
-      print(stdout, await timeline(args[0], ctx));
+    if (what === "runs") {
+      print(stdout, await runHistories(args[0], ctx));
       return 0;
     }
-    throw new Error("Usage: agent-plan list backlog|timeline [ticketId]\n" + usage);
+    if (what === "timeline" || what === "execution-timeline") {
+      print(stdout, sanitizeTimeline(await timeline(args[0], args[1], ctx)));
+      return 0;
+    }
+    throw new Error("Usage: agent-plan list backlog|runs [ticketId]|timeline [ticketId] [runId]\n" + usage);
   }
   if (command === "select") {
     const id = rest[0];
@@ -109,7 +120,19 @@ async function handleCommand(command, rest, ctx) {
     const [profileId, model, thinking, explicitId] = rest;
     if (!profileId || !model || !thinking) throw new Error("Usage: agent-plan profile <stage> <model> <thinking> [ticketId]");
     const id = await resolveTicketId(explicitId, ctx);
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/stage-profiles/" + encodeURIComponent(profileId), { body: { model, thinking }, env, fetchImpl });
+    const parsed = parseModelRef(model);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/stage-profiles/" + encodeURIComponent(profileId), {
+      body: { model: parsed.model, thinking, ...(parsed.provider ? { provider: parsed.provider } : {}) },
+      env, fetchImpl
+    });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "preview") {
+    const action = rest[0];
+    if (!["start", "stop"].includes(action)) throw new Error("Usage: agent-plan preview start|stop [ticketId]");
+    const id = await resolveTicketId(rest[1], ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/preview", { body: { action }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -138,6 +161,22 @@ async function handleCommand(command, rest, ctx) {
     if (!instruction || extra.length || (flag >= 0 && !stepId)) throw new Error("Usage: agent-plan steer <instruction> [ticketId] [--step <stepId>]");
     const id = await resolveTicketId(explicitId, ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steering", { body: { instruction, author: "cli", ...(stepId ? { stepId } : {}) }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "scope-add") {
+    const [stepId, id, path, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!stepId || !id || !path || !reason) throw new Error("Usage: agent-plan scope-add <stepId> <ticketId> <path> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/scope", { body: { paths: [path], reason }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "waive") {
+    const [stepId, id, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!stepId || !id || !reason) throw new Error("Usage: agent-plan waive <stepId> <ticketId> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/waive", { body: { reason }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -181,6 +220,22 @@ async function handleCommand(command, rest, ctx) {
   if (command === "approve-proof") {
     const id = await resolveTicketId(rest[0], ctx);
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/approve", { body: {}, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "revise-proof") {
+    const [id, ...words] = rest;
+    const feedback = words.join(" ").trim();
+    if (!id || !feedback) throw new Error("Usage: agent-plan revise-proof <ticketId> <feedback>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: { feedback }, env, fetchImpl });
+    print(stdout, result);
+    return 0;
+  }
+  if (command === "restart-fixer") {
+    const [id, ...words] = rest;
+    const reason = words.join(" ").trim();
+    if (!id || !reason) throw new Error("Usage: agent-plan restart-fixer <ticketId> <reason>");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/review-fix/restart", { body: { reason }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -242,35 +297,22 @@ function backlogRow(ticket, run, selectedTicketId) {
   };
 }
 
-async function timeline(explicitId, ctx) {
+async function timeline(explicitId, runId, ctx) {
   const { env, fetchImpl } = ctx;
-  const state = await request("GET", "/api/state", { env, fetchImpl });
+  const state = explicitId ? null : await request("GET", "/api/state", { env, fetchImpl });
   const id = explicitId || state.selectedTicketId;
   if (!id) throw new Error("Pass a ticket id (no selected run)");
-  const run = state.ticketRuns?.[id];
-  if (!run) throw new Error("Ticket run not found");
-  const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const stage = (run.stages || []).find((item) => item.status === "active");
-  const activeStep = steps.find((item) => ["running", "fixing"].includes(item.status));
-  const step = activeStep
-    || ((!stage || stage.id === "implement") ? steps.find((item) => item.id === preferredStepId(run.plan)) : null)
-    || null;
-  const events = step
-    ? [...(step.attempts || []).flatMap((attempt) => attempt.events || []), ...(run.activeRuns?.[step.id]?.activity?.events || [])]
-    : stage?.activity?.events || [];
-  return {
-    ticketId: id,
-    stepId: step?.id || null,
-    stepStatus: step?.status || null,
-    stageId: stage?.id || null,
-    events: eventTimeline(events).map((item) => ({
-      at: item.at || null,
-      title: item.title,
-      tool: item.tool || null,
-      status: item.status,
-      isError: Boolean(item.isError)
-    }))
-  };
+  // The inspector owns focus, lifecycle, redaction, and retention semantics. Keep
+  // this command a transport-only view so its JSON cannot drift from the dashboard.
+  const path = runId
+    ? "/api/tickets/" + encodeURIComponent(id) + "/runs/" + encodeURIComponent(runId) + "/inspection"
+    : "/api/tickets/" + encodeURIComponent(id) + "/inspection";
+  return request("GET", path, { env, fetchImpl });
+}
+
+async function runHistories(explicitId, ctx) {
+  const id = await resolveTicketId(explicitId, ctx);
+  return request("GET", "/api/tickets/" + encodeURIComponent(id) + "/runs", { env: ctx.env, fetchImpl: ctx.fetchImpl });
 }
 
 function aliasAction(value) {
@@ -286,6 +328,21 @@ async function resolveTicketId(explicit, ctx) {
   const id = state.selectedTicketId || Object.keys(state.ticketRuns || {})[0];
   if (!id) throw new Error("Pass a ticket id (no selected run)");
   return id;
+}
+
+const timelineSecretKey = /(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)/i;
+const timelineAuthorization = /\b(?:authorization|proxy-authorization)\s*[=:]\s*[^\r\n]+/gi;
+const timelineSecret = /\b(?:api[_-]?key|authorization|credential|password|secret|token|cookie|private[_-]?key)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const timelinePath = /(^|[^A-Za-z0-9_.@-])(?:~\/|\/[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*|[A-Za-z]:\\[^\s"'`),;]+)/g;
+
+function sanitizeTimeline(value) {
+  if (typeof value === "string") return value
+    .replace(timelineAuthorization, "[redacted]")
+    .replace(timelineSecret, (match) => match.replace(/(?:"[^"]*"|'[^']*'|[^\s,;]+)$/, "[redacted]"))
+    .replace(timelinePath, (_, prefix) => `${prefix}[path]`);
+  if (Array.isArray(value)) return value.map(sanitizeTimeline);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, timelineSecretKey.test(key) ? "[redacted]" : sanitizeTimeline(item)]));
 }
 
 function print(stdout, payload) {
@@ -326,13 +383,14 @@ function terminal(run) {
   if (run.status === "needs_attention" || (run.checkpoint && run.checkpoint.kind === "needs_attention")) return { done: true, code: 1, reason: "needs_attention" };
   if (run.status === "failed") return { done: true, code: 1, reason: "failed" };
   if (run.status === "completed") return { done: true, code: 0, reason: "completed" };
+  if (run.status === "paused") return { done: true, code: 0, reason: "paused" };
   if (run.checkpoint) return { done: true, code: 0, reason: "checkpoint" };
   return { done: false, code: 0, reason: run.status };
 }
 
 if (process.argv[1] && import.meta.url === ("file://" + process.argv[1])) {
-  runCli(process.argv.slice(2)).then((code) => process.exit(code), (error) => {
+  runCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => {
     process.stderr.write(error.message + String.fromCharCode(10));
-    process.exit(1);
+    process.exitCode = 1;
   });
 }

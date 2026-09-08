@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { previewChromiumPath } from "../src/previews.js";
+import { signalProcessTree } from "../src/process-tree.js";
 
 async function waitFor(url, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
@@ -19,7 +21,10 @@ function sendCdp(socket) {
   const pending = new Map();
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
-    if (message.id && pending.has(message.id)) pending.get(message.id)(message);
+    if (message.id && pending.has(message.id)) {
+      pending.get(message.id)(message);
+      pending.delete(message.id);
+    }
   });
   return (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++next;
@@ -28,15 +33,17 @@ function sendCdp(socket) {
   });
 }
 
-export async function capturePage({ url, out, click = null, eval: script = null, waitMs = 600 }) {
+export async function capturePage({ url, out, video = null, click = null, eval: script = null, interact = null, waitMs = 600, width = 1440, height = 900 }) {
   await waitFor(url);
   const profile = await mkdtemp(join(tmpdir(), "agent-plan-chrome-"));
   const chrome = spawn(await previewChromiumPath(), [
     "--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
+    ...(video ? ["--auto-select-tab-capture-source-by-title=Agent Plan CLI recording"] : []),
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--window-size=1440,900", url
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+    `--window-size=${width},${height}`, url
+  ], { detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
   let debugPort;
+  let socket;
   try {
     debugPort = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Chromium did not expose DevTools")), 20000);
@@ -55,7 +62,7 @@ export async function capturePage({ url, out, click = null, eval: script = null,
     const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
     const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
     if (!page) throw new Error("No Chromium page target");
-    const socket = new WebSocket(page.webSocketDebuggerUrl);
+    socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       socket.addEventListener("open", resolve);
       socket.addEventListener("error", () => reject(new Error("DevTools websocket failed")));
@@ -63,20 +70,64 @@ export async function capturePage({ url, out, click = null, eval: script = null,
     const cdp = sendCdp(socket);
     await cdp("Page.enable");
     await cdp("Runtime.enable");
+    await cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+    const evaluate = async (expression) => {
+      const result = await cdp("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, userGesture: true, timeout: 15000 });
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+      return result.result?.value;
+    };
     await new Promise((resolve) => setTimeout(resolve, waitMs));
+    if (video) await evaluate(`(async () => {
+      const title = document.title;
+      document.title = "Agent Plan CLI recording";
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false, preferCurrentTab: true });
+      document.title = title;
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp8" });
+      let size = 0;
+      recorder.ondataavailable = (event) => { size += event.data.size; if (size > 20 * 1024 * 1024) recorder.stop(); chunks.push(event.data); };
+      globalThis.__agentPlanRecording = { recorder, chunks, stream };
+      recorder.start(100);
+    })()`);
     if (click) {
       await cdp("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(click)})?.click()` });
       await new Promise((resolve) => setTimeout(resolve, 700));
     }
     if (script) {
-      await cdp("Runtime.evaluate", { expression: script });
+      await evaluate(script);
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
+    if (interact) await interact({ evaluate });
     const shot = await cdp("Page.captureScreenshot", { format: "png", fromSurface: true });
-    await writeFile(out, Buffer.from(shot.data, "base64"));
-    socket.close();
+    if (out) await writeFile(out, Buffer.from(shot.data, "base64"));
+    if (video) {
+      // MediaRecorder records the live tab stream, not a slideshow of screenshots.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const data = await evaluate(`(async () => {
+        const { recorder, chunks, stream } = globalThis.__agentPlanRecording;
+        if (recorder.state !== "recording") throw new Error("Recording exceeded its size limit");
+        await new Promise((resolve) => { recorder.onstop = resolve; recorder.stop(); });
+        stream.getTracks().forEach((track) => track.stop());
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(",")[1]); reader.onerror = reject;
+          reader.readAsDataURL(new Blob(chunks, { type: "video/webm" }));
+        });
+      })()`);
+      const raw = join(profile, "recording.webm");
+      await writeFile(raw, Buffer.from(data, "base64"));
+      // Finalize duration/index metadata so the independent decoder can seek it.
+      await promisify(execFile)("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", raw, "-c", "copy", video], { timeout: 30000 });
+    }
   } finally {
-    chrome.kill("SIGTERM");
+    socket?.close();
+    signalProcessTree(chrome);
+    await new Promise((resolve) => {
+      if (chrome.exitCode !== null) return resolve();
+      const timer = setTimeout(resolve, 1000);
+      chrome.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+    if (chrome.exitCode === null) signalProcessTree(chrome, "SIGKILL");
+    await rm(profile, { recursive: true, force: true });
   }
   return out;
 }
@@ -88,7 +139,15 @@ if (isMain) {
     const index = args.indexOf(name);
     return index >= 0 ? args[index + 1] : null;
   };
-  capturePage({ url: option("--url"), out: option("--out"), click: option("--click") }).then((path) => {
+  const numberOption = (name, fallback) => Number(option(name)) || fallback;
+  capturePage({
+    url: option("--url"),
+    out: option("--out"),
+    click: option("--click"),
+    waitMs: numberOption("--wait-ms", 600),
+    width: numberOption("--width", 1440),
+    height: numberOption("--height", 900)
+  }).then((path) => {
     process.stdout.write(`${path}\n`);
   }, (error) => {
     process.stderr.write(`${error.message}\n`);

@@ -10,9 +10,12 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function runVerification(root, environment = {}) {
   return new Promise((resolveRun, rejectRun) => {
+    const env = { ...process.env };
+    delete env.AGENT_PLAN_EVIDENCE_DIR;
+    Object.assign(env, environment);
     const child = spawn(process.execPath, [join(root, ".agent-plan", "verify.mjs")], {
       cwd: join(root, "outside-repository"),
-      env: { ...process.env, ...environment }
+      env
     });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
@@ -32,6 +35,7 @@ async function createFixture() {
   ]);
   await Promise.all([
     writeFile(join(root, ".agent-plan", "verify.mjs"), contract),
+    writeFile(join(root, ".agent-plan", "ui.test.mjs"), 'import test from "node:test"; test("fixture UI", () => {});'),
     writeFile(join(root, "scripts", "test.mjs"), `import { appendFile } from "node:fs/promises";
 
 const phase = process.argv.includes("--check") ? "syntax" : "tests";
@@ -49,11 +53,18 @@ if (process.env.FAIL_PHASE === phase) {
 test("verification contract composes repository-local phases and retains failed diagnostics", async () => {
   const project = JSON.parse(await readFile(join(repositoryRoot, ".agent-plan", "project.json"), "utf8"));
   assert.deepEqual(project.commands.verify, ["node", ".agent-plan/verify.mjs"]);
+  assert.deepEqual(project.commands["nav-json"], ["node", "scripts/nav.mjs", "--json"]);
+  assert.deepEqual(project.commands["test-map"], ["node", "scripts/test.mjs", "--map"]);
+  assert.deepEqual(project.commands["seed-list"], ["node", "scripts/seed.mjs", "--list"]);
   assert.deepEqual(project.commands["test-capture-proof"], ["node", "scripts/capture-steering-proof.mjs", "--preflight"]);
   assert.deepEqual(project.commands["capture-proof"], ["node", "scripts/capture-steering-proof.mjs"]);
+  assert.deepEqual(project.commands["capture-proof-dashboard"], ["node", ".agent-plan/capture-proof-dashboard.mjs"]);
+  assert.deepEqual(project.commands.ui, ["node", ".agent-plan/ui.mjs"]);
+  assert.deepEqual(project.commands["ui-test"], ["node", "--test", ".agent-plan/ui.test.mjs"]);
   assert.equal(project.ports.variables.length, 0);
   assert.equal(project.environment.files.length, 0);
   assert.ok(project.environment.pass.includes("AGENT_PLAN_EVIDENCE_DIR"));
+  assert.ok(project.environment.pass.includes("AGENT_PLAN_CAPTURE_CRITERIA"));
 
   const root = await createFixture();
   try {

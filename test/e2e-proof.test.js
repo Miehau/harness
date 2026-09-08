@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { ticketProofManifest, visualEvidenceManifestName } from "../src/visual-evidence.js";
 import { promisify } from "node:util";
 import { normalizePlan } from "../src/plan.js";
+import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { beginJjChange, initializeJjWorkspace } from "../src/jj.js";
+import { persistArtifact } from "../src/artifacts.js";
 import { commitWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
 import { mockHarness, invoke, seedRun, withDaemon } from "./helpers.js";
 
@@ -18,6 +21,13 @@ const gitIdentity = {
   GIT_COMMITTER_NAME: "Proof Test",
   GIT_COMMITTER_EMAIL: "proof@example.test"
 };
+
+function verifiedProofMap(plan, run, evidence) {
+  const map = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+  return applyProofReports(map, map.criteria.map((criterion) => ({
+    criterionId: criterion.id, status: "verified", evidence
+  })), run);
+}
 
 async function proofFixture(daemon, { dataDir, cwd }, calls) {
   await exec("git", ["init", "-q", "-b", "main"], { cwd });
@@ -36,9 +46,13 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
   const videoPath = join(mediaDir, "interaction.webm");
   await writeFile(imagePath, "png-proof");
   await writeFile(videoPath, "webm-proof");
+  await writeFile(join(mediaDir, visualEvidenceManifestName), JSON.stringify(ticketProofManifest({
+    ticketId: ticket.id, runId: "run-1",
+    captures: [{ name: "desktop", path: "desktop.png" }, { name: "interaction", path: "interaction.webm" }]
+  })));
   calls.evidence = [
-    { name: "desktop.png", path: imagePath, mediaType: "image/png", mediaKind: "image" },
-    { name: "interaction.webm", path: videoPath, mediaType: "video/webm", mediaKind: "video" }
+    { name: "desktop.png", path: imagePath, mediaType: "image/png", mediaKind: "image", boundTicketId: ticket.id, boundRunId: "run-1" },
+    { name: "interaction.webm", path: videoPath, mediaType: "video/webm", mediaKind: "video", boundTicketId: ticket.id, boundRunId: "run-1" }
   ];
 
   const plan = normalizePlan({ title: "Proof", nodes: [{
@@ -47,13 +61,36 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
     requirementIds: ["REQ-proof"], requiresVideoEvidence: true
   }] });
   plan.nodes[0].status = "accepted";
-  const artifacts = calls.evidence.map((item, index) => ({ ...item, id: `media-${index}`, kind: "visual-evidence", stageId: "verify" }));
+  const artifacts = calls.evidence.map((item, index) => ({ ...item, id: `media-${index}`, kind: "visual-evidence", stageId: "verify", boundTicketId: ticket.id, boundRunId: "run-1" }));
+  const finalChecks = { status: "passed", summary: "integration checks passed" };
+  const proofMap = verifiedProofMap(plan, { plan, artifacts, finalChecks, proofStorageRoot: dataDir }, [{ type: "check", scope: "final" }]);
   const id = await seedRun(daemon, {
-    ticket, workspace, plan, artifacts, reviews: [{ round: 1, diff: { stat: "1 file changed" }, reviews: [], actionableFindings: [] }],
+    ticket, workspace, plan, artifacts, proofMap, proofStorageRoot: dataDir, finalChecks, reviews: [{ round: 1, diff: { stat: "1 file changed" }, reviews: [], actionableFindings: [] }],
     status: "awaiting_evidence_review",
-    checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks: { status: "passed", summary: "integration checks passed" }, evidenceArtifactIds: artifacts.map((item) => item.id), videoRequired: true }
+    checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks, evidenceArtifactIds: artifacts.map((item) => item.id), videoRequired: true }
   });
   return { id, imagePath, videoPath };
+}
+
+async function freshVisualChecks(calls, environment = {}) {
+  const directory = await mkdtemp(join(calls.evidence[0].path, "..", "capture-"));
+  const criterionIds = JSON.parse(environment.AGENT_PLAN_CAPTURE_CRITERIA || "[]").map(({ id }) => id);
+  const evidence = await Promise.all(calls.evidence.map(async (item) => {
+    const path = join(directory, item.name);
+    await copyFile(item.path, path);
+    return { ...item, path, criterionIds, commands: [["tasks", "open", "proof-local"]], assertions: [{ selector: "#ticket-header", text: "Proof delivery" }] };
+  }));
+  const framePath = join(directory, "recording-frame.png");
+  await copyFile(evidence[0].path, framePath);
+  evidence.push({ ...evidence[0], name: "recording-frame.png", path: framePath, videoPath: evidence[1].path });
+  return { status: "passed", command: "verify", summary: "new final checks", output: "new output", evidence };
+}
+
+function independentResults(proofMap, artifacts = []) {
+  return proofMap.criteria.map((criterion) => ({
+    criterionId: criterion.id, status: "verified", explanation: { summary: "Fixture independent verification" },
+    evidence: [{ type: "check", scope: "final" }, ...artifacts.filter((artifact) => artifact.criterionIds?.includes(criterion.id)).map(({ id }) => ({ type: "media", artifactId: id }))]
+  }));
 }
 
 async function waitFor(daemon, id, predicate) {
@@ -70,9 +107,20 @@ test("final proof blocks local integration, streams image and video, then delive
   const calls = { evidence: [] };
   const harness = {
     ...mockHarness(),
+    containmentFactory: ({ executionId }) => ({
+      executionId,
+      ownership: { executionId, token: "proof-check-owner", createdAt: "2026-09-03T10:00:00.000Z" },
+      cleanup: async (trigger) => {
+        calls.cleanupTriggers ||= [];
+        calls.cleanupTriggers.push(trigger);
+        return { executionId, outcome: "not-required", triggers: [trigger], discovered: [], actions: [], unresolved: [], diagnostics: [] };
+      }
+    }),
     runRepositoryChecks: async (input) => {
       calls.lastCheck = input;
-      return { status: "passed", command: "node .agent-plan/verify.mjs", summary: "integration checks passed", output: "", evidence: calls.evidence };
+      const cleanupTrigger = { trigger: "repository-check-exit", command: "node .agent-plan/verify.mjs", at: "2026-09-03T10:00:01.000Z" };
+      const cleanup = await input.containment.cleanup(cleanupTrigger);
+      return { status: "passed", command: "node .agent-plan/verify.mjs", summary: "integration checks passed", output: "", evidence: calls.evidence, cleanup, cleanupTrigger };
     }
   };
   await withDaemon(async (daemon, fixture) => {
@@ -93,6 +141,61 @@ test("final proof blocks local integration, streams image and video, then delive
     assert.equal(await readFile(join(fixture.cwd, "delivered.txt"), "utf8"), "approved\n");
     assert.equal(calls.lastCheck.requireVisualEvidence, true);
     assert.equal(calls.lastCheck.requireVideoEvidence, true);
+    const execution = daemon.store.read().ticketRuns[id].cleanup.executions.find(({ executionId }) => executionId === calls.lastCheck.containment.executionId);
+    const exits = execution.triggers.filter(({ trigger }) => trigger === "repository-check-exit");
+    assert.deepEqual(exits, [{ trigger: "repository-check-exit", command: "node .agent-plan/verify.mjs", at: "2026-09-03T10:00:01.000Z" }]);
+    assert.equal(calls.cleanupTriggers.filter(({ trigger }) => trigger === "repository-check-exit").length, 2, "harness completion and daemon settlement share one durable trigger");
+assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_TICKET_ID, id);
+    assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_RUN_ID, "run-1");
+    assert.match(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.deepEqual(daemon.store.read().ticketRuns[id].finalEvidenceArtifactIds, ["media-0", "media-1"]);
+  }, { harness, listen: true });
+});
+
+test("verification restart preserves old final evidence and assigns a fresh review identity", async () => {
+  const calls = { evidence: [] };
+  const harness = {
+    ...mockHarness(),
+    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
+    evidenceImages: async () => [],
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({
+      role, summary: `${role} passed`, findings: [],
+      criterionResults: independentResults(proofMap, artifacts)
+    })
+  };
+  await withDaemon(async (daemon, fixture) => {
+    const { id } = await proofFixture(daemon, fixture, calls);
+    const oldChecks = { status: "passed", command: "verify-old", summary: "old final checks", output: "old output" };
+    const oldDiff = { available: true, patch: "old final diff", files: ["old.js"] };
+    await daemon.store.update((state) => {
+      const stored = state.ticketRuns[id];
+      Object.assign(stored, {
+        reviews: [{ round: 1, reviewId: "final-review-1", finalChecks: oldChecks, diff: oldDiff, reviews: [], actionableFindings: [], createdAt: "2020-01-01T00:00:00.000Z" }],
+        finalChecks: oldChecks,
+        finalCheckHistory: { "final-review-1": oldChecks },
+        finalDiffHistory: { "final-review-1": oldDiff },
+        finalReviewHistory: { "final-review-1": { createdAt: "2020-01-01T00:00:00.000Z" } },
+        finalReviewSequence: 1,
+        status: "needs_attention",
+        checkpoint: null
+      });
+      for (const criterion of stored.proofMap.criteria) criterion.current.evidence = [{ type: "check", scope: "final", reviewId: "final-review-1", validity: "valid" }];
+    });
+
+    const restarted = await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { confirmed: true, target: "stage:verify" } });
+    assert.equal(restarted.status, 202, restarted.text);
+    const reverified = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "evidence_review" && run.proofMap?.criteria[0]?.current.evidence?.some((evidence) => evidence.reviewId === "final-review-2"));
+    assert.equal(reverified.proofMap.eligibility.eligible, true);
+    assert.equal(reverified.proofMap.criteria[0].current.evidence[0].reviewId, "final-review-2");
+    assert.equal(reverified.proofMap.criteria[0].history.some((result) => result.evidence?.some((evidence) => evidence.reviewId === "final-review-1")), true);
+
+    const oldCheck = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-1`);
+    const oldFinalDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=final&reviewId=final-review-1`);
+    const newCheck = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-2`);
+    assert.equal(oldCheck.json.output, "old output");
+    assert.equal(oldFinalDiff.json.patch, "old final diff");
+    assert.equal(newCheck.json.output, "new output");
+    assert.equal(daemon.store.read().ticketRuns[id].reviews.length, 2);
   }, { harness });
 });
 
@@ -113,10 +216,13 @@ test("verified tracker tickets with no changes complete without remote delivery"
     const plan = normalizePlan({ title: "No change", nodes: [{ id: "verify", title: "Verify", permission: "read", acceptanceCriteria: ["Existing behavior passes"] }] });
     plan.nodes[0].status = "accepted";
     const diff = { available: true, files: [], fileStats: [], additions: 0, deletions: 0, changedLines: 0, patch: "", stat: "" };
+    const finalChecks = { status: "passed", summary: "passed" };
+    const artifacts = [{ id: "context", name: "product-context-update.md", kind: "product-context-update", content: "# Product context\n" }];
+    const proofMap = verifiedProofMap(plan, { plan, artifacts, finalChecks }, [{ type: "check", scope: "final" }]);
     const id = await seedRun(daemon, {
-      ticket, workspace, plan, artifacts: [{ id: "context", name: "product-context-update.md", kind: "product-context-update", content: "# Product context\n" }],
+      ticket, workspace, plan, artifacts, proofMap, finalChecks,
       reviews: [{ round: 1, diff, reviews: [], actionableFindings: [] }], status: "awaiting_evidence_review",
-      checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks: { status: "passed", summary: "passed" } }
+      checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks }
     });
 
     const approved = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`);
@@ -135,7 +241,7 @@ test("accepting a no-change Jujutsu step does not create an empty ticket commit"
     ...mockHarness(),
     runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role }) => ({ role, summary: `${role} passed`, findings: [] })
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({ role, summary: `${role} passed`, findings: [], criterionResults: independentResults(proofMap, artifacts) })
   };
   await withDaemon(async (daemon, { cwd, dataDir }) => {
     await exec("git", ["init", "-q", "-b", "main"], { cwd });
@@ -147,8 +253,9 @@ test("accepting a no-change Jujutsu step does not create an empty ticket commit"
     await initializeJjWorkspace(workspace.cwd);
     const vcsChange = await beginJjChange(workspace.cwd, { title: "No changes" });
     const plan = normalizePlan({ title: "No change", nodes: [{ id: "verify", title: "Verify", permission: "write", writeScope: "baseline.txt", acceptanceCriteria: ["Existing behavior passes"] }] });
-    Object.assign(plan.nodes[0], { status: "review_ready", vcsChange, diff: { available: true, files: [], changedLines: 0, patch: "", stat: "" } });
-    const id = await seedRun(daemon, { ticket, workspace, plan, status: "awaiting_step_review", checkpoint: { id: "review", kind: "step_review", stepId: "verify", title: "Review" } });
+    Object.assign(plan.nodes[0], { status: "review_ready", vcsChange, checks: { status: "passed", summary: "passed" }, diff: { available: true, files: [], changedLines: 0, patch: "", stat: "" } });
+    const proofMap = verifiedProofMap(plan, { plan }, [{ type: "check", scope: "step", stepId: "verify" }]);
+    const id = await seedRun(daemon, { ticket, workspace, plan, proofMap, status: "awaiting_step_review", checkpoint: { id: "review", kind: "step_review", stepId: "verify", title: "Review" } });
 
     const accepted = await invoke(daemon, "POST", `/api/tickets/${id}/steps/verify/accept`, { body: {} });
     assert.equal(accepted.status, 202, accepted.text);
@@ -164,19 +271,36 @@ test("requesting proof changes enters the correction loop and returns to final r
   const calls = { evidence: [], fixes: [] };
   const harness = {
     ...mockHarness(),
-    runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: calls.evidence }),
+    runRepositoryChecks: async ({ environment }) => ({ ...await freshVisualChecks(calls, environment), output: "api_key=lowercase_secret_abcdefgh" }),
     evidenceImages: async () => [],
-    reviewTicket: async ({ role }) => ({ role, summary: `${role} passed`, findings: [] }),
+    reviewTicket: async ({ role, proofMap, artifacts }) => {
+      calls.reviewArtifacts = artifacts;
+      return { role, summary: `${role} api_key=lowercase_secret_abcdefgh`, findings: [], criterionResults: independentResults(proofMap, artifacts) };
+    },
     runStep: async ({ step }) => { calls.fixes.push(step.prompt); return { report: { status: "completed", summary: "fixed" }, output: "fixed", events: [], rawOutput: "" }; }
   };
   await withDaemon(async (daemon, fixture) => {
     const { id } = await proofFixture(daemon, fixture, calls);
-    const response = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/changes`, { body: { feedback: "The confirmation state is missing from the recording" } });
+const context = await persistArtifact(fixture.dataDir, daemon.store.read().ticketRuns[id].ticket, { name: "architecture.md", content: "# Retained architecture", runId: "run-1", stageId: "design", kind: "architecture" });
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(context); });
+    const criterionId = daemon.store.read().ticketRuns[id].proofMap.criteria[0].id;
+    const response = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/changes`, { body: { feedback: "The confirmation state is missing from the recording", criterionIds: [criterionId] } });
     assert.equal(response.status, 202);
     const reviewed = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "evidence_review" && run.checkpoint.id !== "proof-1" || run.lastError);
     assert.equal(reviewed.checkpoint?.kind, "evidence_review", reviewed.lastError);
     assert.ok(calls.fixes.some((prompt) => prompt.includes("confirmation state is missing")));
+    assert.equal(calls.fixes.some((prompt) => prompt.includes("lowercase_secret_abcdefgh")), false);
+    assert.equal(calls.reviewArtifacts.find((artifact) => artifact.id === context.id)?.content, "# Retained architecture");
     const stored = daemon.store.read().ticketRuns[id];
-    assert.equal(stored.reviews.some((round) => round.actionableFindings?.some((finding) => finding.category === "human-proof-review")), true);
+    const proofFinding = stored.reviews.flatMap((round) => round.actionableFindings || []).find((finding) => finding.category === "human-proof-review");
+    assert.ok(proofFinding);
+    assert.equal(proofFinding.claim.includes("lowercase_secret_abcdefgh"), false);
+    assert.equal(proofFinding.suggestedFix.includes("lowercase_secret_abcdefgh"), false);
+    assert.equal(JSON.stringify(stored).includes("lowercase_secret_abcdefgh"), false);
+    const publicState = await invoke(daemon, "GET", "/api/state");
+    assert.equal(JSON.stringify(publicState.json).includes("lowercase_secret_abcdefgh"), false);
+    const reviewArtifacts = stored.artifacts.filter((artifact) => artifact.kind === "independent-review");
+    const bodies = await Promise.all(reviewArtifacts.map((artifact) => readFile(artifact.path, "utf8")));
+    assert.equal(bodies.some((body) => body.includes("lowercase_secret_abcdefgh")), false);
   }, { harness });
 });

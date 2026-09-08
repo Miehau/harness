@@ -1,15 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
   const artifact = await persistArtifact(root, { identifier: "MM-42" }, { name: "Exploration", content: "# Map", runId: "run-7", stageId: "explore" });
   assert.equal(await readFile(artifact.path, "utf8"), "# Map");
-  assert.match(artifact.path, /ticket-runs\/mm-42\/runs\/run-7\/artifacts\/explore\/exploration\.md$/);
+  assert.equal(artifact.content, undefined);
+  assert.match(artifact.path, /ticket-runs\/mm-42\/runs\/run-7\/artifacts\/explore\/agent-output-[a-f0-9]{10}-exploration\.md$/);
   assert.doesNotMatch(artifact.path, /pi-sessions/);
 });
 
@@ -18,13 +19,43 @@ test("isolates step attempts within one ticket run", async () => {
   const artifact = await persistArtifact(root, { identifier: "MM-42" }, {
     name: "result.md", content: "attempt two", runId: "run-7", stageId: "implement", stepId: "api-slice", attemptId: "attempt-2"
   });
-  assert.match(artifact.path, /runs\/run-7\/artifacts\/implement\/api-slice\/attempt-2\/result\.md$/);
+  assert.match(artifact.path, /runs\/run-7\/artifacts\/implement\/api-slice\/attempt-2\/agent-output-[a-f0-9]{10}-result\.md$/);
   assert.equal(await readFile(artifact.path, "utf8"), "attempt two");
+});
+
+test("same-named artifacts of different kinds retain separate bodies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ticket-artifact-kinds-"));
+  const [output, prompt] = await Promise.all([
+    persistArtifact(root, { identifier: "MM-42" }, { name: "prompt.md", content: "worker output", runId: "run-7", stageId: "implement", stepId: "build", attemptId: "attempt-1", kind: "agent-output" }),
+    persistArtifact(root, { identifier: "MM-42" }, { name: "prompt.md", content: "worker prompt", runId: "run-7", stageId: "implement", stepId: "build", attemptId: "attempt-1", kind: "agent-prompt" })
+  ]);
+  assert.notEqual(output.id, prompt.id);
+  assert.notEqual(output.path, prompt.path);
+  assert.equal(await readFile(output.path, "utf8"), "worker output");
+  assert.equal(await readFile(prompt.path, "utf8"), "worker prompt");
+});
+
+test("hydrates compact artifact metadata only from app storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ticket-hydration-"));
+  const stored = await persistArtifact(root, { identifier: "MM-42" }, { name: "result.md", content: "full result", runId: "run-7" });
+  const compact = { ...stored, content: undefined, bodyStored: true };
+  assert.equal((await hydrateArtifact(compact, root)).content, "full result");
+  assert.equal((await hydrateArtifacts([compact], root))[0].content, "full result");
+  await assert.rejects(hydrateArtifact({ id: "unsafe", name: "unsafe.md", path: join(tmpdir(), "unsafe.md"), bodyStored: true }, root), /outside the data directory/);
 });
 
 test("safeName constrains directory components", () => {
   assert.equal(safeName("../MM 42"), "mm-42");
   assert.equal(safeName(".."), "artifact");
+});
+
+test("cleans only root-level legacy review transcripts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "legacy-review-artifacts-"));
+  await writeFile(join(root, "review-fixes-round-12.md"), "legacy");
+  await writeFile(join(root, "review-fixes-round-latest.md"), "product");
+  await writeFile(join(root, "review-fixes-round-12.txt"), "product");
+  assert.deepEqual(await cleanupLegacyReviewArtifacts(root), ["review-fixes-round-12.md"]);
+  assert.deepEqual((await readdir(root)).sort(), ["review-fixes-round-12.txt", "review-fixes-round-latest.md"]);
 });
 
 test("classifies supported visual evidence media without guessing unsupported files", () => {
@@ -38,6 +69,7 @@ test("only resolves recorded artifacts inside app storage", () => {
   assert.equal(artifactPathForOpen([{ id: "safe", path: "/data/runs/result.md" }], "safe", "/data"), "/data/runs/result.md");
   assert.equal(artifactPathForOpen([{ id: "unsafe", path: "/tmp/secret" }], "unsafe", "/data"), null);
   assert.equal(artifactPathForOpen([], "missing", "/data"), null);
+  assert.equal(artifactPathForOpen([null], "missing", "/data"), null);
 });
 
 test("keeps one living product context per source workspace", async () => {

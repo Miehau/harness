@@ -1,3 +1,74 @@
+export function inspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const explicitStage = stages.find((item) => item.id === selection.stageId) || null;
+  const attempt = attempts.find((item) => item.id === selection.attemptId)
+    || attempts.filter((item) => item.workerId === selection.workerId).at(-1)
+    || (!selection.stageId && attempts.find((item) => item.id === projection?.focus?.attemptId))
+    || null;
+  const worker = workers.find((item) => item.id === (attempt?.workerId || selection.workerId))
+    || (!selection.stageId && workers.find((item) => item.id === projection?.focus?.workerId))
+    || null;
+  const stage = stages.find((item) => item.id === (attempt?.stageId || worker?.stageId || selection.stageId))
+    || (!selection.stageId && stages.find((item) => item.id === projection?.focus?.stageId))
+    || explicitStage;
+  return { stageId: stage?.id || null, workerId: worker?.id || null, attemptId: attempt?.id || null };
+}
+
+// A durable selection wins while it still exists. Only a missing record follows the
+// server-provided focus order (active, actionable, then latest completion).
+export function restoreInspectionSelection(projection, selection = {}) {
+  const stages = projection?.stages || [];
+  const workers = projection?.workers || [];
+  const attempts = projection?.attempts || [];
+  const hasSelection = Boolean(selection.stageId || selection.workerId || selection.attemptId);
+  const retainedAttempt = attempts.find((item) => item.id === selection.attemptId);
+  const retainedWorker = workers.find((item) => item.id === selection.workerId);
+  const retainedStage = stages.find((item) => item.id === selection.stageId);
+  const retained = selection.attemptId ? retainedAttempt : selection.workerId ? retainedWorker : retainedStage;
+  const resolved = inspectionSelection(projection, retained ? selection : {});
+  return {
+    selection: resolved,
+    preserved: Boolean(retained),
+    disappeared: hasSelection && !retained,
+    reason: retained ? "preserved" : projection?.focus?.reason || "empty"
+  };
+}
+
+export function inspectionTransitionAnnouncement(previous, projection, selection = {}) {
+  if (!previous || !projection) return null;
+  const previousAttempt = (previous.attempts || []).find((item) => item.id === selection.attemptId);
+  const currentAttempt = (projection.attempts || []).find((item) => item.id === selection.attemptId);
+  if (previousAttempt && !currentAttempt) return "The selected record is no longer available; the inspector moved to current work.";
+  if (previousAttempt && currentAttempt && previousAttempt.lifecycle === "active" && currentAttempt.lifecycle !== "active") {
+    return `The selected attempt ${currentAttempt.lifecycle === "completed" ? "completed" : "stopped"}. Retained history is still available.`;
+  }
+  const previousWorker = (previous.workers || []).find((item) => item.id === selection.workerId);
+  const worker = (projection.workers || []).find((item) => item.id === selection.workerId);
+  if (previousWorker && worker && previousWorker.attemptIds.at(-1) !== worker.attemptIds.at(-1)) {
+    const latest = (projection.attempts || []).find((item) => item.id === worker.attemptIds.at(-1));
+    if (latest?.lifecycle === "active") return "A correction attempt started for the selected worker. Earlier attempts remain available.";
+  }
+  return null;
+}
+
+export function inspectionResourceLabel(resource = {}) {
+  return ({ available: "Available", loading: "Loading…", unavailable: "Unavailable", not_retained: "Not retained", not_recorded: "Not recorded", not_started: "Not started", not_yet_available: "Not yet available", not_applicable: "Not applicable", truncated: "Truncated" })[resource.state] || "Unavailable";
+}
+
+export function inspectionSummary({ worker = null, attempt = null } = {}) {
+  const item = attempt || worker;
+  if (!item) return { status: "not_started", latestAction: "Not started", blocker: null, evidence: { state: "not_started" }, nextAction: { kind: "none", label: "No action available" } };
+  return {
+    status: item.status,
+    latestAction: item.latestAction || "No activity recorded",
+    blocker: item.blocker || null,
+    evidence: item.evidence || { state: "not_started" },
+    nextAction: item.nextAction || worker?.nextAction || { kind: "none", label: "No action available" }
+  };
+}
+
 export function executionGraph(plan) {
   const nodes = plan?.nodes || [];
   const owner = new Map();
@@ -41,6 +112,76 @@ export function artifactsForStage(artifacts = [], stageId) {
 
 const proofMedia = { png: "image", jpg: "image", jpeg: "image", webp: "image", webm: "video", mp4: "video" };
 
+function proofEvidenceNavigation(run, locator = {}) {
+  const ticketId = encodeURIComponent(run?.id || "");
+  if (locator.validity && locator.validity !== "valid") return {
+    ...locator,
+    unavailable: true,
+    label: locator.reason ? `Evidence unavailable: ${locator.reason.replaceAll("_", " ")}` : "Evidence unavailable"
+  };
+  if (["artifact", "media"].includes(locator.type) && locator.artifactId) {
+    const artifactId = encodeURIComponent(locator.artifactId);
+    return {
+      type: locator.type,
+      artifactId: locator.artifactId,
+      route: `/api/tickets/${ticketId}/artifacts/${artifactId}`,
+      mediaUrl: locator.type === "media" ? `/api/tickets/${ticketId}/artifacts/${artifactId}/media` : null,
+      label: locator.type === "media" ? "Open media" : "Open artifact"
+    };
+  }
+  if (locator.type === "check" || locator.type === "diff") {
+    const params = new URLSearchParams({ scope: locator.scope || "step" });
+    if (locator.stepId) params.set("stepId", locator.stepId);
+    if (locator.attemptId) params.set("attemptId", locator.attemptId);
+    if (locator.reviewId) params.set("reviewId", locator.reviewId);
+    const isDiff = locator.type === "diff";
+    return {
+      ...locator,
+      label: isDiff ? (locator.scope === "final" ? "Open final diff" : "Open diff") : "Open check output",
+      route: `/api/tickets/${ticketId}/proof/${isDiff ? "diff" : "check-output"}?${params}`,
+      tab: isDiff ? "diff" : "run"
+    };
+  }
+  return { ...locator, label: "Evidence unavailable" };
+}
+
+function projectedEligibility(criteria) {
+  const blockingReasons = criteria.flatMap((criterion) => {
+    const current = criterion.current || {};
+    if (current.status !== "verified") return [{ criterionId: criterion.id, criterion: criterion.text, code: `status_${current.status || "unresolved"}`, message: current.explanation?.summary || "Criterion is unresolved." }];
+    if (current.evidenceValidity !== "valid") return [{ criterionId: criterion.id, criterion: criterion.text, code: `evidence_${current.evidenceValidity || "missing"}`, message: "Criterion evidence is not currently valid." }];
+    return [];
+  });
+  return { eligible: blockingReasons.length === 0, blockingReasons };
+}
+
+/** Turns the server's proof projection into ordered, actionable presentation data. */
+export function proofMapView(run, { stepId = null, requiredOnly = false } = {}) {
+  const proof = run?.proofMap || { criteria: [], compatibility: true };
+  const criteria = (proof.criteria || [])
+    .filter((criterion) => (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false))
+    .map((criterion) => {
+      const current = structuredClone(criterion.current || { status: "not_yet_verified", evidenceValidity: "missing", evidence: [] });
+      if (current.status === "unresolved") current.status = "not_yet_verified";
+      const state = current.status === "verified" && current.evidenceValidity === "stale" ? "stale"
+        : current.status === "verified" && current.evidenceValidity !== "valid" ? "missing-evidence"
+          : current.status || "not_yet_verified";
+      const resultLabel = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified" })[current.status] || "Not yet verified";
+      const evidenceLabel = ({ valid: "Evidence valid", stale: "Evidence stale", missing: "Evidence missing" })[current.evidenceValidity] || "Evidence missing";
+      const label = ({ verified: "Verified", failed: "Failed", blocked: "Blocked", not_yet_verified: "Not yet verified", stale: "Stale evidence", "missing-evidence": "Missing evidence" })[state] || resultLabel;
+      return {
+        ...structuredClone(criterion), current, state, label, resultLabel, evidenceLabel,
+        evidence: (current.evidence || []).map((locator) => proofEvidenceNavigation(run, locator)),
+        history: (criterion.history || []).map((item) => ({
+          ...structuredClone(item),
+          status: item.status === "unresolved" ? "not_yet_verified" : item.status,
+          evidence: (item.evidence || []).map((locator) => proofEvidenceNavigation(run, locator))
+        }))
+      };
+    });
+  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: proof.compatibility ? { eligible: true, blockingReasons: [] } : projectedEligibility(criteria) };
+}
+
 export function finalReview(run) {
   const extension = (name = "") => String(name).split(".").at(-1).toLowerCase();
   const review = run?.reviews?.at(-1);
@@ -48,10 +189,11 @@ export function finalReview(run) {
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
   const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
   return {
+    criteria: proofMapView(run),
     proof: proofArtifacts.map((artifact) => ({
       ...artifact,
       media: proofMedia[extension(artifact.name)] || null,
-      mediaUrl: artifact.mediaUrl || (run?.id && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
+      mediaUrl: artifact.mediaUrl || (run?.id && run?.runId && artifact.id ? `/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(artifact.id)}/media` : null)
     })).filter((artifact) => artifact.media),
     checks: checks ? { status: checks.status, summary: checks.summary, command: checks.command } : null,
     reviews: reviews.filter((item) => item.role !== "deterministic").map((item) => ({ role: item.role, summary: item.summary }))
@@ -122,6 +264,56 @@ export function stageDetailModel(run, stageId) {
     stage: { id: stage.id, title: stage.title, status: stage.status, position: stageIndex + 1, total: stages.length },
     stepIndex: steps.map((step, index) => ({ id: step.id, title: step.title, status: step.status, position: index + 1 })),
     dependencies
+  };
+}
+
+const cleanupOutcomeCopy = new Set(["running", "not-required", "complete", "incomplete", "unsupported"]);
+
+/**
+ * Shapes durable process-containment evidence for the run inspector without
+ * reducing unresolved cleanup to a generic worker error.
+ */
+export function cleanupInspectorModel(run) {
+  const cleanup = run?.cleanup || {};
+  const executions = Array.isArray(cleanup.executions) ? cleanup.executions.map((execution) => ({
+    executionId: String(execution?.executionId || "unknown-execution"),
+    outcome: cleanupOutcomeCopy.has(execution?.outcome) ? execution.outcome : "incomplete",
+    stepId: execution?.stepId || null,
+    attemptId: execution?.attemptId || null,
+    ownership: execution?.ownership || null,
+    platform: execution?.platform || null,
+    startedAt: execution?.startedAt || null,
+    completedAt: execution?.completedAt || null,
+    triggers: Array.isArray(execution?.triggers) ? execution.triggers : [],
+    discovered: Array.isArray(execution?.discovered) ? execution.discovered : [],
+    actions: Array.isArray(execution?.actions) ? execution.actions : [],
+    unresolved: Array.isArray(execution?.unresolved) ? execution.unresolved : [],
+    diagnostics: Array.isArray(execution?.diagnostics) ? execution.diagnostics : []
+  })) : [];
+  const outcome = cleanupOutcomeCopy.has(cleanup.outcome)
+    ? cleanup.outcome
+    : executions.some((execution) => execution.outcome === "incomplete") ? "incomplete"
+      : executions.some((execution) => execution.outcome === "unsupported") ? "unsupported"
+        : executions.some((execution) => execution.outcome === "complete") ? "complete" : "not-required";
+  const labels = {
+    running: "Cleanup in progress",
+    complete: "Cleanup complete",
+    incomplete: "Cleanup incomplete",
+    unsupported: "Cleanup unsupported",
+    "not-required": "No cleanup required"
+  };
+  const actionableIncomplete = executions.some((execution) => (
+    execution.outcome === "incomplete"
+    && execution.executionId !== "legacy-unrecorded"
+    && ((execution.unresolved || []).length > 0 || (execution.actions || []).some((action) => action.status === "failed"))
+  ));
+  return {
+    outcome,
+    label: labels[outcome],
+    advisory: actionableIncomplete,
+    updatedAt: cleanup.updatedAt || null,
+    executionCount: executions.length,
+    executions
   };
 }
 
@@ -326,6 +518,10 @@ function findingDetails(findings) {
   return findings.map((finding, index) => `### Finding ${index + 1} · ${finding.severity || "issue"}\n\n${finding.claim || "Unspecified finding"}${finding.suggestedFix ? `\n\n**Suggested fix:** ${finding.suggestedFix}` : ""}`).join("\n\n");
 }
 
+function milestoneText(value, fallback = "") {
+  return String(value || fallback).replace(/(^|[\s"'`(])(?:~\/|\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z]:\\[^\s"'`),;]+)/g, "$1[path]");
+}
+
 export function stageMilestones(run, stage) {
   const activity = stage?.activity;
   if (stage?.id === "verify") {
@@ -345,7 +541,10 @@ export function stageMilestones(run, stage) {
         detail: [review.fix.report?.summary, review.fix.diff ? `${review.fix.diff.files?.length || 0} files · +${review.fix.diff.additions || 0} −${review.fix.diff.deletions || 0}` : null].filter(Boolean).join("\n\n")
       });
     }
-    if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
+    if (stage.status === "active" && run?.status === "fixing") {
+      const findings = run.reviews?.at(-1)?.actionableFindings || [];
+      items.push({ title: "Focused correction in progress.", status: "fixing", at: stage.updatedAt, detail: findingDetails(findings) || "Correcting the latest actionable review findings." });
+    } else if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
     if (stage.status === "completed") items.push({ title: "Agent review completed.", status: "complete", at: stage.updatedAt, detail: stage.summary });
     return items;
   }
@@ -361,13 +560,13 @@ export function stageMilestones(run, stage) {
       detail: evidence.map((shot) => `- \`${shot.name}\``).join("\n")
     });
     const merge = run?.merge;
-    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository: \`${merge.sourceCwd}\`\n\nTicket branch: \`${merge.branch}\`` });
+    if (merge?.queuedAt) items.push({ title: "Added to merge queue.", status: merge.status === "queued" ? `position ${merge.position}` : "started", at: merge.queuedAt, detail: `Target repository selected\n\nTicket branch: \`${merge.branch}\`` });
     if (merge?.startedAt) items.push({ title: "Automated merge started.", status: "merging", at: merge.startedAt, detail: "Git is merging in an isolated integration worktree; the opened repository remains untouched until verification passes." });
-    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${file}\``).join("\n") });
-    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: merge.resolutionArtifact?.content || "Conflicts resolved in the isolated integration worktree." });
-    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: merge.checks?.summary || "Repository checks passed." });
-    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: merge.error });
-    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Repository: \`${run.integration.sourceCwd}\`\n\nCommit: \`${run.integration.commit}\`` });
+    if (merge?.resolverStartedAt) items.push({ title: "Merge conflicts found.", status: `${merge.conflicts?.length || 0} conflict${merge.conflicts?.length === 1 ? "" : "s"}`, at: merge.resolverStartedAt, detail: (merge.conflicts || []).map((file) => `- \`${milestoneText(file)}\``).join("\n") });
+    if (merge?.resolverCompletedAt) items.push({ title: "Conflict-resolution agent completed.", status: "resolved", at: merge.resolverCompletedAt, detail: milestoneText(merge.resolutionArtifact?.content, "Conflicts resolved in the isolated integration worktree.") });
+    if (merge?.verifiedAt) items.push({ title: "Merged result verified.", status: merge.checks?.status || "passed", at: merge.verifiedAt, detail: milestoneText(merge.checks?.summary, "Repository checks passed.") });
+    if (merge?.failedAt) items.push({ title: "Merge queue blocked.", status: "needs attention", at: merge.failedAt, detail: milestoneText(merge.error) });
+    if (run?.integration) items.push({ title: "Changes integrated into the working directory.", status: "complete", at: run.integration.integratedAt, detail: `Commit: \`${run.integration.commit}\`` });
     return items;
   }
   return [];

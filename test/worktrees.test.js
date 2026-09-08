@@ -267,3 +267,24 @@ test("refuses to initialize a zero-state run over existing files", async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("a free-text task initializes a new folder and delivers back to main", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-new-folder-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await mkdir(cwd);
+    await writeFile(join(cwd, "existing.txt"), "preserved\n");
+    await writeFile(join(cwd, ".env"), "SECRET=local\n");
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-new" }, runId: "run-1" });
+    assert.equal(await isGitRepository(cwd), true);
+    assert.equal((await exec("git", ["branch", "--show-current"], { cwd })).stdout.trim(), "main");
+    assert.equal(await readFile(join(workspace.cwd, "existing.txt"), "utf8"), "preserved\n");
+    await assert.rejects(readFile(join(workspace.cwd, ".env")), /ENOENT/);
+    await writeFile(join(workspace.cwd, "result.txt"), "delivered\n");
+    await commitWorkspace(workspace.cwd, "feat: new project\n\nWhy: verify first-ticket delivery.");
+    await integrateBranch({ sourceCwd: cwd, branch: workspace.branch, integrationCwd: join(dataDir, "integration") });
+    assert.equal(await readFile(join(cwd, "result.txt"), "utf8"), "delivered\n");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
