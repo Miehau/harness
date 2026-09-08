@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, glob, mkdir, mkdtemp, readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { join, relative, resolve, sep } from "node:path";
-import { createEditToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { assertScopedWrite, diffOutline, normalizeReviewMap } from "./git.js";
+import { cloneRunAccess, resolveAccessPath, writeScopeAllows } from "./access-policy.js";
+import { assertScopedWrite, diffOutline, isGitRepository, normalizeReviewMap } from "./git.js";
 import { appendBounded, pushBounded } from "./execution.js";
 import { parseModelOutput } from "./model-output.js";
 import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
@@ -594,36 +596,281 @@ function reviewNoteTool(capture) {
   });
 }
 
-export function scopedWorkerTools(cwd, writeScope) {
-  const check = (path) => assertScopedWrite(cwd, path, writeScope);
-  const scopedDescendant = (path) => {
-    const directory = relative(resolve(cwd), resolve(path)).split(sep).join("/");
-    return String(writeScope || "").split(",").map((item) => item.trim().replace(/^\.\//, "").replace(/\/\*\*?$/, "")).find((item) => item.startsWith(`${directory}/`));
+const filesystemToolNames = ["read", "grep", "find", "ls"];
+
+function pathContained(child, parent) {
+  if (!child || !parent) return false;
+  if (child === parent) return true;
+  const prefix = parent.endsWith(sep) ? parent : `${parent}${sep}`;
+  return child.startsWith(prefix);
+}
+
+function ignoredSearchPart(relativePath) {
+  return String(relativePath || "").split(/[\\/]/).some((part) => part === "node_modules" || part === ".git");
+}
+
+function toolText(result) {
+  if (typeof result?.content === "string") return result.content;
+  if (!Array.isArray(result?.content)) return "";
+  return result.content.filter((part) => part?.type === "text").map((part) => part.text || "").join("");
+}
+
+function withToolText(result, text) {
+  return { ...result, content: [{ type: "text", text }] };
+}
+
+async function mappedAccess(access, cwd) {
+  const realCwd = cwd ? await realpath(cwd).catch(() => resolve(cwd)) : null;
+  if (!access || typeof access !== "object" || Array.isArray(access)) {
+    return {
+      mode: "restricted",
+      primary: realCwd ? { id: "primary", path: realCwd, displayPath: cwd, mode: "read/write" } : null,
+      extraRoots: [],
+      frozenAt: null,
+      sourcePrimaryPath: realCwd
+    };
+  }
+  const cloned = cloneRunAccess(access, { workspace: { cwd: realCwd || cwd } });
+  cloned.sourcePrimaryPath = access.primary?.path || realCwd;
+  if (realCwd && cloned.primary) {
+    cloned.primary = { ...cloned.primary, path: realCwd, displayPath: cloned.primary.displayPath || cwd, mode: "read/write" };
+  }
+  return cloned;
+}
+
+function sessionAccess(access, cwd) {
+  let pending;
+  return () => {
+    pending ||= mappedAccess(access, cwd);
+    return pending;
   };
+}
+
+async function assertReadable(access, cwd, inputPath) {
+  const resolved = await resolveAccessPath(access, inputPath, { cwd, intent: "read" });
+  return resolved.realPath || resolved.absolute;
+}
+
+async function assertWritable(access, cwd, inputPath, writeScope) {
+  const resolved = await resolveAccessPath(access, inputPath, { cwd, intent: "write" });
+  if (resolved.root?.kind === "extra" && await isGitRepository(resolved.root.path)) {
+    throw new Error(`Write blocked: extra Git repository “${resolved.root.displayPath || resolved.root.path}” is not mapped to a worktree`);
+  }
+  if (access?.sourcePrimaryPath && cwd) {
+    const realOriginal = await realpath(access.sourcePrimaryPath).catch(() => null);
+    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
+    const target = resolved.realPath || resolved.absolute;
+    if (realOriginal && realOriginal !== realCwd && pathContained(target, realOriginal) && !pathContained(target, realCwd)) {
+      throw new Error("Write blocked: the original primary checkout is not writable; use the run worktree");
+    }
+  }
+  if (!await writeScopeAllows(resolved, writeScope)) {
+    throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
+  }
+  return resolved.absolute;
+}
+
+async function assertDeletable(access, cwd, inputPath, writeScope) {
+  const raw = String(inputPath || "").replace(/^@/, "");
+  const absolute = isAbsolute(raw) ? resolve(raw) : resolve(cwd, raw);
+  const parentResolved = await resolveAccessPath(access, dirname(absolute), { cwd, intent: "write" });
+  const relativePath = parentResolved.relativePath
+    ? `${parentResolved.relativePath}/${basename(absolute)}`
+    : basename(absolute);
+  const entryResolved = {
+    ...parentResolved,
+    absolute,
+    realPath: resolve(parentResolved.realPath || parentResolved.absolute, basename(absolute)),
+    relativePath,
+    intent: "write"
+  };
+  if (parentResolved.root?.kind === "extra" && await isGitRepository(parentResolved.root.path)) {
+    throw new Error(`Write blocked: extra Git repository “${parentResolved.root.displayPath || parentResolved.root.path}” is not mapped to a worktree`);
+  }
+  if (access?.sourcePrimaryPath && cwd) {
+    const realOriginal = await realpath(access.sourcePrimaryPath).catch(() => null);
+    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
+    const target = entryResolved.realPath;
+    if (realOriginal && realOriginal !== realCwd && pathContained(target, realOriginal) && !pathContained(target, realCwd)) {
+      throw new Error("Write blocked: the original primary checkout is not writable; use the run worktree");
+    }
+  }
+  if (!await writeScopeAllows(entryResolved, writeScope)) {
+    throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
+  }
+  return absolute;
+}
+
+function wrapToolExecute(tool, execute) {
+  return { ...tool, execute };
+}
+
+async function filterSearchLines(text, { cwd, access, searchPath, kind }) {
+  let searchIsDirectory = true;
+  try { searchIsDirectory = (await stat(searchPath)).isDirectory(); }
+  catch { searchIsDirectory = true; }
+  const lines = String(text || "").split("\n");
+  const kept = [];
+  for (const line of lines) {
+    if (!line || line.startsWith("[")) {
+      kept.push(line);
+      continue;
+    }
+    let displayed = line;
+    if (kind === "grep") {
+      const match = line.match(/^(.*?)[:\-]\d+[:\-]\s?/);
+      if (!match) {
+        kept.push(line);
+        continue;
+      }
+      displayed = match[1];
+    }
+    const candidate = isAbsolute(displayed)
+      ? displayed
+      : searchIsDirectory ? resolve(searchPath, displayed) : searchPath;
+    try {
+      await resolveAccessPath(access, candidate, { cwd, intent: "read" });
+      kept.push(line);
+    } catch {}
+  }
+  return kept.join("\n");
+}
+
+export function scopedReadTools(cwd, runAccess = null) {
+  const currentAccess = sessionAccess(runAccess, cwd);
+  const guard = async (inputPath) => assertReadable(await currentAccess(), cwd, inputPath || cwd);
+  const wrapSearch = (tool, pathArg) => wrapToolExecute(tool, async (toolCallId, args = {}, ...rest) => {
+    const searchPath = args[pathArg] || cwd;
+    await guard(searchPath);
+    const result = await tool.execute(toolCallId, args, ...rest);
+    const absoluteSearch = isAbsolute(String(searchPath)) ? resolve(searchPath) : resolve(cwd, searchPath);
+    const filtered = await filterSearchLines(toolText(result), {
+      cwd, access: await currentAccess(), searchPath: absoluteSearch, kind: tool.name
+    });
+    return filtered === toolText(result) ? result : withToolText(result, filtered);
+  });
   return [
+    createReadToolDefinition(cwd, { operations: {
+      access: async (path) => {
+        await guard(path);
+        await access(path, fsConstants.R_OK);
+      },
+      readFile: async (path) => {
+        await guard(path);
+        return readFile(path);
+      }
+    } }),
+    wrapSearch(createGrepToolDefinition(cwd, { operations: {
+      isDirectory: async (path) => {
+        await guard(path);
+        return (await stat(path)).isDirectory();
+      },
+      readFile: async (path) => {
+        await guard(path);
+        return readFile(path, "utf8");
+      }
+    } }), "path"),
+    wrapSearch(createFindToolDefinition(cwd, { operations: {
+      exists: async (path) => {
+        try {
+          await guard(path);
+          await access(path);
+          return true;
+        } catch (error) {
+          if (error?.code === "ENOENT") return false;
+          throw error;
+        }
+      },
+      glob: async (pattern, searchCwd, options = {}) => {
+        await guard(searchCwd);
+        const policy = await currentAccess();
+        const results = [];
+        for await (const entry of glob(pattern, { cwd: searchCwd })) {
+          if (ignoredSearchPart(entry)) continue;
+          const absolute = isAbsolute(entry) ? entry : resolve(searchCwd, entry);
+          try { await resolveAccessPath(policy, absolute, { cwd, intent: "read" }); }
+          catch { continue; }
+          results.push(entry);
+          if (results.length >= (options.limit || 1000)) break;
+        }
+        return results;
+      }
+    } }), "path"),
+    wrapSearch(createLsToolDefinition(cwd, { operations: {
+      exists: async (path) => {
+        try {
+          await guard(path);
+          await access(path);
+          return true;
+        } catch (error) {
+          if (error?.code === "ENOENT") return false;
+          throw error;
+        }
+      },
+      stat: async (path) => {
+        await guard(path);
+        return stat(path);
+      },
+      readdir: async (path) => {
+        await guard(path);
+        const policy = await currentAccess();
+        const allowed = [];
+        for (const entry of await readdir(path)) {
+          try {
+            await resolveAccessPath(policy, join(path, entry), { cwd, intent: "read" });
+            allowed.push(entry);
+          } catch {}
+        }
+        return allowed;
+      }
+    } }), "path")
+  ];
+}
+
+export function scopedWorkerTools(cwd, writeScope, runAccess = null) {
+  const currentAccess = sessionAccess(runAccess, cwd);
+  const check = async (path) => assertWritable(await currentAccess(), cwd, path, writeScope);
+  let approvedWrite = null;
+  const isApprovedAncestor = (path) => {
+    if (!approvedWrite) return false;
+    const dir = resolve(path);
+    return dir === resolve(cwd) || dir === approvedWrite || pathContained(approvedWrite, dir);
+  };
+  const writeTool = createWriteToolDefinition(cwd, { operations: {
+    mkdir: async (path) => {
+      try { await access(path); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        if (resolve(path) !== resolve(cwd) && !isApprovedAncestor(path)) {
+          throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${path}`);
+        }
+      }
+      await mkdir(path, { recursive: true });
+    },
+    writeFile: async (path, content) => writeFile(await check(path), content, { flag: "wx" })
+  } });
+  return [
+    ...scopedReadTools(cwd, runAccess),
     createEditToolDefinition(cwd, { operations: {
       access: async (path) => access(await check(path)),
       readFile,
       writeFile: async (path, content) => writeFile(await check(path), content)
     } }),
-    createWriteToolDefinition(cwd, { operations: {
-      mkdir: async (path) => {
-        try { await access(path); }
-        catch (error) {
-          if (error.code !== "ENOENT") throw error;
-          if (resolve(path) !== resolve(cwd)) await check(scopedDescendant(path) || path);
-        }
-        await mkdir(path, { recursive: true });
-      },
-      writeFile: async (path, content) => writeFile(await check(path), content, { flag: "wx" })
-    } }),
+    wrapToolExecute(writeTool, async (toolCallId, args = {}, ...rest) => {
+      approvedWrite = await check(args.path);
+      try {
+        return await writeTool.execute(toolCallId, args, ...rest);
+      } finally {
+        approvedWrite = null;
+      }
+    }),
     defineTool({
       name: "delete",
       label: "Delete file",
       description: "Delete one repository file inside the approved write scope.",
       parameters: Type.Object({ path: Type.String({ description: "Repository-relative file path" }) }),
       async execute(_toolCallId, { path }) {
-        const target = await check(path);
+        const target = await assertDeletable(await currentAccess(), cwd, path, writeScope);
         await unlink(target);
         return { content: [{ type: "text", text: `Deleted ${relative(cwd, target)}` }], details: { path: relative(cwd, target) } };
       }
@@ -859,7 +1106,7 @@ export class PiHarness {
     this.supervisorStages = [];
   }
 
-  async planningSession(cwd, existingFile, sessionKey = cwd, { repositoryAccess = true, profile } = {}) {
+  async planningSession(cwd, existingFile, sessionKey = cwd, { repositoryAccess = true, profile, access } = {}) {
     const cached = this.planning.get(sessionKey);
     if (cached?.cwd === cwd) {
       await this.applyProfile(cached.session, profile);
@@ -878,8 +1125,9 @@ export class PiHarness {
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: repositoryAccess ? ["read", "grep", "find", "ls", "workflow_stage", "workflow_checkpoint"] : ["workflow_stage", "workflow_checkpoint"],
+      tools: repositoryAccess ? [...filesystemToolNames, "workflow_stage", "workflow_checkpoint"] : ["workflow_stage", "workflow_checkpoint"],
       customTools: [
+        ...(repositoryAccess ? scopedReadTools(cwd, access) : []),
         stageTool((stage) => {
           this.supervisorStages.push(stage);
           this.publish({ channel: "workflow", type: "stage_update", stage });
@@ -921,9 +1169,9 @@ export class PiHarness {
     }, `${ticket.id}:${runId}:requirements`);
   }
 
-  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, onEvent, onSessionFile, signal }) {
+  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, access, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access });
       await onSessionFile?.(session.sessionFile);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Exploration output");
@@ -943,9 +1191,9 @@ export class PiHarness {
     }, `${ticket.id}:ticket-lookahead`);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, onEvent, onSessionFile, signal }) {
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, access, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile });
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access });
       await onSessionFile?.(session.sessionFile);
       const skillNames = availableSkillNames(session);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketDesignInstruction)}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
@@ -996,16 +1244,16 @@ export class PiHarness {
     }
   }
 
-  async listSkills({ cwd, sessionFile, sessionKey }) {
-    const session = await this.planningSession(cwd, sessionFile, sessionKey);
+  async listSkills({ cwd, sessionFile, sessionKey, access }) {
+    const session = await this.planningSession(cwd, sessionFile, sessionKey, { access });
     return session.resourceLoader.getSkills().skills
       .map(({ name, description }) => ({ name, description }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  async activateWorkflow({ cwd, sessionFile, sessionKey, skillName, profile, onEvent, signal }) {
+  async activateWorkflow({ cwd, sessionFile, sessionKey, skillName, profile, access, onEvent, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
+      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile, access });
       const skill = session.resourceLoader.getSkills().skills.find((item) => item.name === skillName);
       if (!skill) throw new Error(`Pi skill not found: ${skillName}`);
       this.drainSupervisorSignals();
@@ -1020,9 +1268,9 @@ export class PiHarness {
     }, sessionKey || "shared");
   }
 
-  async continueWorkflow({ cwd, sessionFile, sessionKey, checkpoint, response, profile, onEvent, signal }) {
+  async continueWorkflow({ cwd, sessionFile, sessionKey, checkpoint, response, profile, access, onEvent, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile });
+      const session = await this.planningSession(cwd, sessionFile, sessionKey, { profile, access });
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
       const reply = await this.visibleSupervisorPrompt(session, `The user resolved workflow checkpoint “${checkpoint.title}”. Response: ${response || "Approved"}. Continue the binding workflow. If another gate is required, use workflow_checkpoint.`, { onEvent, signal });
@@ -1049,9 +1297,9 @@ export class PiHarness {
     };
   }
 
-  async chat({ cwd, sessionFile, message, images = [] }) {
+  async chat({ cwd, sessionFile, message, images = [], access }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile);
+      const session = await this.planningSession(cwd, sessionFile, cwd, { access });
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
       const prompt = session.state.messages.length ? message : `${planningInstruction}\n\nUser: ${message}`;
@@ -1065,9 +1313,9 @@ export class PiHarness {
     });
   }
 
-  async generatePlan({ cwd, sessionFile }) {
+  async generatePlan({ cwd, sessionFile, access }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile);
+      const session = await this.planningSession(cwd, sessionFile, cwd, { access });
       this.drainSupervisorSignals();
       this.drainSupervisorStages();
       const skillNames = availableSkillNames(session);
@@ -1085,14 +1333,16 @@ export class PiHarness {
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, round, focusFindings = [], profile, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, round, focusFindings = [], profile, access, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
+    const inspectionTools = verificationTools(focusFindings, images);
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: verificationTools(focusFindings, images),
+      tools: inspectionTools,
+      customTools: inspectionTools.length ? scopedReadTools(cwd, access) : [],
       sessionManager: SessionManager.create(cwd, sessionDir)
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
@@ -1302,7 +1552,7 @@ ${diff.patch || "No textual diff"}`;
     }
   }
 
-  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, onEvent, signal }) {
+  async reviewTicket({ cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, access, onEvent, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
     await mkdir(sessionDir, { recursive: true });
@@ -1316,7 +1566,8 @@ ${diff.patch || "No textual diff"}`;
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: ["read", "grep", "find", "ls"],
+      tools: filesystemToolNames,
+      customTools: scopedReadTools(cwd, access),
       sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
@@ -1400,7 +1651,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onCleanup, ticketId = "shared", runId = "legacy", profile, signal, containment: suppliedContainment }) {
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onCleanup, ticketId = "shared", runId = "legacy", profile, access, signal, containment: suppliedContainment }) {
     // The daemon may persist this containment before invoking us. Never replace
     // it: project commands must inherit the exact ownership record on disk.
     const containment = suppliedContainment || this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
@@ -1424,14 +1675,14 @@ Every reported finding triggers an automatic correction round. Report concrete d
         manager = SessionManager.create(cwd, sessionDir);
       }
       const tools = step.permission === "write"
-        ? ["read", "grep", "find", "ls", "edit", "write"]
-        : step.permission === "read" ? ["read", "grep", "find", "ls"] : [];
+        ? [...filesystemToolNames, "edit", "write"]
+        : step.permission === "read" ? [...filesystemToolNames] : [];
       let report = null;
       const reviewNotes = [];
       tools.push("worker_report");
       const scopedTools = step.permission === "write"
-        ? [...scopedWorkerTools(cwd, workerWriteScope(step)), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence")), reviewNoteTool((note) => reviewNotes.push(note))]
-        : [];
+        ? [...scopedWorkerTools(cwd, workerWriteScope(step), access), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence")), reviewNoteTool((note) => reviewNotes.push(note))]
+        : step.permission === "read" ? scopedReadTools(cwd, access) : [];
       if (step.permission === "write") tools.push("project_command", "review_note", "delete");
       ({ session } = await createAgentSession({
         ...(await this.sessionOptions(profile)),

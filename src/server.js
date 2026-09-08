@@ -556,6 +556,7 @@ async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, 
   try {
     result = await harness.runStep({
       ...input, containment, ticketId, signal,
+      access: input.access || ticketRun(store.read(), ticketId)?.access || null,
       onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
     });
     return result;
@@ -1045,11 +1046,31 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   };
 }
 
+const namedCommandLimitationNotice = "Named project commands keep argv and environment allow-lists. They are not a filesystem sandbox and do not isolate subprocesses from the host. These controls are agent file-tool boundaries, not host-wide subprocess isolation.";
+
+function withPlanApprovalNotice(prompt) {
+  const text = String(prompt || "");
+  if (text.includes("not a filesystem sandbox")) return text;
+  return `${text}\n\n## Agent file-tool boundary\n${namedCommandLimitationNotice}`;
+}
+
+function planApprovalCheckpoint(prompt) {
+  return {
+    id: randomUUID(),
+    kind: "awaiting_approval",
+    title: "Approve implementation plan",
+    prompt: withPlanApprovalNotice(prompt),
+    notice: namedCommandLimitationNotice,
+    createdAt: new Date().toISOString()
+  };
+}
+
 function skillSession(state, run) {
   return {
     cwd: run?.workspace?.cwd || state.workspace.cwd,
     sessionFile: run?.sessionFile || null,
-    sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined
+    sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined,
+    access: run?.access || null
   };
 }
 
@@ -1272,8 +1293,8 @@ const design = [...(run.artifacts || [])].reverse().find((artifact) => artifact.
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_approval";
-        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt, createdAt: new Date().toISOString() };
-        setStage(current, "design", "blocked", "Plan ready for approval");
+        current.checkpoint = planApprovalCheckpoint(prompt);
+        setStage(current, "design", "blocked", "Plan ready for approval. Named project commands are not a filesystem sandbox.");
       });
     }
     return;
@@ -1654,6 +1675,7 @@ const [retainedRequirements, productContextBody] = await Promise.all([
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
+        access: latestRun.access,
 productContext: productContextBody, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"),
         onSessionFile: saveRunSession(ticketId), signal
@@ -1746,6 +1768,7 @@ const ticketLookAheadArtifact = [...run.artifacts].reverse().find((artifact) => 
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
+      access: run.access,
 productContext: productContextBody.content, requirements: requirementsBody.content, exploration: explorationBody.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
       onSessionFile: saveRunSession(ticketId), signal
@@ -1765,8 +1788,8 @@ productContext: productContextBody.content, requirements: requirementsBody.conte
       current.plan = designPlan;
       current.artifacts.push(artifact);
       current.status = "awaiting_approval";
-      setStage(current, "design", "blocked", "Plan ready for approval").activity = activity.snapshot();
-      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: designArtifact, createdAt: new Date().toISOString() };
+      setStage(current, "design", "blocked", "Plan ready for approval. Named project commands are not a filesystem sandbox.").activity = activity.snapshot();
+      current.checkpoint = planApprovalCheckpoint(designArtifact);
     });
   } catch (error) {
     if (signal?.aborted) return;
@@ -1983,6 +2006,7 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
+            access: latest.access,
             design, diff, output: result.output, checks,
             proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
             artifacts: ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)),
@@ -2729,6 +2753,7 @@ const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback)
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
+      access: current.access,
       plan: current.plan,
       artifacts: reviewArtifacts,
       diff,

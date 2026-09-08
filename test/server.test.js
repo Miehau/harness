@@ -1396,6 +1396,53 @@ test("final proof approval blocks UI tickets without ticket-bound screenshots", 
   });
 });
 
+test("plan approval surfaces that named commands are not a filesystem sandbox", async () => {
+  const harness = {
+    ...mockHarness(),
+    async designTicket() {
+      return {
+        artifact: "# Design\n\nChosen approach.",
+        plan: normalizePlan({ nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] }),
+        sessionFile: null
+      };
+    }
+  };
+  await withDaemon(async (daemon, { dataDir }) => {
+    const id = await seedRun(daemon, {
+      status: "interrupted",
+      stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((stage) => ({
+        id: stage, title: stage, status: ["requirements", "explore"].includes(stage) ? "completed" : stage === "design" ? "blocked" : "pending", summary: ""
+      }))
+    });
+    const run = daemon.store.read().ticketRuns[id];
+    const artifacts = await Promise.all([
+      ["requirements.md", "requirements"],
+      ["product-context.md", "product-context-snapshot"],
+      ["implementation-delta.md", "implementation-delta"]
+    ].map(async ([name, kind]) => persistArtifact(dataDir, run.ticket, {
+      name, content: `# ${kind}`, runId: run.runId, stageId: kind === "requirements" || kind === "product-context-snapshot" ? "requirements" : "explore", kind
+    })));
+    await daemon.store.update((state) => { state.ticketRuns[id].artifacts.push(...artifacts); });
+    const resumed = await invoke(daemon, "POST", `/api/tickets/${encodeURIComponent(id)}/resume`);
+    assert.equal(resumed.status, 202);
+    let durable;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      durable = daemon.store.read().ticketRuns[id];
+      if (durable.status === "awaiting_approval" && durable.checkpoint?.notice) break;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(durable.status, "awaiting_approval", durable.lastError || durable.status);
+    assert.match(String(durable.checkpoint?.prompt || ""), /not a filesystem sandbox/);
+    assert.match(String(durable.checkpoint?.notice || ""), /agent file-tool boundaries/);
+    assert.match(String(durable.checkpoint?.notice || ""), /not a filesystem sandbox/);
+    assert.doesNotMatch(String(durable.checkpoint?.notice || ""), /sandbox(?:ed)? (?:the )?subprocess|subprocess(?:es)? (?:are|is|remain) restricted/i);
+    const exposed = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/run`);
+    assert.match(String(exposed.json.checkpoint?.notice || ""), /not a filesystem sandbox/);
+    assert.match(String(exposed.json.checkpoint?.notice || ""), /agent file-tool boundaries/);
+  }, { harness });
+});
+
 test("plan approval snapshots proof once and exposes the compatibility projection", async () => {
   await withDaemon(async (daemon) => {
     const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
