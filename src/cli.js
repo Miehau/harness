@@ -31,6 +31,8 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
   status [ticketId]
   queue clear                       Remove non-running queue items
+  access show                       Current project access policy (JSON)
+  access set <json>                 Set extra roots / any access (same JSON as the API)
 `;
 
 export async function runCli(argv, opts) {
@@ -233,6 +235,23 @@ async function handleCommand(command, rest, ctx) {
     const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/start", { body: {}, env, fetchImpl });
     print(stdout, result);
     return 0;
+  }
+  if (command === "access") {
+    const action = rest[0] || "show";
+    if (action === "show" && rest.length <= 1) {
+      print(stdout, await request("GET", "/api/workspace/access-policy", { env, fetchImpl }));
+      return 0;
+    }
+    if (action === "set") {
+      const raw = rest.slice(1).join(" ").trim();
+      if (!raw) throw new Error("Usage: agent-plan access set <json>\n" + usage);
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { throw new Error("Access policy JSON is invalid"); }
+      print(stdout, await request("POST", "/api/workspace/access-policy", { body, env, fetchImpl }));
+      return 0;
+    }
+    throw new Error("Usage: agent-plan access show|set <json>\n" + usage);
   }
   throw new Error("Unknown command: " + command + "\n" + usage);
 }

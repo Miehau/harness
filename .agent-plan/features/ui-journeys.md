@@ -1,15 +1,18 @@
 # UI journeys — F02 intake, F09 evidence, F14 interfaces
 
-The dashboard is at `/`. Tasks are selected in the left list, then a stage or step opens its inspector. Feature behavior and owning files: [intake](../../docs/features/intake.md), [interfaces](../../docs/features/interfaces.md), [visual evidence](../../docs/features/visual-evidence.md).
+The dashboard is at `/`. Tasks are selected in the left list, then a stage or step opens its inspector. Top-bar **Repository** opens the workspace dialog for the primary path and the current project's directory access policy. Feature behavior and owning files: [intake](../../docs/features/intake.md), [interfaces](../../docs/features/interfaces.md), [visual evidence](../../docs/features/visual-evidence.md), [setup](../../docs/features/setup.md).
 
 ```sh
 node .agent-plan/ui.mjs tasks list --url http://127.0.0.1:4317
 node .agent-plan/ui.mjs tasks open TASK_ID --screenshot /tmp/task.png
 node .agent-plan/ui.mjs tasks add "Task description"
+node .agent-plan/ui.mjs workspace open --screenshot /tmp/access-policy.png
 node .agent-plan/ui.mjs journey /tmp/scenario.json --screenshot /tmp/proof.png
+node src/cli.js access show
+node src/cli.js access set '{"mode":"restricted","extraRoots":[]}'
 ```
 
-`tasks add` submits New → Task description → Start workflow and starts real work. Use the isolated mocked daemon in `ui.test.mjs` for tests. Other commands navigate through rendered UI; missing or ambiguous controls fail.
+`tasks add` submits New → Task description → Start workflow and starts real work. `workspace open` loads the current project's policy into `#workspace-dialog` (primary, extra roots as saved, Restricted or Any access). `workspace save-policy` submits only on that explicit control; closing the dialog does not persist. Use the isolated mocked daemon in `ui.test.mjs` for tests. Other commands navigate through rendered UI; missing or ambiguous controls fail. Never enable Any access against the operator checkout; seed extra roots in a temp daemon.
 
 A journey runs in one browser session. Example:
 

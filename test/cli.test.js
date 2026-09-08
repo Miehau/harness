@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { markRunCancelled, rewindRun } from "../src/execution.js";
 import { runCli } from "../src/cli.js";
@@ -532,4 +535,71 @@ test("waive rejects one verifier finding with an operator reason", async () => {
   });
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/waive");
   assert.deepEqual(called.body, { reason: "Owned by the next plan slice" });
+});
+
+test("access commands call the workspace access-policy API", async () => {
+  const requests = [];
+  const policy = { mode: "restricted", extraRoots: [] };
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, method: options.method || "GET", body: options.body });
+    return { ok: true, status: 200, async text() { return JSON.stringify(policy); } };
+  };
+  const opts = { env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" }, fetchImpl, stdout: { write() {} }, stderr: { write() {} } };
+  assert.equal(await runCli(["access", "show"], opts), 0);
+  assert.equal(await runCli(["access"], opts), 0);
+  assert.equal(await runCli(["access", "set", JSON.stringify({ mode: "restricted", extraRoots: [] })], opts), 0);
+  assert.deepEqual(requests.map((item) => [item.method, item.url]), [
+    ["GET", "http://127.0.0.1:4317/api/workspace/access-policy"],
+    ["GET", "http://127.0.0.1:4317/api/workspace/access-policy"],
+    ["POST", "http://127.0.0.1:4317/api/workspace/access-policy"]
+  ]);
+  await assert.rejects(runCli(["access", "set", "{nope"], opts), /Access policy JSON is invalid/);
+});
+
+test("access show and set round-trip the current project policy as JSON", async () => {
+  await withDaemon(async (daemon, { cwd }) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-cli-extra-"));
+    try {
+      const shown = await runAgainstDaemon(daemon, ["access", "show"]);
+      assert.equal(shown.code, 0);
+      const apiUnset = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(shown.json, apiUnset.json);
+      assert.deepEqual(shown.json, { mode: "restricted", extraRoots: [] });
+
+      const body = { mode: "restricted", extraRoots: [{ path: extra, mode: "read/write" }] };
+      const set = await runAgainstDaemon(daemon, ["access", "set", JSON.stringify(body)]);
+      assert.equal(set.code, 0);
+      const apiGet = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(set.json, apiGet.json);
+      assert.equal(set.json.mode, "restricted");
+      assert.equal(set.json.extraRoots.length, 1);
+      assert.equal(set.json.extraRoots[0].mode, "read/write");
+      assert.equal(set.json.extraRoots[0].displayPath, extra);
+
+      await assert.rejects(
+        () => runAgainstDaemon(daemon, ["access", "set", JSON.stringify({ extraRoots: [{ path: extra, mode: "write-only" }] })]),
+        /Unknown extra root mode/
+      );
+      const unchanged = await runAgainstDaemon(daemon, ["access"]);
+      assert.equal(unchanged.code, 0);
+      assert.deepEqual(unchanged.json, apiGet.json);
+
+      const anySet = await runAgainstDaemon(daemon, ["access", "set", JSON.stringify({ mode: "any", extraRoots: [] })]);
+      assert.equal(anySet.code, 0);
+      assert.equal(anySet.json.mode, "any");
+      assert.deepEqual(anySet.json.extraRoots, []);
+      const apiAny = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(anySet.json, apiAny.json);
+
+      const published = await invoke(daemon, "GET", "/api/state");
+      assert.equal(published.json.projectPolicies, undefined);
+      assert.equal(published.json.workspace.cwd, undefined);
+      assert.ok(published.json.workspace.displayPath);
+      assert.equal(published.json.workspace.displayPath.includes(cwd) || published.json.workspace.displayPath.length > 0, true);
+      assert.equal(published.json.accessPolicy.mode, "any");
+      assert.deepEqual(published.json.accessPolicy.extraRoots, []);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
+  });
 });

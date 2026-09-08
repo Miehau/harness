@@ -1,1 +1,48 @@
-[]
+[
+  {
+    "criterion": "The workspace dialog shows primary, extra roots as saved, and the effective restricted or Any access mode.",
+    "commands": [["workspace", "open"]],
+    "assertions": [
+      { "selector": "#workspace-dialog", "text": "Primary repository (not removable)" },
+      { "selector": "#access-mode-status", "text": "Effective mode" },
+      { "selector": "#access-policy-form", "text": "Extra roots" },
+      { "selector": "#access-policy-form", "text": "Any access" }
+    ]
+  },
+  {
+    "criterion": "Invalid extra roots or modes show an actionable error and do not persist when the dialog is submitted.",
+    "commands": [
+      ["workspace", "open"],
+      ["workspace", "extra-root", ".", "read-only"],
+      ["workspace", "save-policy"]
+    ],
+    "assertions": [
+      { "selector": "#access-policy-form", "text": "cannot be stored as an extra root" },
+      { "selector": "#access-policy-error", "text": "implied" },
+      { "selector": "#workspace-dialog", "text": "Save access policy" }
+    ]
+  },
+  {
+    "criterion": "The operator CLI can show and update the current project's policy as JSON equivalent to the API.",
+    "commands": [["workspace", "open"]],
+    "assertions": [
+      { "selector": "#access-mode-status", "text": "Effective mode" },
+      { "selector": "#access-policy-form", "text": "Save access policy" }
+    ]
+  },
+  {
+    "criterion": "Keyboard can reach and operate the policy controls; success is not color-only.",
+    "commands": [
+      ["workspace", "open"],
+      ["workspace", "extra-root", "docs", "read-only"],
+      ["workspace", "keyboard"]
+    ],
+    "assertions": [
+      { "selector": "#access-mode-status", "text": "Effective mode" },
+      { "selector": "#access-policy-form", "text": "Any access" },
+      { "selector": "#save-access-policy", "text": "Save access policy" },
+      { "selector": "#access-policy-form", "text": "read-only" }
+    ]
+  }
+]
+

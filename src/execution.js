@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { storedProjectPolicy } from "./access-policy.js";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
@@ -1158,6 +1160,28 @@ function removePrivateLocations(value) {
   return value;
 }
 
+function ownerWorkspaceDisplayPath(workspace) {
+  if (!workspace || typeof workspace !== "object") return "";
+  return workspace.displayPath || workspace.cwd || "";
+}
+
+function publicAccessPolicy(state) {
+  const cwd = state?.workspace?.cwd;
+  const policies = state?.projectPolicies;
+  let key = cwd;
+  if (cwd && policies && typeof policies === "object" && !Array.isArray(policies) && !Object.hasOwn(policies, cwd)) {
+    try { key = realpathSync(cwd); } catch {}
+  }
+  const stored = storedProjectPolicy(state, key);
+  return {
+    mode: stored.mode === "any" ? "any" : "restricted",
+    extraRoots: stored.extraRoots.map((root) => ({
+      displayPath: root.displayPath || root.path || "",
+      mode: root.mode === "read/write" ? "read/write" : "read-only"
+    }))
+  };
+}
+
 function publicWorkflow(workflow) {
   if (!workflow) return workflow;
   return redactRecord({
@@ -1266,10 +1290,15 @@ export function publicRun(run) {
 export function publicState(state) {
   if (!state) return state;
   const clone = structuredClone(state);
+  const accessPolicy = publicAccessPolicy(state);
+  const workspaceDisplayPath = ownerWorkspaceDisplayPath(clone.workspace);
   for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
     clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
   }
   for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
+  delete clone.projectPolicies;
+  clone.accessPolicy = accessPolicy;
+  if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;
   return removePrivateLocations(clone);
 }
 

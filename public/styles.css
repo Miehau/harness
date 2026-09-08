@@ -1055,6 +1055,9 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .directory-picker { display: flex; gap: 8px; }
 .directory-picker input { min-width: 0; flex: 1; }
 .directory-picker .button { flex: none; }
+[data-extra-root] .extra-root-path { min-width: 0; flex: 1; }
+[data-extra-root] .extra-root-mode,
+[data-extra-root] [data-remove-extra-root] { width: auto; flex: none; }
 .restart-impact { margin: 0 14px 14px; border: 1px solid rgb(139 124 246 / .25); border-radius: 9px; padding: 10px 11px; background: rgb(139 124 246 / .07); color: #b9c0cb; font-size: 12px; line-height: 1.5; }
 .restart-confirm { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; align-items: start; margin: 0 14px 14px; color: #b9c0cb; font-size: 12px; line-height: 1.45; }
 .restart-confirm input { margin-top: 2px; }
