@@ -8,28 +8,53 @@ import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
-test("session options omit thinking when the model cannot take reasoningEffort", async () => {
+test("Grok Build omits reasoning on the wire for fresh and cached sessions", async () => {
+  const { streamSimple } = await import("@earendil-works/pi-ai/api/openai-responses");
+  const { clampThinkingLevel } = await import("@earendil-works/pi-ai/compat");
   const harness = new PiHarness({ dataDir: tmpdir() });
+  const build = {
+    id: "grok-build-0.1", provider: "xai", api: "openai-responses",
+    baseUrl: "https://example.invalid/v1", reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null },
+    input: ["text"], contextWindow: 256000, maxTokens: 1000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  };
   harness.sdk = async () => ({
     ModelRuntime: {
       create: async () => ({
-        getModel: (provider, id) => ({
-          id, provider,
+        getModel: (provider, id) => id === build.id ? build : ({
+          id, provider, reasoning: true,
           thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium" }
         })
       })
     }
   });
-  const omitted = await harness.sessionOptions({ provider: "xai", model: "grok-build-0.1", thinking: "off" });
-  assert.equal(Object.hasOwn(omitted, "thinkingLevel"), false);
+  for (const thinking of ["off", "high"]) {
+    const options = await harness.sessionOptions({ provider: "xai", model: build.id, thinking });
+    assert.equal(options.thinkingLevel, "off");
+    assert.equal(clampThinkingLevel(options.model, "high"), "off");
+    let payload;
+    const stream = streamSimple(options.model, { messages: [{ role: "user", content: "test", timestamp: 0 }] }, {
+      apiKey: "test-only", reasoning: options.thinkingLevel,
+      fetch: async (_url, init) => {
+        payload = JSON.parse(init.body);
+        return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+      }
+    });
+    await stream.result();
+    assert.ok(payload, "the real SDK request builder must be exercised");
+    assert.equal(Object.hasOwn(payload, "reasoning"), false);
+  }
+  assert.equal(build.reasoning, true, "shared registry metadata stays unchanged");
   const mapped = await harness.sessionOptions({ provider: "xai", model: "grok-4.3", thinking: "medium" });
   assert.equal(mapped.thinkingLevel, "medium");
   const calls = [];
   await harness.applyProfile({
-    model: { provider: "xai", id: "grok-build-0.1" },
+    model: build,
+    setModel: async (model) => calls.push(model.reasoning),
     setThinkingLevel: (level) => calls.push(level)
   }, { provider: "xai", model: "grok-build-0.1", thinking: "off" });
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, [false, "off"]);
 });
 
 test("commit messages always explain why and name the requirement", () => {
@@ -126,10 +151,12 @@ test("configured guidance is emitted once per stage in a session", () => {
 });
 
 test("worker project commands defer canonical verification to the framework", async () => {
-  const result = await projectCommandTool("/unused").execute("call-1", { name: "verify" });
-  assert.equal(result.isError, false);
-  assert.equal(result.details.status, "deferred");
-  assert.match(result.content[0].text, /once after worker_report/);
+  for (const name of ["verify", "capture-proof"]) {
+    const result = await projectCommandTool("/unused").execute("call-1", { name });
+    assert.equal(result.isError, false);
+    assert.equal(result.details.status, "deferred");
+    assert.match(result.content[0].text, /once after worker_report/);
+  }
 });
 
 test("worker project commands isolate generated evidence from the worktree", async () => {
@@ -213,14 +240,17 @@ test("focused screenshot corrections do not receive repository inspection tools"
 });
 
 test("worker prompts bind structured results to the approved criterion IDs", () => {
-  const plan = normalizePlan({ title: "Proof", nodes: [{ id: "build", title: "Build", acceptanceCriteria: ["Works"] }] });
+  const plan = normalizePlan({ title: "Proof", nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src", acceptanceCriteria: ["Works"] }] });
   const prompt = stepContext({
     plan, step: plan.nodes[0], artifacts: [],
     proofMap: { criteria: [{ id: "criterion-fixed", stepId: "build", text: "Works" }] }
   });
   assert.match(prompt, /Criterion proof report/);
+  assert.match(prompt, /do not repeat repository-wide discovery/);
   assert.match(prompt, /criterion-fixed: Works/);
   assert.match(prompt, /Omit criterionResults entirely/);
+  assert.match(prompt, /Step ID: build/);
+  assert.ok(prompt.includes(JSON.stringify({ type: "check", scope: "step", stepId: "build" })));
 });
 
 test("synthetic review steps can omit optional planning arrays", () => {
@@ -284,6 +314,44 @@ test("retries one transient filesystem cleanup race without spending a correctio
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("standalone proof capture runs only after passing visual verification and fails closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-separate-proof-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "");
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { "capture-proof": ["node", "capture.mjs"] } }));
+    const calls = [];
+    let fail = "";
+    const harness = new PiHarness({ dataDir: root, execImpl: async (_command, args, options) => {
+      const phase = args[0].endsWith("capture.mjs") ? "capture" : "verify";
+      calls.push(phase);
+      if (options.env.AGENT_PLAN_CAPTURE_TICKET_ID) assert.deepEqual(JSON.parse(options.env.AGENT_PLAN_CAPTURE_CRITERIA), phase === "capture" ? [{ id: "backend-criterion" }] : []);
+      if (fail === phase) throw new Error(`${phase} failed`);
+      if (phase === "capture") {
+        assert.equal(options.env.AGENT_PLAN_CAPTURE_TICKET_ID, "T-1");
+        await writeFile(join(options.env.AGENT_PLAN_EVIDENCE_DIR, "proof.png"), "fixture");
+      }
+      return { stdout: `${phase} passed`, stderr: "" };
+    } });
+    const input = { cwd: root, requireVisualEvidence: true, environment: { AGENT_PLAN_CAPTURE_TICKET_ID: "T-1", AGENT_PLAN_CAPTURE_CRITERIA: "[]" }, proofCriteria: [{ id: "backend-criterion" }] };
+    const result = await harness.runRepositoryChecks(input);
+    assert.equal(result.status, "passed");
+    assert.equal(result.evidence.length, 1);
+    assert.deepEqual(calls.splice(0), ["verify", "capture"]);
+    await harness.runRepositoryChecks({ cwd: root });
+    assert.deepEqual(calls.splice(0), ["verify"]);
+    fail = "verify";
+    assert.equal((await harness.runRepositoryChecks(input)).status, "failed");
+    assert.deepEqual(calls.splice(0), ["verify"]);
+    fail = "capture";
+    const failed = await harness.runRepositoryChecks(input);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.failureKind, "visual-evidence");
+    assert.match(failed.summary, /capture-proof failed/);
+    assert.deepEqual(calls, ["verify", "capture"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("bounded repository failure output retains both context and the final failing evidence", async () => {
@@ -361,7 +429,9 @@ test("prefers the repository verification contract and discovers image and video
   const dataDir = await mkdtemp(join(tmpdir(), "pi-contract-state-"));
   try {
     await mkdir(join(root, ".agent-plan"));
-    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// deterministic checks\n");
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { "capture-proof": ["node", ".agent-plan/capture.mjs"] } }));
+    await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
@@ -373,7 +443,7 @@ test("prefers the repository verification contract and discovers image and video
     const invalid = await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true });
     assert.equal(invalid.status, "failed", "a file named .webm is not a playable recording");
 
-    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+    await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
@@ -386,7 +456,7 @@ test("prefers the repository verification contract and discovers image and video
     assert.equal(images[0].mimeType, "image/png");
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
-    await writeFile(join(root, ".agent-plan", "verify.mjs"), `
+    await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
@@ -394,7 +464,7 @@ test("prefers the repository verification contract and discovers image and video
     `);
     assert.equal((await harness.runRepositoryChecks({ cwd: root, requireVideoEvidence: true })).status, "failed");
 
-    await writeFile(join(root, ".agent-plan", "verify.mjs"), "// no screenshot\n");
+    await writeFile(join(root, ".agent-plan", "capture.mjs"), "// no screenshot\n");
     const missingEvidence = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
     assert.equal(missingEvidence.status, "failed");
     assert.equal(missingEvidence.failureKind, "visual-evidence");
@@ -632,16 +702,25 @@ test("workers cannot complete without the terminating worker report", async () =
   const root = await mkdtemp(join(tmpdir(), "pi-worker-report-"));
   try {
     const harness = new PiHarness({ dataDir: root });
+    let calls = 0;
+    let returnReport = false;
+    let customTools;
     const session = {
       state: { messages: [] },
       resourceLoader: { getSkills: () => ({ skills: [] }) },
       setSessionName() {},
       subscribe() { return () => {}; },
-      async prompt() {},
+      async prompt(value) {
+        calls++;
+        if (calls % 2 === 0) {
+          assert.match(value, /Preserve unresolved failures/);
+          if (returnReport) await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "needs_input", summary: "Dependency unavailable", artifact: "The check could not run", request: "Restore the dependency" });
+        }
+      },
       dispose() {}
     };
     harness.sdk = async () => ({
-      createAgentSession: async () => ({ session }),
+      createAgentSession: async (options) => { customTools = options.customTools; return { session }; },
       SessionManager: { create: () => ({}) }
     });
     const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read" }] });
@@ -649,6 +728,11 @@ test("workers cannot complete without the terminating worker report", async () =
     await assert.rejects(harness.runStep({
       cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], feedback: ""
     }), /required worker_report tool/);
+    assert.equal(calls, 2, "missing report gets only one reminder");
+    returnReport = true;
+    const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [] });
+    assert.equal(calls, 4);
+    assert.equal(result.report.status, "needs_input", "the reminder does not turn missing evidence into success");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -689,6 +773,9 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.equal(result.summary, "Verified");
     assert.match(prompt, /The deterministic gate has already run/);
     assert.match(prompt, /Checks passed\./);
+    assert.match(prompt, /Step ID: slice/);
+    assert.ok(prompt.includes(JSON.stringify({ type: "check", scope: "step", stepId: "slice" })));
+    assert.ok(prompt.includes(JSON.stringify({ type: "diff", scope: "step", stepId: "slice" })));
     assert.doesNotMatch(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
@@ -819,14 +906,16 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     const opened = [];
     let prompt;
     let promptImages;
+    const prompts = [];
     const session = {
       state: { messages: [] },
       setSessionName() {},
       subscribe() { return () => {}; },
       async prompt(value, options) {
+        prompts.push(value);
         prompt = value;
         promptImages = options.images;
-        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Resumed","findings":[]}' }] });
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: prompts.length === 1 ? '{"assessment":"Missing summary","findings":[]}' : '{"summary":"Resumed","findings":[]}' }] });
       },
       dispose() {}
     };
@@ -835,11 +924,19 @@ test("an interrupted independent reviewer resumes its durable session", async ()
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({ fresh: true }), open: (...args) => { opened.push(args); return { resumed: true }; } }
     });
-    await harness.reviewTicket({
+    const input = {
       cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" },
       plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }), artifacts: [], diff: { files: [], patch: "" },
+      proofMap: { criteria: [{ id: "criterion-exact", text: "Preserve the checkpoint" }] },
       checks: { status: "passed", summary: "Passed" }, operatorFeedback: "Fix the blank status pill and clipped mobile worker row.", images: [{ data: "large" }], role: "integration", round: 2, runId: "run"
-    });
+    };
+    const result = await harness.reviewTicket(input);
+    assert.equal(result.summary, "Resumed");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /Independent-review output.summary must be non empty string/);
+    assert.match(prompts[1], /without changing your evidence-backed verdicts or dropping unresolved findings/);
+    assert.match(prompts[1], /do not repeat repository inspection/);
+    prompt = prompts[0];
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
     assert.match(prompt, /Expected ticket: T-1 — Ticket/);
@@ -850,7 +947,61 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.match(prompt, /incorrect, blank, partial, stale or unverifiable states/);
     assert.match(prompt, /New operator final-proof feedback/);
     assert.match(prompt, /blank status pill and clipped mobile worker row/);
+    assert.match(prompt, /"summary": "concise independent assessment"/);
+    assert.match(prompt, /"status": "verified \| failed \| blocked"/);
+    assert.match(prompt, /# Approved criterion IDs/);
+    assert.match(prompt, /criterion-exact: Preserve the checkpoint/);
     assert.deepEqual(promptImages, [{ data: "large" }]);
+    session.prompt = async (value) => {
+      prompts.push(value);
+      session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"assessment":"Still invalid","findings":[]}' }] });
+    };
+    await assert.rejects(harness.reviewTicket(input), /Independent-review output.summary must be non empty string/);
+    assert.equal(prompts.length, 4, "invalid output gets only one repair attempt per invocation");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("oversized durable reviewer errors get one fresh compact review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-context-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    const prompts = [];
+    let alwaysFail = false;
+    let disposed = 0;
+    harness.sdk = async () => ({
+      SessionManager: { create: () => ({}) },
+      createAgentSession: async () => {
+        let message;
+        return { session: {
+          state: { messages: [] },
+          sessionManager: { getBranch: () => [{ type: "message", message }] },
+          setSessionName() {}, subscribe() { return () => {}; }, dispose() { disposed++; },
+          async prompt(value) {
+            prompts.push(value);
+            message = alwaysFail || prompts.length === 1
+              ? { role: "assistant", stopReason: "error", errorMessage: "Your input exceeds the context window of this model", content: [] }
+              : { role: "assistant", content: [{ type: "text", text: '{"summary":"Current evidence reviewed","findings":[]}' }] };
+          }
+        } };
+      }
+    });
+    const input = {
+      cwd: root, ticket: { id: "T-1" }, plan: normalizePlan({ title: "Review", nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] }),
+      proofMap: { legacy: { summary: "legacy-sentinel" }, criteria: [{ id: "current-criterion", text: "Current requirement", current: { status: "verified", evidence: [{ artifactId: "current-image" }] }, history: [{ summary: "history-sentinel" }] }] },
+      role: "requirements", round: 1, runId: "run"
+    };
+    assert.equal((await harness.reviewTicket(input)).summary, "Current evidence reviewed");
+    assert.equal(prompts.length, 2);
+    for (const prompt of prompts) {
+      assert.match(prompt, /current-criterion/);
+      assert.match(prompt, /current-image/);
+      assert.doesNotMatch(prompt, /legacy-sentinel|history-sentinel/);
+    }
+    assert.equal(disposed, 2);
+    alwaysFail = true;
+    await assert.rejects(harness.reviewTicket(input), /exceeds the context window/);
+    assert.equal(prompts.length, 4, "fresh context retry is bounded");
+    assert.equal(disposed, 4);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -953,7 +1104,7 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
       resourceLoader: { getSkills: () => ({ skills: [] }) },
       setSessionName() {},
       subscribe() { return () => {}; },
-      async prompt(value) { prompt = value; },
+      async prompt(value) { if (!value.startsWith("Your turn ended without worker_report")) prompt = value; },
       dispose() {}
     };
     harness.sdk = async () => ({
@@ -1085,4 +1236,26 @@ test("explore, design, bind, continue, and review share one supervisor queue key
   await harness.reviewWorkerReport({ cwd: "/repo", sessionKey: expected, step: { id: "build", title: "Build", agentId: "w", acceptanceCriteria: [] }, report: { status: "completed" }, diff: { files: [] } });
   assert.ok(keys.includes(expected));
   assert.equal(keys.filter((key) => key === expected).length >= 4, true);
+});
+
+test("visual capture readiness is planned early and a failed fixture preflight skips browser capture", async () => {
+  const plan = ensureVerificationContractStep(normalizePlan({ nodes: [{ id: "ui", title: "UI", requiresVisualEvidence: true }] }), true, true, false);
+  assert.equal(plan.nodes[0].role, "architecture");
+  assert.match(plan.nodes[0].prompt, /test-capture-proof/);
+  const root = await mkdtemp(join(tmpdir(), "capture-readiness-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "");
+    const calls = [];
+    const harness = new PiHarness({ dataDir: root, execImpl: async (_command, args) => { calls.push(args); throw new Error("fixture rejected instruction"); } });
+    const missing = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(missing.failureKind, "capture-configuration");
+    assert.equal(calls.length, 0);
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { "capture-proof": ["node", "capture.mjs"], "test-capture-proof": ["node", "preflight.mjs"] } }));
+    const failed = await harness.runRepositoryChecks({ cwd: root, requireVisualEvidence: true });
+    assert.equal(failed.failureKind, "capture-preflight");
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], ["preflight.mjs"]);
+    assert.match(failed.output, /fixture rejected instruction/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

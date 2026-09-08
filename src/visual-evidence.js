@@ -46,7 +46,7 @@ export async function prepareVisualEvidence(evidence, { evidenceDir, run }) {
   const captures = Array.isArray(manifest?.captures) ? manifest.captures : [];
   const result = [];
   for (const item of evidence) {
-    const capture = captures.find((capture) => capture.path === item.name);
+    const capture = captures.find((capture) => capture.path === item.name || capture.path === item.path);
     const journey = capture && Array.isArray(capture.commands) && capture.commands.length && Array.isArray(capture.assertions) && capture.assertions.length
       ? { criterionIds: Array.isArray(capture.criterionIds) ? capture.criterionIds.filter((id) => typeof id === "string") : [], commands: capture.commands, assertions: capture.assertions }
       : { criterionIds: [], commands: [], assertions: [] };
@@ -81,10 +81,10 @@ export function ticketBoundVisualEvidence(evidence = [], { ticketId, runId, evid
   return { bound: true, manifest, evidence: items };
 }
 
-export function applyVerifyEvidenceGate(checks, { required = false, requiredVideo = false, ticketId = null, runId = null } = {}) {
+export function applyVerifyEvidenceGate(checks, { required = false, requiredVideo = false, ticketId = null, runId = null, criteria = [] } = {}) {
   if (!required) return checks;
-  const repositoryFailed = checks.status === "failed" && checks.failureKind !== "visual-evidence";
-  if (repositoryFailed) return checks;
+  // Preserve the causal command failure; absence of media is a consequence.
+  if (checks.status === "failed") return checks;
   const evidence = checks.evidence || [];
   const hasImage = evidence.some((item) => item.mediaKind === "image");
   const hasVideo = evidence.some((item) => item.mediaKind === "video");
@@ -92,7 +92,7 @@ export function applyVerifyEvidenceGate(checks, { required = false, requiredVide
     return Object.assign(checks, {
       status: "failed",
       failureKind: "visual-evidence",
-      summary: "Visual verification produced no desktop or mobile evidence."
+      summary: "Visual verification produced no screenshot evidence for the required outcomes."
     });
   }
   if (requiredVideo && !hasVideo) {
@@ -109,6 +109,16 @@ export function applyVerifyEvidenceGate(checks, { required = false, requiredVide
       summary: "Visual verification produced no ticket-bound evidence."
     });
   }
+  const requiredCriteria = criteria.filter((criterion) => criterion.stepRequired !== false && (criterion.requiresVisualEvidence || criterion.requiresVideoEvidence));
+  const missing = requiredCriteria.filter((criterion) => {
+    const linked = evidence.filter((item) => item.criterionIds?.includes(criterion.id) && item.commands?.length && item.assertions?.length);
+    return !linked.some((item) => item.mediaKind === "image") || (criterion.requiresVideoEvidence && !linked.some((item) => item.mediaKind === "video"));
+  });
+  if (missing.length) Object.assign(checks, {
+    status: "failed", failureKind: "visual-evidence", missingCriterionIds: missing.map((criterion) => criterion.id),
+    summary: `Visual proof does not cover required criteria: ${missing.map((criterion) => criterion.id).join(", ")}.`,
+    failureHighlights: "Capture each missing outcome with criterion links, executed journey commands and assertions; provide recordings for criteria requiring video."
+  });
   return checks;
 }
 

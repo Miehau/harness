@@ -5,6 +5,9 @@ import { pathToFileURL } from "node:url";
 export async function startSnapshotPreview([serverFile, cwd, dataDir, host, portValue, seedFile]) {
   if (![serverFile, cwd, dataDir, host, portValue, seedFile].every(Boolean)) throw new Error("Snapshot preview requires server, workspace, data, host, port, and seed paths");
   const snapshot = JSON.parse(await readFile(seedFile, "utf8"));
+  // Public snapshots omit local paths. The preview still needs an operational
+  // primary directory for workspace APIs; use its isolated checkout, never the source.
+  snapshot.workspace = { ...snapshot.workspace, cwd };
   const { createDaemon } = await import(pathToFileURL(serverFile));
   const daemon = await createDaemon({ cwd, dataDir, host, port: Number(portValue), listen: false, lock: false });
 

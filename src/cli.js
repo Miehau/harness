@@ -356,7 +356,7 @@ async function request(method, path, opts) {
   const fetchImpl = opts.fetchImpl || fetch;
   const response = await fetchImpl(baseUrl(env) + path, {
     method,
-    headers: headers(env),
+    headers: { ...headers(env), ...(method === "POST" ? { prefer: "respond-async" } : {}) },
     ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) })
   });
   const text = await response.text();

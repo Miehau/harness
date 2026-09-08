@@ -49,6 +49,7 @@ test("delivery fixers receive repository paths named by failing checks", () => {
 test("delivery recovery fixes repository defects but not provider failures", () => {
   assert.equal(deliveryFailureNeedsFix("SyntaxError: Unexpected token '}' at src/pi-harness.js:228"), true);
   assert.equal(deliveryFailureNeedsFix("AssertionError: expected complete"), true);
+  assert.equal(deliveryFailureNeedsFix("Visual verification produced no desktop or mobile evidence.\nError: Dashboard did not render the steering form"), true);
   assert.equal(deliveryFailureNeedsFix("GITHUB_TOKEN is required for GitHub delivery"), false);
   assert.equal(deliveryFailureNeedsFix("fetch failed"), false);
 });
@@ -1171,13 +1172,118 @@ test("operator can auditably waive a stopped false verifier finding without acce
   });
 });
 
+test("paused verification survives daemon reload without repeating unchanged worker work or checks", async () => {
+  for (const changed of [false, true]) {
+    const root = await mkdtemp(join(tmpdir(), "agent-plan-resume-verification-"));
+    const cwd = join(root, "repo");
+    const dataDir = join(root, "state");
+    let workerCalls = 0, checkCalls = 0, reviewCalls = 0;
+    const reviewFocus = [];
+    let reviewing;
+    const started = new Promise((resolve) => { reviewing = resolve; });
+    const harness = {
+      ...mockHarness(),
+      runStep: async () => {
+        workerCalls++;
+        return { report: { status: "completed", summary: "implemented" }, output: "implemented", prompt: "build", reviewNotes: [], rawOutput: "" };
+      },
+      runRepositoryChecks: async () => {
+        checkCalls++;
+        if (checkCalls === 2) return { status: "failed", command: "verify", summary: "Fixture check failed", output: "Fixture check failed", evidence: [] };
+        return { status: "passed", command: "verify", summary: "passed", output: "", evidence: [] };
+      },
+      evidenceImages: async () => [],
+      generateCommitMessage: async () => "Keep completed work across pauses",
+      verifyStep: async ({ signal, focusFindings }) => {
+        reviewFocus.push(focusFindings);
+        if (++reviewCalls === 2) {
+          reviewing();
+          await new Promise((resolve, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        return { summary: "Verified", findings: [] };
+      }
+    };
+    let id;
+    try {
+      await mkdir(cwd);
+      await withDaemon(async (daemon) => {
+        const ticket = { id: "resume-proof", identifier: "LOCAL-resume", title: "Resume proof", source: "local", state: { name: "Local", type: "local" } };
+        const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+        const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src", expectedFiles: ["src/app.js"], estimatedChangedLines: 20, acceptanceCriteria: ["Works"] }] });
+        id = await seedRun(daemon, { ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "awaiting_approval", checkpoint: { kind: "awaiting_approval" } });
+        assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: {} })).status, 202);
+        const criterionIds = daemon.store.read().ticketRuns[id].proofMap?.criteria.map((criterion) => criterion.id) || [];
+        const running = invoke(daemon, "POST", `/api/tickets/${id}/steps/build/changes`, { body: { feedback: "Keep policy saving disabled until loading succeeds.", criterionIds } });
+        await Promise.race([started, running.then((response) => { throw new Error(`Worker stopped before verification: ${response.text}`); })]);
+        assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/pause`, { body: {} })).status, 200);
+        await running;
+        assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].pendingVerification.checks.status, "passed");
+        if (changed) {
+          await mkdir(join(workspace.cwd, "src"), { recursive: true });
+          await writeFile(join(workspace.cwd, "src", "changed.js"), "export const changed = true;\n");
+        }
+      }, { cwd, dataDir, harness });
+      await withDaemon(async (daemon) => {
+        const resumed = await invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} });
+        assert.equal(resumed.status, 202, resumed.text);
+        const step = daemon.store.read().ticketRuns[id].plan.nodes[0];
+        assert.equal(step.status, "review_ready");
+        assert.equal(step.pendingVerification, undefined);
+        assert.equal(workerCalls, changed ? 4 : 3);
+        assert.equal(checkCalls, changed ? 4 : 3);
+        assert.equal(reviewCalls, 3);
+        assert.ok(reviewFocus[1].some((finding) => finding.claim.includes("Keep policy saving disabled")));
+        if (!changed) assert.deepEqual(reviewFocus[2], reviewFocus[1]);
+      }, { cwd, dataDir, harness });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("async action requests acknowledge launch and retain later worker failures", { timeout: 10000 }, async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const harness = { ...mockHarness(), runStep: async () => { await gate; throw new Error("Worker failed after acknowledgement"); } };
+  try {
+    await withDaemon(async (daemon, { cwd }) => {
+      const ticket = { id: "async-action", identifier: "LOCAL-async", title: "Async action", source: "local", state: { name: "Local", type: "local" } };
+      const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+      const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src", expectedFiles: ["src/app.js"], estimatedChangedLines: 20, acceptanceCriteria: ["Works"] }] });
+      const id = await seedRun(daemon, { ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "awaiting_approval", checkpoint: { kind: "awaiting_approval" } });
+      if (!daemon.server.address()) await new Promise((resolve) => daemon.server.once("listening", resolve));
+      const response = await fetch(`http://127.0.0.1:${daemon.server.address().port}/api/tickets/${id}/approve`, {
+        method: "POST", headers: { "content-type": "application/json", prefer: "respond-async" }, body: "{}", signal: AbortSignal.timeout(3000)
+      });
+      assert.equal(response.status, 202);
+      assert.equal((await response.json()).accepted, true);
+      assert.equal(daemon.store.read().ticketRuns[id].lastError, null);
+      release();
+      const deadline = Date.now() + 3000;
+      while (!daemon.store.read().ticketRuns[id].lastError && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(daemon.store.read().ticketRuns[id].lastError, "Worker failed after acknowledgement");
+      assert.equal(daemon.store.read().ticketRuns[id].status, "needs_attention");
+    }, { harness, listen: true });
+  } finally { release(); }
+});
+
 test("step execution failures persist an actionable run checkpoint", async () => {
+  let verifyCalls = 0;
+  const workerFeedback = [];
   const harness = {
     ...mockHarness(),
-    runStep: async () => ({ report: { status: "completed", summary: "implemented" }, output: "implemented", prompt: "build", reviewNotes: [], rawOutput: "" }),
+    generateCommitMessage: async () => "fix: correct the scoped write guard\n\nWhy: Reverify operator corrections after a failed inspection.",
+    runStep: async ({ feedback }) => {
+      workerFeedback.push(feedback);
+      return { report: { status: "completed", summary: "implemented" }, output: "implemented", prompt: "build", reviewNotes: [], rawOutput: "" };
+    },
     runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }),
     evidenceImages: async () => [],
-    verifyStep: async () => { throw new Error("Verification exceeded its inspection budget."); }
+    verifyStep: async () => {
+      if (++verifyCalls === 1) throw new Error("Verification exceeded its inspection budget.");
+      return { summary: "Correction reviewed", findings: [] };
+    }
   };
   await withDaemon(async (daemon, { cwd }) => {
     const ticket = { id: "failed-step", identifier: "LOCAL-failed", title: "Fail visibly", description: "Expose the failure", source: "local", state: { name: "Local", type: "local" } };
@@ -1203,6 +1309,14 @@ test("step execution failures persist an actionable run checkpoint", async () =>
     assert.deepEqual({ kind: run.checkpoint.kind, stepId: run.checkpoint.stepId, source: run.checkpoint.source, prompt: run.checkpoint.prompt }, {
       kind: "needs_attention", stepId: "build", source: "execution", prompt: "Verification exceeded its inspection budget."
     });
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} })).status, 400);
+    const corrected = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/changes`, { body: {
+      feedback: "Correct the reproduced scope escape.", criterionIds: run.proofMap.criteria.map((criterion) => criterion.id)
+    } });
+    assert.equal(corrected.status, 202, corrected.text);
+    assert.equal(workerFeedback.at(-1), "Correct the reproduced scope escape.");
+    assert.equal(verifyCalls, 2);
+    assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].status, "review_ready", daemon.store.read().ticketRuns[id].lastError);
   }, { harness });
 });
 
@@ -1469,4 +1583,11 @@ test("stage output is bounded, redacted and readable from retained runs after re
     assert.equal(Object.values(reloaded.read().retainedRuns)[0].stages[0].activity.rawOutput, "Saved clarification");
     assert.ok((await invoke(daemon, "GET", route("missing"))).status >= 400);
   });
+});
+
+test("delivery recovery uses typed failures instead of inferring code work from arbitrary diagnostics", () => {
+  assert.equal(deliveryFailureNeedsFix("Coverage incomplete", { kind: "visual-evidence" }), true);
+  assert.equal(deliveryFailureNeedsFix("Fixture failed", { kind: "capture-preflight" }), true);
+  assert.equal(deliveryFailureNeedsFix("SyntaxError mentioned in upload response", { kind: "evidence-publication" }), false);
+  assert.equal(deliveryFailureNeedsFix("Provider unavailable", { kind: "provider" }), false);
 });

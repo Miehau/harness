@@ -4,12 +4,37 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PreviewManager, previewChromiumPath } from "../src/previews.js";
+import { publicPreviewState } from "../src/execution.js";
+import { startSnapshotPreview } from "../scripts/preview-snapshot-server.mjs";
+import { withDaemon } from "./helpers.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("locates Chromium from common CI environment variables", async () => {
   assert.equal(await previewChromiumPath({ CHROME_BIN: process.execPath }), process.execPath);
   assert.equal(await previewChromiumPath({ GOOGLE_CHROME_BIN: process.execPath }), process.execPath);
+});
+
+test("snapshot preview restores its own workspace path after public state sanitization", async () => {
+  await withDaemon(async (source, { dataDir }) => {
+    const cwd = join(dataDir, "isolated-checkout");
+    await mkdir(cwd);
+    const seedFile = join(dataDir, "snapshot.json");
+    const snapshot = publicPreviewState(source.store.read(), "missing-ticket");
+    assert.equal(snapshot.workspace.cwd, undefined);
+    await writeFile(seedFile, JSON.stringify(snapshot));
+    const preview = await startSnapshotPreview([
+      fileURLToPath(new URL("../src/server.js", import.meta.url)), cwd,
+      join(dataDir, "preview"), "127.0.0.1", "0", seedFile
+    ]);
+    try {
+      assert.equal(preview.store.read().workspace.cwd, cwd);
+      assert.notEqual(preview.store.read().workspace.cwd, source.store.read().workspace.cwd);
+      const persisted = JSON.parse(await readFile(join(dataDir, "preview", "state-v3.json"), "utf8"));
+      assert.equal(persisted.workspace.cwd, cwd);
+    } finally { await preview.close({ exit: false }); }
+  });
 });
 
 test("does not reuse a port held by another ticket preview", async () => {

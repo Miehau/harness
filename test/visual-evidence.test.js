@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { normalizePlan } from "../src/plan.js";
 import { captureTicketProof } from "../scripts/capture-ticket-proof.mjs";
 import {
-  applyVerifyEvidenceGate, planRequiresVideoEvidence, planRequiresVisualEvidence,
+  applyVerifyEvidenceGate, prepareVisualEvidence, planRequiresVideoEvidence, planRequiresVisualEvidence,
   ticketBoundVisualEvidence, ticketProofManifest, verifyStageEvidenceError, visualEvidenceManifestName
 } from "../src/visual-evidence.js";
 
@@ -73,4 +73,37 @@ test("repository failures stay test failures even when screenshots are missing",
   }, { required: true, ticketId: "ticket-1", runId: "run-2" });
   assert.equal(checks.failureKind, undefined);
   assert.equal(checks.summary, "node .agent-plan/verify.mjs failed.");
+});
+
+
+test("capture metadata matches filenames and exact absolute paths without aliasing other files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "capture-path-"));
+  try {
+    const screenshot = { name: "desktop.png", path: join(directory, "desktop.png"), mediaKind: "image" };
+    const metadata = { criterionIds: ["criterion-1"], commands: ["open dashboard"], assertions: ["Steering history is visible"] };
+    for (const path of [screenshot.name, screenshot.path, join(directory, "other", screenshot.name)]) {
+      await writeFile(join(directory, visualEvidenceManifestName), JSON.stringify({ captures: [{ path, ...metadata }] }));
+      const [prepared] = await prepareVisualEvidence([screenshot], { evidenceDir: directory });
+      assert.deepEqual(prepared.criterionIds, path.includes("/other/") ? [] : metadata.criterionIds);
+      assert.deepEqual(prepared.commands, path.includes("/other/") ? [] : metadata.commands);
+      assert.deepEqual(prepared.assertions, path.includes("/other/") ? [] : metadata.assertions);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("visual proof requires outcome coverage rather than a screenshot count", () => {
+  const criteria = [
+    { id: "success", requiresVisualEvidence: true },
+    { id: "recovery", requiresVisualEvidence: true, requiresVideoEvidence: true }
+  ];
+  const image = { name: "success.png", mediaKind: "image", criterionIds: ["success"], commands: ["submit"], assertions: ["success visible"] };
+  const gate = (evidence) => applyVerifyEvidenceGate({ status: "passed", evidence }, { required: true, criteria });
+  const insufficient = gate([image, { ...image, name: "another-success.png" }]);
+  assert.equal(insufficient.status, "failed");
+  assert.deepEqual(insufficient.missingCriterionIds, ["recovery"]);
+  const recovery = { ...image, name: "recovery.png", criterionIds: ["recovery"], assertions: ["recovered"] };
+  assert.equal(gate([image, recovery]).status, "failed", "a video criterion needs its own recording");
+  assert.equal(gate([image, recovery, { ...recovery, name: "recovery.webm", mediaKind: "video" }]).status, "passed");
+  assert.equal(gate([{ ...image, criterionIds: ["success", "recovery"] }, { ...recovery, mediaKind: "video" }]).status, "passed", "one image may cover several outcomes when independently verified");
+  assert.equal(gate([{ ...image, assertions: [] }]).status, "failed");
 });

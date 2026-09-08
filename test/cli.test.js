@@ -495,6 +495,7 @@ test("revise sends focused feedback to a review-ready step", async () => {
   await runCli(["revise", "build", "ticket-1", "Match the installed SDK interface"], {
     env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
     fetchImpl: async (url, options) => {
+      assert.equal(options.headers.prefer, "respond-async");
       called = { url, body: JSON.parse(options.body) };
       return { ok: true, status: 202, async text() { return JSON.stringify({ accepted: true }); } };
     },

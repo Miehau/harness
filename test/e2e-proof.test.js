@@ -61,6 +61,8 @@ async function proofFixture(daemon, { dataDir, cwd }, calls) {
     requirementIds: ["REQ-proof"], requiresVideoEvidence: true
   }] });
   plan.nodes[0].status = "accepted";
+  const criterionIds = initializeProofMap(plan).criteria.map(({ id }) => id);
+  for (const item of calls.evidence) Object.assign(item, { criterionIds, commands: ["open delivery", "submit delivery"], assertions: ["Delivery is visible"] });
   const artifacts = calls.evidence.map((item, index) => ({ ...item, id: `media-${index}`, kind: "visual-evidence", stageId: "verify", boundTicketId: ticket.id, boundRunId: "run-1" }));
   const finalChecks = { status: "passed", summary: "integration checks passed" };
   const proofMap = verifiedProofMap(plan, { plan, artifacts, finalChecks, proofStorageRoot: dataDir }, [{ type: "check", scope: "final" }]);
@@ -152,11 +154,48 @@ assert.equal(calls.lastCheck.environment.AGENT_PLAN_CAPTURE_TICKET_ID, id);
   }, { harness, listen: true });
 });
 
+test("a failed reviewer waits for its siblings before the run becomes retryable", async () => {
+  const calls = { evidence: [] };
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const started = new Set();
+  const harness = {
+    ...mockHarness(),
+    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
+    evidenceImages: async () => [],
+    reviewTicket: async ({ role }) => {
+      started.add(role);
+      if (role === "requirements") throw new Error("review provider failed");
+      if (role === "integration") await held;
+      return { role, summary: "Reviewed", findings: [] };
+    }
+  };
+  await withDaemon(async (daemon, fixture) => {
+    const { id } = await proofFixture(daemon, fixture, calls);
+    try {
+      const restart = invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { confirmed: true, target: "stage:verify" } });
+      const reviewing = await waitFor(daemon, id, () => started.size === 3);
+      assert.notEqual(reviewing.status, "needs_attention");
+      assert.equal(reviewing.lastError, null);
+      release();
+      const restarted = await restart;
+      assert.equal(restarted.status, 202, restarted.text);
+      const failed = await waitFor(daemon, id, (run) => run.status === "needs_attention");
+      assert.match(failed.lastError, /review provider failed/);
+    } finally { release(); }
+  }, { harness });
+});
+
 test("verification restart preserves old final evidence and assigns a fresh review identity", async () => {
   const calls = { evidence: [] };
   const harness = {
     ...mockHarness(),
-    runRepositoryChecks: async ({ environment }) => freshVisualChecks(calls, environment),
+    runRepositoryChecks: async ({ environment, requireVisualEvidence, proofCriteria }) => {
+      assert.equal(requireVisualEvidence, true, "declared capture-proof enables final evidence even without plan visual flags");
+      assert.deepEqual(JSON.parse(environment.AGENT_PLAN_CAPTURE_CRITERIA), []);
+      assert.ok(proofCriteria.length);
+      return freshVisualChecks(calls, { ...environment, AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(proofCriteria) });
+    },
     evidenceImages: async () => [],
     reviewTicket: async ({ role, proofMap, artifacts }) => ({
       role, summary: `${role} passed`, findings: [],
@@ -165,10 +204,15 @@ test("verification restart preserves old final evidence and assigns a fresh revi
   };
   await withDaemon(async (daemon, fixture) => {
     const { id } = await proofFixture(daemon, fixture, calls);
+    const workspace = daemon.store.read().ticketRuns[id].workspace.cwd;
+    await mkdir(join(workspace, ".agent-plan"), { recursive: true });
+    await writeFile(join(workspace, ".agent-plan", "project.json"), JSON.stringify({ commands: { "capture-proof": ["node", "capture.mjs"] } }));
     const oldChecks = { status: "passed", command: "verify-old", summary: "old final checks", output: "old output" };
     const oldDiff = { available: true, patch: "old final diff", files: ["old.js"] };
     await daemon.store.update((state) => {
       const stored = state.ticketRuns[id];
+      Object.assign(stored.plan.nodes[0], { requiresVisualEvidence: false, requiresVideoEvidence: false });
+      for (const criterion of stored.proofMap.criteria) Object.assign(criterion, { requiresVisualEvidence: false, requiresVideoEvidence: false });
       Object.assign(stored, {
         reviews: [{ round: 1, reviewId: "final-review-1", finalChecks: oldChecks, diff: oldDiff, reviews: [], actionableFindings: [], createdAt: "2020-01-01T00:00:00.000Z" }],
         finalChecks: oldChecks,
@@ -302,5 +346,27 @@ const context = await persistArtifact(fixture.dataDir, daemon.store.read().ticke
     const reviewArtifacts = stored.artifacts.filter((artifact) => artifact.kind === "independent-review");
     const bodies = await Promise.all(reviewArtifacts.map((artifact) => readFile(artifact.path, "utf8")));
     assert.equal(bodies.some((body) => body.includes("lowercase_secret_abcdefgh")), false);
+  }, { harness });
+});
+
+test("failed verification skips independent reviewers and carries the exact failure into correction", async () => {
+  const calls = { evidence: [], reviewers: 0 };
+  let correction;
+  const harness = {
+    ...mockHarness(),
+    runRepositoryChecks: async () => ({ status: "failed", failureKind: "capture-preflight", command: "test-capture-proof", summary: "Fixture rejected instruction", output: "submitSteering returned rejected", evidence: [] }),
+    evidenceImages: async () => [],
+    reviewTicket: async () => { calls.reviewers++; throw new Error("Review must not run"); },
+    runStep: async (input) => { correction = input; throw new Error("Stop at correction boundary"); }
+  };
+  await withDaemon(async (daemon, fixture) => {
+    const { id } = await proofFixture(daemon, fixture, calls);
+    await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { confirmed: true, target: "stage:verify" } });
+    await waitFor(daemon, id, (run) => run.status === "needs_attention");
+    assert.equal(calls.reviewers, 0);
+    const stored = daemon.store.read().ticketRuns[id];
+    assert.equal(stored.reviews.at(-1).reviewMode, "prerequisite");
+    assert.match(JSON.stringify(correction), /submitSteering returned rejected/);
+    assert.equal(stored.reviews.at(-1).reviews.length, 1);
   }, { harness });
 });
