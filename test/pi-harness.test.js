@@ -894,21 +894,21 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
       focusFindings: [finding], operatorFeedback: "AGENT_PLAN_CAPTURE_* variables were injected by the live harness.",
       images: [{ type: "image", data: "proof", mimeType: "image/png" }], role: "integration", round: 2, runId: "run"
     });
-    assert.match(prompt, /Findings from earlier review rounds/);
+    assert.match(prompt, /Progressive review index/);
     assert.match(prompt, /A late child can escape cleanup/);
     assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
     assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
     assert.match(prompt, /expected application, screen, data and fully loaded state/);
-    assert.match(prompt, /Operator evidence and correction constraints/);
-    assert.match(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
-    assert.match(prompt, /Do not repeat a finding directly contradicted/);
+    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+    assert.match(await readFile(navigation.constraints, "utf8"), /AGENT_PLAN_CAPTURE_\* variables were injected/);
+    assert.doesNotMatch(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("an interrupted independent reviewer resumes its durable session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-review-resume-"));
   try {
-    const sessionDir = join(root, "pi-sessions", "tickets", "T-1", "run", "reviews", "round-2", "integration");
+    const sessionDir = join(root, "pi-sessions", "tickets", "T-1", "run", "reviews", "round-2", "integration", "progressive-v1");
     await mkdir(sessionDir, { recursive: true });
     const sessionFile = join(sessionDir, "saved.jsonl");
     await writeFile(sessionFile, "persisted review");
@@ -948,19 +948,14 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     prompt = prompts[0];
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
-    assert.match(prompt, /Expected ticket: T-1 — Ticket/);
-    assert.match(prompt, /Current deterministic gate \(authoritative; supersedes every earlier check result/);
+    assert.match(prompt, /"ticket": "T-1"/);
     assert.match(prompt, /"status": "passed"/);
     assert.match(prompt, /"summary": "Passed"/);
     assert.match(prompt, /Filenames, manifests and capture claims alone are not visual proof/);
-    assert.match(prompt, /incorrect, blank, partial, stale or unverifiable states/);
-    assert.match(prompt, /New operator final-proof feedback/);
-    assert.match(prompt, /blank status pill and clipped mobile worker row/);
-    assert.match(prompt, /"summary": "concise independent assessment"/);
-    assert.match(prompt, /"status": "verified \| failed \| blocked"/);
-    assert.match(prompt, /# Approved criterion IDs/);
-    assert.match(prompt, /criterion-exact: Preserve the checkpoint/);
-    assert.deepEqual(promptImages, [{ data: "large" }]);
+    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+    assert.match(await readFile(navigation.constraints, "utf8"), /blank status pill and clipped mobile worker row/);
+    assert.match(prompt, /criterion-exact/);
+    assert.deepEqual(promptImages, []);
     session.prompt = async (value) => {
       prompts.push(value);
       session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"assessment":"Still invalid","findings":[]}' }] });
@@ -1003,7 +998,8 @@ test("oversized durable reviewer errors get one fresh compact review", async () 
     assert.equal(prompts.length, 2);
     for (const prompt of prompts) {
       assert.match(prompt, /current-criterion/);
-      assert.match(prompt, /current-image/);
+      const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+      assert.match(await readFile(join(navigation.index, "..", navigation.criteria[0].detail), "utf8"), /current-image/);
       assert.doesNotMatch(prompt, /legacy-sentinel|history-sentinel/);
     }
     assert.equal(disposed, 2);
@@ -1609,4 +1605,48 @@ test("project_command without a repository stays primary; an explicit id uses ma
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("independent review loads images only through explicit current-artifact lookup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-media-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    let customTools;
+    let inspect = true;
+    let count = 0;
+    const session = {
+      state: { messages: [] }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt(_prompt, options) {
+        assert.deepEqual(options.images, []);
+        count++;
+        if (inspect) {
+          const tool = customTools.find((tool) => tool.name === "review_media");
+          await assert.rejects(tool.execute("call", { artifactId: "stale" }), /No current review image/);
+          const result = await tool.execute("call", { artifactId: "current" });
+          assert.equal(result.content[1].data, "image-bytes");
+        }
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: JSON.stringify({ summary: "Reviewed", findings: [], criterionResults: [{ criterionId: "criterion", status: "verified", evidence: [{ type: "media", artifactId: "current" }] }] }) }] });
+      }
+    };
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    const input = { cwd: root, ticket: { id: "T" }, plan: normalizePlan({ nodes: [{ id: "ui", title: "UI" }] }), artifacts: [{ id: "current", name: "screen.png", kind: "visual-evidence", path: "/proof/screen.png" }], checks: { status: "passed", evidence: [{ path: "/proof/screen.png", mediaKind: "image" }] }, images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }], role: "requirements", round: 1, runId: "run" };
+    const result = await harness.reviewTicket(input);
+    assert.deepEqual(result.inputMetrics.inspectedMediaIds, ["current"]);
+    assert.ok(result.inputMetrics.promptCharacters < 16000);
+    inspect = false;
+    await harness.reviewTicket(input); // Same immutable packet retains prior inspection.
+    await assert.rejects(harness.reviewTicket({ ...input, round: 2 }), /uninspected media/);
+    assert.equal(count, 4, "uninspected media gets one report repair, then fails closed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("UI workers cannot start before the design-system prerequisite exists", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ui-prerequisite-"));
+  try {
+    const harness = new PiHarness({ dataDir: root });
+    harness.sdk = async () => { throw new Error("Model must not start"); };
+    const plan = normalizePlan({ nodes: [{ id: "ui", title: "UI", permission: "write", requiresVisualEvidence: true }] });
+    await assert.rejects(harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [] }), /Missing \.agent-plan\/design-system.md/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+
 });

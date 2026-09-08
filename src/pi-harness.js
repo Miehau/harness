@@ -1,3 +1,4 @@
+import { designSystemPath, designSystemExists, ensureDesignSystemStep, uiDesignViolations, uiPlanningInstruction } from "./design-system.js";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
@@ -14,7 +15,7 @@ import { parseModelOutput } from "./model-output.js";
 import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
 import { loadProjectConfig, projectConfigPath, projectEnvironment, redactCommandOutput, runManagedCommand, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
-import { compactReviewPacket } from "./review-packet.js";
+import { compactReviewPacket, writeReviewIndex } from "./review-packet.js";
 import { visualEvidenceMedia } from "./artifacts.js";
 import { prepareVisualEvidence } from "./visual-evidence.js";
 import { redactRecord, redactText, safeReasoningSummary } from "./redaction.js";
@@ -95,6 +96,7 @@ STEP:
   "productContext": "only the concise PRD and implementation-delta context relevant to this step",
   "expectedArtifacts": ["named outputs"],
   "acceptanceCriteria": ["observable criterion"],
+  "uiPlan": { "reuse": "existing component/pattern and source", "hierarchy": "primary information and action; omit unnecessary text/controls", "states": "necessary loading/empty/error/success states", "interaction": "flow, keyboard and accessibility", "proof": "journeys and outcomes to inspect", "deviations": "reason for new patterns, or none" },
   "requiresVisualEvidence": false,
   "requiresVideoEvidence": false,
   "dependsOn": ["step-or-group-id"],
@@ -102,6 +104,7 @@ STEP:
 }
 
 Rules:
+- ${uiPlanningInstruction} For UI write steps provide uiPlan as short decisions, about 120 words total; omit it for backend-only work. Small changes should name the existing pattern rather than add a new design phase. Include these decisions in designArtifact.
 - Steps are task-specific; do not use a fixed workflow template.
 - Use a group only when sibling steps can run concurrently and feed a later step.
 - Groups may contain steps only; never nest another group.
@@ -440,6 +443,10 @@ ${architectureHorizon}
 
 ## Feature discovery and maintenance
 ${discoveryInstruction}
+
+${step.requiresVisualEvidence || step.requiresVideoEvidence ? `## UI plan and existing conventions
+${uiPlanningInstruction}
+${step.uiPlan ? JSON.stringify(step.uiPlan, null, 2) : "Before editing UI, state the existing pattern to reuse, hierarchy, required states, interaction and proof journey. Explain any deviation."}` : ""}
 
 ## Relevant product context
 ${step.productContext || "No step-specific product context was assigned."}
@@ -1358,12 +1365,14 @@ export class PiHarness {
       const projectConfigExists = contractExists;
       const captureReady = Boolean((await loadProjectConfig(cwd)).commands["capture-proof"]);
       let plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists, captureReady);
-      let violations = planReviewViolations(plan);
+      plan = ensureDesignSystemStep(plan, await designSystemExists(cwd, plan));
+      let violations = [...planReviewViolations(plan), ...uiDesignViolations(plan)];
       if (violations.length) {
         const revision = await this.visibleSupervisorPrompt(session, `Revise the complete JSON plan so every implementation step is a coherent review unit. Resolve each deterministic violation below by splitting behavior slices or adding a concrete indivisibility justification; do not merely raise a budget. Return the complete JSON plan only.\n\n${violations.map((item) => `- ${item}`).join("\n")}`, { publishText: false, onEvent, signal });
         Object.assign(parsed, parseModelOutput(revision, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Revised design output"));
         plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists, captureReady);
-        violations = planReviewViolations(plan);
+        plan = ensureDesignSystemStep(plan, await designSystemExists(cwd, plan));
+        violations = [...planReviewViolations(plan), ...uiDesignViolations(plan)];
       }
       if (violations.length) throw new Error(`Planner returned oversized review steps: ${violations.join("; ")}`);
       assertAvailablePlanSkills(plan, skillNames);
@@ -1724,7 +1733,7 @@ ${diff.patch || "No textual diff"}`;
   async reviewTicket(input) {
     const { cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, access, onEvent, signal, freshSession = false } = input;
     const { createAgentSession, SessionManager } = await this.sdk();
-    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role);
+    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role, "progressive-v1");
     await mkdir(sessionDir, { recursive: true });
     const existingFile = !freshSession && (await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).sort().at(-1);
     let manager;
@@ -1733,18 +1742,41 @@ ${diff.patch || "No textual diff"}`;
     } catch {
       manager = SessionManager.create(cwd, sessionDir);
     }
+    const lookup = await writeReviewIndex(join(sessionDir, "evidence"), input);
+    const inspectedFile = join(lookup.root, "inspected-media.json");
+    let retainedInspections = [];
+    try { retainedInspections = JSON.parse(await readFile(inspectedFile, "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    const inspectedMedia = new Set(retainedInspections);
+    const currentImages = (checks?.evidence || []).filter((item) => item.mediaKind === "image");
+    const mediaTool = defineTool({
+      name: "review_media", label: "Inspect current review media", description: "Inspect a current image or sampled video frame by its artifact ID from the review index. Images are loaded only on request.",
+      parameters: Type.Object({ artifactId: Type.String() }),
+      async execute(_callId, { artifactId }) {
+        const artifact = (artifacts || []).find((item) => item.id === artifactId && item.kind === "visual-evidence");
+        const index = artifact ? currentImages.findIndex((item) => item.path === artifact.path) : -1;
+        if (index < 0 || !images[index]) throw new Error("No current review image for that artifact ID; read the evidence index first.");
+        inspectedMedia.add(artifactId);
+        await writeFile(inspectedFile, JSON.stringify([...inspectedMedia]), "utf8");
+        return { content: [{ type: "text", text: `Inspected current artifact ${artifactId}: ${artifact.name}` }, images[index]] };
+      }
+    });
     const { session } = await createAgentSession({
-      ...(await this.sessionOptions(profile)),
-      cwd,
-      tools: filesystemToolNames,
-      customTools: scopedReadTools(cwd, access),
-      sessionManager: manager
+      ...(await this.sessionOptions(profile)), cwd, tools: filesystemToolNames,
+      customTools: [...scopedReadTools(cwd, access), mediaTool, defineTool({
+        name: "review_evidence", label: "Read retained review evidence", description: "Read an indexed evidence file in bounded portions. Repository files use read instead.",
+        parameters: Type.Object({ file: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
+        async execute(_callId, { file, offset = 0, limit = 12000 }) {
+          const path = resolve(lookup.root, file);
+          if (dirname(path) !== lookup.root || !/\.(json|md|patch)$/.test(path)) throw new Error("Choose a file from the current review index");
+          const content = await readFile(path, "utf8");
+          const start = Math.max(0, Math.floor(offset));
+          return { content: [{ type: "text", text: JSON.stringify({ file, total: content.length, offset: start, content: content.slice(start, start + Math.max(1, Math.min(12000, limit))) }) }] };
+        }
+      })], sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
-    const packet = enrichReviewPacket(compactReviewPacket({ ticket, plan, artifacts, diff, checks, proofMap: proofMap && {
-      ...proofMap, legacy: undefined,
-      criteria: (proofMap.criteria || []).map((criterion) => ({ ...criterion, history: [] }))
-    } }), { diff, checks });
+    onEvent?.({ type: "phase", label: `Progressive review index: ${lookup.textCharacters} characters; ${lookup.summary.counts.criteria} criteria` });
     const outputContract = `The requirements reviewer must return an explicit criterionResults verdict for EVERY approved criterion ID, even on correction rounds. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate.
 
 Return ONLY JSON:
@@ -1770,20 +1802,12 @@ Return ONLY JSON:
 
 ${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
 
-# Compact review packet
-${JSON.stringify(packet, null, 2)}
+# Progressive review index
+${JSON.stringify(lookup.summary, null, 2)}
 
-# Approved criterion IDs
-${(proofMap?.criteria || []).map((criterion) => `- ${criterion.id} (${criterion.stepTitle}): ${criterion.text}`).join("\n") || "- None"}
-
+Use review_evidence to read indexed evidence files (absolute paths or index-relative names); use read for permitted repository files. Read constraints.md first: it contains authoritative operator scope and correction instructions. Read the complete index, then review one behavior at a time, following its criteria, evidence and dependencies on demand. Do not load every detail file or historical review. Requirements review must cover every criterion in the complete index, not just the navigation preview. Integration review must check shared state, dependencies and interactions across behaviors; groups are navigation units, not isolation guarantees.
+Restrict inspection to the checkout and indexed evidence; do not inspect sibling tickets or global configuration. Read only the relevant changed-file sections from changes.patch; if truncated, inspect the actual repository files. Use review_media to inspect images by artifact ID; filenames and manifests cannot establish visual success.
 ${images.length ? visualProofIdentityInstruction : ""}
-
-# Findings from earlier review rounds
-${focusFindings.length ? JSON.stringify(focusFindings, null, 2) : "None — this is the first review round."}
-
-# Operator evidence and correction constraints
-${operatorFeedback || "None"}
-${operatorFeedback ? "Treat these as authoritative constraints. Do not repeat a finding directly contradicted by them unless current evidence proves the issue has regressed." : ""}
 
 ${focusFindings.length
     ? "This is a correction review. Re-check every earlier finding against the current repository and inspect regressions directly introduced by its fixes. Report an earlier finding again when it remains unresolved; omit it only after verifying that current code or evidence resolves it. Do not start a new broad audit or expand the review horizon."
@@ -1794,6 +1818,13 @@ ${outputContract}
 ${findingRubric}
 
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`);
+    const parseReview = () => {
+      const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
+      for (const result of parsed.criterionResults || []) for (const locator of result.evidence || []) {
+        if (locator.type === "media" && !inspectedMedia.has(locator.artifactId)) throw Object.assign(new Error(`Independent-review output cites uninspected media ${locator.artifactId}; inspect it with review_media before reporting visual success.`), { code: "MODEL_RESPONSE_ERROR" });
+      }
+      return parsed;
+    };
     const unbindAbort = bindAbort(session, signal);
     let lastThinkingAt = 0;
     const unsubscribe = session.subscribe((event) => {
@@ -1805,25 +1836,26 @@ Every reported finding triggers an automatic correction round. Report concrete d
     try {
       signal?.throwIfAborted();
       const turnPrompt = existingFile
-        ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n\nCurrent deterministic gate (authoritative; supersedes every earlier check result in this conversation):\n${JSON.stringify(packet.checks, null, 2)}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\n# Approved criterion IDs\n${(proofMap?.criteria || []).map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None"}\n\n${outputContract}`
+        ? `Continue the interrupted independent review from the existing conversation. Preserve verified inspection; use this current index and its constraints to supersede stale evidence.\n\n${prompt}`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
-      await session.prompt(turnPrompt, { images });
+      await session.prompt(turnPrompt, { images: [] });
       signal?.throwIfAborted();
       let parsed;
       try {
-        parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
+        parsed = parseReview();
       } catch (error) {
         if (/context (?:window|length)/i.test(error.message)) throw error;
         if (error.code !== "MODEL_RESPONSE_ERROR" && !/^(?:Model output|Independent-review output)/.test(error.message)) throw error;
         signal?.throwIfAborted();
         onEvent?.({ type: "phase", label: "Retrying failed or incomplete independent-review output" });
-        await session.prompt(`Your previous review response was invalid: ${error.message}. Correct its format without changing your evidence-backed verdicts or dropping unresolved findings; do not repeat repository inspection.\n\n${outputContract}`, { images });
+        await session.prompt(`Your previous review response was invalid: ${error.message}. Correct its format without changing your evidence-backed verdicts or dropping unresolved findings; do not repeat repository inspection.\n\n${outputContract}`, { images: [] });
         signal?.throwIfAborted();
-        parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
+        parsed = parseReview();
       }
       return {
         role,
+        inputMetrics: { indexCharacters: lookup.textCharacters, promptCharacters: turnPrompt.length, inspectedMediaIds: [...inspectedMedia], packetDigest: lookup.digest },
         summary: String(parsed.summary || ""),
         criterionResults: Array.isArray(parsed.criterionResults) ? parsed.criterionResults : [],
         findings: Array.isArray(parsed.findings) ? parsed.findings : [],
@@ -1862,6 +1894,10 @@ Every reported finding triggers an automatic correction round. Report concrete d
   }
 
   async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onSessionActive, onSessionInactive, onSteering, onCleanup, ticketId = "shared", runId = "legacy", attemptId = null, profile, access, repositories = [], signal, containment: suppliedContainment }) {
+    if (step.permission === "write" && (step.requiresVisualEvidence || step.requiresVideoEvidence) && !await designSystemExists(cwd, { nodes: [step] })) {
+      throw new Error(`Missing ${designSystemPath}; complete the design-system prerequisite before UI implementation.`);
+    }
+
     // The daemon may persist this containment before invoking us. Never replace
     // it: project commands must inherit the exact ownership record on disk.
     const containment = suppliedContainment || this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });

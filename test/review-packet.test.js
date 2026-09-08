@@ -124,3 +124,31 @@ test("bounds canonical diff and deterministic check output", () => {
   assert.match(packet.artifacts[0].content, /characters omitted/);
   assert.equal(packet.checks.durationMs, 42);
 });
+
+test("progressive index stays bounded while preserving every current criterion and detail", async (t) => {
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { writeReviewIndex } = await import("../src/review-packet.js");
+  const root = await mkdtemp(join(tmpdir(), "progressive-review-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proofMap = { legacy: { reviews: "historical-sentinel".repeat(100000) }, criteria: Array.from({ length: 120 }, (_, n) => ({ id: `c-${n}`, stepId: `step-${n % 12}`, text: `Outcome ${n}`, current: { status: "verified", evidence: [] }, history: [{ summary: "historical-sentinel" }] })) };
+  const input = { plan: { nodes: Array.from({ length: 12 }, (_, n) => ({ id: `step-${n}`, title: `Behavior ${n}`, status: "accepted", dependsOn: n ? [`step-${n - 1}`] : [] })) }, proofMap, diff: { before: "before", after: "after", files: ["src/app.js"], patch: "+current-change\n".repeat(50000) }, checks: { status: "passed", output: "check-detail-sentinel" }, operatorFeedback: "authoritative-constraint-sentinel", focusFindings: [{ claim: "Fix regression", suggestedFix: "finding-detail-sentinel" }] };
+  const result = await writeReviewIndex(root, input);
+  const initial = JSON.stringify(result.summary);
+  assert.ok(initial.length < 12000, initial.length);
+  assert.doesNotMatch(initial, /historical-sentinel|check-detail-sentinel|authoritative-constraint-sentinel|finding-detail-sentinel|current-change/);
+  const index = JSON.parse(await readFile(result.summary.index, "utf8"));
+  assert.equal(index.criteria.length, 120);
+  assert.equal(index.groups.length, 12);
+  assert.match(await readFile(join(result.root, index.criteria.at(-1).detail), "utf8"), /Outcome 119/);
+  assert.doesNotMatch(await readFile(join(result.root, index.criteria[0].detail), "utf8"), /historical-sentinel/);
+  assert.match(await readFile(join(result.root, "changes.patch"), "utf8"), /current-change/);
+  assert.match(await readFile(join(result.root, index.constraints), "utf8"), /authoritative-constraint-sentinel/);
+  const group = JSON.parse(await readFile(join(result.root, index.groups[1].detail), "utf8"));
+  assert.deepEqual(group.dependsOn, ["step-0"]);
+  assert.equal(group.criteria.length, 10);
+  const updated = await writeReviewIndex(root, { ...input, operatorFeedback: "New scope" });
+  assert.notEqual(updated.digest, result.digest);
+  assert.match(await readFile(join(result.root, index.constraints), "utf8"), /authoritative-constraint-sentinel/, "old reviewer snapshots remain immutable");
+});

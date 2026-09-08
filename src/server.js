@@ -1,3 +1,4 @@
+import { designSystemExists, ensureDesignSystemStep } from "./design-system.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
@@ -1704,7 +1705,8 @@ async function loadLocalRun(inputPath) {
     verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
-  const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists, Boolean((await loadProjectConfig(source)).commands["capture-proof"]));
+  let plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists, Boolean((await loadProjectConfig(source)).commands["capture-proof"]));
+  plan = ensureDesignSystemStep(plan, await designSystemExists(source, plan));
   const runId = randomUUID();
   const slug = safeName(plan.title).slice(0, 32);
   const id = `local-${slug}-${runId.slice(0, 8)}`;
@@ -3728,7 +3730,8 @@ async function freshLocalRun(previous, runId, access) {
     verificationContractExists(source),
     stat(join(source, projectConfigPath)).then(() => true, () => false)
   ]);
-  const plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists, Boolean((await loadProjectConfig(source)).commands["capture-proof"]));
+  let plan = ensureVerificationContractStep(fixture.plan, contractExists, projectConfigExists, Boolean((await loadProjectConfig(source)).commands["capture-proof"]));
+  plan = ensureDesignSystemStep(plan, await designSystemExists(source, plan));
   const artifacts = await Promise.all([
     persistArtifact(dataDir, previous.ticket, { runId, name: "feature.md", content: fixture.feature, stageId: "requirements", kind: "feature-brief" }),
     persistArtifact(dataDir, previous.ticket, { runId, name: "plan.json", content: fixture.planSource, stageId: "design", kind: "plan-source" }),

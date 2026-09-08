@@ -66,6 +66,7 @@ function normalizeStep(raw, used, defaultHarness) {
     productContext: String(raw.productContext || "").trim(),
     expectedArtifacts: strings(raw.expectedArtifacts),
     acceptanceCriteria: strings(raw.acceptanceCriteria),
+    ...(raw.uiPlan && typeof raw.uiPlan === "object" ? { uiPlan: Object.fromEntries(["reuse", "hierarchy", "states", "interaction", "proof", "deviations"].map((key) => [key, String(raw.uiPlan[key] || "").trim().slice(0, 600)])) } : {}),
     requiresVisualEvidence: raw.requiresVisualEvidence === true || raw.requiresVideoEvidence === true,
     requiresVideoEvidence: raw.requiresVideoEvidence === true,
     dependsOn: strings(raw.dependsOn),
