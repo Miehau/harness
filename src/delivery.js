@@ -222,3 +222,68 @@ export async function safeSyncLocal(cwd, base, execImpl = exec) {
 }
 
 export const parseRemoteRepository = repositoryFromRemote;
+
+export function deliveryRepositoryId(repo = {}) {
+  return repo.repositoryId || repo.id || "primary";
+}
+
+export function writableGitDeliveryRepos(repos = []) {
+  return (repos || []).filter((repo) => repo && repo.mode !== "read-only" && repo.cwd);
+}
+
+export function changedGitDeliveryRepos(repos = [], diffs = {}) {
+  return writableGitDeliveryRepos(repos).filter((repo) => (diffs[deliveryRepositoryId(repo)]?.files || []).length > 0);
+}
+
+export function deliveryFinished(record) {
+  return record?.status === "integrated" || record?.status === "not_required";
+}
+
+export function createDeliveryRecord(repo = {}, extras = {}) {
+  const repositoryId = deliveryRepositoryId(repo);
+  const change = extras.change || repo.change || null;
+  return {
+    repositoryId,
+    kind: repo.kind || (repositoryId === "primary" ? "primary" : "extra"),
+    sourceCwd: extras.sourceCwd || repo.sourceCwd || null,
+    cwd: extras.cwd || repo.cwd || null,
+    branch: extras.branch || repo.branch || null,
+    displayPath: extras.displayPath || repo.displayPath || repo.sourceCwd || repositoryId,
+    status: extras.status || "pending",
+    remote: extras.remote || null,
+    base: extras.base || null,
+    change,
+    remoteChangeId: change?.id ?? extras.remoteChangeId ?? null,
+    checks: extras.checks || null,
+    commit: extras.commit || null,
+    sync: extras.sync || null,
+    error: extras.error || null,
+    integratedAt: extras.integratedAt || null,
+    externalActionPending: extras.externalActionPending || null,
+    feedbackIds: extras.feedbackIds || []
+  };
+}
+
+export function upsertDeliveryRecord(records = [], patch = {}) {
+  const repositoryId = deliveryRepositoryId(patch);
+  const next = Array.isArray(records) ? records.map((item) => ({ ...item })) : [];
+  const index = next.findIndex((item) => item.repositoryId === repositoryId);
+  const current = index >= 0 ? next[index] : createDeliveryRecord(patch, patch);
+  const change = patch.change === undefined ? current.change : patch.change;
+  const merged = {
+    ...current,
+    ...patch,
+    repositoryId,
+    change,
+    remoteChangeId: change?.id ?? patch.remoteChangeId ?? current.remoteChangeId ?? null
+  };
+  if (index >= 0) next[index] = merged;
+  else next.push(merged);
+  return next;
+}
+
+export function classifyDeliveryFailure(failures = []) {
+  const names = failures.map((item) => item.displayPath || item.repositoryId).join(", ");
+  const details = failures.map((item) => `${item.displayPath || item.repositoryId}: ${item.error}`).join("\n");
+  return `Repository delivery failed in ${names}\n${details}`;
+}

@@ -45,3 +45,33 @@ test("adapter lifecycle admits a dependency-ready Jira ticket and closes it afte
   assert.equal(JSON.parse(forgeWrites.find(({ url }) => url.endsWith("/merge")).input.body).squash, true);
   assert.equal(trackerWrites.filter(({ input }) => input.method === "POST").length, 2);
 });
+
+test("independent GitLab adapters keep per-repo remote identities", async () => {
+  const created = { a: 0, b: 0 };
+  function adapter(label) {
+    return new GitLabDelivery({
+      project: `acme/${label}`, token: "token",
+      fetchImpl: async (url, input = {}) => {
+        if (url.endsWith("/merge_requests") && input.method === "POST") {
+          created[label] += 1;
+          if (label === "b" && created.b === 1) return { ok: false, text: async () => JSON.stringify({ message: "B hosting failed" }) };
+          return response({ iid: created[label], web_url: `https://gitlab.com/acme/${label}/-/merge_requests/${created[label]}`, sha: "head" });
+        }
+        if (url.endsWith("/discussions")) return response([]);
+        if (url.endsWith("/merge") && input.method === "PUT") return response({ state: "merged", squash_commit_sha: `squash-${label}` });
+        return response({ sha: "head", state: "opened", detailed_merge_status: "mergeable", blocking_discussions_resolved: true, head_pipeline: { status: "success" } });
+      }
+    });
+  }
+  const forgeA = adapter("a");
+  const forgeB = adapter("b");
+  const changeA = await forgeA.create({ branch: "ticket", base: "main", title: "A", body: "A" });
+  await assert.rejects(forgeB.create({ branch: "ticket", base: "main", title: "B", body: "B" }), /B hosting failed/);
+  const retryB = await forgeB.create({ branch: "ticket", base: "main", title: "B", body: "B" });
+  assert.equal(created.a, 1);
+  assert.equal(created.b, 2);
+  assert.equal(changeA.id, 1);
+  assert.equal(retryB.id, 2);
+  assert.equal((await forgeA.merge(changeA)).commit, "squash-a");
+  assert.equal((await forgeB.merge(retryB)).commit, "squash-b");
+});

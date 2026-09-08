@@ -2253,3 +2253,194 @@ test("non-Git extra roots and Any-access writes stay in proof instead of being d
     await rm(external, { recursive: true, force: true });
   }
 });
+
+const deliveryGitIdentity = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "Delivery Test",
+  GIT_AUTHOR_EMAIL: "delivery@example.test",
+  GIT_COMMITTER_NAME: "Delivery Test",
+  GIT_COMMITTER_EMAIL: "delivery@example.test"
+};
+
+async function initSourcedRepo(cwd) {
+  await gitExec("git", ["init", "-q", "-b", "main"], { cwd });
+  await writeFile(join(cwd, "README.md"), "base\n");
+  await gitExec("git", ["add", "-A"], { cwd });
+  await gitExec("git", ["commit", "-qm", "baseline"], { cwd, env: deliveryGitIdentity });
+  const bare = await mkdtemp(join(tmpdir(), "agent-plan-origin-"));
+  await gitExec("git", ["init", "-q", "--bare", "-b", "main"], { cwd: bare });
+  await gitExec("git", ["remote", "add", "origin", bare], { cwd });
+  await gitExec("git", ["push", "-q", "-u", "origin", "main"], { cwd });
+  await gitExec("git", ["remote", "set-head", "origin", "main"], { cwd });
+  return bare;
+}
+
+function fakeForge(label, { failCreate = () => false } = {}) {
+  const creates = [];
+  const merges = [];
+  return {
+    creates,
+    merges,
+    async create(input) {
+      if (failCreate()) throw new Error(`${label} hosting failed`);
+      creates.push(input);
+      return { provider: "github", id: creates.length, url: `https://github.com/acme/${label}/pull/${creates.length}`, headSha: `head-${label}-${creates.length}` };
+    },
+    async status(change) {
+      return { headSha: change.headSha || `head-${label}`, feedback: [], checks: "passed", mergeable: true, ready: true, mergeState: "clean", merged: false };
+    },
+    async merge(change) {
+      merges.push(change);
+      return { commit: `merged-${label}-${change.id}` };
+    },
+    comment: async () => ({})
+  };
+}
+
+function verifiedDeliveryProof(plan, run) {
+  const map = initializeProofMap(plan, { approvedAt: "2026-09-10T10:00:00.000Z" });
+  return applyProofReports(map, map.criteria.map((criterion) => ({
+    criterionId: criterion.id, status: "verified", evidence: [{ type: "check", scope: "final" }]
+  })), run);
+}
+
+test("mocked hosting delivers A once, records B failure, and retries only B after restart", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-deliver-ab-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-deliver-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-deliver-b-"));
+  const bares = [];
+  let daemon;
+  let failB = true;
+  try {
+    bares.push(await initSourcedRepo(primary), await initSourcedRepo(extra));
+    await writeFile(join(primary, "user-dirty.txt"), "keep-me\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    const forgeA = fakeForge("repo-a");
+    const forgeB = fakeForge("repo-b", { failCreate: () => failB });
+    const harness = {
+      ...mockHarness(),
+      runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] })
+    };
+    const trackers = {
+      async comment() { return { id: "c1" }; },
+      async transition() { return { type: "completed" }; }
+    };
+    const daemonOptions = {
+      cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git", harness, trackers, deliveryPollMs: 5,
+      deliveryForRemote(_remote, { repository } = {}) {
+        return (repository?.id || "primary") === "primary" ? forgeA : forgeB;
+      }
+    };
+    daemon = await createDaemon(daemonOptions);
+    const ticket = {
+      id: "deliver-ab", identifier: "MEA-ab", title: "Ship both", description: "Two repos",
+      source: "linear", provider: "linear", state: { name: "In Progress", type: "started" }
+    };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    await writeFile(join(workspace.cwd, "done-a.txt"), "from-a\n");
+    await commitWorkspace(workspace.cwd, "feat: a");
+    await writeFile(join(extraRepo.cwd, "done-b.txt"), "from-b\n");
+    await commitWorkspace(extraRepo.cwd, "feat: b");
+    const plan = normalizePlan({
+      title: "Both",
+      nodes: [{ id: "one", title: "One", permission: "write", writeScope: `done-a.txt,root:${extraId}:done-b.txt`, acceptanceCriteria: ["Both land"] }]
+    });
+    plan.nodes[0].status = "accepted";
+    const artifacts = [{ id: "context", name: "product-context-update.md", kind: "product-context-update", content: "# Product context\n" }];
+    const finalChecks = { status: "passed", summary: "passed" };
+    const proofMap = verifiedDeliveryProof(plan, { plan, artifacts, finalChecks });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan, artifacts, proofMap, finalChecks,
+      reviews: [{ round: 1, diff: { available: true, files: ["done-a.txt", `root:${extraId}:done-b.txt`], stat: "2 files" }, reviews: [], actionableFindings: [] }],
+      status: "awaiting_evidence_review",
+      checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks }
+    });
+    assert.equal(forgeA.creates.length, 0);
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(approved.status, 200, approved.text);
+    await waitForRun(daemon, id, (run) => run.status === "needs_attention" || run.status === "completed", 20_000);
+    let stored = daemon.store.read().ticketRuns[id];
+    assert.equal(stored.status, "needs_attention", stored.lastError);
+    assert.notEqual(stored.status, "completed");
+    assert.equal(forgeA.creates.length, 1);
+    assert.equal(forgeA.merges.length, 1);
+    assert.equal(forgeB.creates.length, 0);
+    const deliveredA = (stored.deliveries || []).find((item) => item.repositoryId === "primary");
+    const failedB = (stored.deliveries || []).find((item) => item.repositoryId === extraId);
+    assert.equal(deliveredA?.status, "integrated");
+    assert.equal(deliveredA?.remoteChangeId, 1);
+    assert.equal(failedB?.status, "failed");
+    assert.match(stored.lastError || "", /repo-b|hosting failed/);
+    assert.equal(await readFile(join(primary, "user-dirty.txt"), "utf8"), "keep-me\n");
+
+    await daemon.close({ exit: false });
+    await daemon.store.queue;
+    failB = false;
+    daemon = await createDaemon(daemonOptions);
+    const resumed = await invoke(daemon, "POST", `/api/tickets/${id}/resume`);
+    assert.equal(resumed.status, 202, resumed.text);
+    await waitForRun(daemon, id, (run) => run.status === "completed" || (run.status === "needs_attention" && run.lastError !== stored.lastError), 20_000);
+    stored = daemon.store.read().ticketRuns[id];
+    assert.equal(stored.status, "completed", stored.lastError);
+    assert.equal(forgeA.creates.length, 1);
+    assert.equal(forgeA.merges.length, 1);
+    assert.equal(forgeB.creates.length, 1);
+    assert.equal(forgeB.merges.length, 1);
+    assert.equal((stored.deliveries || []).find((item) => item.repositoryId === extraId)?.status, "integrated");
+    assert.equal(await readFile(join(primary, "user-dirty.txt"), "utf8"), "keep-me\n");
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+    for (const bare of bares) await rm(bare, { recursive: true, force: true });
+  }
+});
+
+test("a primary-only project still completes through the existing single-repo delivery path", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-deliver-one-"));
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-deliver-one-cwd-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-one" }, runId: "base" });
+    daemon = await createDaemon({
+      cwd, dataDir, listen: false, lock: false, vcsMode: "git",
+      harness: { ...mockHarness(), runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] }) }
+    });
+    const ticket = { id: "deliver-one", identifier: "LOCAL-one", title: "One repo", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket, runId: "run-1" });
+    await writeFile(join(workspace.cwd, "shipped.txt"), "ok\n");
+    await commitWorkspace(workspace.cwd, "feat: ship");
+    const plan = normalizePlan({ title: "One", nodes: [{ id: "one", title: "One", permission: "write", writeScope: "shipped.txt", acceptanceCriteria: ["Shipped"] }] });
+    plan.nodes[0].status = "accepted";
+    const finalChecks = { status: "passed", summary: "passed" };
+    const proofMap = verifiedDeliveryProof(plan, { plan, artifacts: [], finalChecks });
+    const id = await seedRun(daemon, {
+      ticket, workspace, repositories: workspace.repositories || [{ id: "primary", kind: "primary", sourceCwd: cwd, cwd: workspace.cwd, branch: workspace.branch, mode: "read/write" }],
+      baselineTree: workspace.baselineTree || await snapshotTree(workspace.cwd), plan, proofMap, finalChecks,
+      reviews: [{ round: 1, diff: { available: true, files: ["shipped.txt"], stat: "1 file" }, reviews: [], actionableFindings: [] }],
+      status: "awaiting_evidence_review",
+      checkpoint: { id: "proof-1", kind: "evidence_review", title: "Review final proof", finalChecks }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(approved.status, 200, approved.text);
+    const completed = await waitForRun(daemon, id, (run) => run.status === "completed" || run.status === "needs_attention", 20_000);
+    assert.equal(completed.status, "completed", completed.lastError);
+    const stored = daemon.store.read().ticketRuns[id];
+    assert.equal(stored.merge.status, "integrated");
+    assert.equal(Boolean(stored.integration.commit), true);
+    assert.equal(await readFile(join(cwd, "shipped.txt"), "utf8"), "ok\n");
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

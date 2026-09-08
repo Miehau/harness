@@ -10,7 +10,7 @@ import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hyd
 import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 import { admissionCandidates } from "./admission.js";
 import { aggregateProofDiffs, combineRepositoryChecks, diffFileSnapshots, diffTrees, extraProofRoots, labelDiff, labelRepositoryDiffs, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotProofPath, snapshotTree } from "./git.js";
-import { deliveryForRemote, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
+import { changedGitDeliveryRepos, classifyDeliveryFailure, createDeliveryRecord, deliveryFinished, deliveryForRemote, deliveryRepositoryId, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths, upsertDeliveryRecord } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
@@ -211,6 +211,8 @@ const activeTickets = new Map();
 const activeContainments = new Map();
 const activeMerges = new Set();
 const mergeQueues = new Map();
+const resolveDeliveryForRemote = options.deliveryForRemote || deliveryForRemote;
+const deliveryPollMs = Math.max(1, Number(options.deliveryPollMs) || 20_000);
 let ticketCache = new Map();
 let trackerRefresh = null;
 let pollTimer = null;
@@ -2336,9 +2338,10 @@ function waitForDelivery(milliseconds, signal) {
   });
 }
 
-async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback") {
+async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback", cwd = null) {
   const current = ticketRun(store.read(), ticketId);
-  const beforeTree = await snapshotTree(current.workspace.cwd);
+  const workCwd = cwd || current.workspace.cwd;
+  const beforeTree = await snapshotTree(workCwd);
   const references = deliveryFeedbackReferences(feedback);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
@@ -2349,18 +2352,18 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
     expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
 const result = await runContainedWorker({
-    ticketId, stepId: step.id, cwd: current.workspace.cwd, plan: current.plan, step,
+    ticketId, stepId: step.id, cwd: workCwd, plan: current.plan, step,
     artifacts: compactReviewPacket({ ticket: current.ticket, plan: current.plan, artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir) }).artifacts,
     proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
-  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((item) => item.requiresVideoEvidence) });
+  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: workCwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((item) => item.requiresVideoEvidence) });
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
-  const afterTree = await snapshotTree(current.workspace.cwd);
-  const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
-  const commit = await commitWorkspace(current.workspace.cwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
+  const afterTree = await snapshotTree(workCwd);
+  const diff = await diffTrees(workCwd, beforeTree, afterTree);
+  const commit = await commitWorkspace(workCwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
     runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
   });
@@ -2373,174 +2376,417 @@ const result = await runContainedWorker({
   return { commit, checks };
 }
 
-async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
-  if (activeMerges.has(ticketId)) throw new Error("This ticket is already being delivered");
-  activeMerges.add(ticketId);
-  const promise = (async () => {
-    const current = ticketRun(store.read(), ticketId);
-    const sourceCwd = current.workspace.sourceCwd;
-    const resumedChange = current.merge?.change || null;
-    const remoteDetails = current.merge?.remote && current.merge?.base
+function patchRunDelivery(run, patch) {
+  run.deliveries = upsertDeliveryRecord(run.deliveries || [], patch);
+  const record = run.deliveries.find((item) => item.repositoryId === deliveryRepositoryId(patch));
+  const primary = run.deliveries.find((item) => item.repositoryId === "primary") || run.deliveries[0];
+  const failed = run.deliveries.filter((item) => item.status === "failed");
+  const unfinished = run.deliveries.filter((item) => !deliveryFinished(item) && item.status !== "failed");
+  const inFlight = unfinished[0] || null;
+  run.merge = {
+    ...(run.merge || {}),
+    status: inFlight?.status || (failed.length ? "failed" : primary?.status || run.merge?.status),
+    sourceCwd: primary?.sourceCwd || run.merge?.sourceCwd,
+    branch: primary?.branch || run.merge?.branch,
+    base: primary?.base ?? inFlight?.base ?? run.merge?.base,
+    remote: primary?.remote ?? inFlight?.remote ?? run.merge?.remote,
+    change: primary?.change || run.merge?.change || null,
+    checks: inFlight?.checks || primary?.checks || run.merge?.checks,
+    commit: primary?.commit || run.merge?.commit,
+    sync: primary?.sync || run.merge?.sync,
+    error: failed[0]?.error || null,
+    externalActionPending: inFlight?.externalActionPending || null,
+    feedbackIds: primary?.feedbackIds || run.merge?.feedbackIds || []
+  };
+  if (record?.status === "failed") {
+    Object.assign(run.merge, { status: "failed", error: record.error, failedAt: record.failedAt || new Date().toISOString() });
+  }
+  return record;
+}
+
+function forgeForRepository(remote, repo) {
+  if (options.deliveryForRemote) return options.deliveryForRemote(remote, { repository: repo });
+  return deliveryForRemote(remote);
+}
+
+async function requiredChangedGitRepos(run) {
+  const repos = gitRepositoriesForStep(run);
+  const trees = await snapshotRepositoryTrees(repos);
+  const diffs = await diffRepositoryTrees(repos, repositoryBaselines(run, repos), trees);
+  return changedGitDeliveryRepos(repos, diffs).map((repo) => ({ ...repo, deliveryDiff: diffs[deliveryRepositoryId(repo)] }));
+}
+
+async function persistRepoDeliveryFailure(ticketId, repo, error) {
+  const message = redactText(error.message);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId: deliveryRepositoryId(repo),
+      displayPath: repo.displayPath || repo.sourceCwd,
+      sourceCwd: repo.sourceCwd,
+      cwd: repo.cwd,
+      branch: repo.branch,
+      status: "failed",
+      error: message,
+      failedAt: new Date().toISOString()
+    });
+    run.lastError = classifyDeliveryFailure([{ repositoryId: deliveryRepositoryId(repo), displayPath: repo.displayPath || repo.sourceCwd, error: message }]);
+  });
+}
+
+async function completeNoChangeDelivery(ticketId, queuedRun, { diff, contextContent }) {
+  const integratedAt = new Date().toISOString();
+  const productContext = contextContent === null ? null : await persistProductContext(dataDir, queuedRun.workspace.sourceCwd, contextContent);
+  const handoff = await persistArtifact(dataDir, queuedRun.ticket, {
+    runId: queuedRun.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+    content: `# ${queuedRun.ticket.identifier} handoff\n\nVerified as already satisfied. No repository changes or remote review were required.`
+  });
+  await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, "Verified as already satisfied. No repository changes or remote review were required."));
+  await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.deliveries = [createDeliveryRecord(run.workspace || {}, { status: "not_required", integratedAt })];
+    run.deliveries[0].reason = "no_changes";
+    run.integration = { sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch, commit: null, integratedAt, diff, noChange: true };
+    run.deliveredDiff = diff;
+    run.merge = { status: "not_required", reason: "no_changes", integratedAt };
+    if (productContext) run.productContextPath = productContext.path;
+    run.artifacts.push(handoff);
+    run.checkpoint = null;
+    setStage(run, "handoff", "completed", "Verified with no repository changes");
+    run.status = "completed";
+    run.lastError = null;
+    run.completedAt = integratedAt;
+  });
+  await stopTicketPreviews(ticketId, "run_completed");
+  return { position: 0, promise: Promise.resolve({ noChange: true }) };
+}
+
+async function finalizeSuccessfulDelivery(ticketId, { diff, contextContent, activity }) {
+  const current = ticketRun(store.read(), ticketId);
+  const deliveries = current.deliveries || [];
+  if (!deliveries.length || deliveries.some((item) => !deliveryFinished(item))) return null;
+  const primary = deliveries.find((item) => item.repositoryId === "primary") || deliveries[0];
+  const integratedAt = new Date().toISOString();
+  const productContext = contextContent == null ? null : await persistProductContext(dataDir, current.workspace.sourceCwd, contextContent);
+  const evidenceArtifacts = current.artifacts;
+  const remoteLines = deliveries.map((item) => item.change?.url
+    ? `- ${item.displayPath || item.repositoryId}: ${item.change.url} (\"${item.commit || "pending"}\")`
+    : `- ${item.displayPath || item.repositoryId}: integrated \"${item.commit || ""}\"`);
+  const handoff = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+    content: `# ${current.ticket.identifier} handoff\n\n${remoteLines.join("\n")}\n\n${diff?.stat || "See changed files."}${visualEvidenceHandoffSection(evidenceArtifacts)}`
+  });
+  const remoteUrl = deliveries.map((item) => item.change?.url).filter(Boolean).join(", ");
+  await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, remoteUrl
+    ? `Merged after remote checks and review: ${remoteUrl}\n\n${deliveries.map((item) => `${item.displayPath || item.repositoryId}: ${item.commit || ""}`).join("\n")}${visualEvidenceComment(evidenceArtifacts)}`
+    : `Integrated ${deliveries.length} repositor${deliveries.length === 1 ? "y" : "ies"}.${visualEvidenceComment(evidenceArtifacts)}`));
+  await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  const repos = gitRepositoriesForStep(current);
+  const diffsById = Object.fromEntries(deliveries.filter((item) => item.diff).map((item) => [item.repositoryId, item.diff]));
+  const deliveredDiff = Object.keys(diffsById).length ? mergeRepositoryDiff(repos, diffsById) : (primary.diff || diff);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.integration = {
+      sourceCwd: primary.sourceCwd || run.workspace.sourceCwd,
+      branch: primary.branch || run.workspace.branch,
+      commit: primary.commit,
+      integratedAt,
+      change: primary.change || null,
+      sync: primary.sync || null,
+      diff: deliveredDiff,
+      ...(deliveries.length > 1 ? { repositories: deliveries } : {})
+    };
+    run.deliveredDiff = deliveredDiff;
+    Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: deliveredDiff });
+    Object.assign(run.merge, { status: "integrated", commit: primary.commit, integratedAt, sync: primary.sync || null, change: primary.change || run.merge?.change, externalActionPending: null });
+    if (productContext) run.productContextPath = productContext.path;
+    run.artifacts.push(handoff);
+    run.status = "completed";
+    run.lastError = null;
+    run.completedAt = integratedAt;
+    const stage = setStage(run, "handoff", "completed", remoteUrl ? `Merged via ${remoteUrl}` : `Merged into ${primary.sourceCwd}`);
+    if (activity) stage.activity = activity.snapshot();
+  });
+  await stopTicketPreviews(ticketId, "run_completed");
+  return { commit: primary.commit, change: primary.change, sync: primary.sync, deliveries };
+}
+
+async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity, attempt }) {
+  const repositoryId = deliveryRepositoryId(repo);
+  const current = ticketRun(store.read(), ticketId);
+  const existing = (current.deliveries || []).find((item) => item.repositoryId === repositoryId);
+  if (deliveryFinished(existing)) return existing;
+  const sourceCwd = repo.sourceCwd || current.workspace.sourceCwd;
+  const cwd = repo.cwd || current.workspace.cwd;
+  const branch = repo.branch || current.workspace.branch;
+  const resumedChange = existing?.change || (repositoryId === "primary" ? current.merge?.change : null) || null;
+  const remoteDetails = existing?.remote && existing?.base
+    ? { remote: existing.remote, base: existing.base }
+    : current.merge?.remote && current.merge?.base && repositoryId === "primary"
       ? { remote: current.merge.remote, base: current.merge.base }
       : await remoteContext(sourceCwd);
-    const { remote, base } = remoteDetails;
-    const forge = deliveryForRemote(remote);
-    const attempt = (current.merge?.attempt || 0) + 1;
-    const activity = captureStageActivity(ticketId, "handoff", current.runId);
+  const { remote, base } = remoteDetails;
+  const forge = forgeForRepository(remote, repo);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId, sourceCwd, cwd, branch, displayPath: repo.displayPath || sourceCwd, kind: repo.kind,
+      status: resumedChange ? "waiting_for_checks" : "rebasing",
+      attempt, base, remote, change: resumedChange,
+      feedbackIds: existing?.feedbackIds || (repositoryId === "primary" ? run.merge?.feedbackIds : []) || []
+    });
+    run.status = resumedChange ? "waiting_for_checks" : "rebasing";
+    run.recovery = null;
+    run.checkpoint = null;
+    setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling ${repo.displayPath || sourceCwd} with origin/${base}`);
+  });
+  const reconcile = () => reconcileWithRemote(cwd, base, {
+    resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
+  });
+  let checks = existing?.checks || (repositoryId === "primary" ? current.merge?.checks : null) || null;
+  let change = resumedChange;
+  let awaitingHeadAfterPush = null;
+  if ((await unmergedPaths(cwd)).length) await reconcile();
+  if (existing?.externalActionPending === "push_feedback_revision") {
+    await pushTicketBranch(cwd, branch);
+    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null }); });
+  }
+  if (!change) {
+    if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
+      const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
+        || String(current.lastError).slice(-4500);
+      ({ checks } = await fixRemoteFeedback(ticketId, [{
+        id: `delivery-recovery-${attempt}-${repositoryId}`,
+        body: `${failure}\n\nContinue from the current worktree and make ${existing?.checks?.command || current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
+      }], signal, "persisted delivery verification failure", cwd));
+    }
+    await reconcile();
+    checks = repositoryId === "primary"
+      ? await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery:${repositoryId}`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) })
+      : retainChecks(await runContainedRepositoryChecks({ ticketId, cwd, signal, requireVisualEvidence: false, requireVideoEvidence: false, environment: {} }));
+    if (checks.status === "failed") {
+      ({ checks } = await fixRemoteFeedback(ticketId, [{
+        id: `post-rebase-check-${attempt}-${repositoryId}`,
+        body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
+      }], signal, "post-rebase verification failures", cwd));
+    }
+    await pushTicketBranch(cwd, branch);
+    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: "create_remote_change", checks }); });
+    change = await forge.create({
+      branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
+      body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || repo.deliveryDiff?.stat || "See changed files."].join("\n\n")
+    });
+    await update((state) => {
+      patchRunDelivery(ticketRun(state, ticketId), {
+        repositoryId, status: "waiting_for_checks", change, remoteChangeId: change.id, checks,
+        openedAt: new Date().toISOString(), externalActionPending: null
+      });
+    });
+    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.merge = resumedChange
-        ? { ...run.merge, status: "waiting_for_checks", attempt, sourceCwd, branch: run.workspace.branch, base, remote }
-        : { status: "rebasing", attempt, sourceCwd, branch: run.workspace.branch, base, remote, feedbackIds: run.merge?.feedbackIds || [] };
-      run.status = resumedChange ? "waiting_for_checks" : "rebasing";
-      run.recovery = null;
-      run.checkpoint = null;
-      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling with origin/${base}`);
+      run.status = "waiting_for_checks";
+      setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
     });
-    const reconcile = () => reconcileWithRemote(current.workspace.cwd, base, {
-      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
-    });
-    let checks = current.merge?.checks || null;
-    let change = resumedChange;
-    let awaitingHeadAfterPush = null;
-    if ((await unmergedPaths(current.workspace.cwd)).length) await reconcile();
-    if (current.merge?.externalActionPending === "push_feedback_revision") {
-      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
-    }
-    if (!change) {
-      if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
-        const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
-          || String(current.lastError).slice(-4500);
-        ({ checks } = await fixRemoteFeedback(ticketId, [{
-          id: `delivery-recovery-${attempt}`,
-          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
-        }], signal, "persisted delivery verification failure"));
+  }
+
+  if (change) {
+    const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd });
+    if (!status.trim()) {
+      const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd });
+      const reconciled = await reconcile();
+      if (reconciled.commit !== before.trim()) {
+        await pushTicketBranch(cwd, branch);
+        awaitingHeadAfterPush = before.trim();
       }
+    }
+  }
+
+  let mergeResult = null;
+  let lastRebaseHead = null;
+  for (;;) {
+    signal?.throwIfAborted();
+    const delivery = await forge.status(change);
+    if (awaitingHeadAfterPush === delivery.headSha) {
+      await waitForDelivery(deliveryPollMs, signal);
+      continue;
+    }
+    awaitingHeadAfterPush = null;
+    const processed = new Set((ticketRun(store.read(), ticketId).deliveries || []).find((item) => item.repositoryId === repositoryId)?.feedbackIds || []);
+    const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      patchRunDelivery(run, { repositoryId, status: feedback.length ? "addressing_feedback" : delivery.checks === "pending" ? "waiting_for_checks" : "waiting_for_merge", remoteStatus: delivery, checkedAt: new Date().toISOString() });
+      run.status = run.merge.status;
+      setStage(run, "handoff", "active", feedback.length ? `Addressing ${feedback.length} review comment${feedback.length === 1 ? "" : "s"} in ${repo.displayPath || repositoryId}` : `Remote checks (${repo.displayPath || repositoryId}): ${delivery.checks}; merge: ${delivery.mergeState}`);
+    });
+    if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
+    if (feedback.length) {
+      await fixRemoteFeedback(ticketId, feedback, signal, "remote review feedback", cwd);
       await reconcile();
-      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-      if (checks.status === "failed") {
-        ({ checks } = await fixRemoteFeedback(ticketId, [{
-          id: `post-rebase-check-${attempt}`,
-          body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
-        }], signal, "post-rebase verification failures"));
-      }
-      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
-      change = await forge.create({
-        branch: current.workspace.branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
-        body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || "See changed files."].join("\n\n")
-      });
-      await trackerAction(ticketId, "remote_change", (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
       await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(run.merge, { status: "waiting_for_checks", change, checks, openedAt: new Date().toISOString(), externalActionPending: null });
-        run.status = "waiting_for_checks";
-        setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
-      });
-    }
-
-    if (change) {
-      const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd: current.workspace.cwd });
-      if (!status.trim()) {
-        const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd: current.workspace.cwd });
-        const reconciled = await reconcile();
-        if (reconciled.commit !== before.trim()) {
-          await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-          awaitingHeadAfterPush = before.trim();
-        }
-      }
-    }
-
-    let mergeResult = null;
-    let lastRebaseHead = null;
-    for (;;) {
-      signal?.throwIfAborted();
-      const delivery = await forge.status(change);
-      if (awaitingHeadAfterPush === delivery.headSha) {
-        await waitForDelivery(20000, signal);
-        continue;
-      }
-      awaitingHeadAfterPush = null;
-      const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
-      const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(run.merge, { status: feedback.length ? "addressing_feedback" : delivery.checks === "pending" ? "waiting_for_checks" : "waiting_for_merge", remoteStatus: delivery, checkedAt: new Date().toISOString() });
-        run.status = run.merge.status;
-        setStage(run, "handoff", "active", feedback.length ? `Addressing ${feedback.length} review comment${feedback.length === 1 ? "" : "s"}` : `Remote checks: ${delivery.checks}; merge: ${delivery.mergeState}`);
-      });
-      if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
-      if (feedback.length) {
-        await fixRemoteFeedback(ticketId, feedback, signal);
-        await reconcile();
-        await update((state) => {
-          const merge = ticketRun(state, ticketId).merge;
-          merge.feedbackIds.push(...feedback.map((item) => item.id));
-          merge.externalActionPending = "push_feedback_revision";
+        const record = (ticketRun(state, ticketId).deliveries || []).find((item) => item.repositoryId === repositoryId);
+        patchRunDelivery(ticketRun(state, ticketId), {
+          repositoryId,
+          feedbackIds: [...(record?.feedbackIds || []), ...feedback.map((item) => item.id)],
+          externalActionPending: "push_feedback_revision"
         });
-        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-        awaitingHeadAfterPush = delivery.headSha;
-        await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
-        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
-        continue;
-      }
-      if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
-        await waitForDelivery(20000, signal);
-        continue;
-      }
-      if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
-      const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
-      if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
-        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "squash_merge"; });
-        mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`);
-        break;
-      }
-      if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
-        lastRebaseHead = delivery.headSha;
-        await reconcile();
-        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-        continue;
-      }
-      await waitForDelivery(20000, signal);
+      });
+      await pushTicketBranch(cwd, branch);
+      awaitingHeadAfterPush = delivery.headSha;
+      await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
+      await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null }); });
+      continue;
     }
+    if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
+      await waitForDelivery(deliveryPollMs, signal);
+      continue;
+    }
+    if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
+    const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
+    if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
+      await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: "squash_merge" }); });
+      mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`);
+      break;
+    }
+    if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
+      lastRebaseHead = delivery.headSha;
+      await reconcile();
+      await pushTicketBranch(cwd, branch);
+      continue;
+    }
+    await waitForDelivery(deliveryPollMs, signal);
+  }
 
-    const deliveredTree = await snapshotTree(current.workspace.cwd);
-    const deliveredDiff = await diffTrees(current.workspace.cwd, `origin/${base}^{tree}`, deliveredTree);
-    const sync = await safeSyncLocal(sourceCwd, base);
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent == null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
-    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
-    const handoff = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nRemote review: ${change.url}\n\nSquash commit: \`${mergeResult.commit}\`\n\nLocal sync: ${sync.status}${sync.reason ? ` — ${sync.reason}` : ""}.${visualEvidenceHandoffSection(evidenceArtifacts)}`
+  const deliveredTree = await snapshotTree(cwd);
+  const deliveredDiff = await diffTrees(cwd, `origin/${base}^{tree}`, deliveredTree);
+  const sync = await safeSyncLocal(sourceCwd, base);
+  await update((state) => {
+    patchRunDelivery(ticketRun(state, ticketId), {
+      repositoryId, status: "integrated", commit: mergeResult.commit, change, checks, sync, diff: deliveredDiff,
+      integratedAt: new Date().toISOString(), externalActionPending: null, error: null
     });
-    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, `Merged after remote checks and review: ${change.url}\n\nSquash commit: ${mergeResult.commit}${visualEvidenceComment(evidenceArtifacts)}`));
-    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  });
+  return { commit: mergeResult.commit, change, sync, diff: deliveredDiff };
+}
+
+async function deliverLocalRepository(ticketId, repo, { signal, activity, attempt }) {
+  const repositoryId = deliveryRepositoryId(repo);
+  const current = ticketRun(store.read(), ticketId);
+  const existing = (current.deliveries || []).find((item) => item.repositoryId === repositoryId);
+  if (deliveryFinished(existing)) return existing;
+  const sourceCwd = repo.sourceCwd || current.workspace.sourceCwd;
+  const queued = enqueueSerial(mergeQueues, sourceCwd, (position) => update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId, sourceCwd, cwd: repo.cwd, branch: repo.branch, displayPath: repo.displayPath || sourceCwd,
+      status: "queued", position, attempt, conflicts: []
+    });
+    run.status = "queued_for_merge";
+    run.recovery = null;
+    run.checkpoint = null;
+    setStage(run, "handoff", "active", `Merge queue position ${position} (${repo.displayPath || sourceCwd})`);
+  }), async () => {
+    signal?.throwIfAborted();
+    const live = ticketRun(store.read(), ticketId);
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync, diff: deliveredDiff };
-      run.deliveredDiff = deliveredDiff;
-      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: deliveredDiff });
-      Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync, externalActionPending: null });
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.status = "completed";
+      patchRunDelivery(run, { repositoryId, status: "merging", position: 1, startedAt: new Date().toISOString() });
+      run.status = "merging";
       run.lastError = null;
-      run.completedAt = integratedAt;
-      setStage(run, "handoff", "completed", `Merged via ${change.url}`).activity = activity.snapshot();
+      setStage(run, "handoff", "active", `Merging ${repo.branch || run.workspace.branch} (${repo.displayPath || sourceCwd})`);
     });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return { commit: mergeResult.commit, change, sync };
+    activity.onEvent({ type: "phase", label: `Automated merge started (${repo.displayPath || sourceCwd})` }, "merge queue");
+    const integrationCwd = repositoryId === "primary"
+      ? join(dataDir, "ticket-runs", safeName(live.ticket.identifier || live.ticket.id), "runs", safeName(live.runId), "integration")
+      : join(dataDir, "ticket-runs", safeName(live.ticket.identifier || live.ticket.id), "runs", safeName(live.runId), "repos", safeName(repositoryId), "integration");
+    const integration = await integrateBranch({
+      sourceCwd, branch: repo.branch || live.workspace.branch, integrationCwd, dependencyCwd: repo.cwd || live.workspace.cwd,
+      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt }),
+      verify: async ({ cwd, conflicts }) => {
+        signal?.throwIfAborted();
+        await update((state) => {
+          const run = ticketRun(state, ticketId);
+          patchRunDelivery(run, { repositoryId, status: "verifying", conflicts, verificationStartedAt: new Date().toISOString() });
+          run.status = "verifying_merge";
+          setStage(run, "handoff", "active", `Verifying merged result (${repo.displayPath || sourceCwd})`);
+        });
+        activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
+        const checks = repositoryId === "primary"
+          ? await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration:${repositoryId}`, cwd, signal, required: flattenSteps(live.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(live.plan).some((step) => step.requiresVideoEvidence) })
+          : retainChecks(await runContainedRepositoryChecks({ ticketId, cwd, signal, requireVisualEvidence: false, requireVideoEvidence: false, environment: {} }));
+        if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+        await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, checks, verifiedAt: new Date().toISOString() }); });
+      }
+    });
+    await update((state) => {
+      patchRunDelivery(ticketRun(state, ticketId), {
+        repositoryId, status: "integrated", commit: integration.commit, conflicts: integration.conflicts,
+        diff: integration.diff, integratedAt: new Date().toISOString(), error: null
+      });
+    });
+    return integration;
+  });
+  return queued.promise;
+}
+
+async function scheduleAllDeliveries(ticketId, { diff, contextContent = null, signal } = {}) {
+  if (activeMerges.has(ticketId)) {
+    const live = ticketRun(store.read(), ticketId);
+    throw new Error(live.ticket.source === "local" ? "This ticket is already in the merge queue" : "This ticket is already being delivered");
+  }
+  const queuedRun = ticketRun(store.read(), ticketId);
+  const required = await requiredChangedGitRepos(queuedRun);
+  if (!required.length) return completeNoChangeDelivery(ticketId, queuedRun, { diff, contextContent });
+  if (queuedRun.ticket.source === "local" && ["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) {
+    throw new Error("This ticket is already in the merge queue");
+  }
+  activeMerges.add(ticketId);
+  const attempt = (queuedRun.merge?.attempt || 0) + 1;
+  const promise = (async () => {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.merge = { ...(run.merge || {}), attempt, sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch };
+      for (const repo of required) {
+        const repositoryId = deliveryRepositoryId(repo);
+        if ((run.deliveries || []).some((item) => item.repositoryId === repositoryId && deliveryFinished(item))) continue;
+        if ((run.deliveries || []).some((item) => item.repositoryId === repositoryId)) continue;
+        patchRunDelivery(run, createDeliveryRecord(repo, { status: "pending", attempt }));
+      }
+    });
+    const activity = captureStageActivity(ticketId, "handoff", queuedRun.runId);
+    const failures = [];
+    for (const repo of required) {
+      const live = ticketRun(store.read(), ticketId);
+      const existing = (live.deliveries || []).find((item) => item.repositoryId === deliveryRepositoryId(repo));
+      if (deliveryFinished(existing)) continue;
+      try {
+        if (queuedRun.ticket.source === "local") await deliverLocalRepository(ticketId, repo, { signal, activity, attempt });
+        else await deliverRemoteRepository(ticketId, repo, { diff: repo.deliveryDiff || diff, signal, activity, attempt });
+      } catch (error) {
+        await persistRepoDeliveryFailure(ticketId, repo, error);
+        failures.push({ repositoryId: deliveryRepositoryId(repo), displayPath: repo.displayPath || repo.sourceCwd, error: redactText(error.message) });
+      }
+    }
+    if (failures.length) throw new Error(classifyDeliveryFailure(failures));
+    return finalizeSuccessfulDelivery(ticketId, { diff, contextContent, activity });
   })().catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
       const run = ticketRun(state, ticketId);
       const previousStatus = run.status;
       const previousMergeStatus = run.merge?.status || null;
       run.status = "needs_attention";
-run.lastError = redactText(error.message);
+      run.lastError = redactText(error.message);
       if (run.merge) Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
-      run.recovery = { kind: "delivery", previousStatus, previousMergeStatus, uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending), message: "Delivery failed before completion. Resume will retry from the persisted delivery state." };
+      const deliveries = run.deliveries || [];
+      run.recovery = {
+        kind: "delivery",
+        previousStatus,
+        previousMergeStatus,
+        uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending || deliveries.some((item) => item.change || item.externalActionPending)),
+        message: "Delivery failed before completion. Resume will retry from the persisted delivery state."
+      };
       setStage(run, "handoff", "blocked", redactText(error.message));
     });
     await mirrorExecutionBlocker(ticketId, error);
@@ -2549,116 +2795,12 @@ run.lastError = redactText(error.message);
   return { position: 1, promise };
 }
 
+async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
+  return scheduleAllDeliveries(ticketId, { diff, contextContent, signal });
+}
+
 async function scheduleTicketIntegration(ticketId, { diff, contextContent = null, signal } = {}) {
-  const queuedRun = ticketRun(store.read(), ticketId);
-  if (diff?.available && diff.files?.length === 0) {
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent === null ? null : await persistProductContext(dataDir, queuedRun.workspace.sourceCwd, contextContent);
-    const handoff = await persistArtifact(dataDir, queuedRun.ticket, {
-      runId: queuedRun.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${queuedRun.ticket.identifier} handoff\n\nVerified as already satisfied. No repository changes or remote review were required.`
-    });
-    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, "Verified as already satisfied. No repository changes or remote review were required."));
-    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch, commit: null, integratedAt, diff, noChange: true };
-      run.deliveredDiff = diff;
-      run.merge = { status: "not_required", reason: "no_changes", integratedAt };
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.checkpoint = null;
-      setStage(run, "handoff", "completed", "Verified with no repository changes");
-      run.status = "completed";
-      run.lastError = null;
-      run.completedAt = integratedAt;
-    });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return { position: 0, promise: Promise.resolve({ noChange: true }) };
-  }
-  if (queuedRun.ticket.source !== "local") return scheduleRemoteDelivery(ticketId, { diff, contextContent, signal });
-  if (["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) throw new Error("This ticket is already in the merge queue");
-  const sourceCwd = queuedRun.workspace.sourceCwd;
-  const attempt = (queuedRun.merge?.attempt || 0) + 1;
-  const queuedAt = new Date().toISOString();
-  let queuedState;
-  const queued = enqueueSerial(mergeQueues, sourceCwd, (position) => {
-    activeMerges.add(ticketId);
-    queuedState = update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.merge = { status: "queued", position, attempt, queuedAt, sourceCwd, branch: run.workspace.branch, conflicts: [] };
-      run.status = "queued_for_merge";
-      run.recovery = null;
-      run.checkpoint = null;
-      setStage(run, "handoff", "active", `Merge queue position ${position}`);
-    });
-    return queuedState;
-  }, async () => {
-    signal?.throwIfAborted();
-    const current = ticketRun(store.read(), ticketId);
-    const activity = captureStageActivity(ticketId, "handoff", current.runId);
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "merging", position: 1, startedAt: new Date().toISOString() });
-      run.status = "merging";
-      run.lastError = null;
-      setStage(run, "handoff", "active", `Merging ${run.workspace.branch}`);
-    });
-    activity.onEvent({ type: "phase", label: "Automated merge started" }, "merge queue");
-    const integrationCwd = join(dataDir, "ticket-runs", safeName(current.ticket.identifier || current.ticket.id), "runs", safeName(current.runId), "integration");
-    const integration = await integrateBranch({
-      sourceCwd, branch: current.workspace.branch, integrationCwd, dependencyCwd: current.workspace.cwd,
-      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt }),
-      verify: async ({ cwd, conflicts }) => {
-        signal?.throwIfAborted();
-        await update((state) => {
-          const run = ticketRun(state, ticketId);
-          Object.assign(run.merge, { status: "verifying", conflicts, verificationStartedAt: new Date().toISOString() });
-          run.status = "verifying_merge";
-          setStage(run, "handoff", "active", "Verifying merged result");
-        });
-        activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
-        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-        if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
-        await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
-      }
-    });
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent === null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
-    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
-    const handoff = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nIntegrated into: \`${sourceCwd}\`\n\nSource branch: \`${current.workspace.branch}\`\n\nCommit: \`${integration.commit}\`${productContext ? `\n\nLiving product context: \`${productContext.path}\`.` : ""}\n\n${diff?.stat || "No changed files."}${visualEvidenceHandoffSection(evidenceArtifacts)}`
-    });
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: integration.commit, integratedAt, diff: integration.diff };
-      run.deliveredDiff = integration.diff;
-      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: integration.diff });
-      Object.assign(run.merge, { status: "integrated", commit: integration.commit, conflicts: integration.conflicts, integratedAt });
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.checkpoint = null;
-      setStage(run, "handoff", "completed", `Merged into ${sourceCwd}`).activity = activity.snapshot();
-      run.status = "completed";
-      run.lastError = null;
-      run.completedAt = integratedAt;
-    });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return integration;
-  });
-  await queuedState;
-  const tracked = queued.promise.catch(async (error) => {
-    if (!signal?.aborted) await update((state) => {
-      const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
-      run.status = "needs_attention";
-      run.lastError = redactText(error.message);
-      setStage(run, "handoff", "blocked", redactText(error.message));
-    });
-    throw error;
-  }).finally(() => activeMerges.delete(ticketId));
-  return { position: queued.position, promise: tracked };
+  return scheduleAllDeliveries(ticketId, { diff, contextContent, signal });
 }
 
 async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, restartFeedback = "", reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
@@ -3768,7 +3910,7 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
     const id = decodeURIComponent(resume[1]);
     const run = ticketRun(store.read(), id);
     if (run.recovery?.kind === "delivery") {
-      if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
+      if (run.recovery.uncertainExternalActions && !run.merge?.change && !(run.deliveries || []).some((item) => item.change)) throw new Error(run.recovery.message);
 const contextContent = await artifactText([...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")) || null;
       const diff = run.reviews?.at(-1)?.diff || null;
       void settleScheduledDelivery(scheduleTicketIntegration(id, { diff, contextContent }));
