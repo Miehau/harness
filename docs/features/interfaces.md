@@ -8,11 +8,13 @@
 
 **Purpose:** Navigate urgency-grouped tickets, stage/step graph and inspector; inspect prompts, activity, diffs, evidence, cleanup, elapsed time and model/tool usage. SSE streams update the UI. The JSON operator CLI drives the same HTTP actions and exposes status, lists, selection, wait, approvals and recovery.
 
+Inspection, CLI `list timeline`, review packets, diffs, and checks name each configured repository by saved `displayPath` or stable id, including non-Git read/write extras and Any-access external writes. Canonical supervision includes per-repo identity and partial delivery. Secrets and non-configured paths still redact; owner-saved configured roots stay visible in identity fields. CLI `access show|set` matches the workspace access-policy API.
+
 **Strength:** API and UI actions share a daemon path; compact summaries avoid shipping artifact bodies with every update. CLI automation can reproduce UI actions without mutating state files directly.
 
 **Limit:** Numerous gates and inspector modes create operator complexity. The main UI and daemon files remain large; helper maps and focused UI-model functions are essential navigation aids. Pure UI-model tests do not establish full browser interaction coverage.
 
-Evidence: [app.js](../../public/app.js), [ui-model.js](../../public/ui-model.js), [cli.js](../../src/cli.js), [CLI tests](../../test/cli.test.js), [UI model tests](../../test/ui-model.test.js).
+Evidence: [app.js](../../public/app.js), [ui-model.js](../../public/ui-model.js), [cli.js](../../src/cli.js), [inspection.js](../../src/inspection.js), [CLI tests](../../test/cli.test.js), [inspection tests](../../test/inspection.test.js), [UI model tests](../../test/ui-model.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
 
 **Runtime caveat:** `GET /api/tickets` (including CLI `list backlog`) can admit work when automatic intake is enabled. Use an isolated fixture for exploratory requests.
 

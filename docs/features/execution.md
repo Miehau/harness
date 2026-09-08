@@ -8,11 +8,13 @@
 
 **Purpose:** Snapshot existing tracked/untracked changes without touching the user's index, create ticket worktrees, run scoped workers through named argv commands, and retain logical commits. Git parallel siblings use isolated worktrees and cherry-pick accepted commits; Jujutsu maintains editable changes and exports accepted Git commits.
 
+Each frozen read/write Git extra root gets an isolated run/step worktree. `run.workspace` remains the primary record; `run.repositories` lists every writable Git checkout. File tools rewrite configured original paths into those worktrees so user source checkouts stay untouched except pre-existing dirty files. Read-only Git extras have no worktree. Named `project_command` calls stay on the primary worktree unless a repository id selects another mapped root.
+
 **Strength:** User changes are preserved, step acceptance defines integration order, and dependent artifacts explicitly cross worker boundaries.
 
 **Limit:** Jujutsu is the default and executes dependency-ready siblings serially. Parallel Git work can still conflict at acceptance. Command execution intentionally has no arbitrary shell-string tool. Repository bootstrap is a verification/configuration step inside a plan, not a separate initialization ticket merged before all feature work.
 
-Evidence: [worktrees.js](../../src/worktrees.js), [git.js](../../src/git.js), [jj.js](../../src/jj.js), `advanceTicket` / `acceptStep` in [server.js](../../src/server.js), [worktree tests](../../test/worktrees.test.js).
+Evidence: [worktrees.js](../../src/worktrees.js) (`ensureTicketWorktree`, `gitRepositoriesForStep`, `mapConfiguredPath`), [git.js](../../src/git.js), [jj.js](../../src/jj.js), `advanceTicket` / `acceptStep` in [server.js](../../src/server.js), [worktree tests](../../test/worktrees.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
 
 ## Find the implementation
 
