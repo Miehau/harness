@@ -43,6 +43,8 @@ let latestTicketSelection = 0;
 let lastClarificationKey = null;
 const liveRuns = new Map();
 const liveStages = new Map();
+const stageOutputs = new Map();
+const pendingStageOutputs = new Set();
 const sessionTraces = new Map();
 const stagePromptTraces = new Map();
 const appendLiveOutput = (value, delta) => `${value || ""}${delta || ""}`.slice(-100000);
@@ -192,8 +194,8 @@ function loadAttemptDetails(run, attempt) {
   if (pendingAttemptDetails.has(key) || attemptDetails.has(key)) return;
   pendingAttemptDetails.add(key);
   api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/steps/${encodeURIComponent(attempt.workerId.replace(/^worker:/, ""))}/attempts/${encodeURIComponent(attempt.attemptId)}/details`)
-    .then((detail) => { attemptDetails.set(key, { detail }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) renderInspector(); })
-    .catch((error) => { attemptDetails.set(key, { error: error.message }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) renderInspector(); })
+    .then((detail) => { attemptDetails.set(key, { detail }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) render(); })
+    .catch((error) => { attemptDetails.set(key, { error: error.message }); if (sameRun(run, runFor()) && attempt.id === selectedAttemptId) render(); })
     .finally(() => pendingAttemptDetails.delete(key));
 }
 
@@ -562,11 +564,11 @@ function renderPlanTree() {
   const run = runFor();
   const stage = run?.stages?.find((item) => item.id === (selectedStageId || (selectedStepId ? "implement" : null)));
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
+  const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
   if (isArchivedRun(run)) {
-    target.innerHTML = `${stageSurface}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
+    target.innerHTML = `${stageSurface}${stageWork}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
     return;
   }
-  const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
   if (checkpointUsesWorkspace(run)) {
     target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>${stageWork}`;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
@@ -582,7 +584,7 @@ function renderPlanTree() {
     target.innerHTML = `${stageSurface}<div class="empty"><div><strong>No execution graph yet</strong>${copy}</div></div>`;
     return;
   }
-  target.innerHTML = `${stageSurface}${stage ? stageWorkerMapHtml(run, stage) : ""}`;
+  target.innerHTML = `${stageSurface}${stage ? stageWorkerMapHtml(run, stage) : ""}${workerOutputHtml(run)}`;
 }
 
 function cachedTrace(run, step) {
@@ -660,12 +662,44 @@ function milestoneTimelineHtml(items) {
   }).join("")}</ol>`;
 }
 
+function workerOutputHtml(run) {
+  const step = nodeById(selectedStepId);
+  const attempt = inspectionAttempt(selectedAttemptId);
+  if (!step || !attempt) return "";
+  loadAttemptDetails(run, attempt);
+  const stored = attemptDetails.get(attemptDetailKey(run, attempt));
+  const detail = liveAttemptDetail(run, step, attempt, stored?.detail);
+  const output = detail?.output;
+  return `<section class="stage-work-surface stage-output"><span class="eyebrow">${attempt.lifecycle === "active" ? "Live agent output" : "Saved agent output"} · ${escapeHtml(step.title)}</span>${output?.state === "truncated" ? truncatedResourceWarning(output, "output") : ""}<pre data-worker-output data-worker-run="${escapeHtml(attempt.lifecycle === "active" ? attempt.runId : "")}">${escapeHtml(output?.content || (stored?.error ? "Output unavailable." : "Waiting for agent output…"))}</pre></section>`;
+}
+
+function loadStageOutput(run, stage) {
+  const key = `${runIdentity(run)}:${stage.id}`;
+  const signature = `${stage.status}:${stage.updatedAt}`;
+  if (stageOutputs.get(key)?.signature === signature || pendingStageOutputs.has(key)) return;
+  pendingStageOutputs.add(key);
+  api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/stages/${encodeURIComponent(stage.id)}/output`)
+    .then((output) => { stageOutputs.set(key, { signature, ...output }); if (sameRun(run, runFor())) render(); })
+    .catch(() => { stageOutputs.set(key, { signature, state: "unavailable" }); if (sameRun(run, runFor())) render(); })
+    .finally(() => pendingStageOutputs.delete(key));
+}
+
+function updateStreamOutput(target, output) {
+  const following = target.scrollHeight - target.scrollTop - target.clientHeight < 40;
+  target.textContent = output;
+  if (following) target.scrollTop = target.scrollHeight;
+}
+
 function stageOutputHtml(run, stage) {
   const artifacts = artifactsForStage(run.artifacts, stage.id).sort((a, b) => Number(a.kind === "product-context-snapshot") - Number(b.kind === "product-context-snapshot"));
   const saved = artifacts.length ? `<section class="stage-artifacts"><span class="eyebrow">Saved artifacts · ${artifacts.length}</span>${artifactsPanel(null, artifacts)}</section>` : "";
-  const output = liveStages.get(`${run.id}:${stage.id}`)?.output || stage.activity?.rawOutput || "";
+  loadStageOutput(run, stage);
+  const retained = stageOutputs.get(`${runIdentity(run)}:${stage.id}`);
+  const live = liveStages.get(`${run.id}:${stage.id}`);
   const active = stage.status === "active";
-  const stream = active || output ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Model output"}</span><pre data-stage-output>${escapeHtml(output || "Waiting for model output…")}</pre></section>` : "";
+  const streamed = live?.runId === run.runId ? live.output : "";
+  const output = (active ? streamed || retained?.content : retained?.content || streamed) || "";
+  const stream = active || output || retained?.state === "unavailable" ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Saved model output"}</span><small>Retained output · latest 100,000 characters</small><pre data-stage-output>${escapeHtml(output || (retained?.state === "unavailable" ? "Saved output unavailable." : "Waiting for model output…"))}</pre></section>` : "";
   return `${saved}${stream}`;
 }
 
@@ -1860,7 +1894,11 @@ events.onmessage = ({ data }) => {
   if (event.type === "tickets") { ticketSources = event.ticketSources; render(); return; }
   if (event.channel === "run" && event.ticketId && event.stepId) {
     const key = `${event.ticketId}:${event.stepId}`;
-    let live = liveRuns.get(key) || { events: [], output: "" };
+    const selectedRun = runFor();
+    const selectedAttempt = inspectionAttempt(selectedAttemptId);
+    const retainedOutput = selectedRun?.id === event.ticketId && selectedAttempt?.runId === event.runId
+      ? attemptDetails.get(attemptDetailKey(selectedRun, selectedAttempt))?.detail?.output?.content : "";
+    let live = liveRuns.get(key) || { events: [], output: retainedOutput || "" };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "" };
     live.runId = event.runId;
     if (event.type === "prompt") {
@@ -1876,6 +1914,8 @@ events.onmessage = ({ data }) => {
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveRuns.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
+      const output = $("[data-worker-output]");
+      if (event.type === "text_delta" && output?.dataset.workerRun === event.runId) updateStreamOutput(output, live.output);
       if (event.type === "prompt" && activeTab === "prompt") renderInspectorPreservingContext();
       else if (selectedAttemptId && activeTab !== "run") renderInspectorPreservingContext();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
@@ -1884,7 +1924,7 @@ events.onmessage = ({ data }) => {
   if (event.channel === "stage" && event.ticketId && event.stageId) {
     const key = `${event.ticketId}:${event.stageId}`;
     const persisted = state.ticketRuns?.[event.ticketId]?.stages?.find((stage) => stage.id === event.stageId)?.activity;
-    let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
+    let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: stageOutputs.get(`${event.ticketId}:${event.runId}:${event.stageId}`)?.content || persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
     if (live.runId && live.runId !== event.runId) live = { events: [], output: "", startedAt: new Date().toISOString() };
     live.runId = event.runId;
     if (event.type === "prompt") live.prompts = [...(live.prompts || []), { ...event, at: new Date().toISOString() }].slice(-20);
@@ -1895,9 +1935,9 @@ events.onmessage = ({ data }) => {
     live.label = event.label || live.label;
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveStages.set(key, live);
-    if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId) {
+    if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId && event.runId === runFor()?.runId) {
       if (event.type === "text_delta") {
-        for (const output of document.querySelectorAll("[data-stage-output]")) output.textContent = live.output;
+        for (const output of document.querySelectorAll("[data-stage-output]")) updateStreamOutput(output, live.output);
       } else if (event.type !== "text_delta") renderInspectorPreservingContext();
     }
   }

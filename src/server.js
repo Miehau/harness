@@ -3298,6 +3298,14 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
       prompts: (trace.prompts || []).slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })), events: (trace.events || []).slice(-100).map(detailActivityEvent), rawOutput: rawOutput.value
     } });
   }
+  const stageOutput = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/stages\/([^/]+)\/output$/);
+  if (request.method === "GET" && stageOutput) {
+    const run = runForIdentity(store.read(), decodeURIComponent(stageOutput[1]), decodeURIComponent(stageOutput[2]));
+    const stage = run.stages.find((item) => item.id === decodeURIComponent(stageOutput[3]));
+    if (!stage) throw new Error("Stage not found");
+    const output = redactText(stage.activity?.rawOutput || "");
+    return json(response, 200, { state: output ? "available" : "not_retained", content: output.slice(-100000), retainedTail: true });
+  }
   const stagePrompts = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/stages\/([^/]+)\/prompts$/);
   if (request.method === "GET" && stagePrompts) {
     const run = stagePrompts[2]

@@ -1452,3 +1452,21 @@ test("final proof feedback is redacted before its pending durable state is expos
     assert.equal(JSON.stringify(state.json).includes(secret), false);
   }, { harness });
 });
+
+test("stage output is bounded, redacted and readable from retained runs after reload", async () => {
+  await withDaemon(async (daemon, { dataDir, cwd }) => {
+    const id = await seedRun(daemon, { stages: [{ id: "requirements", status: "completed", activity: { rawOutput: "Saved clarification" } }, { id: "explore", status: "completed", activity: { rawOutput: "password=secret_abcdefgh " + "x".repeat(110000) } }] });
+    const route = (stage) => `/api/tickets/${id}/runs/run-1/stages/${stage}/output`;
+    assert.equal((await invoke(daemon, "GET", route("requirements"))).json.content, "Saved clarification");
+    const output = (await invoke(daemon, "GET", route("explore"))).json;
+    assert.ok(output.content.length <= 100000);
+    assert.match(output.content, /redacted/);
+    assert.doesNotMatch(output.content, /secret_abcdefgh/);
+    await invoke(daemon, "POST", "/api/queue/clear", { body: {} });
+    assert.equal((await invoke(daemon, "GET", route("requirements"))).json.content, "Saved clarification");
+    const reloaded = new JsonStore(join(dataDir, "state-v3.json"), cwd);
+    await reloaded.init();
+    assert.equal(Object.values(reloaded.read().retainedRuns)[0].stages[0].activity.rawOutput, "Saved clarification");
+    assert.ok((await invoke(daemon, "GET", route("missing"))).status >= 400);
+  });
+});
