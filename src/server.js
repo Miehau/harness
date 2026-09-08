@@ -1144,13 +1144,13 @@ async function mirrorCheckpoint(ticketId) {
   }
 }
 
-async function beginTicket(ticket, { automaticAdmission = false } = {}) {
+async function beginTicket(ticket, { automaticAdmission = false, awaitWork = true } = {}) {
   if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
     if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
   });
-  await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id));
+  await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id), { awaitWork });
   return ticket.id;
 }
 
@@ -3428,7 +3428,7 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
     const id = decodeURIComponent(start[1]);
     const input = await body(request);
     const ticket = ticketCache.get(id) || input.ticket;
-    await beginTicket(ticket);
+    await beginTicket(ticket, { awaitWork: false });
     return json(response, 202, { accepted: true, ticketId: id });
   }
 

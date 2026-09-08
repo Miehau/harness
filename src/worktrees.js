@@ -45,6 +45,18 @@ export async function needsLocalWorkspaceRepair(ticket, workspace) {
   return ticket?.source === "local" && !(workspace?.cwd && await isGitRepository(workspace.cwd));
 }
 
+async function initializeRepository(cwd) {
+  const initialized = await isGitRepository(cwd);
+  const entries = await readdir(cwd);
+  if (!initialized) await git(cwd, ["init", "-q", "-b", "main"]);
+  if (!entries.includes(".gitignore")) await writeFile(join(cwd, ".gitignore"), "node_modules/\ncoverage/\n.env*\n!.env.example\n*.log\n.DS_Store\n", "utf8");
+  try { await git(cwd, ["rev-parse", "HEAD"]); }
+  catch {
+    await git(cwd, ["add", "-A"]);
+    await git(cwd, ["commit", "--allow-empty", "-qm", "Zero-state baseline"], { env: identity });
+  }
+}
+
 export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles = false }) {
   const slug = safeName(ticket.identifier || ticket.id);
   const runSlug = safeName(runId);
@@ -53,13 +65,7 @@ export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles 
   const entries = await readdir(cwd);
   const initialized = await isGitRepository(cwd);
   if (!initialized && !allowFiles && entries.some((entry) => entry !== ".git")) throw new Error(`Local zero-state working directory must be empty: ${cwd}`);
-  if (!initialized) await git(cwd, ["init", "-q", "-b", "main"]);
-  if (!entries.includes(".gitignore")) await writeFile(join(cwd, ".gitignore"), "node_modules/\ncoverage/\n.env*\n!.env.example\n*.log\n.DS_Store\n", "utf8");
-  try { await git(cwd, ["rev-parse", "HEAD"]); }
-  catch {
-    await git(cwd, ["add", "-A"]);
-    await git(cwd, ["commit", "--allow-empty", "-qm", "Zero-state baseline"], { env: identity });
-  }
+  await initializeRepository(cwd);
   if (await git(cwd, ["branch", "--show-current"]) !== branch) {
     try { await git(cwd, ["checkout", "-qb", branch]); }
     catch { await git(cwd, ["checkout", "-q", branch]); }
@@ -160,6 +166,7 @@ export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runI
 }
 
 export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId }) {
+  if (!(await isGitRepository(sourceCwd))) await initializeRepository(sourceCwd);
   const slug = safeName(ticket.identifier || ticket.id);
   const runSlug = safeName(runId);
   const worktree = join(dataDir, "ticket-runs", slug, "runs", runSlug, "worktree");

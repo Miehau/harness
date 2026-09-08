@@ -45,7 +45,7 @@
 
 <dialog id="workspace-dialog">
   <form id="workspace-form" class="dialog-shell">
-    <header><div><span class="eyebrow">Workspace</span><h2>Open repository</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Workspace</span><h2>Open repository</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <label class="dialog-field" for="workspace-path">Repository path<div class="directory-picker"><input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" readonly required><button id="pick-workspace" class="button" type="button">Choose…</button></div></label>
     <footer><span></span><button class="button primary" type="submit">Open repository</button></footer>
   </form>
@@ -53,7 +53,7 @@
 
 <dialog id="tracker-dialog">
   <form id="tracker-form" class="dialog-shell">
-    <header><div><span class="eyebrow">Local harness credentials</span><h2>Ticket trackers</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Local harness credentials</span><h2>Ticket trackers</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <p class="profiles-note">Saved outside the repository with owner-only file permissions. Leave a secret blank to keep its current value.</p>
     <div class="tracker-credentials">
       <fieldset><legend>Linear <span id="linear-credential-status"></span></legend><label>API key<input name="linearApiKey" type="password" autocomplete="off" placeholder="lin_api_…"></label><label class="credential-clear"><input name="clearLinear" type="checkbox"> Remove saved Linear key</label></fieldset>
@@ -75,7 +75,7 @@
 
 <dialog id="free-text-dialog">
   <form id="free-text-form" class="dialog-shell">
-    <header><div><span class="eyebrow">Local task</span><h2>Start from free text</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Local task</span><h2>Start from free text</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <p class="profiles-note">The first line becomes the ticket title. The full text goes through the normal requirements and planning workflow.</p>
     <label class="dialog-field">Task description<textarea name="description" rows="8" placeholder="Describe what you want built or changed…" required></textarea></label>
     <footer>
@@ -87,7 +87,7 @@
 
 <dialog id="local-load-dialog">
   <form id="local-load" class="dialog-shell">
-    <header><div><span class="eyebrow">Local fixture</span><h2>Load feature.md and plan.json</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Local fixture</span><h2>Load feature.md and plan.json</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <label class="dialog-field" for="local-load-path">Fixture path<input id="local-load-path" name="path" value="fixtures/zero-state-task-board" aria-label="Local fixture path" required></label>
     <footer><span>Reads from the open repository.</span><button class="button primary" type="submit">Load</button></footer>
   </form>
@@ -95,7 +95,7 @@
 
 <dialog id="plan-dialog">
   <form id="plan-form" class="dialog-shell">
-    <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Plan source</span><h2>Edit generated JSON</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <textarea id="plan-json" spellcheck="false"></textarea>
     <footer><span id="plan-json-error" class="error-text"></span><div class="plan-actions"><button class="button" type="button" data-close-plan>Cancel</button><button class="button primary" type="submit">Save plan</button></div></footer>
   </form>
@@ -104,7 +104,7 @@
 <dialog id="restart-dialog">
   <form id="restart-form" class="dialog-shell">
     <input id="restart-run-id" name="ticketId" type="hidden">
-    <header><div><span class="eyebrow">Recorded checkpoints</span><h2>Restart run</h2></div><button class="icon-button" value="cancel" formmethod="dialog" aria-label="Close">×</button></header>
+    <header><div><span class="eyebrow">Recorded checkpoints</span><h2>Restart run</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
     <label class="dialog-field">Restart point<select id="restart-target" name="target" required></select></label>
     <p id="restart-impact" class="restart-impact"></p>
     <label class="restart-confirm"><input id="restart-confirm" name="confirmed" type="checkbox" required><span>I understand that code after this checkpoint will be replaced. The previous run and restart audit remain available.</span></label>

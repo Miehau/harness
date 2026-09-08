@@ -283,7 +283,7 @@ function ticketCard(ticket) {
 function queueTickets() {
   const byId = new Map();
   for (const ticket of ticketSources.tickets) byId.set(ticket.id, ticket);
-  for (const run of [...Object.values(state.ticketRuns || {}), ...Object.values(state.retainedRuns || {})]) if (run.ticket) byId.set(run.ticket.id, run.ticket);
+  for (const run of Object.values(state.ticketRuns || {})) if (run.ticket) byId.set(run.ticket.id, run.ticket);
   return [...byId.values()];
 }
 
@@ -566,8 +566,9 @@ function renderPlanTree() {
     target.innerHTML = `${stageSurface}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
     return;
   }
+  const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>`;
+    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>${stageWork}`;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
     if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
       lastClarificationKey = clarificationKey;
@@ -575,6 +576,7 @@ function renderPlanTree() {
     }
     return;
   }
+  if (stageWork) { target.innerHTML = `${stageSurface}${stageWork}`; return; }
   if (!run?.plan) {
     const copy = run ? (run.status === "awaiting_requirements" ? "Approve the requirements above before repository exploration." : run.status === "awaiting_input" ? "Answer the technical question above." : "Exploration and design will produce the graph here.") : "Start the selected ticket to clarify requirements.";
     target.innerHTML = `${stageSurface}<div class="empty"><div><strong>No execution graph yet</strong>${copy}</div></div>`;
@@ -658,17 +660,26 @@ function milestoneTimelineHtml(items) {
   }).join("")}</ol>`;
 }
 
+function stageOutputHtml(run, stage) {
+  const artifacts = artifactsForStage(run.artifacts, stage.id).sort((a, b) => Number(a.kind === "product-context-snapshot") - Number(b.kind === "product-context-snapshot"));
+  const saved = artifacts.length ? `<section class="stage-artifacts"><span class="eyebrow">Saved artifacts · ${artifacts.length}</span>${artifactsPanel(null, artifacts)}</section>` : "";
+  const output = liveStages.get(`${run.id}:${stage.id}`)?.output || stage.activity?.rawOutput || "";
+  const active = stage.status === "active";
+  const stream = active || output ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Model output"}</span><pre data-stage-output>${escapeHtml(output || "Waiting for model output…")}</pre></section>` : "";
+  return `${saved}${stream}`;
+}
+
 function stageActivityPanel(run, stage) {
   const live = liveStages.get(`${run.id}:${stage.id}`);
   const activity = live || stage.activity || {};
   const milestones = stageMilestones(run, stage);
   const history = stage.id === "requirements" && !checkpointUsesWorkspace(run) ? clarificationHistoryHtml(run) : "";
-  if (!live && !stage.activity && !milestones.length) return history || `<div class="run-empty stage-empty">No model activity was recorded for this stage.</div>`;
   const active = stage.status === "active";
   const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: activity.lastEventAt || stage.updatedAt, lastEvent: activity.lastEvent || stage.summary, warning: activity.warning }, live)) : "";
   const activityTimeline = timelineHtml(activity.events || [], active, activity.groups);
   const milestoneTimeline = milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : "";
-  return `<div class="stage-activity">${history}${pulse}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
+  const output = ["requirements", "explore"].includes(stage.id) ? "" : stageOutputHtml(run, stage);
+  return `<div class="stage-activity">${history}${pulse}${output}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
 }
 
 function rawOutputFor(run, step) {
@@ -1298,6 +1309,8 @@ function updateReviewQueue(formId) {
 }
 
 document.addEventListener("click", async (event) => {
+  const closeDialog = event.target.closest("[data-close-dialog]");
+  if (closeDialog) { closeDialog.closest("dialog").close(); return; }
   const addNote = event.target.closest("[data-add-note-review]");
   if (addNote) {
     const card = addNote.closest(".review-note");
@@ -1573,7 +1586,7 @@ document.addEventListener("click", async (event) => {
   const step = event.target.closest("[data-step]");
   if (step) { deliberateSelection = true; selectedStepId = step.dataset.step; selectedStageId = null; selectedWorkerId = `worker:${step.dataset.step}`; selectedStageKey = inspectionWorker(selectedWorkerId)?.stageId || null; selectedAttemptId = inspectionWorker(selectedWorkerId)?.attemptIds.at(-1) || null; selectedRunId = inspectionFor()?.runId || null; selectedArtifactId = null; activeTab = "overview"; rememberView(); renderSelection(); return; }
   const artifact = event.target.closest("[data-select-artifact]");
-  if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; renderInspector(); return; }
+  if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; render(); return; }
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; rememberView(); renderInspector(); }
   if (event.target.closest("#workspace-settings")) $("#workspace-dialog").showModal();
@@ -1883,7 +1896,9 @@ events.onmessage = ({ data }) => {
     live.warning = event.type === "agent_error" || (event.type === "tool_end" && event.isError);
     liveStages.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId) {
-      if (event.type !== "text_delta") renderInspectorPreservingContext();
+      if (event.type === "text_delta") {
+        for (const output of document.querySelectorAll("[data-stage-output]")) output.textContent = live.output;
+      } else if (event.type !== "text_delta") renderInspectorPreservingContext();
     }
   }
 };

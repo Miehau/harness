@@ -1741,3 +1741,6 @@ button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:
 .criterion-picker legend { padding: 0 4px; color: #8d97a8; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
 .criterion-picker label { display: flex; gap: 6px; align-items: start; line-height: 1.35; }
 .criterion-picker input { margin: 1px 0 0; accent-color: #8b7cf6; }
+
+.stage-output, .stage-artifacts { display: grid; gap: 10px; margin-bottom: 18px; }
+.stage-output pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
