@@ -10,7 +10,7 @@
 
 **Strength:** Fixtures reject authored runtime fields so harness versions can be compared against the same input. Tests use a mocked harness and reusable daemon helpers.
 
-**Limit:** Seeded states are development evidence, not proof of a complete live provider journey. `src/camera-control.js` is an unrelated NVR helper and is outside this product map.
+**Limit:** Seeded states are development evidence, not proof of a complete live provider journey.
 
 Evidence: [local.js](../../src/local.js), [scripts README](../../scripts/README.md), [test helpers](../../test/helpers.js), [local tests](../../test/local.test.js), [daemon e2e tests](../../test/e2e-daemon.test.js).
 

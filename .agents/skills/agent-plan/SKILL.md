@@ -72,7 +72,6 @@ AGENT_PLAN_DATA_DIR=<dataDir> npm start -- --cwd <cwd>
 - No extra notifiers, no direct deploy, no second agent layer.
 - Workers have no arbitrary shell; commands are named argv from `.agent-plan/project.json`.
 - Do not parse architecture prose for commands.
-- `src/camera-control.js` is unrelated; leave it alone unless asked.
 
 ## Checks before done
 

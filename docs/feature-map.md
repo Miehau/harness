@@ -50,4 +50,4 @@ F05 governs Pi sessions and workflow gates across stages. F09 supplies visual ev
 
 Follow the [repository skill](../.agents/skills/agent-plan/SKILL.md). Run `node scripts/nav.mjs --json`, `node scripts/test.mjs --map`, and `node scripts/seed.mjs --list`; these discover current behavior. Test-map filename matches are not coverage. Use mocked harnesses for test journeys; do not mutate real daemon state while exploring.
 
-Snapshot: 2026-09-06, base `9703dde` plus uncommitted work. Source wins over this map and specification prose. Preserve stable F-IDs; update the affected leaf and navigation row when behavior changes. Keep audit history out of the lookup path. Camera control is unrelated and excluded.
+Snapshot: 2026-09-06, base `9703dde` plus uncommitted work. Source wins over this map and specification prose. Preserve stable F-IDs; update the affected leaf and navigation row when behavior changes. Keep audit history out of the lookup path.
