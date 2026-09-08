@@ -1506,11 +1506,18 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             error: error.message
           });
         }
-        failed.status = "failed";
+        const preserveSteeringCheckpoint = steeringCheckpointPending(current);
+        failed.status = preserveSteeringCheckpoint ? "needs_input" : "failed";
         failed.lastError = error.message;
         delete current.activeRuns[stepId];
-        current.status = "needs_attention";
-        setStage(current, "implement", "blocked", error.message);
+        if (preserveSteeringCheckpoint) {
+          // The withheld instruction is an operator decision that remains valid
+          // even when its bound worker fails before the decision is answered.
+          setStage(current, "implement", "blocked", current.checkpoint.title);
+        } else {
+          current.status = "needs_attention";
+          setStage(current, "implement", "blocked", error.message);
+        }
       });
     }
   })().finally(() => activeSteps.delete(key));
@@ -2436,7 +2443,11 @@ async function api(request, response, url) {
       await mirrorCheckpoint(ticketId);
       return json(response, 200, steeringResponse(outcome.record));
     }
-    const record = outcome.paused ? outcome.record : await deliverSteering(ticketId, outcome.record.id);
+    let record = outcome.record;
+    if (!outcome.paused) {
+      await deliverSteering(ticketId, outcome.record.id);
+      record = ticketRun(store.read(), ticketId).steering.records.find((item) => item.id === outcome.record.id) || outcome.record;
+    }
     return json(response, 200, steeringResponse(record, outcome.paused ? { nextCondition: "Resume this paused run manually; the correction remains queued for its saved attempt." } : {}));
   }
 

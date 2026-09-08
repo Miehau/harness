@@ -1,10 +1,25 @@
 {
   "version": 1,
   "commands": {
-    "verify": ["node", ".agent-plan/verify.mjs"]
+    "verify": ["node", ".agent-plan/verify.mjs"],
+    "nav": ["node", "scripts/nav.mjs", "--json"],
+    "test-map": ["node", "scripts/test.mjs", "--map"],
+    "seed-list": ["node", "scripts/seed.mjs", "--list"],
+    "test-ui-model": ["node", "scripts/test.mjs", "ui-model"],
+    "test-steering-delivery": ["node", "scripts/test.mjs", "steering-delivery"],
+    "check": ["node", "scripts/test.mjs", "--check"],
+    "test-capture-proof": ["node", "scripts/capture-steering-proof.mjs", "--preflight"],
+    "capture-proof": ["node", "scripts/capture-steering-proof.mjs"]
   },
   "environment": {
-    "pass": [],
+    "pass": [
+      "AGENT_PLAN_EVIDENCE_DIR",
+      "AGENT_PLAN_CAPTURE_URL",
+      "AGENT_PLAN_CAPTURE_TICKET_ID",
+      "AGENT_PLAN_CAPTURE_RUN_ID",
+      "AGENT_PLAN_CAPTURE_CRITERIA",
+      "CHROMIUM_PATH"
+    ],
     "files": []
   },
   "ports": {

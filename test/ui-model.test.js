@@ -352,6 +352,9 @@ test("steering selects only an active or paused saved attempt", () => {
   const paused = { ...run, status: "paused", activeRuns: {}, plan: { nodes: [{ id: "build", status: "interrupted", activeAttempt: { id: "attempt", status: "interrupted" } }] } };
   assert.equal(steeringTarget(paused).paused, true);
   assert.match(steeringTarget(paused).message, /resume is still a separate manual action/i);
+  const unavailable = { ...run, activeRuns: { build: { attemptId: "attempt", piSessionState: "unavailable" } } };
+  assert.equal(steeringTarget(unavailable).targetable, false);
+  assert.match(steeringTarget(unavailable).reason, /not active or resumable/i);
   assert.equal(steeringTarget({ ...run, status: "completed" }).targetable, false);
 });
 

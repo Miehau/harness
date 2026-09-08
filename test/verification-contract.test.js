@@ -49,8 +49,11 @@ if (process.env.FAIL_PHASE === phase) {
 test("verification contract composes repository-local phases and retains failed diagnostics", async () => {
   const project = JSON.parse(await readFile(join(repositoryRoot, ".agent-plan", "project.json"), "utf8"));
   assert.deepEqual(project.commands.verify, ["node", ".agent-plan/verify.mjs"]);
-  assert.deepEqual(project.environment, { pass: [], files: [] });
-  assert.deepEqual(project.ports, { variables: [] });
+  assert.deepEqual(project.commands["test-capture-proof"], ["node", "scripts/capture-steering-proof.mjs", "--preflight"]);
+  assert.deepEqual(project.commands["capture-proof"], ["node", "scripts/capture-steering-proof.mjs"]);
+  assert.equal(project.ports.variables.length, 0);
+  assert.equal(project.environment.files.length, 0);
+  assert.ok(project.environment.pass.includes("AGENT_PLAN_EVIDENCE_DIR"));
 
   const root = await createFixture();
   try {

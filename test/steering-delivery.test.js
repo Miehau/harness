@@ -5,7 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiHarness } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
-import { invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
+import { invoke, mockHarness, sampleTicket, seedRun, withDaemon } from "./helpers.js";
+
+async function settlesWithin(promise, message, timeoutMs = 3000) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 test("Pi steering queues the stable instruction on the active worker session and preserves explicit acknowledgment", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-steering-"));
@@ -73,7 +85,7 @@ function activePlan() {
   return plan;
 }
 
-test("an unsafe steer remains the visible needs-input gate after its active worker settles", async () => {
+test("a worker error preserves an unsafe steering needs-input checkpoint", async () => {
   let releaseWorker;
   const workerStarted = new Promise((resolve) => { releaseWorker = resolve; });
   let settleWorker;
@@ -86,24 +98,39 @@ test("an unsafe steer remains the visible needs-input gate after its active work
       await onSessionActive({ ticketId, runId, stepId: "ledger", attemptId });
       releaseWorker();
       await workerSettled;
-      return { prompt: "", rawOutput: "", output: "# Result", reviewNotes: [], sessionFile: null, report: { status: "completed", summary: "Done", artifact: "# Result" } };
+      throw new Error("worker crashed after steering was withheld");
     }
   };
   await withDaemon(async (daemon) => {
-    const id = await seedRun(daemon, { status: "paused", plan, workspace: { cwd: process.cwd() }, activeRuns: {} });
+    // This worker-lifecycle test does not exercise tracker delivery. A local ticket
+    // keeps the resume path offline and prevents missing credentials from masking it.
+    const id = await seedRun(daemon, {
+      ticket: sampleTicket({ source: "local" }), status: "paused", plan,
+      workspace: { cwd: process.cwd() }, activeRuns: {}
+    });
     const resume = invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} });
-    await workerStarted;
-    const unsafe = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Edit src/steering.js safely." } });
-    assert.equal(unsafe.json.state, "withheld");
-    settleWorker();
-    await resume;
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && daemon.store.read().ticketRuns[id].activeRuns.ledger) await new Promise((resolve) => setTimeout(resolve, 10));
-    const run = daemon.store.read().ticketRuns[id];
-    assert.equal(run.status, "awaiting_input");
-    assert.equal(run.checkpoint.source, "steering");
-    assert.equal(run.checkpoint.kind, "needs_input");
-    assert.notEqual(run.checkpoint.kind, "step_review");
+    try {
+      await settlesWithin(workerStarted, "Timed out waiting for the resumed worker to start");
+      const unsafe = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Edit src/steering.js safely." } });
+      assert.equal(unsafe.json.state, "withheld");
+      settleWorker();
+      await resume;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && daemon.store.read().ticketRuns[id].activeRuns.ledger) await new Promise((resolve) => setTimeout(resolve, 10));
+      const run = daemon.store.read().ticketRuns[id];
+      assert.equal(run.status, "awaiting_input");
+      assert.equal(run.checkpoint.source, "steering");
+      assert.equal(run.checkpoint.kind, "needs_input");
+      assert.equal(run.checkpoint.steerId, run.steering.records[0].id);
+      assert.equal(run.plan.nodes[0].status, "needs_input");
+      assert.match(run.plan.nodes[0].lastError, /worker crashed/);
+      assert.notEqual(run.checkpoint.kind, "step_review");
+    } finally {
+      // Always release the mock worker so a failed assertion cannot leave daemon.close()
+      // awaiting a test-controlled promise indefinitely.
+      settleWorker();
+      await resume;
+    }
   }, { harness, cwd: process.cwd() });
 });
 
@@ -216,9 +243,11 @@ test("a pre-session steering claim is released and drains in FIFO order once del
     await daemon.store.update((state) => {
       state.ticketRuns[id].activeRuns.ledger.piSessionState = "active";
     });
-    await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with the claim guard." } });
+    const second = await invoke(daemon, "POST", `/api/tickets/${id}/steering`, { body: { instruction: "Update src/steering.js with the claim guard." } });
     const records = daemon.store.read().ticketRuns[id].steering.records;
     assert.deepEqual(records.map((record) => record.state), ["delivered", "delivered"]);
     assert.deepEqual(delivered, records.map((record) => record.id));
+    assert.equal(second.json.steerId, records[1].id);
+    assert.equal(second.json.state, "delivered");
   }, { harness });
 });

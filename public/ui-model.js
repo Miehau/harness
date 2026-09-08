@@ -66,7 +66,10 @@ export function steeringTarget(run, selectedStepId = null) {
   const steps = flattenPlanSteps(run.plan);
   const candidates = paused
     ? steps.filter((step) => step.status === "interrupted" && step.activeAttempt?.status === "interrupted").map((step) => ({ step, attemptId: step.activeAttempt.id }))
-    : Object.entries(run.activeRuns || {}).map(([id, active]) => ({ step: steps.find((step) => step.id === id), attemptId: active?.attemptId })).filter(({ step, attemptId }) => step && attemptId && ["running", "fixing"].includes(step.status));
+    : Object.entries(run.activeRuns || {})
+      .filter(([, active]) => active?.piSessionState !== "unavailable")
+      .map(([id, active]) => ({ step: steps.find((step) => step.id === id), attemptId: active?.attemptId }))
+      .filter(({ step, attemptId }) => step && attemptId && ["running", "fixing"].includes(step.status));
   const selected = selectedStepId ? candidates.filter(({ step }) => step.id === selectedStepId) : candidates;
   if (selected.length !== 1) return { targetable: false, paused, reason: selected.length ? "Select one active worker before steering." : "The selected step is not active or resumable." };
   const { step, attemptId } = selected[0];
