@@ -92,6 +92,13 @@ export function settleScheduledDelivery(scheduled) {
   return Promise.resolve(scheduled).then(({ promise }) => promise).catch(() => {});
 }
 
+export function captureProofCriteria(criteria, stepId) {
+  const hasVisualCriteria = criteria.some(criterion => criterion.requiresVisualEvidence || criterion.requiresVideoEvidence);
+  return criteria.filter(criterion => (!stepId || criterion.stepId === stepId)
+    && (!hasVisualCriteria || criterion.requiresVisualEvidence || criterion.requiresVideoEvidence))
+    .map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }));
+}
+
 export function deliveryFeedbackReferences(feedback = []) {
   return [...new Set(feedback.flatMap((item) => [...`${item.path || ""}\n${item.body || ""}`
     .matchAll(/(?:^|[\/\s'"(])((?:src|test|public|scripts|\.agent-plan)\/[a-z0-9._/-]+)/gi)]
@@ -389,9 +396,9 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     containment,
     requireVisualEvidence: required,
     requireVideoEvidence: requiredVideo,
-    // The standalone scenario selects its relevant criteria; legacy verify capture
-    // must still receive only criteria explicitly requiring visual proof.
-    proofCriteria: captureProof ? projectProofMap(current).criteria.filter((criterion) => !stepId || criterion.stepId === stepId).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence })) : undefined,
+    // Honor explicit visual criteria. Legacy capture-only plans without visual
+    // flags still let the standalone scenario select its relevant criteria.
+    proofCriteria: captureProof ? captureProofCriteria(projectProofMap(current).criteria, stepId) : undefined,
     // Canonical proof must exercise both API and UI code from the worktree.
     environment: required ? { ...liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId), AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(projectProofMap(current).criteria.filter((criterion) => criterion.requiresVisualEvidence && (!stepId || criterion.stepId === stepId)).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }))) } : {}
   });
@@ -1787,23 +1794,14 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const target = findNode(ticketRun(state, ticketId).plan, stepId);
         target.baseTree ||= stepBaseTree;
       });
-      let rollbackFeedback = "";
       if (step.baseTree && beforeTree) {
         const existingDiff = await diffTrees(stepCwd, step.baseTree, beforeTree);
         const existingBudget = diffReviewBudget(step, existingDiff);
         if (reviewBudgetRequiresRollback(existingBudget)) {
-          beforeTree = await restoreTree(stepCwd, step.baseTree);
-          rollbackFeedback = `The harness rolled back a runaway prior diff before this attempt: ${existingBudget.reasons.join("; ")}. Re-implement this slice from its clean step checkpoint with focused edits; do not copy whole files from another worktree.`;
-          await update((state) => {
-            const target = findNode(ticketRun(state, ticketId).plan, stepId);
-            target.rollbackHistory ||= [];
-            target.rollbackHistory.push({ at: new Date().toISOString(), reason: rollbackFeedback, diff: existingDiff, reviewBudgetResult: existingBudget });
-            target.diff = null;
-            target.reviewBudgetResult = null;
-          });
+          throw new Error(`Review budget approval required; worktree preserved: ${existingBudget.reasons.join("; ")}. Approve a bounded budget with scope-add before resuming.`);
         }
       }
-      let nextFeedback = feedback || rollbackFeedback;
+      let nextFeedback = feedback;
       // A completed worker and its checks survive a reviewer interruption. Reuse
       // them only while the worktree is unchanged and no correction was requested.
       let pendingVerification = !nextFeedback && step.pendingVerification?.afterTree === beforeTree
@@ -1886,12 +1884,13 @@ const report = redactRecord(result.report);
         ];
 Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, report);
-        if (runawayDiff) await restoreTree(cwd, stepBaseTree);
+        // Size is a review decision, not evidence of invalid code. Preserve the
+        // worker output while blocking further work until the budget is approved.
         if (violations.length || runawayDiff || (report.status !== "completed" && !workerGate)) {
           const error = redactText(violations.length
             ? `Changes outside permission or write scope: ${violations.join(", ")}`
             : runawayDiff
-              ? `Runaway diff rolled back to the step checkpoint: ${reviewBudget.reasons.join("; ")}`
+              ? `Review budget approval required; worktree preserved: ${reviewBudget.reasons.join("; ")}`
               : (report.request || report.summary || "Worker needs attention"));
           const attemptActivity = activity.snapshot();
           await update((state) => {
@@ -1916,6 +1915,8 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
             current.artifacts.push(...artifacts);
             delete current.activeRuns[stepId];
             current.status = "needs_attention";
+            current.lastError = error;
+            current.checkpoint = { id: randomUUID(), kind: "needs_attention", source: "execution", stepId, title: runawayDiff ? "Review budget approval required" : "Worker needs attention", prompt: error, createdAt: new Date().toISOString(), questions: [] };
             setStage(current, "implement", "blocked", error);
           });
           await persistProofSnapshot(ticketId, { stageId: "implement", stepId, attemptId, name: "proof-map-worker.json" });
@@ -3721,18 +3722,23 @@ if (affectedCriterionIds.length) await persistProofSnapshot(id, { stageId: "veri
     const stepId = decodeURIComponent(stepScope[2]);
     const input = await body(request);
     const paths = approvedScopePaths(input.paths);
+    const reviewBudget = input.reviewBudget;
+    if (reviewBudget && (!Number.isInteger(reviewBudget.maxFiles) || reviewBudget.maxFiles <= 0
+      || !Number.isInteger(reviewBudget.maxChangedLines) || reviewBudget.maxChangedLines <= 0)) throw new Error("Review budget requires positive integer file and line limits");
     const reason = String(input.reason || "").trim();
     if (!reason) throw new Error("Explain why the approved scope must expand");
     if (activeTickets.has(ticketId)) throw new Error("Pause the run before changing a step scope");
     const state = await update((draft) => {
       const run = ticketRun(draft, ticketId);
       const step = findNode(run.plan, stepId);
-      if (!step || !["needs_attention", "needs_input", "awaiting_approval", "failed", "interrupted"].includes(step.status)) throw new Error("Only a stopped blocked step can receive a scope expansion");
+      if (!step || !["needs_attention", "needs_input", "awaiting_approval", "failed", "interrupted", "review_ready"].includes(step.status)) throw new Error("Only a stopped step can receive a scope expansion");
       const existing = step.writeScope.split(",").map((path) => path.trim()).filter(Boolean);
       step.writeScope = [...new Set([...existing, ...paths])].join(",");
       step.expectedFiles = [...new Set([...(step.expectedFiles || []), ...paths])];
+      if (reviewBudget) step.reviewBudget = { maxFiles: reviewBudget.maxFiles, maxChangedLines: reviewBudget.maxChangedLines, justification: "" };
       step.scopeChanges ||= [];
       const change = { at: new Date().toISOString(), paths, reason, source: "operator" };
+      if (reviewBudget) change.reviewBudget = { ...step.reviewBudget };
       step.scopeChanges.push(change);
       const note = `Approved scope expansion: ${paths.join(", ")} — ${reason}`;
       step.lastError = [step.lastError, note].filter(Boolean).join("\n\n");
@@ -3790,7 +3796,7 @@ if (affectedCriterionIds.length) await persistProofSnapshot(id, { stageId: "veri
     // A failed verifier must not force another broad review before an operator
     // can send concrete corrections. This only reopens work, never acceptance.
     const stoppedExecution = decision === "changes" && current.status === "needs_attention"
-      && current.checkpoint?.source === "execution" && current.checkpoint?.stepId === stepId
+      && ["execution", "verification"].includes(current.checkpoint?.source) && current.checkpoint?.stepId === stepId
       && !activeTickets.has(ticketId);
     if (step.status !== "review_ready" && !stoppedExecution) throw new Error("This step is not ready for review");
     if (decision === "changes") {
@@ -3805,6 +3811,7 @@ if (affectedCriterionIds.length) await persistProofSnapshot(id, { stageId: "veri
         if (affectedCriterionIds.length) run.proofMap = invalidateProof(run.proofMap, affectedCriterionIds, { reason: feedback });
         delete findNode(run.plan, stepId).workspaceCommit;
         run.status = "running";
+        run.lastError = null;
         run.checkpoint = null;
         setStage(run, "implement", "active", `Revising ${step.title}`);
       });

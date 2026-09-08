@@ -8,9 +8,21 @@ import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
 import { JsonStore } from "../src/store.js";
 import { createZeroStateWorkspace } from "../src/worktrees.js";
-import { auditHarnessWriteScopes, closeSseClients, createDaemon, deliveryFailureNeedsFix, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
+import { auditHarnessWriteScopes, captureProofCriteria, closeSseClients, createDaemon, deliveryFailureNeedsFix, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
 import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
+
+test("capture criteria exclude backend requirements when the plan explicitly identifies visual proof", () => {
+  const criteria = [
+    { id: "backend", stepId: "store", text: "Persistence survives reload" },
+    { id: "dialog", stepId: "ui", text: "Policy is visible", requiresVisualEvidence: true },
+    { id: "keyboard", stepId: "ui", text: "Keyboard controls work", requiresVideoEvidence: true }
+  ];
+  assert.deepEqual(captureProofCriteria(criteria).map(c => c.id), ["dialog", "keyboard"]);
+  assert.deepEqual(captureProofCriteria(criteria, "store"), []);
+  assert.deepEqual(captureProofCriteria(criteria, "ui").map(c => c.id), ["dialog", "keyboard"]);
+  assert.deepEqual(captureProofCriteria(criteria.slice(0, 1)).map(c => c.id), ["backend"]);
+});
 
 test("reports missing visual evidence instead of mislabeling passing checks", () => {
   const review = repositoryCheckReview({
@@ -1134,11 +1146,23 @@ test("operator can auditably expand one blocked step to a directly affected test
     assert.deepEqual(run.plan.nodes[0].scopeChanges.at(-1).paths, ["test/e2e.test.js"]);
     assert.match(run.checkpoint.prompt, /Approved scope expansion/);
 
-    run.plan.nodes[0].status = "needs_input";
+    await daemon.store.update((state) => { state.ticketRuns[id].plan.nodes[0].status = "needs_input"; });
     const inputExpansion = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, {
       body: { paths: ["test/focused.test.js"], reason: "The worker requested this exact bounded test scope." }
     });
     assert.equal(inputExpansion.status, 200, inputExpansion.text);
+
+    await daemon.store.update((state) => { state.ticketRuns[id].plan.nodes[0].status = "review_ready"; });
+    const reviewExpansion = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, {
+      body: { paths: ["src/execution.js"], reason: "Review found a shared lifecycle correction before acceptance.", reviewBudget: { maxFiles: 12, maxChangedLines: 1400 } }
+    });
+    assert.equal(reviewExpansion.status, 200, reviewExpansion.text);
+    assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].status, "review_ready");
+    assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].reviewBudget.maxChangedLines, 1400);
+    assert.equal(reviewExpansion.json.scopeChange.reviewBudget.maxFiles, 12);
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, {
+      body: { paths: ["src/execution.js"], reason: "Invalid budget", reviewBudget: { maxFiles: 0, maxChangedLines: 1400 } }
+    })).status, 400);
 
     const rejected = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/scope`, { body: { paths: ["../outside"], reason: "No" } });
     assert.equal(rejected.status, 400);
@@ -1268,7 +1292,43 @@ test("async action requests acknowledge launch and retain later worker failures"
   } finally { release(); }
 });
 
+test("oversized worker output stays intact and cannot resume until its budget is approved", async () => {
+  let workerCalls = 0;
+  const content = "required change\n".repeat(12);
+  const harness = {
+    ...mockHarness(),
+    runStep: async ({ cwd }) => {
+      workerCalls++;
+      await writeFile(join(cwd, "change.txt"), content);
+      return { report: { status: "completed", summary: "Implemented" }, output: "Implemented", prompt: "Build", reviewNotes: [], rawOutput: "" };
+    },
+    runRepositoryChecks: async () => ({ status: "passed", summary: "Passed", output: "", evidence: [] }),
+    evidenceImages: async () => []
+  };
+  await withDaemon(async (daemon, { cwd }) => {
+    const ticket = { id: "budget-preserved", identifier: "LOCAL-budget", title: "Preserve output", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "change.txt", expectedFiles: ["change.txt"], estimatedChangedLines: 1, reviewBudget: { maxFiles: 1, maxChangedLines: 2 } }] });
+    const id = await seedRun(daemon, { ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "awaiting_approval", checkpoint: { kind: "awaiting_approval" } });
+    const waitStopped = async () => {
+      const deadline = Date.now() + 3000;
+      while (daemon.store.read().ticketRuns[id].status !== "needs_attention" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(daemon.store.read().ticketRuns[id].status, "needs_attention");
+    };
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } })).status, 202);
+    await waitStopped();
+    assert.equal(await readFile(join(workspace.cwd, "change.txt"), "utf8"), content);
+    assert.equal(daemon.store.read().ticketRuns[id].checkpoint.title, "Review budget approval required");
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} })).status, 400);
+    await invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} });
+    await waitStopped();
+    assert.equal(workerCalls, 1);
+    assert.equal(await readFile(join(workspace.cwd, "change.txt"), "utf8"), content);
+  }, { harness });
+});
+
 test("step execution failures persist an actionable run checkpoint", async () => {
+  for (const source of ["execution", "verification"]) {
   let verifyCalls = 0;
   const workerFeedback = [];
   const harness = {
@@ -1310,14 +1370,17 @@ test("step execution failures persist an actionable run checkpoint", async () =>
       kind: "needs_attention", stepId: "build", source: "execution", prompt: "Verification exceeded its inspection budget."
     });
     assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/accept`, { body: {} })).status, 400);
+    await daemon.store.update((state) => { state.ticketRuns[id].checkpoint.source = source; });
     const corrected = await invoke(daemon, "POST", `/api/tickets/${id}/steps/build/changes`, { body: {
       feedback: "Correct the reproduced scope escape.", criterionIds: run.proofMap.criteria.map((criterion) => criterion.id)
     } });
     assert.equal(corrected.status, 202, corrected.text);
     assert.equal(workerFeedback.at(-1), "Correct the reproduced scope escape.");
     assert.equal(verifyCalls, 2);
+    assert.equal(daemon.store.read().ticketRuns[id].lastError, null);
     assert.equal(daemon.store.read().ticketRuns[id].plan.nodes[0].status, "review_ready", daemon.store.read().ticketRuns[id].lastError);
   }, { harness });
+  }
 });
 
 test("provider usage exhaustion pauses a step without blaming its implementation", async () => {

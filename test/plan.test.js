@@ -39,6 +39,24 @@ test("a group is a hard barrier until every required child is accepted", () => {
   assert.deepEqual(dependencyArtifacts(plan, build).map((artifact) => artifact.name), ["repo.md", "risk.md"]);
 });
 
+test("worker context includes accepted transitive dependencies once, with current file ownership", () => {
+  const plan = normalizePlan({ nodes: [
+    { id: "roots", title: "Isolate roots", description: "Map original paths to worktrees", status: "accepted" },
+    { id: "proof", title: "Proof", status: "accepted", dependsOn: ["roots"] },
+    { id: "unrelated", title: "Unrelated", status: "accepted" },
+    { id: "delivery", title: "Deliver", dependsOn: ["proof", "roots"] }
+  ] });
+  for (const node of plan.nodes.slice(0, 3)) node.artifacts = [{ name: `${node.id}.md`, kind: "agent-output", content: node.title }];
+  plan.nodes[0].diff = { files: ["src/worktrees.js"] };
+  plan.nodes[0].artifacts.push({ name: "verification.json", kind: "step-verification", content: "large logs" });
+  const artifacts = dependencyArtifacts(plan, plan.nodes[3]);
+  assert.deepEqual(artifacts.map(a => a.name), ["roots.md", "proof.md"]);
+  assert.equal(artifacts[0].sourceStepOutcome, "Map original paths to worktrees");
+  assert.deepEqual(artifacts[0].sourceStepFiles, ["src/worktrees.js"]);
+  plan.nodes[0].status = "ready";
+  assert.deepEqual(dependencyArtifacts(plan, plan.nodes[3]).map(a => a.name), ["proof.md"]);
+});
+
 test("runaway review diffs require rollback while ordinary overruns remain reviewable", () => {
   assert.equal(reviewBudgetRequiresRollback({ files: 9, maxFiles: 8, changedLines: 450, maxChangedLines: 400 }), false);
   assert.equal(reviewBudgetRequiresRollback({ files: 6, maxFiles: 8, changedLines: 1800, maxChangedLines: 400 }), true);

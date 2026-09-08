@@ -226,6 +226,16 @@ test("review stage becomes a findings-and-fixes timeline", () => {
   assert.match(milestones[2].detail, /Persisted completion/);
 });
 
+test("a clean review does not invent another round while final proof is being prepared", () => {
+  const stage = { id: "verify", status: "active" };
+  const run = { reviews: [{ round: 4, actionableFindings: [] }] };
+  const items = stageMilestones(run, stage);
+  assert.equal(items[0].title, "Review round 4 passed.");
+  assert.equal(items.at(-1).title, "Preparing final proof.");
+  run.pendingReviewAttempt = { round: 5 };
+  assert.equal(stageMilestones(run, stage).at(-1).title, "Review round 5 started.");
+});
+
 test("review stage names an active fixer and repeats the issues being corrected", () => {
   const stage = { id: "verify", status: "active", updatedAt: "2026-09-03T10:00:00.000Z" };
   const items = stageMilestones({ status: "fixing", reviews: [{ createdAt: stage.updatedAt, actionableFindings: [{ severity: "high", claim: "Scope expansion bypasses the approved plan" }] }] }, stage);

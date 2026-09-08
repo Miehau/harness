@@ -114,7 +114,7 @@ Rules:
 - Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
 - Set requiresVisualEvidence to true when acceptance depends on rendered browser behavior or appearance. In that case declare capture-proof to capture enough PNG, JPEG, or WebP screenshots to visibly prove every required outcome into process.env.AGENT_PLAN_EVIDENCE_DIR using the project's existing browser tooling. Set requiresVideoEvidence to true only when acceptance specifically needs interaction proof; that requires both a screenshot and at least one real WebM or MP4. Never turn screenshots into a video.
 - Every serial write step after the first must depend on the preceding write step so implementation pauses for human review in a predictable order.
-- Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt.
+- Link every step to stable requirement, capability, and delta IDs. Copy only the relevant product context into productContext; do not dump the whole PRD into a worker prompt. Preserve the exploration's relevant owning files, symbols, and integration seams there so the worker need not rediscover them. Label these as the pre-implementation baseline; current code and accepted dependency handoffs supersede it.
 - Use only skill names from the supplied available-skill catalog. Use an empty array when none applies.
 - Every step must have a useful prompt, expected artifact, and acceptance criterion.`;
 
@@ -204,7 +204,7 @@ function lastAssistantText(session) {
   const message = session.sessionManager?.getBranch?.().findLast((entry) => entry.type === "message" && entry.message?.role === "assistant")?.message
     || [...messages].reverse().find((item) => item?.role === "assistant");
   const text = textFromContent(message?.content);
-  if (!text && message?.stopReason === "error") {
+  if (message?.stopReason === "error") {
     const error = new Error(message.errorMessage || "Model request failed");
     error.code = "MODEL_RESPONSE_ERROR";
     throw error;
@@ -237,7 +237,7 @@ function eventText(value) {
 
 function failureHighlights(output) {
   const lines = String(output || "").split(/\r?\n/);
-  return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+(?:location|failureType|error|code|name|expected|actual|operator|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
+  return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+.*:\d+:\d+\)?$|\s+(?:location|failureType|error|code|name|expected|actual|operator|stack|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
 }
 
 function safeEvent(event) {
@@ -309,7 +309,7 @@ export function stepContext({ plan, step, artifacts, proofMap }) {
   const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
     .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
-    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.id ? ` [artifactId: ${artifact.id}]` : ""}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.kind === "visual-evidence" ? "Captured visual evidence; use its artifactId as a media locator without copying it." : artifact.content || artifact.summary || ""}`).join("\n\n")
+    ? artifacts.map((artifact) => `### ${artifact.name}${artifact.id ? ` [artifactId: ${artifact.id}]` : ""}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.sourceStepOutcome ? `Accepted outcome: ${artifact.sourceStepOutcome}\nChanged files: ${artifact.sourceStepFiles?.join(", ") || "not recorded"}\n` : ""}${artifact.kind === "visual-evidence" ? "Captured visual evidence; use its artifactId as a media locator without copying it." : artifact.content || artifact.summary || ""}`).join("\n\n")
     : "No dependency artifacts.";
   const steps = flattenSteps(plan);
   const summarize = (items) => items.length
@@ -384,7 +384,7 @@ ${stepCriteria}
 
 Visual evidence: ${step.requiresVideoEvidence ? `required; configure capture-proof to write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; configure capture-proof to write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}
 
-Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} Do not run the canonical verify command yourself; the framework runs ${verificationEntry} once after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact.`;
+Work only within the stated permission and write scope. Expected files are a planning estimate, not an additional permission boundary; inspect every listed reference before changing files. Write workers have no arbitrary shell. Use project_command to run a named command from ${projectConfigPath}; the harness controls its working directory, environment allow-list, and timeout. ${step.permission === "write" ? "After the final edit, use review_note for up to five non-obvious changed sections where intent, an invariant, risk, or test evidence will reduce reviewer effort. Point at exact changed lines. Write one to three informative, direct sentences: explain what the changed block does now, then why its non-obvious decision matters. Do not paraphrase obvious code." : ""} Do not run the canonical verify command yourself; the framework runs ${verificationEntry} once after your report. Your final action MUST be the worker_report tool. Use completed when the result is ready for review, needs_input only when one concrete user answer or action is unavoidable, or awaiting_approval when explicit approval is required. Never request broader access for a path already listed in the write scope. Report dependency or command failures separately from permission issues, include the exact failed command and useful output in the artifact, and make at most one concrete request. Put the complete artifact for dependent steps in artifact. On every retry, replace it with a cumulative handoff for the whole step, not only the latest correction: include implemented interfaces and owning files, invariants, verification results, and remaining limitations. Remove superseded claims; later workers receive this handoff without your conversation history.`;
 }
 
 export function ensureVerificationContractStep(plan, contractExists, projectConfigExists = contractExists, captureReady = true) {
@@ -1128,11 +1128,18 @@ export class PiHarness {
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
+    const existingFile = (await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).sort().at(-1);
+    let manager;
+    try {
+      manager = existingFile ? SessionManager.open(join(sessionDir, existingFile), sessionDir, cwd) : SessionManager.create(cwd, sessionDir);
+    } catch {
+      manager = SessionManager.create(cwd, sessionDir);
+    }
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
       tools: verificationTools(focusFindings, images),
-      sessionManager: SessionManager.create(cwd, sessionDir)
+      sessionManager: manager
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
     const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
@@ -1158,6 +1165,8 @@ export class PiHarness {
     try {
       signal?.throwIfAborted();
       await session.prompt(this.configuredPrompt(session, profile, `# Fresh implementation-slice verification
+
+${existingFile && session.state.messages.length ? "Continue the interrupted verification from the inspection evidence already in this session. Do not repeat completed reads or restart discovery. The refreshed review packet below is authoritative; inspect only unresolved criteria or changed evidence, then return your verdict." : ""}
 
 Review this slice without relying on the implementation conversation. Inspect repository evidence. The deterministic gate has already run; use its result below rather than attempting to rerun it.
 
@@ -1504,6 +1513,8 @@ Every reported finding triggers an automatic correction round. Report concrete d
         customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
         sessionManager: manager
       }));
+      const resumed = Boolean(resumeSessionFile && session.state.messages.length);
+      if (resumeSessionFile && !resumed) onEvent?.({ type: "phase", label: "Saved worker context unavailable; rebuilding full step context" });
       session.setSessionName(step.agentId);
       await onSessionFile?.(session.sessionFile);
       unbindAbort = bindAbort(session, signal);
@@ -1533,18 +1544,18 @@ ${stripFrontmatter(content).trim()}
       });
       signal?.throwIfAborted();
       const deferredSlices = flattenSteps(plan).filter((candidate) => candidate.id !== step.id && candidate.status !== "accepted");
-      const resumedContext = resumeSessionFile
+      const resumedContext = resumed
         ? `\n\nCurrent slice boundary:\n- Acceptance criteria: ${step.acceptanceCriteria.join("; ") || "none"}\n- Permission: ${step.permission}\n- Effective write scope: ${workerWriteScope(step) || "none"}${step.scopeChanges?.length ? `\n- Audited scope additions: ${step.scopeChanges.map((change) => `${change.paths.join(", ")} (${change.reason})`).join("; ")}` : ""}\n- Deferred slices: ${deferredSlices.map((candidate) => `${candidate.title} (${candidate.acceptanceCriteria.join("; ")})`).join("; ") || "none"}\nDo not request access to a path already included in this effective write scope. Do not implement behavior assigned exclusively to a deferred slice; report completed without that change when the current criteria are already met.`
         : "";
       const continuation = feedback
-        ? resumeSessionFile
+        ? resumed
           ? `The user responded to this worker session.\n\n${feedback}${resumedContext}\n\nContinue from the existing conversation. Your final action MUST be the worker_report tool.`
           : `# Review feedback\n\n${feedback}\n\nCorrect only the requested issues, preserve accepted behavior, run focused verification, and finish with worker_report.`
-        : resumeSessionFile
+        : resumed
           ? `Continue the interrupted work from this existing session.${resumedContext}\n\nYour final action MUST be the worker_report tool.`
           : "";
-      const prompt = resumeSessionFile
-        ? continuation
+      const prompt = resumed
+        ? `${continuation}\n\nIn worker_report.artifact, provide a cumulative handoff for the whole step, not only the latest correction: implemented interfaces and owning files, invariants, verification results, and remaining limitations. Remove superseded claims; dependent workers do not receive your conversation history.`
         : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap })), continuation].filter(Boolean).join("\n\n");
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       await session.prompt(prompt, { images });

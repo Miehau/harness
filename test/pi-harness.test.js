@@ -368,6 +368,8 @@ test("bounded repository failure output retains both context and the final faili
       console.log("    Command failed: git worktree add --detach /tmp/feature abc123");
       console.log("    fatal: failed to read .git/worktrees/feature/commondir");
       console.log("  code: 128");
+      console.log("  stack: |-");
+      console.log("    TestContext.<anonymous> (file:///tmp/project/test/proof.test.js:87:12)");
       console.log("Final proof dashboard did not render selected MEA-55 workflow within 45 seconds");
       console.log("AFTER-FAILURE-NOISE:" + "c".repeat(120000));
       console.error("CHROME-NOISE:" + "b".repeat(120000));
@@ -383,6 +385,7 @@ test("bounded repository failure output retains both context and the final faili
     assert.match(result.failureHighlights, /not ok 237 - preserves the proof record/);
     assert.match(result.failureHighlights, /Command failed: git worktree add/);
     assert.match(result.failureHighlights, /fatal: failed to read/);
+    assert.match(result.failureHighlights, /test\/proof\.test\.js:87:12/);
     assert.match(result.failureHighlights, /did not render selected MEA-55 workflow within 45 seconds/);
     assert.doesNotMatch(result.failureHighlights, /BEGIN-CONTEXT/);
   } finally {
@@ -839,7 +842,7 @@ test("verification surfaces the provider error after one retry", async () => {
       subscribe() { return () => {}; },
       async prompt() {
         prompts++;
-        this.state.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider rejected the image payload" });
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Partial response","findings":[]}' }], stopReason: "error", errorMessage: "Provider rejected the image payload" });
       },
       dispose() {}
     };
@@ -1034,6 +1037,28 @@ test("fresh verification stops after its repository inspection budget", async ()
         status: "passed", command: "node .agent-plan/verify.mjs", summary: "Checks passed.", output: "10 tests passed"
       }, runId: "run", round: 1
     }), new RegExp(`${MAX_VERIFICATION_ACTIONS}-action inspection budget`));
+
+    const saved = join(root, "pi-sessions", "tickets", "T-1", "run", "verifications", "slice", "round-1", "saved.jsonl");
+    await writeFile(saved, "saved inspection");
+    let opened;
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}), open: path => { opened = path; return {}; } }
+    });
+    session.state.messages = [{ role: "user", content: "Original verification and inspection" }];
+    session.prompt = async prompt => {
+      assert.match(prompt, /Continue the interrupted verification/);
+      assert.match(prompt, /Do not repeat completed reads/);
+      assert.match(prompt, /\+current/);
+      session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Inspected remaining evidence","findings":[]}' }] });
+    };
+    const result = await harness.verifyStep({
+      cwd: root, ticket: { id: "T-1", identifier: "T-1", title: "Ticket" }, plan, step: plan.nodes[0],
+      design: "Design", diff: { files: ["src/a.js"], patch: "+current" }, output: "Done",
+      checks: { status: "passed", summary: "Checks passed" }, runId: "run", round: 1
+    });
+    assert.equal(opened, saved);
+    assert.equal(result.summary, "Inspected remaining evidence");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1100,7 +1125,7 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
     const harness = new PiHarness({ dataDir: root });
     let prompt;
     const session = {
-      state: { messages: [] },
+      state: { messages: [{ role: "user", content: "Original step context" }] },
       resourceLoader: { getSkills: () => ({ skills: [] }) },
       setSessionName() {},
       subscribe() { return () => {}; },
@@ -1135,6 +1160,18 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
     }), /required worker_report tool/);
     assert.match(prompt, /# Review feedback/);
     assert.match(prompt, /Skills requested/);
+
+    session.state.messages = []; // SDK silently creates an empty session for a missing/empty file.
+    const events = [];
+    await assert.rejects(harness.runStep({
+      cwd: root, plan, step: plan.nodes[0], artifacts: [{ name: "prior.md", content: "Accepted interfaces" }], images: [],
+      feedback: "Keep the correction", resumeSessionFile: join(root, "missing.jsonl"), onEvent: event => events.push(event)
+    }), /required worker_report tool/);
+    assert.match(prompt, /Skills requested/);
+    assert.match(prompt, /Accepted interfaces/);
+    assert.match(prompt, /Keep the correction/);
+    assert.ok(events.some(event => /rebuilding full step context/.test(event.label)));
+
   } finally {
     await rm(root, { recursive: true, force: true });
   }

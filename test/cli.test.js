@@ -506,9 +506,27 @@ test("revise sends focused feedback to a review-ready step", async () => {
   assert.deepEqual(called.body, { feedback: "Match the installed SDK interface" });
 });
 
-test("scope-add sends one explicit operator-approved path and reason", async () => {
+test("both revision commands send explicit criteria and reject missing flag values", async () => {
+  for (const command of [["revise", "build", "ticket-1"], ["revise-proof", "ticket-1"]]) {
+    let called;
+    const opts = {
+      env: {}, stdout: { write() {} }, stderr: { write() {} },
+      fetchImpl: async (_url, options) => {
+        called = JSON.parse(options.body);
+        return { ok: true, status: 202, async text() { return "{}"; } };
+      }
+    };
+    await runCli([...command, "Preserve", "saved policy", "--criterion", "criterion-a", "--criterion", "criterion-b"], opts);
+    assert.deepEqual(called, { feedback: "Preserve saved policy", criterionIds: ["criterion-a", "criterion-b"] });
+    called = null;
+    await assert.rejects(runCli([...command, "Fix policy", "--criterion"], opts), /requires a criterion ID/);
+    assert.equal(called, null);
+  }
+});
+
+test("scope-add sends an explicit operator-approved path, reason and optional budget", async () => {
   let called;
-  await runCli(["scope-add", "build", "ticket-1", "test/e2e.test.js", "Canonical failure requires its regression update"], {
+  const options = {
     env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" },
     fetchImpl: async (url, options) => {
       called = { url, body: JSON.parse(options.body) };
@@ -516,9 +534,14 @@ test("scope-add sends one explicit operator-approved path and reason", async () 
     },
     stdout: { write() {} },
     stderr: { write() {} }
-  });
+  };
+  const args = ["scope-add", "build", "ticket-1", "test/e2e.test.js", "Canonical failure requires its regression update"];
+  await runCli(args, options);
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/scope");
   assert.deepEqual(called.body, { paths: ["test/e2e.test.js"], reason: "Canonical failure requires its regression update" });
+  await runCli([...args, "--max-files", "12", "--max-lines", "1400"], options);
+  assert.deepEqual(called.body.reviewBudget, { maxFiles: 12, maxChangedLines: 1400 });
+  await assert.rejects(runCli([...args, "--max-files", "12"], options), /Provide both/);
 });
 
 test("waive rejects one verifier finding with an operator reason", async () => {

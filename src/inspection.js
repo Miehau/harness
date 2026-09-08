@@ -68,12 +68,14 @@ function attemptEvidence(run, step, attempt, active = false) {
   // Final proof is produced by Verify for the whole run, rather than copied
   // into every accepted worker attempt.
   const visualPresent = visualRequired ? artifacts.some((item) => item.kind === "visual-evidence") || hasFinalVisualEvidence(run) : true;
+  const visualDeferred = visualRequired && !visualPresent && step.status === "accepted"
+    && run.status !== "completed" && run.stages?.find(stage => stage.id === "verify")?.status !== "completed";
   const missing = [
     reportRequired && !reportPresent ? "report" : null,
     checksRequired && !checksPresent ? "checks" : null,
     approvalRequired && !approvalPresent ? "approval" : null,
     artifactRequired && !artifactPresent ? "artifact" : null,
-    visualRequired && !visualPresent ? "visual_evidence" : null
+    visualRequired && !visualPresent && !visualDeferred ? "visual_evidence" : null
   ].filter(Boolean);
   return {
     state: active ? "collecting" : missing.length ? "incomplete" : "complete",
@@ -81,7 +83,7 @@ function attemptEvidence(run, step, attempt, active = false) {
     checks: checksRequired ? (checksPresent ? "passed" : checks ? checks.status || "failed" : "missing") : "not_required",
     approval: approvalRequired ? (approvalPresent ? "present" : "missing") : "not_required",
     artifacts: artifactRequired ? (artifactPresent ? "present" : "missing") : "not_required",
-    visualEvidence: visualRequired ? (visualPresent ? "present" : "missing") : "not_required",
+    visualEvidence: visualRequired ? (visualPresent ? "present" : visualDeferred ? "pending_final_verification" : "missing") : "not_required",
     missing
   };
 }
