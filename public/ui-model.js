@@ -187,7 +187,7 @@ export function finalReview(run) {
   const review = run?.reviews?.at(-1);
   const reviews = review?.reviews || [];
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
-  const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
+  const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence" && (!run.finalEvidenceArtifactIds?.length || run.finalEvidenceArtifactIds.includes(artifact.id)));
   return {
     criteria: proofMapView(run),
     proof: proofArtifacts.map((artifact) => ({

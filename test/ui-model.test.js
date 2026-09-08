@@ -290,6 +290,17 @@ test("final review keeps supported visual proof and its final check summary", ()
   assert.deepEqual(review.reviews, [{ role: "integration", summary: "No issues found" }]);
 });
 
+test("approved proof survives delivery and completion without mixing earlier captures", () => {
+  for (const status of ["resolving_conflicts", "completed"]) {
+    const review = finalReview({ id: "ticket", runId: "run", status, checkpoint: null,
+      finalEvidenceArtifactIds: ["approved"],
+      artifacts: [{ id: "old", kind: "visual-evidence", name: "old.png" }, { id: "approved", kind: "visual-evidence", name: "desktop.png" }]
+    });
+    assert.deepEqual(review.proof.map(item => item.id), ["approved"]);
+    assert.equal(review.proof[0].mediaUrl, "/api/tickets/ticket/runs/run/artifacts/approved/media");
+  }
+});
+
 test("proof presentation preserves ordered history and makes typed evidence actionable", () => {
   const run = {
     id: "ticket/a", proofMap: {
