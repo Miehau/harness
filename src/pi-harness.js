@@ -8,6 +8,7 @@ import { createEditToolDefinition, createFindToolDefinition, createGrepToolDefin
 import { Type } from "typebox";
 import { cloneRunAccess, resolveAccessPath, writeScopeAllows } from "./access-policy.js";
 import { assertScopedWrite, diffOutline, isGitRepository, normalizeReviewMap } from "./git.js";
+import { mapConfiguredPath } from "./worktrees.js";
 import { appendBounded, pushBounded } from "./execution.js";
 import { parseModelOutput } from "./model-output.js";
 import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
@@ -431,15 +432,27 @@ function includeVisualVerificationScope(plan) {
   return normalizePlan(scoped);
 }
 
-export function projectCommandTool(cwd, signal, containment, runCommand = runProjectCommand, onCleanup, evidenceRoot) {
+function commandRepositoryCwd(cwd, repository, repositories = []) {
+  const id = String(repository || "primary").trim() || "primary";
+  if (id === "primary") return cwd;
+  const repo = repositories.find((item) => item.id === id && item.cwd);
+  if (!repo) throw new Error(`Unknown repository “${id}” for project_command`);
+  return repo.cwd;
+}
+
+export function projectCommandTool(cwd, signal, containment, runCommand = runProjectCommand, onCleanup, evidenceRoot, repositories = []) {
   return defineTool({
     name: "project_command",
     label: "Project command",
-    description: `Run one repository-approved argv command. Optional safe word arguments can narrow commands such as test filters.`,
+    description: `Run one repository-approved argv command. Optional safe word arguments can narrow commands such as test filters. Optional repository selects a mapped worktree and that repository's project.json; omit it to keep the primary worktree.`,
     promptSnippet: "Run a repository-approved development command",
     promptGuidelines: ["Use this for focused tests, lint, type checks, formatting, and builds declared by the repository."],
-    parameters: Type.Object({ name: Type.String(), args: Type.Optional(Type.Array(Type.String())) }),
-    async execute(_toolCallId, { name, args = [] }) {
+    parameters: Type.Object({
+      name: Type.String(),
+      args: Type.Optional(Type.Array(Type.String())),
+      repository: Type.Optional(Type.String({ description: "Frozen repository id. Defaults to primary." }))
+    }),
+    async execute(_toolCallId, { name, args = [], repository } = {}) {
       if (name === "verify") return {
         content: [{ type: "text", text: `The framework runs ${verificationEntry} once after worker_report; continue without rerunning it.` }],
         details: { status: "deferred", command: name }, isError: false
@@ -449,7 +462,8 @@ export function projectCommandTool(cwd, signal, containment, runCommand = runPro
         await mkdir(evidenceRoot, { recursive: true });
         environment = { AGENT_PLAN_EVIDENCE_DIR: await mkdtemp(join(evidenceRoot, "command-")) };
       }
-      const result = await runCommand(cwd, name, { signal, args, ownership: containment?.ownership, containment, environment });
+      const commandCwd = commandRepositoryCwd(cwd, repository, repositories);
+      const result = await runCommand(commandCwd, name, { signal, args, ownership: containment?.ownership, containment, environment });
       // A timed-out command can leave token-owning descendants behind even
       // though the tool returns a normal failed result. Request the shared
       // coordinator now; it remains idempotent when worker exit follows.
@@ -619,6 +633,39 @@ function withToolText(result, text) {
   return { ...result, content: [{ type: "text", text }] };
 }
 
+function sessionRepositories(access) {
+  return Array.isArray(access?.repositories) ? access.repositories : [];
+}
+
+function withMappedPath(access, inputPath, cwd) {
+  return mapConfiguredPath(sessionRepositories(access), inputPath, cwd);
+}
+
+async function extraGitUnmapped(access, root) {
+  if (root?.kind !== "extra") return false;
+  if (sessionRepositories(access).some((repo) => repo.id === root.id && repo.cwd)) return false;
+  return isGitRepository(root.path);
+}
+
+async function assertOriginalCheckoutUntouched(access, cwd, target) {
+  for (const repo of sessionRepositories(access)) {
+    if (!repo.sourceCwd || !repo.cwd) continue;
+    const original = await realpath(repo.sourceCwd).catch(() => resolve(repo.sourceCwd));
+    const mapped = await realpath(repo.cwd).catch(() => resolve(repo.cwd));
+    if (original === mapped) continue;
+    if (pathContained(target, original) && !pathContained(target, mapped)) {
+      throw new Error("Write blocked: the original checkout is not writable; use the run worktree");
+    }
+  }
+  if (access?.sourcePrimaryPath && cwd) {
+    const realOriginal = await realpath(access.sourcePrimaryPath).catch(() => null);
+    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
+    if (realOriginal && realOriginal !== realCwd && pathContained(target, realOriginal) && !pathContained(target, realCwd)) {
+      throw new Error("Write blocked: the original primary checkout is not writable; use the run worktree");
+    }
+  }
+}
+
 async function mappedAccess(access, cwd) {
   const realCwd = cwd ? await realpath(cwd).catch(() => resolve(cwd)) : null;
   if (!access || typeof access !== "object" || Array.isArray(access)) {
@@ -627,14 +674,21 @@ async function mappedAccess(access, cwd) {
       primary: realCwd ? { id: "primary", path: realCwd, displayPath: cwd, mode: "read/write" } : null,
       extraRoots: [],
       frozenAt: null,
-      sourcePrimaryPath: realCwd
+      sourcePrimaryPath: realCwd,
+      repositories: []
     };
   }
   const cloned = cloneRunAccess(access, { workspace: { cwd: realCwd || cwd } });
   cloned.sourcePrimaryPath = access.primary?.path || realCwd;
+  cloned.repositories = sessionRepositories(access);
   if (realCwd && cloned.primary) {
     cloned.primary = { ...cloned.primary, path: realCwd, displayPath: cloned.primary.displayPath || cwd, mode: "read/write" };
   }
+  cloned.extraRoots = await Promise.all((cloned.extraRoots || []).map(async (root) => {
+    const repo = cloned.repositories.find((item) => item.id === root.id && item.cwd);
+    if (!repo?.cwd) return root;
+    return { ...root, path: await realpath(repo.cwd).catch(() => resolve(repo.cwd)) };
+  }));
   return cloned;
 }
 
@@ -646,24 +700,24 @@ function sessionAccess(access, cwd) {
   };
 }
 
+function sessionPolicy(access, repositories = []) {
+  if (!access || !repositories.length) return access;
+  return { ...access, repositories };
+}
+
 async function assertReadable(access, cwd, inputPath) {
-  const resolved = await resolveAccessPath(access, inputPath, { cwd, intent: "read" });
+  const mapped = await withMappedPath(access, inputPath, cwd);
+  const resolved = await resolveAccessPath(access, mapped, { cwd, intent: "read" });
   return resolved.realPath || resolved.absolute;
 }
 
 async function assertWritable(access, cwd, inputPath, writeScope) {
-  const resolved = await resolveAccessPath(access, inputPath, { cwd, intent: "write" });
-  if (resolved.root?.kind === "extra" && await isGitRepository(resolved.root.path)) {
+  const mapped = await withMappedPath(access, inputPath, cwd);
+  const resolved = await resolveAccessPath(access, mapped, { cwd, intent: "write" });
+  if (await extraGitUnmapped(access, resolved.root)) {
     throw new Error(`Write blocked: extra Git repository “${resolved.root.displayPath || resolved.root.path}” is not mapped to a worktree`);
   }
-  if (access?.sourcePrimaryPath && cwd) {
-    const realOriginal = await realpath(access.sourcePrimaryPath).catch(() => null);
-    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
-    const target = resolved.realPath || resolved.absolute;
-    if (realOriginal && realOriginal !== realCwd && pathContained(target, realOriginal) && !pathContained(target, realCwd)) {
-      throw new Error("Write blocked: the original primary checkout is not writable; use the run worktree");
-    }
-  }
+  await assertOriginalCheckoutUntouched(access, cwd, resolved.realPath || resolved.absolute);
   if (!await writeScopeAllows(resolved, writeScope)) {
     throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
   }
@@ -671,7 +725,8 @@ async function assertWritable(access, cwd, inputPath, writeScope) {
 }
 
 async function assertDeletable(access, cwd, inputPath, writeScope) {
-  const raw = String(inputPath || "").replace(/^@/, "");
+  const mapped = await withMappedPath(access, inputPath, cwd);
+  const raw = String(mapped || "").replace(/^@/, "");
   const absolute = isAbsolute(raw) ? resolve(raw) : resolve(cwd, raw);
   const parentResolved = await resolveAccessPath(access, dirname(absolute), { cwd, intent: "write" });
   const relativePath = parentResolved.relativePath
@@ -684,17 +739,10 @@ async function assertDeletable(access, cwd, inputPath, writeScope) {
     relativePath,
     intent: "write"
   };
-  if (parentResolved.root?.kind === "extra" && await isGitRepository(parentResolved.root.path)) {
+  if (await extraGitUnmapped(access, parentResolved.root)) {
     throw new Error(`Write blocked: extra Git repository “${parentResolved.root.displayPath || parentResolved.root.path}” is not mapped to a worktree`);
   }
-  if (access?.sourcePrimaryPath && cwd) {
-    const realOriginal = await realpath(access.sourcePrimaryPath).catch(() => null);
-    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
-    const target = entryResolved.realPath;
-    if (realOriginal && realOriginal !== realCwd && pathContained(target, realOriginal) && !pathContained(target, realCwd)) {
-      throw new Error("Write blocked: the original primary checkout is not writable; use the run worktree");
-    }
-  }
+  await assertOriginalCheckoutUntouched(access, cwd, entryResolved.realPath);
   if (!await writeScopeAllows(entryResolved, writeScope)) {
     throw new Error(`Write blocked outside scope “${writeScope || "none"}”: ${inputPath}`);
   }
@@ -741,40 +789,27 @@ export function scopedReadTools(cwd, runAccess = null) {
   const guard = async (inputPath) => assertReadable(await currentAccess(), cwd, inputPath || cwd);
   const wrapSearch = (tool, pathArg) => wrapToolExecute(tool, async (toolCallId, args = {}, ...rest) => {
     const searchPath = args[pathArg] || cwd;
-    await guard(searchPath);
-    const result = await tool.execute(toolCallId, args, ...rest);
-    const absoluteSearch = isAbsolute(String(searchPath)) ? resolve(searchPath) : resolve(cwd, searchPath);
+    const mappedSearch = await guard(searchPath);
+    const mappedArgs = args[pathArg] ? { ...args, [pathArg]: mappedSearch } : args;
+    const result = await tool.execute(toolCallId, mappedArgs, ...rest);
     const filtered = await filterSearchLines(toolText(result), {
-      cwd, access: await currentAccess(), searchPath: absoluteSearch, kind: tool.name
+      cwd, access: await currentAccess(), searchPath: mappedSearch, kind: tool.name
     });
     return filtered === toolText(result) ? result : withToolText(result, filtered);
   });
   return [
     createReadToolDefinition(cwd, { operations: {
-      access: async (path) => {
-        await guard(path);
-        await access(path, fsConstants.R_OK);
-      },
-      readFile: async (path) => {
-        await guard(path);
-        return readFile(path);
-      }
+      access: async (path) => access(await guard(path), fsConstants.R_OK),
+      readFile: async (path) => readFile(await guard(path))
     } }),
     wrapSearch(createGrepToolDefinition(cwd, { operations: {
-      isDirectory: async (path) => {
-        await guard(path);
-        return (await stat(path)).isDirectory();
-      },
-      readFile: async (path) => {
-        await guard(path);
-        return readFile(path, "utf8");
-      }
+      isDirectory: async (path) => (await stat(await guard(path))).isDirectory(),
+      readFile: async (path) => readFile(await guard(path), "utf8")
     } }), "path"),
     wrapSearch(createFindToolDefinition(cwd, { operations: {
       exists: async (path) => {
         try {
-          await guard(path);
-          await access(path);
+          await access(await guard(path));
           return true;
         } catch (error) {
           if (error?.code === "ENOENT") return false;
@@ -782,12 +817,12 @@ export function scopedReadTools(cwd, runAccess = null) {
         }
       },
       glob: async (pattern, searchCwd, options = {}) => {
-        await guard(searchCwd);
+        const mappedCwd = await guard(searchCwd);
         const policy = await currentAccess();
         const results = [];
-        for await (const entry of glob(pattern, { cwd: searchCwd })) {
+        for await (const entry of glob(pattern, { cwd: mappedCwd })) {
           if (ignoredSearchPart(entry)) continue;
-          const absolute = isAbsolute(entry) ? entry : resolve(searchCwd, entry);
+          const absolute = isAbsolute(entry) ? entry : resolve(mappedCwd, entry);
           try { await resolveAccessPath(policy, absolute, { cwd, intent: "read" }); }
           catch { continue; }
           results.push(entry);
@@ -799,25 +834,21 @@ export function scopedReadTools(cwd, runAccess = null) {
     wrapSearch(createLsToolDefinition(cwd, { operations: {
       exists: async (path) => {
         try {
-          await guard(path);
-          await access(path);
+          await access(await guard(path));
           return true;
         } catch (error) {
           if (error?.code === "ENOENT") return false;
           throw error;
         }
       },
-      stat: async (path) => {
-        await guard(path);
-        return stat(path);
-      },
+      stat: async (path) => stat(await guard(path)),
       readdir: async (path) => {
-        await guard(path);
+        const mapped = await guard(path);
         const policy = await currentAccess();
         const allowed = [];
-        for (const entry of await readdir(path)) {
+        for (const entry of await readdir(mapped)) {
           try {
-            await resolveAccessPath(policy, join(path, entry), { cwd, intent: "read" });
+            await resolveAccessPath(policy, join(mapped, entry), { cwd, intent: "read" });
             allowed.push(entry);
           } catch {}
         }
@@ -1106,7 +1137,7 @@ export class PiHarness {
     this.supervisorStages = [];
   }
 
-  async planningSession(cwd, existingFile, sessionKey = cwd, { repositoryAccess = true, profile, access } = {}) {
+  async planningSession(cwd, existingFile, sessionKey = cwd, { repositoryAccess = true, profile, access, repositories = [] } = {}) {
     const cached = this.planning.get(sessionKey);
     if (cached?.cwd === cwd) {
       await this.applyProfile(cached.session, profile);
@@ -1127,7 +1158,7 @@ export class PiHarness {
       cwd,
       tools: repositoryAccess ? [...filesystemToolNames, "workflow_stage", "workflow_checkpoint"] : ["workflow_stage", "workflow_checkpoint"],
       customTools: [
-        ...(repositoryAccess ? scopedReadTools(cwd, access) : []),
+        ...(repositoryAccess ? scopedReadTools(cwd, sessionPolicy(access, repositories)) : []),
         stageTool((stage) => {
           this.supervisorStages.push(stage);
           this.publish({ channel: "workflow", type: "stage_update", stage });
@@ -1169,9 +1200,9 @@ export class PiHarness {
     }, `${ticket.id}:${runId}:requirements`);
   }
 
-  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, access, onEvent, onSessionFile, signal }) {
+  async exploreTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, profile, access, repositories, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access });
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access, repositories });
       await onSessionFile?.(session.sessionFile);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketExplorationInstruction)}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Current ticket\n${ticket.identifier}: ${ticket.title}\n\n${ticket.description || "No description provided."}`, { publishText: false, onEvent, signal });
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Exploration output");
@@ -1191,9 +1222,9 @@ export class PiHarness {
     }, `${ticket.id}:ticket-lookahead`);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, access, onEvent, onSessionFile, signal }) {
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, access, repositories, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
-      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access });
+      const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access, repositories });
       await onSessionFile?.(session.sessionFile);
       const skillNames = availableSkillNames(session);
       const reply = await this.visibleSupervisorPrompt(session, `${this.configuredPrompt(session, profile, ticketDesignInstruction)}\n\n# Available skills\n${skillNames.length ? skillNames.map((name) => `- ${name}`).join("\n") : "- None"}\n\n# Living product context\n${productContext}\n\n# Approved PRD addendum\n${requirements}\n\n# Ticket look-ahead\n${ticketLookAhead}\n\n# Verified implementation delta\n${exploration}\n\n# Technical exception answers\n${answers || "No technical exceptions were raised."}`, { publishText: false, onEvent, signal });
@@ -1651,7 +1682,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     }
   }
 
-  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onCleanup, ticketId = "shared", runId = "legacy", profile, access, signal, containment: suppliedContainment }) {
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onCleanup, ticketId = "shared", runId = "legacy", profile, access, repositories = [], signal, containment: suppliedContainment }) {
     // The daemon may persist this containment before invoking us. Never replace
     // it: project commands must inherit the exact ownership record on disk.
     const containment = suppliedContainment || this.containmentFactory({ executionId: `${ticketId}:${runId}:${step.id}:${randomUUID()}` });
@@ -1680,9 +1711,10 @@ Every reported finding triggers an automatic correction round. Report concrete d
       let report = null;
       const reviewNotes = [];
       tools.push("worker_report");
+      const policy = sessionPolicy(access, repositories);
       const scopedTools = step.permission === "write"
-        ? [...scopedWorkerTools(cwd, workerWriteScope(step), access), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence")), reviewNoteTool((note) => reviewNotes.push(note))]
-        : step.permission === "read" ? scopedReadTools(cwd, access) : [];
+        ? [...scopedWorkerTools(cwd, workerWriteScope(step), policy), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence"), repositories), reviewNoteTool((note) => reviewNotes.push(note))]
+        : step.permission === "read" ? scopedReadTools(cwd, policy) : [];
       if (step.permission === "write") tools.push("project_command", "review_note", "delete");
       ({ session } = await createAgentSession({
         ...(await this.sessionOptions(profile)),

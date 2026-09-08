@@ -8,6 +8,7 @@ import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizo
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
+import { runProjectCommand } from "../src/project-config.js";
 
 test("session options omit thinking when the model cannot take reasoningEffort", async () => {
   const harness = new PiHarness({ dataDir: tmpdir() });
@@ -1361,6 +1362,36 @@ test("Any-access exact absolute file scope can create a missing parent", async (
     assert.equal(await readFile(target, "utf8"), "fixture");
     await assert.rejects(write.execute("denied", { path: join(outside, "denied", "x.txt"), content: "nope" }), /Write blocked outside scope/);
     await assert.rejects(lstat(join(outside, "denied")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project_command without a repository stays primary; an explicit id uses mapped B", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-command-repo-"));
+  const primary = join(root, "primary");
+  const extra = join(root, "extra-worktree");
+  try {
+    await mkdir(join(primary, ".agent-plan"), { recursive: true });
+    await mkdir(join(extra, ".agent-plan"), { recursive: true });
+    await writeFile(join(primary, "ping.mjs"), "console.log('from-primary');\n");
+    await writeFile(join(extra, "ping.mjs"), "console.log('from-extra');\n");
+    await writeFile(join(primary, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { ping: ["node", "ping.mjs"] }
+    }));
+    await writeFile(join(extra, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { ping: ["node", "ping.mjs"] }
+    }));
+    const repositories = [
+      { id: "primary", cwd: primary, sourceCwd: primary },
+      { id: "r-extra", cwd: extra, sourceCwd: join(root, "extra-source") }
+    ];
+    const tool = projectCommandTool(primary, undefined, undefined, runProjectCommand, undefined, undefined, repositories);
+    const primaryResult = await tool.execute("primary", { name: "ping" });
+    assert.match(resultText(primaryResult), /from-primary/);
+    const extraResult = await tool.execute("extra", { name: "ping", repository: "r-extra" });
+    assert.match(resultText(extraResult), /from-extra/);
+    await assert.rejects(tool.execute("missing", { name: "ping", repository: "nope" }), /Unknown repository/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

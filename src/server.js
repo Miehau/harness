@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { open, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, normalize } from "node:path";
+import { isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
@@ -23,7 +23,7 @@ import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget
 import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, diffRepositoryTrees, ensureTicketWorktree, filesOutsideWriteScope, gitRepositoriesForStep, integrateBranch, mergeRepositoryDiff, needsLocalWorkspaceRepair, repairZeroStateWorkspace, restoreRepositoryTrees, snapshotRepositoryTrees } from "./worktrees.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { dashboardModelProviders, normalizeStageProfiles, parseModelRef } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
@@ -557,6 +557,7 @@ async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, 
     result = await harness.runStep({
       ...input, containment, ticketId, signal,
       access: input.access || ticketRun(store.read(), ticketId)?.access || null,
+      repositories: input.repositories || ticketRun(store.read(), ticketId)?.repositories || [],
       onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
     });
     return result;
@@ -1657,16 +1658,20 @@ const [retainedRequirements, productContextBody] = await Promise.all([
       setStage(current, "explore", "active", "Preparing isolated repository exploration");
     });
     const workspace = await ensureTicketWorktree({
-      sourceCwd: before.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId
+      sourceCwd: before.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, access: run.access
     });
     if (vcsMode === "jj") {
       await initializeJjWorkspace(workspace.cwd);
       workspace.vcs = "jj";
+      for (const repo of workspace.repositories || []) {
+        if (repo.cwd !== workspace.cwd) await initializeJjWorkspace(repo.cwd);
+      }
     }
     const baselineTree = await snapshotTree(workspace.cwd);
     await update((state) => {
       const current = ticketRun(state, ticketId);
       current.workspace = workspace;
+      current.repositories = workspace.repositories || [];
       current.baselineTree = baselineTree;
       current.status = "exploring";
       setStage(current, "explore", "active", "Pi is mapping code, tests, and nearby tickets");
@@ -1675,7 +1680,7 @@ const [retainedRequirements, productContextBody] = await Promise.all([
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
-        access: latestRun.access,
+        access: latestRun.access, repositories: workspace.repositories || [],
 productContext: productContextBody, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"),
         onSessionFile: saveRunSession(ticketId), signal
@@ -1768,7 +1773,7 @@ const ticketLookAheadArtifact = [...run.artifacts].reverse().find((artifact) => 
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
-      access: run.access,
+      access: run.access, repositories: run.repositories || [],
 productContext: productContextBody.content, requirements: requirementsBody.content, exploration: explorationBody.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
       onSessionFile: saveRunSession(ticketId), signal
@@ -1816,23 +1821,41 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
+      const repos = gitRepositoriesForStep(run, step);
       let vcsChange = null;
+      const repositoryVcs = { ...(step.repositoryVcs || {}) };
       if (run.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
-        vcsChange = await beginJjChange(stepCwd, { changeId: step.vcsChange?.changeId, title: step.title });
-        await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).vcsChange = vcsChange; });
+        for (const repo of repos) {
+          const id = repo.id || "primary";
+          const previous = id === "primary" ? step.vcsChange : step.repositoryVcs?.[id];
+          const change = await beginJjChange(repo.cwd, { changeId: previous?.changeId, title: step.title });
+          if (id === "primary") vcsChange = change;
+          else repositoryVcs[id] = change;
+        }
+        await update((state) => {
+          const target = findNode(ticketRun(state, ticketId).plan, stepId);
+          if (vcsChange) target.vcsChange = vcsChange;
+          if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+        });
       }
-      let beforeTree = await snapshotTree(stepCwd);
+      let beforeTrees = await snapshotRepositoryTrees(repos);
+      let beforeTree = beforeTrees.primary || await snapshotTree(stepCwd);
+      if (beforeTree) beforeTrees.primary ||= beforeTree;
       const stepBaseTree = step.baseTree || beforeTree;
+      const stepBaseTrees = step.baseTrees || { ...beforeTrees };
       await update((state) => {
         const target = findNode(ticketRun(state, ticketId).plan, stepId);
         target.baseTree ||= stepBaseTree;
+        target.baseTrees ||= stepBaseTrees;
       });
       let rollbackFeedback = "";
       if (step.baseTree && beforeTree) {
-        const existingDiff = await diffTrees(stepCwd, step.baseTree, beforeTree);
+        const existingDiffs = await diffRepositoryTrees(repos, stepBaseTrees, beforeTrees);
+        const existingDiff = mergeRepositoryDiff(repos, existingDiffs);
         const existingBudget = diffReviewBudget(step, existingDiff);
         if (reviewBudgetRequiresRollback(existingBudget)) {
-          beforeTree = await restoreTree(stepCwd, step.baseTree);
+          beforeTree = await restoreRepositoryTrees(repos, stepBaseTrees) || await restoreTree(stepCwd, step.baseTree);
+          beforeTrees = await snapshotRepositoryTrees(repos);
           rollbackFeedback = `The harness rolled back a runaway prior diff before this attempt: ${existingBudget.reasons.join("; ")}. Re-implement this slice from its clean step checkpoint with focused edits; do not copy whole files from another worktree.`;
           await update((state) => {
             const target = findNode(ticketRun(state, ticketId).plan, stepId);
@@ -1873,7 +1896,9 @@ target.attemptSequence = Number(attemptId.slice("attempt-".length));
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
         activeActivity = activity;
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
-        const attemptBaseTree = await snapshotTree(cwd);
+        const attemptRepos = gitRepositoriesForStep(latest, currentStep);
+        const attemptBaseTrees = await snapshotRepositoryTrees(attemptRepos);
+        const attemptBaseTree = attemptBaseTrees.primary || await snapshotTree(cwd);
         const sessionChoice = selectWorkerSession(currentStep, {
           forkSessionFile: findForkSession(latest.plan, currentStep),
           feedback: nextFeedback
@@ -1883,6 +1908,7 @@ const result = await runContainedWorker({
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
           feedback: nextFeedback, runId: latest.runId,
+          repositories: gitRepositoriesForStep(latest, currentStep),
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
@@ -1891,7 +1917,8 @@ const result = await runContainedWorker({
         Object.assign(attemptEvidence, { report: result.report, rawOutput: result.rawOutput || "", sessionFile: result.sessionFile || null });
         signal?.throwIfAborted();
 const report = redactRecord(result.report);
-        const workerTree = await snapshotTree(cwd);
+        const workerTrees = await snapshotRepositoryTrees(attemptRepos);
+        const workerTree = workerTrees.primary || await snapshotTree(cwd);
         let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (currentStep.permission === "write" && report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
@@ -1899,15 +1926,26 @@ const report = redactRecord(result.report);
         }
         attemptEvidence.checks = checks;
         signal?.throwIfAborted();
-        if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
-        const afterTree = await snapshotTree(cwd);
-        const diff = await diffTrees(cwd, stepBaseTree, afterTree);
-        const attemptDiff = await diffTrees(cwd, attemptBaseTree, workerTree);
-        const checkDiff = await diffTrees(cwd, workerTree, afterTree);
+        if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) {
+          vcsChange = await snapshotJjChange(cwd);
+          for (const repo of attemptRepos.filter((item) => (item.id || "primary") !== "primary")) {
+            repositoryVcs[repo.id] = await snapshotJjChange(repo.cwd);
+          }
+        }
+        const afterTrees = await snapshotRepositoryTrees(attemptRepos);
+        const afterTree = afterTrees.primary || await snapshotTree(cwd);
+        const repositoryDiffs = await diffRepositoryTrees(attemptRepos, stepBaseTrees, afterTrees);
+        const diff = mergeRepositoryDiff(attemptRepos, repositoryDiffs);
+        const attemptDiffs = await diffRepositoryTrees(attemptRepos, attemptBaseTrees, workerTrees);
+        const attemptDiff = mergeRepositoryDiff(attemptRepos, attemptDiffs);
+        const checkDiffs = await diffRepositoryTrees(attemptRepos, workerTrees, afterTrees);
+        const checkDiff = mergeRepositoryDiff(attemptRepos, checkDiffs);
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
         const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
-        const violations = currentStep.permission !== "write" ? attemptDiff.files : outsideWriteScope(attemptDiff.files, workerWriteScope(currentStep));
+        const violations = currentStep.permission !== "write"
+          ? attemptDiff.files
+          : attemptRepos.flatMap((repo) => filesOutsideWriteScope(repo, attemptDiffs[repo.id || "primary"]?.files || [], workerWriteScope(currentStep)));
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
@@ -1919,7 +1957,7 @@ const report = redactRecord(result.report);
         ];
 Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, report);
-        if (runawayDiff) await restoreTree(cwd, stepBaseTree);
+        if (runawayDiff) await restoreRepositoryTrees(attemptRepos, stepBaseTrees);
         if (violations.length || runawayDiff || (report.status !== "completed" && !workerGate)) {
           const error = redactText(violations.length
             ? `Changes outside permission or write scope: ${violations.join(", ")}`
@@ -1937,6 +1975,8 @@ Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: di
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
             target.reviewBudgetResult = reviewBudget;
             if (vcsChange) target.vcsChange = vcsChange;
+            if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+            target.repositoryDiffs = repositoryDiffs;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
@@ -1966,6 +2006,8 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
             target.reviewBudgetResult = reviewBudget;
             if (vcsChange) target.vcsChange = vcsChange;
+            if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+            target.repositoryDiffs = repositoryDiffs;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
@@ -2060,6 +2102,8 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
           target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
           target.reviewBudgetResult = reviewBudget;
           if (vcsChange) target.vcsChange = vcsChange;
+          if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+          target.repositoryDiffs = repositoryDiffs;
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
@@ -2895,19 +2939,82 @@ async function acceptStep(ticketId, stepId) {
   let commit;
   let vcsChange = step.vcsChange || null;
   const noChanges = step.diff?.available && step.diff.files?.length === 0;
+  const repos = gitRepositoriesForStep(current, step);
+  const persistAcceptance = (patch) => update((state) => {
+    const target = findNode(ticketRun(state, ticketId).plan, stepId);
+    if (patch.workspaceCommit !== undefined) target.workspaceCommit = patch.workspaceCommit;
+    if (patch.vcsChange) target.vcsChange = patch.vcsChange;
+    if (patch.commit) target.commit = patch.commit;
+    if (patch.workspaceCommits) target.workspaceCommits = { ...(target.workspaceCommits || {}), ...patch.workspaceCommits };
+    if (patch.acceptedRepositories) target.acceptedRepositories = { ...(target.acceptedRepositories || {}), ...patch.acceptedRepositories };
+    if (patch.repositoryVcs) target.repositoryVcs = { ...(target.repositoryVcs || {}), ...patch.repositoryVcs };
+  }, { publish: false });
+  const liveStep = () => findNode(ticketRun(store.read(), ticketId).plan, stepId);
   if (!noChanges && current.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
-    if (!vcsChange?.changeId) throw new Error("The editable Jujutsu change is missing for this step");
-    vcsChange = await acceptJjChange(current.workspace.cwd, { changeId: vcsChange.changeId, message, bookmark: current.workspace.branch });
-    commit = vcsChange.commitId;
-  } else if (!noChanges && step.workspace?.isolated) {
-    let workspaceCommit = step.workspaceCommit;
-    if (!workspaceCommit) {
-      workspaceCommit = await commitWorkspace(step.workspace.cwd, message);
-      await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).workspaceCommit = workspaceCommit; });
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const already = liveStep().acceptedRepositories?.[id];
+      if (already?.commit) {
+        if (id === "primary") {
+          commit = already.commit;
+          vcsChange = already.vcsChange || vcsChange;
+        }
+        continue;
+      }
+      const previous = id === "primary" ? (liveStep().vcsChange || vcsChange) : liveStep().repositoryVcs?.[id];
+      if (!previous?.changeId) throw new Error(id === "primary" ? "The editable Jujutsu change is missing for this step" : `The editable Jujutsu change is missing for ${repo.displayPath || repo.id}`);
+      const acceptedChange = await acceptJjChange(repo.cwd, { changeId: previous.changeId, message, bookmark: repo.branch });
+      const record = { commit: acceptedChange.commitId, vcsChange: acceptedChange };
+      await persistAcceptance({
+        acceptedRepositories: { [id]: record },
+        ...(id === "primary" ? { vcsChange: acceptedChange, commit: acceptedChange.commitId } : { repositoryVcs: { [id]: acceptedChange } })
+      });
+      if (id === "primary") {
+        vcsChange = acceptedChange;
+        commit = acceptedChange.commitId;
+      }
     }
-    if (workspaceCommit) commit = await cherryPickCommit(current.workspace.cwd, workspaceCommit);
+  } else if (!noChanges && step.workspace?.isolated) {
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const latest = liveStep();
+      if (latest.acceptedRepositories?.[id]?.commit) {
+        if (id === "primary") commit = latest.acceptedRepositories[id].commit;
+        continue;
+      }
+      let workspaceCommit = latest.workspaceCommits?.[id] || (id === "primary" ? latest.workspaceCommit : repo.workspaceCommit);
+      if (!workspaceCommit) {
+        workspaceCommit = await commitWorkspace(repo.cwd, message);
+        await persistAcceptance({
+          workspaceCommits: { [id]: workspaceCommit },
+          ...(id === "primary" ? { workspaceCommit } : {})
+        });
+      }
+      const targetCwd = id === "primary"
+        ? current.workspace.cwd
+        : (current.repositories || []).find((item) => item.id === id)?.cwd;
+      let accepted = workspaceCommit;
+      if (workspaceCommit && targetCwd && resolve(targetCwd) !== resolve(repo.cwd)) {
+        accepted = await cherryPickCommit(targetCwd, workspaceCommit);
+      }
+      await persistAcceptance({ acceptedRepositories: { [id]: { commit: accepted || null } } });
+      if (id === "primary") commit = accepted;
+    }
   } else if (!noChanges) {
-    commit = await commitWorkspace(current.workspace.cwd, message);
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const already = liveStep().acceptedRepositories?.[id];
+      if (already && Object.hasOwn(already, "commit")) {
+        if (id === "primary") commit = already.commit;
+        continue;
+      }
+      const accepted = await commitWorkspace(repo.cwd, message);
+      await persistAcceptance({
+        acceptedRepositories: { [id]: { commit: accepted || null } },
+        ...(id === "primary" && accepted ? { commit: accepted } : {})
+      });
+      if (id === "primary") commit = accepted;
+    }
   }
   await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -2953,7 +3060,8 @@ async function advanceTicket(ticketId, signal) {
     if (batch.length > 1) {
       const tree = await snapshotTree(run.workspace.cwd);
       const workspaces = await createParallelWorktrees({
-        sourceCwd: run.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, steps: batch, tree
+        sourceCwd: run.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, steps: batch, tree,
+        repositories: run.repositories || []
       });
       await update((state) => {
         const current = ticketRun(state, ticketId);
@@ -2974,6 +3082,9 @@ async function advanceTicket(ticketId, signal) {
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
     if (run.workspace.vcs === "jj" && !run.workspace.jjFinalized) {
       await prepareJjForGit(run.workspace.cwd, run.workspace.branch);
+      for (const repo of (run.repositories || []).filter((item) => (item.id || "primary") !== "primary" && item.cwd && item.branch)) {
+        await prepareJjForGit(repo.cwd, repo.branch);
+      }
       await update((state) => { ticketRun(state, ticketId).workspace.jjFinalized = true; });
     }
     await finalReviewLoop(ticketId, signal);
@@ -3136,6 +3247,25 @@ async function restartFrom(ticketId, target) {
     if (!previous.workspace?.cwd) throw new Error("The run has no worktree to restore");
     const restored = await restoreTree(previous.workspace.cwd, audit.restoredTree);
     if (restored !== audit.restoredTree) throw new Error("The worktree did not match the selected restart checkpoint");
+    const stepId = String(target || "").replace(/^step:/, "");
+    const selected = findNode(previous.plan, stepId);
+    const trees = { ...(selected?.baseTrees || {}), ...(audit.restoredTrees || {}), primary: audit.restoredTree };
+    if (target === "stage:explore" || target === "stage:design") {
+      for (const repo of gitRepositoriesForStep(previous)) {
+        if ((repo.id || "primary") === "primary" || trees[repo.id] || !repo.baselineTree) continue;
+        trees[repo.id] = repo.baselineTree;
+      }
+    }
+    const resetIds = new Set(audit.resetStepIds || []);
+    const extraCommits = {};
+    for (const step of flattenSteps(previous.plan)) {
+      if (resetIds.has(step.id)) continue;
+      for (const [id, record] of Object.entries(step.acceptedRepositories || {})) {
+        if (id === "primary" || !record?.commit) continue;
+        extraCommits[id] = record.commit;
+      }
+    }
+    await restoreRepositoryTrees(gitRepositoriesForStep(previous), trees, { commits: extraCommits });
   }
   const artifact = await restartAuditArtifact(previous, audit);
   await stopTicketPreviews(ticketId, "run_restart");

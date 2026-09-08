@@ -369,6 +369,42 @@ test("rewinds a step and every later step to its recorded tree", () => {
   assert.equal(run.restartHistory[0].fromCheckpoint, "step_review");
 });
 
+test("rewinds per-repository live state for step:id and bare step id", () => {
+  for (const target of ["step:two", "two"]) {
+    const plan = normalizePlan({ nodes: [
+      { id: "one", title: "One", status: "accepted" },
+      { id: "two", title: "Two", status: "review_ready" }
+    ] });
+    Object.assign(plan.nodes[1], {
+      baseTree: "a-before",
+      baseTrees: { primary: "a-before", b: "b-before" },
+      vcsChange: { changeId: "old-a" },
+      repositoryVcs: { b: { changeId: "old-b-change" } },
+      repositoryDiffs: { b: { files: ["gone.txt"] } },
+      workspaceCommits: { b: "deadbeef" },
+      acceptedRepositories: { b: { commit: "cafe" } },
+      attempts: [{}]
+    });
+    const run = {
+      status: "awaiting_step_review", checkpoint: { kind: "step_review" }, activeRuns: {}, baselineTree: "base", plan,
+      stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((id) => ({ id, status: "completed" }))
+    };
+    const audit = rewindRun(run, target, "2026-08-27T12:00:00.000Z");
+    assert.equal(audit.restoredTree, "a-before");
+    assert.deepEqual(audit.restoredTrees, { primary: "a-before", b: "b-before" });
+    assert.equal(run.plan.nodes[1].status, "ready");
+    assert.equal(run.plan.nodes[1].vcsChange, null);
+    assert.equal(run.plan.nodes[1].baseTree, undefined);
+    assert.equal(run.plan.nodes[1].baseTrees, undefined);
+    assert.equal(run.plan.nodes[1].repositoryVcs, undefined);
+    assert.equal(run.plan.nodes[1].repositoryDiffs, undefined);
+    assert.equal(run.plan.nodes[1].workspaceCommits, undefined);
+    assert.equal(run.plan.nodes[1].acceptedRepositories, undefined);
+    assert.equal(run.plan.nodes[1].attempts.length, 1);
+    assert.equal(audit.previousSteps[1].repositoryVcs.b.changeId, "old-b-change");
+  }
+});
+
 test("restarts verification without discarding accepted implementation", () => {
   const run = {
     status: "needs_attention", checkpoint: null, activeRuns: {}, reviews: [{}],

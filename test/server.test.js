@@ -1,14 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { promisify } from "node:util";
+import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, storedProjectPolicy } from "../src/access-policy.js";
 import { normalizePlan } from "../src/plan.js";
 import { applyProofReports, initializeProofMap } from "../src/proof-map.js";
 import { runRoot } from "../src/retention.js";
-import { canonicalPrimaryPath, storedProjectPolicy } from "../src/access-policy.js";
 import { JsonStore } from "../src/store.js";
-import { createZeroStateWorkspace } from "../src/worktrees.js";
+import { snapshotTree } from "../src/git.js";
+import { initializeJjWorkspace } from "../src/jj.js";
+import { scopedWorkerTools } from "../src/pi-harness.js";
+import { commitWorkspace, createZeroStateWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
 import { auditHarnessWriteScopes, closeSseClients, createDaemon, deliveryFailureNeedsFix, deliveryFeedbackReferences, reconcileVisualChecks, repositoryCheckReview, settleScheduledDelivery } from "../src/server.js";
 import { persistArtifact } from "../src/artifacts.js";
 import { runAgainstDaemon, invoke, mockHarness, seedRun, withDaemon } from "./helpers.js";
@@ -1708,4 +1713,392 @@ test("malformed access policy POST returns 400 and preserves the previous saved 
       await rm(extra, { recursive: true, force: true });
     }
   });
+});
+
+const gitExec = promisify(execFile);
+
+async function waitForRun(daemon, ticketId, predicate, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await invoke(daemon, "GET", `/api/tickets/${ticketId}/run`);
+    if (last.status === 200 && predicate(last.json)) return last.json;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ticket ${ticketId}: ${last?.json?.status || last?.status} ${last?.json?.lastError || last?.text || ""}`);
+}
+
+function toolNamed(tools, name) {
+  return tools.find((tool) => tool.name === name);
+}
+
+function multiRepoHarness(filesForStep, { mapOriginal = false } = {}) {
+  return {
+    ...mockHarness(),
+    async runRepositoryChecks() {
+      return { status: "passed", command: "node .agent-plan/verify.mjs", summary: "passed", output: "", evidence: [] };
+    },
+    async evidenceImages() { return []; },
+    async generateCommitMessage({ step }) {
+      return `feat: ${step.title}\n\nWhy: multi-repo slice.\nRequirement: REQ-multi`;
+    },
+    async verifyStep({ step, proofMap }) {
+      const criteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id);
+      return {
+        summary: "ok",
+        findings: [],
+        criterionResults: criteria.map((criterion) => ({
+          criterionId: criterion.id,
+          status: "verified",
+          explanation: { summary: "Canonical check passed." },
+          evidence: [{ type: "check", scope: "step", stepId: step.id }]
+        })),
+        rawOutput: "",
+        sessionFile: null
+      };
+    },
+    async runStep({ cwd, step, repositories, access }) {
+      const extra = (repositories || []).find((repo) => repo.id && repo.id !== "primary");
+      const files = filesForStep(step) || {};
+      if (mapOriginal) {
+        const write = toolNamed(scopedWorkerTools(cwd, step.writeScope, { ...access, repositories }), "write");
+        if (files.primary) await write.execute("primary", { path: files.primary.name, content: files.primary.content });
+        if (files.extra && extra?.sourceCwd) {
+          await write.execute("extra", { path: join(extra.sourceCwd, files.extra.name), content: files.extra.content });
+        }
+      } else {
+        if (files.primary) await writeFile(join(cwd, files.primary.name), files.primary.content);
+        if (files.extra && extra?.cwd) await writeFile(join(extra.cwd, files.extra.name), files.extra.content);
+      }
+      return {
+        report: { status: "completed", summary: `${step.id} done`, artifact: "ok" },
+        output: "ok", prompt: "p", rawOutput: "ok", sessionFile: null, reviewNotes: []
+      };
+    }
+  };
+}
+
+async function porcelain(cwd) {
+  return (await gitExec("git", ["status", "--porcelain"], { cwd })).stdout;
+}
+
+test("accepted A+B worktree changes survive the next step and a restart of B", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-ab-life-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-ab-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-ab-b-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    await writeFile(join(primary, "dirty-a.txt"), "seeded-a\n");
+    await writeFile(join(extra, "dirty-b.txt"), "seeded-b\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    let twoRuns = 0;
+    daemon = await createDaemon({
+      cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git",
+      harness: multiRepoHarness((step) => {
+        if (step.id === "one") {
+          return { primary: { name: "one-a.txt", content: "from-one-a" }, extra: { name: "one-b.txt", content: "from-one-b" } };
+        }
+        twoRuns += 1;
+        return {
+          primary: { name: "two-a.txt", content: "from-two-a" },
+          extra: twoRuns === 1 ? { name: "two-b.txt", content: "from-two-b" } : null
+        };
+      })
+    });
+    const ticket = { id: "ab-life", identifier: "TEXT-ab", title: "A and B", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    const plan = normalizePlan({
+      title: "A and B",
+      nodes: [
+        {
+          id: "one", title: "One", permission: "write",
+          writeScope: `one-a.txt,root:${extraId}:one-b.txt`,
+          expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+          acceptanceCriteria: ["One lands in A and B"]
+        },
+        {
+          id: "two", title: "Two", permission: "write", dependsOn: ["one"],
+          writeScope: `two-a.txt,root:${extraId}:two-b.txt`,
+          expectedFiles: ["two-a.txt"], estimatedChangedLines: 4,
+          acceptanceCriteria: ["Two lands in A and B"]
+        }
+      ]
+    });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_approval",
+      checkpoint: { id: "cp", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
+    assert.equal(approved.status, 202, approved.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "one");
+    const acceptedOne = await invoke(daemon, "POST", `/api/tickets/${id}/steps/one/accept`, { body: {} });
+    assert.equal(acceptedOne.status, 202, acceptedOne.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "two");
+    assert.equal(await readFile(join(workspace.cwd, "one-a.txt"), "utf8"), "from-one-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    const acceptedTwo = await invoke(daemon, "POST", `/api/tickets/${id}/steps/two/accept`, { body: {} });
+    assert.equal(acceptedTwo.status, 202, acceptedTwo.text);
+    await waitForRun(daemon, id, () => findNodeStatus(daemon, id, "two") === "accepted");
+    assert.equal(await readFile(join(workspace.cwd, "two-a.txt"), "utf8"), "from-two-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "two-b.txt"), "utf8"), "from-two-b");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    await invoke(daemon, "POST", `/api/tickets/${id}/pause`, { body: {} });
+    const restarted = await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { target: "step:two", confirmed: true } });
+    assert.equal(restarted.status, 202, restarted.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "two");
+    assert.equal(await readFile(join(workspace.cwd, "one-a.txt"), "utf8"), "from-one-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    await assert.rejects(readFile(join(extraRepo.cwd, "two-b.txt"), "utf8"), /ENOENT/);
+    assert.match(await porcelain(primary), /dirty-a\.txt/);
+    assert.doesNotMatch(await porcelain(primary), /one-a|two-a/);
+    assert.match(await porcelain(extra), /dirty-b\.txt/);
+    assert.doesNotMatch(await porcelain(extra), /one-b|two-b/);
+
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+  }
+});
+
+const hasJj = await gitExec("jj", ["--version"]).then(() => true, () => false);
+
+test("serial jj A+B accepted changes survive the next step and rewind without reopening B", { skip: !hasJj }, async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-ab-jj-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-ab-jj-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-ab-jj-b-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    await writeFile(join(primary, "dirty-a.txt"), "seeded-a\n");
+    await writeFile(join(extra, "dirty-b.txt"), "seeded-b\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    let twoRuns = 0;
+    daemon = await createDaemon({
+      cwd: primary, dataDir, listen: false, lock: false, vcsMode: "jj",
+      harness: multiRepoHarness((step) => {
+        if (step.id === "one") {
+          return { primary: { name: "one-a.txt", content: "from-one-a" }, extra: { name: "one-b.txt", content: "from-one-b" } };
+        }
+        twoRuns += 1;
+        return {
+          primary: { name: "two-a.txt", content: "from-two-a" },
+          extra: twoRuns === 1 ? { name: "two-b.txt", content: "from-two-b" } : null
+        };
+      }, { mapOriginal: true })
+    });
+    const ticket = { id: "ab-jj", identifier: "TEXT-jj", title: "A and B jj", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    await initializeJjWorkspace(workspace.cwd);
+    for (const repo of workspace.repositories.filter((item) => item.cwd !== workspace.cwd)) await initializeJjWorkspace(repo.cwd);
+    workspace.vcs = "jj";
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    const plan = normalizePlan({
+      title: "A and B jj",
+      nodes: [
+        {
+          id: "one", title: "One", permission: "write",
+          writeScope: `one-a.txt,root:${extraId}:one-b.txt`,
+          expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+          acceptanceCriteria: ["One lands in A and B"]
+        },
+        {
+          id: "two", title: "Two", permission: "write", dependsOn: ["one"],
+          writeScope: `two-a.txt,root:${extraId}:two-b.txt`,
+          expectedFiles: ["two-a.txt"], estimatedChangedLines: 4,
+          acceptanceCriteria: ["Two lands in A and B"]
+        }
+      ]
+    });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_approval",
+      checkpoint: { id: "cp", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
+    assert.equal(approved.status, 202, approved.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "one");
+    const acceptedOne = await invoke(daemon, "POST", `/api/tickets/${id}/steps/one/accept`, { body: {} });
+    assert.equal(acceptedOne.status, 202, acceptedOne.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "two");
+    assert.equal(await readFile(join(workspace.cwd, "one-a.txt"), "utf8"), "from-one-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    await assert.rejects(readFile(join(extra, "one-b.txt"), "utf8"), /ENOENT/);
+    const acceptedTwo = await invoke(daemon, "POST", `/api/tickets/${id}/steps/two/accept`, { body: {} });
+    assert.equal(acceptedTwo.status, 202, acceptedTwo.text);
+    await waitForRun(daemon, id, () => findNodeStatus(daemon, id, "two") === "accepted");
+    assert.equal(await readFile(join(extraRepo.cwd, "two-b.txt"), "utf8"), "from-two-b");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    await invoke(daemon, "POST", `/api/tickets/${id}/pause`, { body: {} });
+    const restarted = await invoke(daemon, "POST", `/api/tickets/${id}/restart`, { body: { target: "step:two", confirmed: true } });
+    assert.equal(restarted.status, 202, restarted.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "two");
+    assert.equal(await readFile(join(extraRepo.cwd, "one-b.txt"), "utf8"), "from-one-b");
+    await assert.rejects(readFile(join(extraRepo.cwd, "two-b.txt"), "utf8"), /ENOENT/);
+    assert.match(await porcelain(primary), /dirty-a\.txt/);
+    assert.doesNotMatch(await porcelain(primary), /one-a|two-a/);
+    assert.match(await porcelain(extra), /dirty-b\.txt/);
+    assert.doesNotMatch(await porcelain(extra), /one-b|two-b/);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+  }
+});
+
+function findNodeStatus(daemon, ticketId, stepId) {
+  const run = daemon.store.read().ticketRuns[ticketId];
+  const nodes = run.plan.nodes.flatMap((node) => node.type === "group" ? node.children : [node]);
+  return nodes.find((node) => node.id === stepId)?.status;
+}
+
+test("parallel accepted changes integrate into both run worktrees", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-ab-par-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-ab-par-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-ab-par-b-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    await writeFile(join(primary, "dirty-a.txt"), "seeded-a\n");
+    await writeFile(join(extra, "dirty-b.txt"), "seeded-b\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    daemon = await createDaemon({
+      cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git",
+      harness: multiRepoHarness((step) => step.id === "left"
+        ? { primary: { name: "left-a.txt", content: "left-a" }, extra: { name: "left-b.txt", content: "left-b" } }
+        : { primary: { name: "right-a.txt", content: "right-a" }, extra: { name: "right-b.txt", content: "right-b" } })
+    });
+    const ticket = { id: "ab-par", identifier: "TEXT-par", title: "Parallel A B", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    const plan = normalizePlan({
+      title: "Parallel A B",
+      nodes: [{
+        id: "pair", type: "group", title: "Pair",
+        children: [
+          {
+            id: "left", title: "Left", permission: "write",
+            writeScope: `left-a.txt,root:${extraId}:left-b.txt`,
+            expectedFiles: ["left-a.txt"], estimatedChangedLines: 4,
+            acceptanceCriteria: ["Left lands in A and B"]
+          },
+          {
+            id: "right", title: "Right", permission: "write",
+            writeScope: `right-a.txt,root:${extraId}:right-b.txt`,
+            expectedFiles: ["right-a.txt"], estimatedChangedLines: 4,
+            acceptanceCriteria: ["Right lands in A and B"]
+          }
+        ]
+      }]
+    });
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_approval",
+      checkpoint: { id: "cp", kind: "awaiting_approval", title: "Approve" }
+    });
+    const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
+    assert.equal(approved.status, 202, approved.text);
+    await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review");
+    const left = await invoke(daemon, "POST", `/api/tickets/${id}/steps/left/accept`, { body: {} });
+    const right = await invoke(daemon, "POST", `/api/tickets/${id}/steps/right/accept`, { body: {} });
+    assert.equal(left.status, 202, left.text);
+    assert.equal(right.status, 202, right.text);
+    await waitForRun(daemon, id, () => findNodeStatus(daemon, id, "left") === "accepted" && findNodeStatus(daemon, id, "right") === "accepted");
+    assert.equal(await readFile(join(workspace.cwd, "left-a.txt"), "utf8"), "left-a");
+    assert.equal(await readFile(join(workspace.cwd, "right-a.txt"), "utf8"), "right-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "left-b.txt"), "utf8"), "left-b");
+    assert.equal(await readFile(join(extraRepo.cwd, "right-b.txt"), "utf8"), "right-b");
+    assert.doesNotMatch(await porcelain(primary), /left-a|right-a/);
+    assert.doesNotMatch(await porcelain(extra), /left-b|right-b/);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+  }
+});
+
+test("retrying accept after a persisted primary commit still finishes extra without duplicating A", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-ab-retry-"));
+  const primary = await mkdtemp(join(tmpdir(), "agent-plan-ab-retry-a-"));
+  const extra = await mkdtemp(join(tmpdir(), "agent-plan-ab-retry-b-"));
+  let daemon;
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const extraId = access.extraRoots[0].id;
+    daemon = await createDaemon({ cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git", harness: mockHarness() });
+    const ticket = { id: "ab-retry", identifier: "TEXT-retry", title: "Retry", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket, runId: "run-1", access });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === extraId);
+    await writeFile(join(workspace.cwd, "done-a.txt"), "primary-done\n");
+    const primaryCommit = await commitWorkspace(workspace.cwd, "feat: already accepted A");
+    await writeFile(join(extraRepo.cwd, "done-b.txt"), "extra-pending\n");
+    const plan = normalizePlan({
+      title: "Retry",
+      nodes: [{
+        id: "one", title: "One", permission: "write",
+        writeScope: `done-a.txt,root:${extraId}:done-b.txt`,
+        expectedFiles: ["done-a.txt"], estimatedChangedLines: 4,
+        acceptanceCriteria: ["Both land"]
+      }]
+    });
+    plan.nodes[0].status = "review_ready";
+    plan.nodes[0].diff = { available: true, files: ["done-a.txt", `root:${extraId}:done-b.txt`] };
+    plan.nodes[0].commitMessage = "feat: finish extra\n\nWhy: durable accept.\nRequirement: REQ-multi";
+    plan.nodes[0].acceptedRepositories = { primary: { commit: primaryCommit } };
+    const id = await seedRun(daemon, {
+      ticket, access, workspace, repositories: workspace.repositories,
+      baselineTree: await snapshotTree(workspace.cwd), plan,
+      status: "awaiting_step_review",
+      checkpoint: { id: "rev", kind: "step_review", stepId: "one", title: "Review" }
+    });
+    const accepted = await invoke(daemon, "POST", `/api/tickets/${id}/steps/one/accept`, { body: {} });
+    assert.equal(accepted.status, 202, accepted.text);
+    const head = (await gitExec("git", ["rev-parse", "HEAD"], { cwd: workspace.cwd })).stdout.trim();
+    assert.equal(head, primaryCommit);
+    assert.equal(await readFile(join(extraRepo.cwd, "done-b.txt"), "utf8"), "extra-pending\n");
+    assert.equal((await gitExec("git", ["status", "--porcelain"], { cwd: extraRepo.cwd })).stdout, "");
+    await assert.rejects(readFile(join(extra, "done-b.txt"), "utf8"), /ENOENT/);
+  } finally {
+    await daemon?.close({ exit: false });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(primary, { recursive: true, force: true });
+    await rm(extra, { recursive: true, force: true });
+  }
 });

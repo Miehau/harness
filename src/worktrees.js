@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { access, cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { access as fsAccess, cp, mkdir, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { PRIMARY_ROOT_ID, frozenRoots } from "./access-policy.js";
 import { safeName } from "./artifacts.js";
-import { diffTrees, isGitRepository, restoreTree, snapshotTree } from "./git.js";
+import { diffTrees, isGitRepository, outsideWriteScope, restoreTree, snapshotTree } from "./git.js";
 
 const exec = promisify(execFile);
 
@@ -29,8 +30,8 @@ async function linkInstalledDependencies(sourceCwd, targetCwd) {
     try {
       const source = join(sourceCwd, dependencyPath);
       const target = join(targetCwd, dependencyPath);
-      await access(source);
-      await access(dirname(target));
+      await fsAccess(source);
+      await fsAccess(dirname(target));
       await git(sourceCwd, ["check-ignore", "-q", relative(sourceCwd, source)]);
       await mkdir(target, { recursive: true });
       for (const entry of await readdir(source, { withFileTypes: true })) {
@@ -76,7 +77,7 @@ export async function createZeroStateWorkspace({ cwd, ticket, runId, allowFiles 
 export async function repairZeroStateWorkspace({ cwd, ticket, runId, previousCwd }) {
   let recovered = false;
   if (previousCwd === cwd) {
-    try { await access(cwd); recovered = true; } catch {}
+    try { await fsAccess(cwd); recovered = true; } catch {}
   }
   const workspace = await createZeroStateWorkspace({ cwd, ticket, runId, allowFiles: previousCwd === cwd });
   if (previousCwd && previousCwd !== cwd) {
@@ -150,28 +151,29 @@ export async function integrateBranch({ sourceCwd, branch, integrationCwd, depen
   }
 }
 
-export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree }) {
-  const parent = await git(sourceCwd, ["rev-parse", "HEAD"]);
-  const commit = await git(sourceCwd, ["commit-tree", tree, "-p", parent, "-m", "Parallel ticket baseline"], { env: identity });
-  const root = join(dataDir, "ticket-runs", safeName(ticket.identifier || ticket.id), "runs", safeName(runId), "parallel");
-  return Promise.all(steps.map(async (step) => {
-    const cwd = join(root, safeName(step.id));
-    await mkdir(dirname(cwd), { recursive: true });
-    if (!(await isGitRepository(cwd))) {
-      await git(sourceCwd, ["worktree", "add", "-q", "--detach", cwd, commit]);
-    } else await restoreTree(cwd, tree);
-    await linkInstalledDependencies(sourceCwd, cwd);
-    return [step.id, { cwd, isolated: true, baseTree: tree }];
-  }));
+function pathContained(child, parent) {
+  if (!child || !parent) return false;
+  const left = resolve(child);
+  const right = resolve(parent);
+  if (left === right) return true;
+  const prefix = right.endsWith(sep) ? right : `${right}${sep}`;
+  return left.startsWith(prefix);
 }
 
-export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId }) {
+function repositoryRecord(root, workspace, kind = root.kind || "extra") {
+  return {
+    id: root.id || PRIMARY_ROOT_ID,
+    kind,
+    sourceCwd: workspace.sourceCwd,
+    cwd: workspace.cwd,
+    branch: workspace.branch,
+    displayPath: root.displayPath || workspace.sourceCwd,
+    mode: root.mode === "read-only" ? "read-only" : "read/write"
+  };
+}
+
+async function createLinkedWorktree(sourceCwd, worktree, branch) {
   if (!(await isGitRepository(sourceCwd))) await initializeRepository(sourceCwd);
-  const slug = safeName(ticket.identifier || ticket.id);
-  const runSlug = safeName(runId);
-  const worktree = join(dataDir, "ticket-runs", slug, "runs", runSlug, "worktree");
-  const suggested = String(ticket.branchName || "").trim();
-  const branch = `${suggested || `codex/${slug}`}-${runSlug.slice(0, 8)}`;
   await mkdir(dirname(worktree), { recursive: true });
   const existing = await git(sourceCwd, ["worktree", "list", "--porcelain"]);
   if (!existing.split("\n\n").some((block) => block.includes(`worktree ${worktree}`))) {
@@ -192,4 +194,204 @@ export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId }
   }
   await linkInstalledDependencies(sourceCwd, worktree);
   return { sourceCwd, cwd: worktree, branch };
+}
+
+async function createParallelForSource({ sourceCwd, dataDir, ticket, runId, steps, tree, subdir, dependencyCwd, gitCwd }) {
+  const repoCwd = gitCwd || sourceCwd;
+  const parent = await git(repoCwd, ["rev-parse", "HEAD"]);
+  const commit = await git(repoCwd, ["commit-tree", tree, "-p", parent, "-m", "Parallel ticket baseline"], { env: identity });
+  const root = join(dataDir, "ticket-runs", safeName(ticket.identifier || ticket.id), "runs", safeName(runId), subdir);
+  return Promise.all(steps.map(async (step) => {
+    const cwd = join(root, safeName(step.id));
+    await mkdir(dirname(cwd), { recursive: true });
+    if (!(await isGitRepository(cwd))) {
+      await git(sourceCwd, ["worktree", "add", "-q", "--detach", cwd, commit]);
+    } else await restoreTree(cwd, tree);
+    await linkInstalledDependencies(dependencyCwd || sourceCwd, cwd);
+    return [step.id, { cwd, isolated: true, baseTree: tree }];
+  }));
+}
+
+async function canonicalizeExisting(absolute) {
+  let existing = resolve(absolute);
+  while (true) {
+    try {
+      const realExisting = await realpath(existing);
+      return existing === resolve(absolute) ? realExisting : resolve(realExisting, relative(existing, resolve(absolute)));
+    } catch (error) {
+      if (error.code !== "ENOENT") return resolve(absolute);
+      const parent = dirname(existing);
+      if (parent === existing) return resolve(absolute);
+      existing = parent;
+    }
+  }
+}
+
+export async function mapConfiguredPath(repositories, inputPath, cwd) {
+  const raw = String(inputPath || "").replace(/^@/, "");
+  if (!raw || !repositories?.length) return inputPath;
+  const absolute = isAbsolute(raw) ? resolve(raw) : resolve(cwd || ".", raw);
+  const canonical = await canonicalizeExisting(absolute);
+  for (const repo of repositories) {
+    if (!repo.sourceCwd || !repo.cwd) continue;
+    const source = await canonicalizeExisting(repo.sourceCwd);
+    const mapped = await canonicalizeExisting(repo.cwd);
+    if (source === mapped) continue;
+    if (canonical === source || pathContained(canonical, source)) {
+      const relativePath = relative(source, canonical);
+      return relativePath && relativePath !== "." ? join(mapped, relativePath) : mapped;
+    }
+  }
+  return inputPath;
+}
+
+export function gitRepositoriesForStep(run, step = null) {
+  const byId = new Map();
+  for (const list of [step?.workspace?.repositories, run?.repositories, run?.workspace?.repositories]) {
+    for (const repo of list || []) {
+      if (!repo?.cwd) continue;
+      const id = repo.id || PRIMARY_ROOT_ID;
+      if (byId.has(id)) continue;
+      byId.set(id, {
+        ...repo,
+        id,
+        cwd: id === PRIMARY_ROOT_ID || repo.kind === "primary"
+          ? (step?.workspace?.cwd || repo.cwd)
+          : repo.cwd
+      });
+    }
+  }
+  if (byId.size) return [...byId.values()];
+  const cwd = step?.workspace?.cwd || run?.workspace?.cwd;
+  if (!cwd) return [];
+  return [{
+    id: PRIMARY_ROOT_ID,
+    kind: "primary",
+    sourceCwd: run.workspace?.sourceCwd || cwd,
+    cwd,
+    branch: run.workspace?.branch || null,
+    displayPath: run.workspace?.displayPath || run.workspace?.sourceCwd || cwd,
+    mode: "read/write"
+  }];
+}
+
+export function qualifyRepositoryFiles(repo, files = []) {
+  const id = repo?.id || PRIMARY_ROOT_ID;
+  if (id === PRIMARY_ROOT_ID) return [...files];
+  return files.map((file) => `root:${id}:${file}`);
+}
+
+export function filesOutsideWriteScope(repo, files, writeScope) {
+  const qualified = qualifyRepositoryFiles(repo, files);
+  const scope = String(writeScope || "");
+  if (scope === "*" || scope === "**") {
+    return (repo?.id || PRIMARY_ROOT_ID) === PRIMARY_ROOT_ID ? [] : qualified;
+  }
+  return outsideWriteScope(qualified, scope);
+}
+
+export async function snapshotRepositoryTrees(repos) {
+  const trees = {};
+  for (const repo of repos || []) trees[repo.id || PRIMARY_ROOT_ID] = await snapshotTree(repo.cwd);
+  return trees;
+}
+
+export async function restoreRepositoryTrees(repos, trees, { commits = {} } = {}) {
+  let primary = null;
+  for (const repo of repos || []) {
+    const id = repo.id || PRIMARY_ROOT_ID;
+    const commit = id === PRIMARY_ROOT_ID ? null : commits[id];
+    if (commit) {
+      await git(repo.cwd, ["reset", "--hard", commit]);
+      await git(repo.cwd, ["clean", "-fd", "-e", ".jj/"]);
+      continue;
+    }
+    const tree = trees?.[id] || (id === PRIMARY_ROOT_ID ? trees?.primary : null);
+    if (!tree) continue;
+    let restored = await restoreTree(repo.cwd, tree);
+    if (restored !== tree) {
+      await git(repo.cwd, ["checkout", "-f", tree, "--", "."]);
+      await git(repo.cwd, ["clean", "-fd", "-e", ".jj/"]);
+      restored = await snapshotTree(repo.cwd);
+    }
+    if (id === PRIMARY_ROOT_ID) primary = restored;
+  }
+  return primary;
+}
+
+export async function diffRepositoryTrees(repos, before, after) {
+  const diffs = {};
+  for (const repo of repos || []) {
+    const id = repo.id || PRIMARY_ROOT_ID;
+    diffs[id] = await diffTrees(repo.cwd, before?.[id], after?.[id]);
+  }
+  return diffs;
+}
+
+export function mergeRepositoryDiff(repos, diffs) {
+  const primary = diffs?.[PRIMARY_ROOT_ID] || diffs?.[(repos || [])[0]?.id] || { available: false, files: [], patch: "", stat: "" };
+  const extraFiles = (repos || [])
+    .filter((repo) => (repo.id || PRIMARY_ROOT_ID) !== PRIMARY_ROOT_ID)
+    .flatMap((repo) => qualifyRepositoryFiles(repo, diffs?.[repo.id]?.files || []));
+  if (!extraFiles.length) return primary;
+  return { ...primary, files: [...(primary.files || []), ...extraFiles], available: true };
+}
+
+export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree, repositories = [] }) {
+  const primaryPairs = await createParallelForSource({
+    sourceCwd, dataDir, ticket, runId, steps, tree, subdir: "parallel"
+  });
+  const extrasByStep = Object.fromEntries(steps.map((step) => [step.id, []]));
+  for (const repo of repositories.filter((item) => item.id && item.id !== PRIMARY_ROOT_ID && item.cwd && item.sourceCwd)) {
+    const extraTree = await snapshotTree(repo.cwd);
+    const pairs = await createParallelForSource({
+      sourceCwd: repo.sourceCwd,
+      dataDir, ticket, runId, steps, tree: extraTree,
+      subdir: join("repos", safeName(repo.id), "parallel"),
+      dependencyCwd: repo.sourceCwd,
+      gitCwd: repo.cwd
+    });
+    for (const [stepId, workspace] of pairs) {
+      extrasByStep[stepId].push({
+        ...repo,
+        cwd: workspace.cwd,
+        isolated: true,
+        baseTree: extraTree
+      });
+    }
+  }
+  return primaryPairs.map(([stepId, workspace]) => [stepId, {
+    ...workspace,
+    repositories: [
+      { id: PRIMARY_ROOT_ID, kind: "primary", sourceCwd, cwd: workspace.cwd, isolated: true, baseTree: tree },
+      ...extrasByStep[stepId]
+    ]
+  }]);
+}
+
+export async function ensureTicketWorktree({ sourceCwd, dataDir, ticket, runId, access: runAccess = null }) {
+  const slug = safeName(ticket.identifier || ticket.id);
+  const runSlug = safeName(runId);
+  const worktree = join(dataDir, "ticket-runs", slug, "runs", runSlug, "worktree");
+  const suggested = String(ticket.branchName || "").trim();
+  const branch = `${suggested || `codex/${slug}`}-${runSlug.slice(0, 8)}`;
+  const primary = await createLinkedWorktree(sourceCwd, worktree, branch);
+  const repositories = [repositoryRecord({
+    id: PRIMARY_ROOT_ID,
+    kind: "primary",
+    displayPath: runAccess?.primary?.displayPath || sourceCwd,
+    mode: "read/write"
+  }, primary, "primary")];
+  for (const root of frozenRoots(runAccess).filter((item) => item.kind === "extra" && item.mode === "read/write")) {
+    try { await fsAccess(root.path); }
+    catch {
+      throw new Error(`Frozen read/write Git root ${root.id} (${root.displayPath || root.path}) is missing`);
+    }
+    if (!(await isGitRepository(root.path))) continue;
+    const extraWorktree = join(dataDir, "ticket-runs", slug, "runs", runSlug, "repos", safeName(root.id), "worktree");
+    const extra = await createLinkedWorktree(root.path, extraWorktree, `${branch}-${safeName(root.id)}`);
+    repositories.push({ ...repositoryRecord(root, extra, "extra"), baselineTree: await snapshotTree(extra.cwd) });
+  }
+  repositories[0].baselineTree = await snapshotTree(primary.cwd);
+  return { ...primary, repositories };
 }

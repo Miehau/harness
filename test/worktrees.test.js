@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { isGitRepository, snapshotTree } from "../src/git.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
+import { scopedWorkerTools } from "../src/pi-harness.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, createZeroStateWorkspace, ensureTicketWorktree, gitRepositoriesForStep, integrateBranch, mapConfiguredPath, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "../src/worktrees.js";
 
 const exec = promisify(execFile);
 
@@ -284,6 +286,136 @@ test("a free-text task initializes a new folder and delivers back to main", asyn
     await commitWorkspace(workspace.cwd, "feat: new project\n\nWhy: verify first-ticket delivery.");
     await integrateBranch({ sourceCwd: cwd, branch: workspace.branch, integrationCwd: join(dataDir, "integration") });
     assert.equal(await readFile(join(cwd, "result.txt"), "utf8"), "delivered\n");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+function toolNamed(tools, name) {
+  return tools.find((tool) => tool.name === name);
+}
+
+test("primary-only projects still create a single ticket worktree and branch", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-primary-only-"));
+  const cwd = join(dataDir, "repository");
+  try {
+    await createZeroStateWorkspace({ cwd, ticket: { identifier: "LOCAL-base" }, runId: "base" });
+    const workspace = await ensureTicketWorktree({ sourceCwd: cwd, dataDir, ticket: { identifier: "TEXT-one" }, runId: "run-1" });
+    assert.equal(workspace.repositories.length, 1);
+    assert.equal(workspace.repositories[0].id, "primary");
+    assert.equal(workspace.repositories[0].cwd, workspace.cwd);
+    assert.equal(workspace.branch, workspace.repositories[0].branch);
+    assert.match(workspace.cwd, /worktree$/);
+    assert.notEqual(workspace.cwd, cwd);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a ticket touching two RW Git repos writes only inside worktrees and accepts both", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-two-repos-"));
+  const primary = join(dataDir, "repo-a");
+  const extra = join(dataDir, "repo-b");
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    await writeFile(join(primary, "dirty-a.txt"), "seeded-a\n");
+    await writeFile(join(extra, "dirty-b.txt"), "seeded-b\n");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const workspace = await ensureTicketWorktree({
+      sourceCwd: primary, dataDir, ticket: { identifier: "TEXT-multi" }, runId: "run-1", access
+    });
+    const extraRepo = workspace.repositories.find((repo) => repo.id === access.extraRoots[0].id);
+    assert.ok(extraRepo);
+    assert.notEqual(extraRepo.cwd, extra);
+    assert.equal(await readFile(join(workspace.cwd, "dirty-a.txt"), "utf8"), "seeded-a\n");
+    assert.equal(await readFile(join(extraRepo.cwd, "dirty-b.txt"), "utf8"), "seeded-b\n");
+    const policy = { ...access, repositories: workspace.repositories };
+    const write = toolNamed(scopedWorkerTools(workspace.cwd, `root:primary:from-a.txt,root:${extraRepo.id}:from-b.txt`, policy), "write");
+    await write.execute("a", { path: "from-a.txt", content: "worktree-a" });
+    await write.execute("b", { path: join(extra, "from-b.txt"), content: "worktree-b" });
+    assert.equal(await readFile(join(workspace.cwd, "from-a.txt"), "utf8"), "worktree-a");
+    assert.equal(await readFile(join(extraRepo.cwd, "from-b.txt"), "utf8"), "worktree-b");
+    await assert.rejects(readFile(join(primary, "from-a.txt"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(join(extra, "from-b.txt"), "utf8"), /ENOENT/);
+    assert.equal(await readFile(join(primary, "dirty-a.txt"), "utf8"), "seeded-a\n");
+    assert.equal(await readFile(join(extra, "dirty-b.txt"), "utf8"), "seeded-b\n");
+    const mapped = await mapConfiguredPath(workspace.repositories, join(extra, "from-b.txt"), workspace.cwd);
+    assert.equal(mapped, join(await realpath(extraRepo.cwd), "from-b.txt"));
+    const primaryCommit = await commitWorkspace(workspace.cwd, "feat: change A");
+    const extraCommit = await commitWorkspace(extraRepo.cwd, "feat: change B");
+    assert.match(primaryCommit, /^[a-f0-9]{40}$/);
+    assert.match(extraCommit, /^[a-f0-9]{40}$/);
+    assert.match((await exec("git", ["status", "--porcelain"], { cwd: primary })).stdout, /dirty-a\.txt/);
+    assert.doesNotMatch((await exec("git", ["status", "--porcelain"], { cwd: primary })).stdout, /from-a/);
+    assert.match((await exec("git", ["status", "--porcelain"], { cwd: extra })).stdout, /dirty-b\.txt/);
+    assert.doesNotMatch((await exec("git", ["status", "--porcelain"], { cwd: extra })).stdout, /from-b/);
+    const run = { workspace, repositories: workspace.repositories };
+    assert.equal(gitRepositoriesForStep(run).length, 2);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("parallel extra-root worktrees stay distinct from the run worktrees", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-parallel-extra-"));
+  const primary = join(dataDir, "repo-a");
+  const extra = join(dataDir, "repo-b");
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    const workspace = await ensureTicketWorktree({
+      sourceCwd: primary, dataDir, ticket: { identifier: "TEXT-par" }, runId: "run-1", access
+    });
+    const tree = await snapshotTree(workspace.cwd);
+    const pairs = await createParallelWorktrees({
+      sourceCwd: workspace.cwd, dataDir, ticket: { identifier: "TEXT-par" }, runId: "run-1",
+      tree, steps: [{ id: "one" }, { id: "two" }], repositories: workspace.repositories
+    });
+    const workspaces = Object.fromEntries(pairs);
+    assert.notEqual(workspaces.one.cwd, workspaces.two.cwd);
+    const extraOne = workspaces.one.repositories.find((repo) => repo.id !== "primary");
+    const extraTwo = workspaces.two.repositories.find((repo) => repo.id !== "primary");
+    assert.ok(extraOne && extraTwo);
+    assert.notEqual(extraOne.cwd, extraTwo.cwd);
+    assert.notEqual(extraOne.cwd, extra);
+    await writeFile(join(extraOne.cwd, "slice.txt"), "one\n");
+    await assert.rejects(readFile(join(extraTwo.cwd, "slice.txt"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(join(extra, "slice.txt"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("missing frozen RW Git extra fails closed with its identity", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-plan-missing-extra-"));
+  const primary = join(dataDir, "repo-a");
+  const extra = join(dataDir, "repo-b");
+  try {
+    await createZeroStateWorkspace({ cwd: primary, ticket: { identifier: "LOCAL-a" }, runId: "base" });
+    await createZeroStateWorkspace({ cwd: extra, ticket: { identifier: "LOCAL-b" }, runId: "base" });
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "repo-b" }]
+      }, { primaryCwd: primary })
+    });
+    await rm(extra, { recursive: true, force: true });
+    await assert.rejects(
+      ensureTicketWorktree({ sourceCwd: primary, dataDir, ticket: { identifier: "TEXT-missing" }, runId: "run-1", access }),
+      new RegExp(`${access.extraRoots[0].id}.*repo-b`)
+    );
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
