@@ -35,7 +35,16 @@ export async function captureTicketProof({
   if (!ticketId) throw new Error("Ticket-bound proof requires AGENT_PLAN_CAPTURE_TICKET_ID");
   if (!runId) throw new Error("Ticket-bound proof requires AGENT_PLAN_CAPTURE_RUN_ID");
   if (!evidenceDir) throw new Error("Ticket-bound proof requires AGENT_PLAN_EVIDENCE_DIR");
-  if (!Array.isArray(criteria) || !criteria.length) throw new Error("Ticket-bound proof requires current AGENT_PLAN_CAPTURE_CRITERIA");
+  if (!Array.isArray(criteria)) throw new Error("Ticket-bound proof requires AGENT_PLAN_CAPTURE_CRITERIA to be an array");
+  await mkdir(evidenceDir, { recursive: true });
+  const identity = await ticketIdentity(url, ticketId, runId);
+  if (!criteria.length) {
+    const manifest = ticketProofManifest({
+      ticketId, runId, ...identity, captures: [], capturedAt: new Date().toISOString()
+    });
+    await writeFile(join(evidenceDir, "final-proof-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    return manifest;
+  }
   scenarios ||= JSON.parse(await readFile(new URL("../.agent-plan/ui-scenarios.json", import.meta.url), "utf8"));
   if (!Array.isArray(scenarios)) throw new Error("UI scenarios must be an array");
   const selected = criteria.map((criterion) => {
@@ -46,8 +55,6 @@ export async function captureTicketProof({
     if (!scenario.assertions?.length) throw new Error(`UI scenario needs assertions: ${criterion.text}`);
     return { criterion, scenario };
   });
-  await mkdir(evidenceDir, { recursive: true });
-  const identity = await ticketIdentity(url, ticketId, runId);
   const captures = [];
   for (const [index, { criterion, scenario }] of selected.entries()) for (const [name, width, height] of viewports) {
     const filename = `criterion-${index + 1}-${name}.png`;

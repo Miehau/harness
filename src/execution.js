@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
+import { createSteeringLedger } from "./steering.js";
 import { inspectionFocus } from "./inspection.js";
 import { boundedText, redactRecord, redactText, safeArtifactMetadata, safeReasoningSummary } from "./redaction.js";
 import { projectProofMap } from "./proof-map.js";
@@ -230,6 +231,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     plan = null,
     artifacts = [],
     activeRuns = {},
+    steering = createSteeringLedger(),
     trackerEvents = {},
     sessionFile = null,
     auto = false,
@@ -253,6 +255,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     plan,
     artifacts,
     activeRuns,
+    steering: createSteeringLedger(steering),
     trackerEvents,
     sessionFile,
     auto,
@@ -528,6 +531,7 @@ export function markRunPaused(run, at = new Date().toISOString()) {
     steps: Object.entries(activeRuns).map(([stepId, active]) => ({
       stepId,
       runId: active.runId || null,
+      attemptId: active.attemptId || steps.find((step) => step.id === stepId)?.activeAttempt?.id || null,
       sessionFile: active.sessionFile || steps.find((step) => step.id === stepId)?.sessionFile || null,
       startedAt: active.startedAt || null,
       lastEventAt: active.activity?.lastEventAt || active.lastEventAt || null,
@@ -536,7 +540,12 @@ export function markRunPaused(run, at = new Date().toISOString()) {
   };
   for (const step of steps) {
     if (!inFlightStepStatusSet.has(step.status)) continue;
-    materializeActiveAttempt(step, activeRuns[step.id] || {}, { status: "paused", completedAt: at, reason: "run_paused" });
+    const active = activeRuns[step.id] || {};
+    const attempt = materializeActiveAttempt(step, active, { status: "paused", completedAt: at, reason: "run_paused" });
+    step.activeAttempt = {
+      ...(step.activeAttempt || {}), id: attempt.attemptId, status: "interrupted", workerRunId: null,
+      startedAt: step.activeAttempt?.startedAt || active.startedAt || at, interruptedAt: at
+    };
     step.status = "interrupted";
   }
   run.status = "paused";
@@ -1304,6 +1313,8 @@ export function compactRun(run, revision = null) {
     checkpoint: publicCheckpoint(run?.checkpoint),
     lastError: boundedText(run?.lastError, 1000).value || null,
     workflow: publicWorkflow(run?.workflow),
+    steering: run?.steering || { nextSequence: 1, records: [] },
+    steeringRejections: run?.steeringRejections || [],
     proofMap: projectProofMap(run),
     cleanup: normalizeRunCleanup(run?.cleanup),
     revision
