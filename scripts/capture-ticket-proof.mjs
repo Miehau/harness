@@ -55,14 +55,20 @@ export async function captureTicketProof({
     if (!scenario.assertions?.length) throw new Error(`UI scenario needs assertions: ${criterion.text}`);
     return { criterion, scenario };
   });
+  const evidenceRoot = join(evidenceDir, "saved-extra-root");
+  await mkdir(evidenceRoot, { recursive: true });
+  const replaceFixture = (value) => value === "$evidenceRoot" ? evidenceRoot : value;
   const captures = [];
   for (const [index, { criterion, scenario }] of selected.entries()) for (const [name, width, height] of viewports) {
     const filename = `criterion-${index + 1}-${name}.png`;
     const videoName = criterion.requiresVideoEvidence || scenario.video === true ? `criterion-${index + 1}-${name}.webm` : null;
-    const commands = scenario.commands.map((command) => command.map((arg) => arg === "$ticketId" ? ticketId : arg));
-    await journey({ url, screenshot: join(evidenceDir, filename), width, height, commands, assertions: scenario.assertions, video: videoName ? join(evidenceDir, videoName) : null });
-    captures.push({ name, path: filename, width, height, criterionIds: [criterion.id], commands, assertions: scenario.assertions });
-    if (videoName) captures.push({ name, path: videoName, width, height, criterionIds: [criterion.id], commands, assertions: scenario.assertions });
+    const commands = scenario.commands.map((command) => command.map((arg) => arg === "$ticketId" ? ticketId : replaceFixture(arg)));
+    const assertions = scenario.assertions.map((assertion) => Object.fromEntries(
+      Object.entries(assertion).map(([key, value]) => [key, replaceFixture(value)])
+    ));
+    await journey({ url, screenshot: join(evidenceDir, filename), width, height, commands, assertions, video: videoName ? join(evidenceDir, videoName) : null });
+    captures.push({ name, path: filename, width, height, criterionIds: [criterion.id], commands, assertions });
+    if (videoName) captures.push({ name, path: videoName, width, height, criterionIds: [criterion.id], commands, assertions });
   }
   const manifest = ticketProofManifest({
     ticketId, runId, ...identity, captures, capturedAt: new Date().toISOString()

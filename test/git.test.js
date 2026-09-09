@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { assertScopedWrite, diffTrees, normalizeReviewMap, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "../src/git.js";
 
 const exec = promisify(execFile);
@@ -104,5 +105,39 @@ test("blocks paths outside write scope", async () => {
     assert.deepEqual(outsideWriteScope(["src/app.js"], ""), ["src/app.js"]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("writeScope still blocks writes that frozen directory policy would otherwise allow", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-scope-access-"));
+  const primary = join(root, "project");
+  const extra = join(root, "shared");
+  try {
+    await mkdir(join(primary, "src"), { recursive: true });
+    await mkdir(join(extra, "src"), { recursive: true });
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write" }]
+      }, { primaryCwd: primary })
+    });
+    assert.equal(
+      await assertScopedWrite(primary, join(primary, "src", "app.js"), "src", { access }),
+      join(primary, "src", "app.js")
+    );
+    await assert.rejects(
+      assertScopedWrite(primary, join(extra, "src", "app.js"), "src", { access }),
+      /Write blocked outside scope/
+    );
+    await assert.rejects(
+      assertScopedWrite(primary, join(extra, "src", "app.js"), "*", { access }),
+      /Write blocked outside scope/
+    );
+    assert.equal(
+      await assertScopedWrite(primary, join(extra, "src", "app.js"), `root:${access.extraRoots[0].id}:src`, { access }),
+      join(extra, "src", "app.js")
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

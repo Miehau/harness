@@ -8,6 +8,8 @@
 
 **Purpose:** Persist run state as serialized atomic JSON writes, store artifact bodies separately, serve media lazily, retain completed worktrees/branches indefinitely, and offer disk inventory plus explicit cleanup by run/ticket/project/age.
 
+Retention removes extra worktrees and local branches through each repository `sourceCwd`, not only the primary checkout. `projectPolicies` live in JsonStore beside runs; they are not retained-run artifacts.
+
 **Strength:** A single-daemon lock and queued writes fit the local product without a database service. Storage cleanup is visible and preserves remote resources.
 
 **Limit:** Indefinite retention grows disk use until operators clean it. Artifact retention and bounded live-activity buffers are different promises; complete raw session traces should not be confused with the compact dashboard projection.

@@ -9,14 +9,26 @@ const tokenPatterns = [
 ];
 const absolutePath = /(^|[\s"'`(])(?:~\/|\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z]:\\[^\s"'`),;]+)/g;
 
-export function redactText(value) {
-  let text = String(value ?? "");
-  for (const pattern of tokenPatterns) text = text.replace(pattern, (...parts) => parts[1] && pattern === tokenPatterns[5] ? `${parts[1]}[redacted]@` : "[redacted]");
-  return text.replace(absolutePath, "$1[path]");
+function allowedPath(path, allowPaths = []) {
+  const candidate = String(path || "").replace(/\\/g, "/");
+  return (allowPaths || []).some((allowed) => {
+    const item = String(allowed || "").replace(/\\/g, "/");
+    if (!item) return false;
+    return candidate === item || candidate.startsWith(item.endsWith("/") ? item : `${item}/`);
+  });
 }
 
-export function boundedText(value, limit) {
-  const text = redactText(value);
+export function redactText(value, { allowPaths = [] } = {}) {
+  let text = String(value ?? "");
+  for (const pattern of tokenPatterns) text = text.replace(pattern, (...parts) => parts[1] && pattern === tokenPatterns[5] ? `${parts[1]}[redacted]@` : "[redacted]");
+  return text.replace(absolutePath, (match, prefix) => {
+    const path = match.slice(prefix.length);
+    return allowedPath(path, allowPaths) ? match : `${prefix}[path]`;
+  });
+}
+
+export function boundedText(value, limit, options) {
+  const text = redactText(value, options);
   return text.length > limit
     ? { value: text.slice(0, limit), state: "truncated", truncated: true, total: text.length }
     : { value: text, state: "available", truncated: false, total: text.length };

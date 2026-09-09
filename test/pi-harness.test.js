@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, verificationContractFiles, verificationContractExists, PiHarness, projectCommandTool, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
+import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
+import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, verificationContractFiles, verificationContractExists, PiHarness, projectCommandTool, scopedReadTools, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
+import { runProjectCommand } from "../src/project-config.js";
 
 test("session options omit thinking when the model cannot take reasoningEffort", async () => {
   const harness = new PiHarness({ dataDir: tmpdir() });
@@ -1085,4 +1087,312 @@ test("explore, design, bind, continue, and review share one supervisor queue key
   await harness.reviewWorkerReport({ cwd: "/repo", sessionKey: expected, step: { id: "build", title: "Build", agentId: "w", acceptanceCriteria: [] }, report: { status: "completed" }, diff: { files: [] } });
   assert.ok(keys.includes(expected));
   assert.equal(keys.filter((key) => key === expected).length >= 4, true);
+});
+
+function toolNamed(tools, name) {
+  return tools.find((tool) => tool.name === name);
+}
+
+function resultText(result) {
+  return (result?.content || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("");
+}
+
+async function accessLayout() {
+  const root = await mkdtemp(join(tmpdir(), "pi-file-tools-"));
+  const primary = join(root, "project-a");
+  const extra = join(root, "project-b");
+  const sibling = join(root, "sibling");
+  const outside = join(root, "outside");
+  await mkdir(primary);
+  await mkdir(extra);
+  await mkdir(sibling);
+  await mkdir(outside);
+  await writeFile(join(primary, "main.js"), "primary-source");
+  await writeFile(join(extra, "notes.txt"), "from-b");
+  await writeFile(join(sibling, "secret.txt"), "unlisted");
+  await writeFile(join(outside, "hidden.txt"), "escaped");
+  return { root, primary, extra, sibling, outside };
+}
+
+test("file tools from primary A read configured B and deny an unlisted sibling", async () => {
+  const { root, primary, extra, sibling } = await accessLayout();
+  try {
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read-only", displayPath: "project-b" }]
+      }, { primaryCwd: primary })
+    });
+    const tools = scopedReadTools(primary, access);
+    const read = toolNamed(tools, "read");
+    const extraRead = await read.execute("extra", { path: join(extra, "notes.txt") });
+    assert.match(resultText(extraRead), /from-b/);
+    const primaryRead = await read.execute("primary", { path: "main.js" });
+    assert.match(resultText(primaryRead), /primary-source/);
+    await assert.rejects(read.execute("sibling", { path: join(sibling, "secret.txt") }), /outside the frozen directory allow-list/);
+    const listed = await toolNamed(tools, "ls").execute("list-extra", { path: extra });
+    assert.match(resultText(listed), /notes.txt/);
+    await assert.rejects(toolNamed(tools, "ls").execute("list-sibling", { path: sibling }), /outside the frozen directory allow-list/);
+    await assert.rejects(toolNamed(tools, "grep").execute("grep-sibling", { pattern: "unlisted", path: sibling }), /outside the frozen directory allow-list/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("file-tool writes into a read-only extra root fail, as do traversal and symlink escapes", async () => {
+  const { root, primary, extra, outside } = await accessLayout();
+  try {
+    const escape = join(primary, "escape");
+    await symlink(outside, escape);
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read-only", displayPath: "project-b" }]
+      }, { primaryCwd: primary })
+    });
+    const tools = scopedWorkerTools(primary, "**", access);
+    const write = toolNamed(tools, "write");
+    const read = toolNamed(tools, "read");
+    const listed = await toolNamed(tools, "ls").execute("list-primary", { path: "." });
+    assert.doesNotMatch(resultText(listed), /hidden\.txt/);
+    await assert.rejects(write.execute("ro", { path: join(extra, "created.txt"), content: "nope" }), /read-only extra root/);
+    await assert.rejects(read.execute("symlink", { path: join(escape, "hidden.txt") }), /outside the frozen directory allow-list/);
+    await assert.rejects(write.execute("symlink-write", { path: join(escape, "created.txt"), content: "nope" }), /outside the frozen directory allow-list/);
+    await assert.rejects(read.execute("traverse", { path: join(primary, "..", "sibling", "secret.txt") }), /outside the frozen directory allow-list/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Any-access file tools skip the allow-list and still report host permission failures", async () => {
+  const { root, primary, extra, sibling } = await accessLayout();
+  const lockedDir = join(root, "locked");
+  const lockedFile = join(lockedDir, "secret.txt");
+  try {
+    await mkdir(lockedDir);
+    await writeFile(lockedFile, "denied");
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        mode: "any",
+        extraRoots: [{ path: extra, mode: "read-only" }]
+      }, { primaryCwd: primary })
+    });
+    const tools = scopedReadTools(primary, access);
+    const read = toolNamed(tools, "read");
+    const siblingRead = await read.execute("sibling", { path: join(sibling, "secret.txt") });
+    assert.match(resultText(siblingRead), /unlisted/);
+    assert.deepEqual(tools.map((tool) => tool.name), ["read", "grep", "find", "ls"]);
+    if (process.getuid?.() !== 0) {
+      await chmod(lockedDir, 0);
+      try {
+        await assert.rejects(read.execute("eacces", { path: lockedFile }), /EACCES|permission denied|not accessible/i);
+      } finally {
+        await chmod(lockedDir, 0o700);
+      }
+    }
+  } finally {
+    await chmod(lockedDir, 0o700).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("read-only sessions stay read-only even when frozen access is Any", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-readonly-any-"));
+  try {
+    const access = { mode: "any", primary: { id: "primary", path: root, displayPath: root, mode: "read/write" }, extraRoots: [], frozenAt: null };
+    let captured;
+    const harness = new PiHarness({ dataDir: root });
+    const session = {
+      sessionFile: join(root, "worker.jsonl"), state: { messages: [] },
+      resourceLoader: { getSkills: () => ({ skills: [] }) }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() { await captured.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Done", artifact: "ok" }); }
+    };
+    harness.sdk = async () => ({
+      createAgentSession: async (options) => { captured = options.customTools; return { session }; },
+      SessionManager: { create: () => ({}) }
+    });
+    const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read", skills: [] }] });
+    await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], access });
+    assert.deepEqual(captured.filter((tool) => ["read", "grep", "find", "ls", "edit", "write", "delete"].includes(tool.name)).map((tool) => tool.name), ["read", "grep", "find", "ls"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named project_command still rejects blocked executables", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-blocked-command-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { hack: ["bash", "-lc", "pwd"] }
+    }));
+    await assert.rejects(projectCommandTool(root).execute("hack", { name: "hack" }), /blocked executable/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("primary writes use the session worktree rather than the original checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-mapped-primary-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  try {
+    await mkdir(original);
+    await mkdir(worktree);
+    await writeFile(join(original, "app.js"), "original");
+    await writeFile(join(worktree, "app.js"), "worktree");
+    const access = await freezeRunAccess({ primaryCwd: original, policy: { mode: "restricted", extraRoots: [] } });
+    const write = toolNamed(scopedWorkerTools(worktree, "**", access), "write");
+    await write.execute("create", { path: "next.js", content: "from-worktree" });
+    assert.equal(await readFile(join(worktree, "next.js"), "utf8"), "from-worktree");
+    await assert.rejects(readFile(join(original, "next.js"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("grep keeps matches for a permitted file and directory and denies unlisted paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-grep-file-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  const sibling = join(root, "sibling");
+  try {
+    await mkdir(original);
+    await mkdir(worktree);
+    await mkdir(sibling);
+    await writeFile(join(worktree, "file.txt"), "WORKTREE fixture\n");
+    await writeFile(join(sibling, "secret.txt"), "unlisted\n");
+    const access = await freezeRunAccess({ primaryCwd: original, policy: { mode: "restricted", extraRoots: [] } });
+    const grep = toolNamed(scopedReadTools(worktree, access), "grep");
+    const directoryHit = await grep.execute("dir", { path: worktree, pattern: "WORKTREE fixture" });
+    assert.match(resultText(directoryHit), /WORKTREE fixture/);
+    const fileHit = await grep.execute("file", { path: join(worktree, "file.txt"), pattern: "WORKTREE fixture" });
+    assert.match(resultText(fileHit), /WORKTREE fixture/);
+    await assert.rejects(grep.execute("unlisted", { path: join(sibling, "secret.txt"), pattern: "unlisted" }), /outside the frozen directory allow-list/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("delete refuses an out-of-scope symlink even when its target is in scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delete-link-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  try {
+    await mkdir(original);
+    await mkdir(join(worktree, "private"), { recursive: true });
+    await writeFile(join(worktree, "private", "target.txt"), "keep");
+    await writeFile(join(worktree, "private", "ok.txt"), "delete-me");
+    await symlink(join(worktree, "private", "target.txt"), join(worktree, "public-link"));
+    const access = await freezeRunAccess({ primaryCwd: original, policy: { mode: "restricted", extraRoots: [] } });
+    const remove = toolNamed(scopedWorkerTools(worktree, "private", access), "delete");
+    await assert.rejects(remove.execute("link", { path: "public-link" }), /Write blocked outside scope/);
+    assert.equal((await lstat(join(worktree, "public-link"))).isSymbolicLink(), true);
+    assert.equal(await readFile(join(worktree, "private", "target.txt"), "utf8"), "keep");
+    await remove.execute("file", { path: "private/ok.txt" });
+    await assert.rejects(readFile(join(worktree, "private", "ok.txt")), /ENOENT/);
+    assert.equal((await lstat(join(worktree, "public-link"))).isSymbolicLink(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("root-qualified file scope can create a missing parent and leaves unauthorized paths untouched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-root-scope-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  try {
+    await mkdir(original);
+    await mkdir(worktree);
+    const access = await freezeRunAccess({ primaryCwd: original, policy: { mode: "restricted", extraRoots: [] } });
+    const write = toolNamed(scopedWorkerTools(worktree, "root:primary:deep/new.txt", access), "write");
+    await write.execute("ok", { path: "deep/new.txt", content: "fixture" });
+    assert.equal(await readFile(join(worktree, "deep", "new.txt"), "utf8"), "fixture");
+    await assert.rejects(write.execute("denied", { path: "other.txt", content: "nope" }), /Write blocked outside scope/);
+    await assert.rejects(readFile(join(worktree, "other.txt")), /ENOENT/);
+    await assert.rejects(lstat(join(worktree, "other")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-Git extra-root exact-file scope can create a missing parent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-extra-scope-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  const extra = join(root, "extra-b");
+  try {
+    await mkdir(original);
+    await mkdir(worktree);
+    await mkdir(extra);
+    const access = await freezeRunAccess({
+      primaryCwd: original,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write", displayPath: "extra-b" }]
+      }, { primaryCwd: original })
+    });
+    const extraId = access.extraRoots[0].id;
+    const write = toolNamed(scopedWorkerTools(worktree, `root:${extraId}:deep/new.txt`, access), "write");
+    await write.execute("ok", { path: join(extra, "deep", "new.txt"), content: "fixture" });
+    assert.equal(await readFile(join(extra, "deep", "new.txt"), "utf8"), "fixture");
+    await assert.rejects(write.execute("denied", { path: join(extra, "denied", "x.txt"), content: "nope" }), /Write blocked outside scope/);
+    await assert.rejects(lstat(join(extra, "denied")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Any-access exact absolute file scope can create a missing parent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-any-scope-"));
+  const original = join(root, "original");
+  const worktree = join(root, "worktree");
+  const outside = join(root, "outside");
+  try {
+    await mkdir(original);
+    await mkdir(worktree);
+    await mkdir(outside);
+    const access = await freezeRunAccess({
+      primaryCwd: original,
+      policy: await normalizeProjectPolicy({ mode: "any", extraRoots: [] }, { primaryCwd: original })
+    });
+    const target = join(outside, "deep", "new.txt");
+    const write = toolNamed(scopedWorkerTools(worktree, target, access), "write");
+    await write.execute("ok", { path: target, content: "fixture" });
+    assert.equal(await readFile(target, "utf8"), "fixture");
+    await assert.rejects(write.execute("denied", { path: join(outside, "denied", "x.txt"), content: "nope" }), /Write blocked outside scope/);
+    await assert.rejects(lstat(join(outside, "denied")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project_command without a repository stays primary; an explicit id uses mapped B", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-command-repo-"));
+  const primary = join(root, "primary");
+  const extra = join(root, "extra-worktree");
+  try {
+    await mkdir(join(primary, ".agent-plan"), { recursive: true });
+    await mkdir(join(extra, ".agent-plan"), { recursive: true });
+    await writeFile(join(primary, "ping.mjs"), "console.log('from-primary');\n");
+    await writeFile(join(extra, "ping.mjs"), "console.log('from-extra');\n");
+    await writeFile(join(primary, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { ping: ["node", "ping.mjs"] }
+    }));
+    await writeFile(join(extra, ".agent-plan", "project.json"), JSON.stringify({
+      commands: { ping: ["node", "ping.mjs"] }
+    }));
+    const repositories = [
+      { id: "primary", cwd: primary, sourceCwd: primary },
+      { id: "r-extra", cwd: extra, sourceCwd: join(root, "extra-source") }
+    ];
+    const tool = projectCommandTool(primary, undefined, undefined, runProjectCommand, undefined, undefined, repositories);
+    const primaryResult = await tool.execute("primary", { name: "ping" });
+    assert.match(resultText(primaryResult), /from-primary/);
+    const extraResult = await tool.execute("extra", { name: "ping", repository: "r-extra" });
+    assert.match(resultText(extraResult), /from-extra/);
+    await assert.rejects(tool.execute("missing", { name: "ping", repository: "nope" }), /Unknown repository/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

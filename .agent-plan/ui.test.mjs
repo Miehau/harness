@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { tmpdir } from "node:os";
 import { normalizePlan } from "../src/plan.js";
-import { seedRun, withDaemon } from "../test/helpers.js";
+import { invoke, seedRun, withDaemon } from "../test/helpers.js";
 import { runJourney, runUi, validateJourney } from "./ui.mjs";
 import { captureTicketProof } from "../scripts/capture-ticket-proof.mjs";
 import { prepareVisualEvidence } from "../src/visual-evidence.js";
@@ -48,5 +49,69 @@ test("UI CLI validates commands and exercises real task navigation and creation"
     assert.deepEqual(manifest.captures[0].commands, [["tasks", "open", id]]);
     assert.deepEqual(manifest.captures[0].assertions, scenario.assertions);
     assert.equal(manifest.identity.runId, "run-1");
+  });
+});
+
+test("UI CLI opens the workspace policy dialog and reports invalid extra roots", { timeout: 60000 }, async () => {
+  assert.throws(() => validateJourney([["workspace", "extra-root", "/tmp/x", "write-only"]]), /Unknown UI command/);
+  assert.doesNotThrow(() => validateJourney([["workspace", "open"]], [{ selector: ".extra-root-path", value: "/tmp/x" }]));
+  await withDaemon(async (daemon) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-ui-extra-"));
+    try {
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
+      const url = `http://127.0.0.1:${daemon.server.address().port}`;
+      const opened = await runJourney({
+        url,
+        commands: [["workspace", "open"]],
+        assertions: [
+          { selector: "#workspace-dialog", text: "Primary repository (not removable)" },
+          { selector: "#access-mode-status", text: "Restricted" },
+          { selector: "#access-policy-form", text: "read-only" }
+        ]
+      });
+      assert.ok(opened.commands);
+      const scenarios = JSON.parse(await readFile(new URL("./ui-scenarios.json", import.meta.url), "utf8"));
+      const savedRootsScenario = scenarios.find((scenario) => scenario.criterion === "The workspace dialog shows primary, extra roots as saved, and the effective restricted or Any access mode.");
+      assert.ok(savedRootsScenario, "ticket-bound proof scenario persists and reloads an extra root");
+      const savedRoots = await runJourney({
+        url,
+        commands: savedRootsScenario.commands.map((command) => command.map((arg) => arg === "$evidenceRoot" ? extra : arg)),
+        assertions: savedRootsScenario.assertions.map((assertion) => ({
+          ...assertion,
+          value: assertion.value === "$evidenceRoot" ? extra : assertion.value
+        }))
+      });
+      assert.ok(savedRoots.assertions);
+      const persistedScenario = scenarios.find((scenario) => scenario.criterion === "Two store primaries keep extra roots only on the project that saved them after re-init.");
+      assert.ok(persistedScenario, "ticket-bound proof scenario exists for project-keyed persisted roots");
+      const persisted = await runJourney({ url, commands: persistedScenario.commands, assertions: persistedScenario.assertions });
+      assert.ok(persisted.assertions);
+      const invalidScenario = scenarios.find((scenario) => scenario.criterion.startsWith("Invalid extra roots"));
+      const invalid = await runJourney({ url, commands: invalidScenario.commands, assertions: invalidScenario.assertions });
+      assert.ok(invalid.assertions);
+      const keyboard = await runJourney({
+        url,
+        commands: [
+          ["workspace", "open"],
+          ["workspace", "extra-root", "docs", "read-only"],
+          ["workspace", "keyboard"]
+        ],
+        assertions: [
+          { selector: "#access-mode-status", text: "Effective mode" },
+          { selector: "#save-access-policy", text: "Save access policy" }
+        ]
+      });
+      assert.ok(keyboard.assertions);
+      const previous = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.equal(previous.json.mode, "restricted");
+      assert.equal(previous.json.extraRoots.length, 1);
+      assert.equal(previous.json.extraRoots[0].displayPath, extra);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
   });
 });

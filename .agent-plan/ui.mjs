@@ -7,6 +7,12 @@ export const help = `Usage: node .agent-plan/ui.mjs <command> [--url URL] [--scr
   tasks list
   tasks open <id>
   tasks add <description>       Creates a task and starts its workflow
+  workspace open                Opens the repository dialog and loads access policy
+  workspace close               Closes the repository dialog
+  workspace extra-root <path> <read-only|read/write>
+  workspace any on|off
+  workspace save-policy
+  workspace keyboard            Focus every policy control in the open dialog
   journey <scenario.json>      Runs commands and assertions in one browser session
 
 Scenario: {"commands":[["tasks","open","id"],["stage","verify"],["tab","details"]],
@@ -20,13 +26,23 @@ export function validateJourney(commands, assertions = []) {
   if (!Array.isArray(commands) || !commands.length || commands.length > 50) throw new Error("A journey needs 1–50 commands");
   for (const command of commands) {
     if (!Array.isArray(command) || command.some((word) => typeof word !== "string" || !word.trim())) throw new Error("Commands must be non-empty string arrays");
-    const [noun, verb] = command;
+    const [noun, verb, value, extra] = command;
     const valid = noun === "tasks" ? (verb === "list" ? command.length === 2 : ["open", "add"].includes(verb) && command.length === 3)
+      : noun === "workspace" ? (
+          ["open", "close", "save-policy", "keyboard"].includes(verb) && command.length === 2
+          || verb === "any" && command.length === 3 && ["on", "off"].includes(value)
+          || verb === "extra-root" && command.length === 4 && ["read-only", "read/write"].includes(extra)
+        )
       : ["stage", "tab", "click"].includes(noun) && command.length === 2;
     if (!valid) throw new Error(`Unknown UI command: ${command.join(" ")}`);
   }
-  if (!Array.isArray(assertions) || assertions.length > 50 || assertions.some((assertion) => !assertion || typeof assertion.selector !== "string" || !assertion.selector.trim() || typeof assertion.text !== "string" || !assertion.text.trim())) {
-    throw new Error("Assertions require a selector and non-empty expected text");
+  if (!Array.isArray(assertions) || assertions.length > 50 || assertions.some((assertion) => {
+    if (!assertion || typeof assertion.selector !== "string" || !assertion.selector.trim()) return true;
+    const hasText = typeof assertion.text === "string" && assertion.text.trim();
+    const hasValue = typeof assertion.value === "string" && assertion.value.trim();
+    return !hasText && !hasValue;
+  })) {
+    throw new Error("Assertions require a selector and non-empty expected text or value");
   }
 }
 
@@ -53,7 +69,8 @@ async function navigate(commands, assertions) {
   };
   await wait(() => visible(document.querySelector("#free-text-open")), "dashboard loaded");
   const results = [];
-  for (const [noun, verb, value] of commands) {
+  for (const command of commands) {
+    const [noun, verb, value, extra] = command;
     if (noun === "tasks" && verb === "list") {
       await wait(() => document.querySelector("#ticket-list")?.textContent.trim(), "task list loaded");
       results.push([...document.querySelectorAll("[data-ticket]")].map((element) => ({ id: element.dataset.ticket, text: element.innerText })));
@@ -71,6 +88,46 @@ async function navigate(commands, assertions) {
       await click('#free-text-form button[type="submit"]');
       await wait(() => !document.querySelector("#free-text-dialog").open && document.querySelector("#ticket-header h2")?.textContent === value.split("\n")[0], "new task selected");
       results.push({ added: value.split("\n")[0] });
+    } else if (noun === "workspace") {
+      if (verb === "open") {
+        await click("#workspace-settings");
+        await wait(() => document.querySelector("#workspace-dialog")?.open && document.querySelector("#access-policy-form")?.dataset.loaded === "true", "workspace access policy loaded");
+      } else if (verb === "close") {
+        await click("#workspace-dialog [data-close-dialog]");
+        await wait(() => !document.querySelector("#workspace-dialog")?.open, "workspace dialog closed");
+      } else if (verb === "any") {
+        const box = document.querySelector("#access-any");
+        box.checked = value === "on";
+        box.dispatchEvent(new Event("change", { bubbles: true }));
+        await wait(() => document.querySelector("#access-mode-status")?.textContent.includes(value === "on" ? "Any access" : "Restricted"), "access mode label");
+      } else if (verb === "extra-root") {
+        const before = document.querySelectorAll("[data-extra-root]").length;
+        await click("#add-extra-root");
+        await wait(() => document.querySelectorAll("[data-extra-root]").length === before + 1, "extra root row added");
+        const row = [...document.querySelectorAll("[data-extra-root]")].at(-1);
+        const input = row.querySelector(".extra-root-path");
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const select = row.querySelector(".extra-root-mode");
+        select.value = extra;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        await wait(() => row.querySelector(".extra-root-path")?.value === value && row.querySelector(".extra-root-mode")?.value === extra, "extra root filled");
+      } else if (verb === "save-policy") {
+        await click("#save-access-policy");
+        await wait(() => {
+          const error = document.querySelector("#access-policy-error");
+          error?.scrollIntoView({ block: "center" });
+          return Boolean(error?.textContent.trim()) || /saved/i.test(document.querySelector("#access-policy-status")?.textContent || "");
+        }, "access policy submit result");
+      } else {
+        const dialog = document.querySelector("#workspace-dialog");
+        const controls = [...dialog.querySelectorAll("button, input, select")].filter((element) => !element.disabled && visible(element));
+        if (controls.length < 4) throw new Error("Policy controls are not keyboard-reachable");
+        for (const control of controls) {
+          control.focus();
+          if (document.activeElement !== control) throw new Error(`Cannot focus ${control.id || control.getAttribute("aria-label") || control.textContent.trim()}`);
+        }
+      }
     } else if (noun === "stage" || noun === "tab") {
       await click(`[data-${noun}=${JSON.stringify(verb)}]`);
     } else {
@@ -79,10 +136,12 @@ async function navigate(commands, assertions) {
       matches[0].click();
     }
   }
-  for (const { selector, text } of assertions) await wait(() => {
-    const matches = [...document.querySelectorAll(selector)].filter(visible);
-    return matches.length === 1 && matches[0].textContent.includes(text);
-  }, `${selector} contains ${JSON.stringify(text)}`);
+  for (const { selector, text, value } of assertions) await wait(() => {
+    const matches = [...document.querySelectorAll(selector)].filter(visible).filter((element) => (
+      (text == null || element.textContent.includes(text)) && (value == null || element.value === value)
+    ));
+    return matches.length === 1;
+  }, `${selector} matches ${JSON.stringify({ text, value })}`);
   return { results, assertions, url: location.href };
 }
 

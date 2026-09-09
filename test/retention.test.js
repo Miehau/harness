@@ -48,3 +48,36 @@ test("manual cleanup removes only run-owned worktrees, branch, previews, and fil
     assert.equal(await import("node:fs/promises").then(({ stat }) => stat(runRoot(dataDir, run)).then(() => true, () => false)), false);
   } finally { await rm(dataDir, { recursive: true }); }
 });
+
+test("cleanup removes extra-root worktrees and branches without touching user sources", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-cleanup-extra-"));
+  const extraSource = join(dataDir, "user-extra");
+  const calls = [];
+  const run = {
+    id: "ticket", runId: "run-1", ticket: { identifier: "ABC-1" },
+    workspace: { sourceCwd: "/repo", cwd: "", branch: "codex/abc" },
+    repositories: [
+      { id: "primary", sourceCwd: "/repo", cwd: "", branch: "codex/abc" },
+      { id: "r-extra", sourceCwd: extraSource, cwd: "", branch: "codex/abc-r-extra" }
+    ]
+  };
+  run.workspace.cwd = join(runRoot(dataDir, run), "worktree");
+  run.repositories[0].cwd = run.workspace.cwd;
+  run.repositories[1].cwd = join(runRoot(dataDir, run), "repos", "r-extra", "worktree");
+  await mkdir(run.workspace.cwd, { recursive: true });
+  await mkdir(run.repositories[1].cwd, { recursive: true });
+  await mkdir(extraSource, { recursive: true });
+  await writeFile(join(extraSource, "keep.txt"), "user-source\n");
+  try {
+    await cleanupRetainedRun({
+      run, dataDir,
+      execImpl: async (command, args, options) => calls.push({ command, args, options })
+    });
+    const extraRemoves = calls.filter((call) => call.options.cwd === extraSource && call.args[0] === "worktree");
+    const extraBranches = calls.filter((call) => call.options.cwd === extraSource && call.args[0] === "branch");
+    assert.equal(extraRemoves.some((call) => call.args.includes(run.repositories[1].cwd)), true);
+    assert.deepEqual(extraBranches.map((call) => call.args), [["branch", "-D", "codex/abc-r-extra"]]);
+    assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(extraSource, "keep.txt"), "utf8")), "user-source\n");
+    assert.equal(await import("node:fs/promises").then(({ stat }) => stat(runRoot(dataDir, run)).then(() => true, () => false)), false);
+  } finally { await rm(dataDir, { recursive: true }); }
+});

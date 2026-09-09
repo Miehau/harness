@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { markRunCancelled, rewindRun } from "../src/execution.js";
 import { runCli } from "../src/cli.js";
@@ -549,4 +552,148 @@ test("waive rejects one verifier finding with an operator reason", async () => {
   });
   assert.equal(called.url, "http://127.0.0.1:4317/api/tickets/ticket-1/steps/build/waive");
   assert.deepEqual(called.body, { reason: "Owned by the next plan slice" });
+});
+
+test("access commands call the workspace access-policy API", async () => {
+  const requests = [];
+  const policy = { mode: "restricted", extraRoots: [] };
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, method: options.method || "GET", body: options.body });
+    return { ok: true, status: 200, async text() { return JSON.stringify(policy); } };
+  };
+  const opts = { env: { AGENT_PLAN_URL: "http://127.0.0.1:4317" }, fetchImpl, stdout: { write() {} }, stderr: { write() {} } };
+  assert.equal(await runCli(["access", "show"], opts), 0);
+  assert.equal(await runCli(["access"], opts), 0);
+  assert.equal(await runCli(["access", "set", JSON.stringify({ mode: "restricted", extraRoots: [] })], opts), 0);
+  assert.deepEqual(requests.map((item) => [item.method, item.url]), [
+    ["GET", "http://127.0.0.1:4317/api/workspace/access-policy"],
+    ["GET", "http://127.0.0.1:4317/api/workspace/access-policy"],
+    ["POST", "http://127.0.0.1:4317/api/workspace/access-policy"]
+  ]);
+  await assert.rejects(runCli(["access", "set", "{nope"], opts), /Access policy JSON is invalid/);
+});
+
+test("access show and set round-trip the current project policy as JSON", async () => {
+  await withDaemon(async (daemon, { cwd }) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-cli-extra-"));
+    try {
+      const shown = await runAgainstDaemon(daemon, ["access", "show"]);
+      assert.equal(shown.code, 0);
+      const apiUnset = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(shown.json, apiUnset.json);
+      assert.deepEqual(shown.json, { mode: "restricted", extraRoots: [] });
+
+      const body = { mode: "restricted", extraRoots: [{ path: extra, mode: "read/write" }] };
+      const set = await runAgainstDaemon(daemon, ["access", "set", JSON.stringify(body)]);
+      assert.equal(set.code, 0);
+      const apiGet = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(set.json, apiGet.json);
+      assert.equal(set.json.mode, "restricted");
+      assert.equal(set.json.extraRoots.length, 1);
+      assert.equal(set.json.extraRoots[0].mode, "read/write");
+      assert.equal(set.json.extraRoots[0].displayPath, extra);
+
+      await assert.rejects(
+        () => runAgainstDaemon(daemon, ["access", "set", JSON.stringify({ extraRoots: [{ path: extra, mode: "write-only" }] })]),
+        /Unknown extra root mode/
+      );
+      const unchanged = await runAgainstDaemon(daemon, ["access"]);
+      assert.equal(unchanged.code, 0);
+      assert.deepEqual(unchanged.json, apiGet.json);
+
+      const anySet = await runAgainstDaemon(daemon, ["access", "set", JSON.stringify({ mode: "any", extraRoots: [] })]);
+      assert.equal(anySet.code, 0);
+      assert.equal(anySet.json.mode, "any");
+      assert.deepEqual(anySet.json.extraRoots, []);
+      const apiAny = await invoke(daemon, "GET", "/api/workspace/access-policy");
+      assert.deepEqual(anySet.json, apiAny.json);
+
+      const published = await invoke(daemon, "GET", "/api/state");
+      assert.equal(published.json.projectPolicies, undefined);
+      assert.equal(published.json.workspace.cwd, undefined);
+      assert.ok(published.json.workspace.displayPath);
+      assert.equal(published.json.workspace.displayPath.includes(cwd) || published.json.workspace.displayPath.length > 0, true);
+      assert.equal(published.json.accessPolicy.mode, "any");
+      assert.deepEqual(published.json.accessPolicy.extraRoots, []);
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
+  });
+});
+
+test("timeline and review packet name both repositories when A and B changed", async () => {
+  await withDaemon(async (daemon) => {
+    const extraId = "r-repob";
+    const plan = normalizePlan({
+      title: "A and B",
+      nodes: [{
+        id: "build", title: "Build", status: "review_ready", permission: "write",
+        writeScope: `one-a.txt,root:${extraId}:one-b.txt`,
+        expectedFiles: ["one-a.txt"], estimatedChangedLines: 4,
+        acceptanceCriteria: ["Lands in A and B"],
+        attempts: [{
+          attemptId: "attempt-1", status: "verified", startedAt: "2026-09-03T10:01:00.000Z", completedAt: "2026-09-03T10:02:00.000Z",
+          report: { status: "completed", summary: "done" },
+          verification: {
+            checks: {
+              status: "passed", command: "verify", summary: "passed",
+              repositories: [
+                { repositoryId: "primary", displayPath: "repo-a", status: "passed", command: "verify-a", summary: "A passed" },
+                { repositoryId: extraId, displayPath: "repo-b", status: "passed", command: "verify-b", summary: "B passed" }
+              ],
+              failedRepositories: []
+            }
+          },
+          diff: {
+            available: true,
+            files: ["one-a.txt", `root:${extraId}:one-b.txt`],
+            patch: "# repository primary (repo-a)\n+from-a\n# repository r-repob (repo-b)\n+from-b\n",
+            repositories: [
+              { repositoryId: "primary", displayPath: "repo-a", evidenceKind: "git", available: true, files: ["one-a.txt"], patch: "diff --git a/one-a.txt b/one-a.txt\n+from-a\n" },
+              { repositoryId: extraId, displayPath: "repo-b", evidenceKind: "git", available: true, files: ["one-b.txt"], patch: "diff --git a/one-b.txt b/one-b.txt\n+from-b\n" }
+            ]
+          }
+        }]
+      }]
+    });
+    const id = await seedRun(daemon, {
+      status: "awaiting_step_review",
+      access: {
+        mode: "restricted",
+        primary: { id: "primary", displayPath: "repo-a", mode: "read/write" },
+        extraRoots: [{ id: extraId, displayPath: "repo-b", mode: "read/write", path: "/tmp/repo-b" }]
+      },
+      repositories: [
+        { id: "primary", kind: "primary", displayPath: "repo-a" },
+        { id: extraId, kind: "extra", displayPath: "repo-b" }
+      ],
+      plan,
+      reviews: [{
+        round: 1,
+        diff: {
+          available: true,
+          files: ["one-a.txt", `root:${extraId}:one-b.txt`],
+          patch: "# repository primary (repo-a)\n+from-a\n# repository r-repob (repo-b)\n+from-b\n",
+          repositories: [
+            { repositoryId: "primary", displayPath: "repo-a", evidenceKind: "git", files: ["one-a.txt"], patch: "diff --git a/one-a.txt b/one-a.txt\n+from-a\n" },
+            { repositoryId: extraId, displayPath: "repo-b", evidenceKind: "git", files: ["one-b.txt"], patch: "diff --git a/one-b.txt b/one-b.txt\n+from-b\n" }
+          ]
+        },
+        reviews: [{ role: "deterministic", checks: { status: "passed", command: "verify" } }]
+      }]
+    });
+    const timeline = await assertCanonicalTimeline(daemon, id);
+    assert.deepEqual(timeline.repositories.map((item) => item.displayPath), ["repo-a", "repo-b"]);
+    assert.equal(JSON.stringify(timeline).includes("repo-a"), true);
+    assert.equal(JSON.stringify(timeline).includes("repo-b"), true);
+    const packet = await invoke(daemon, "GET", `/api/tickets/${encodeURIComponent(id)}/review-packet`);
+    assert.equal(packet.status, 200, packet.text);
+    assert.equal(packet.json.repositories.length, 2);
+    assert.deepEqual(packet.json.repositories.map((item) => [item.repositoryId, item.displayPath]), [
+      ["primary", "repo-a"],
+      [extraId, "repo-b"]
+    ]);
+    assert.match(packet.json.canonicalDiff.patch, /from-a/);
+    assert.match(packet.json.canonicalDiff.patch, /from-b/);
+  });
 });

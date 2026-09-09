@@ -2,27 +2,28 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { open, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, normalize } from "node:path";
+import { isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "./artifacts.js";
 import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 import { admissionCandidates } from "./admission.js";
-import { diffTrees, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotTree } from "./git.js";
-import { deliveryForRemote, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths } from "./delivery.js";
+import { aggregateProofDiffs, combineRepositoryChecks, diffFileSnapshots, diffTrees, extraProofRoots, labelDiff, labelRepositoryDiffs, normalizeReviewNotes, outsideWriteScope, restoreTree, reviewNoteFeedback, snapshotProofPath, snapshotTree } from "./git.js";
+import { changedGitDeliveryRepos, classifyDeliveryFailure, createDeliveryRecord, deliveryFinished, deliveryForRemote, deliveryRepositoryId, pushTicketBranch, reconcileWithRemote, remoteContext, safeSyncLocal, unmergedPaths, upsertDeliveryRecord } from "./delivery.js";
 import { JiraClient } from "./jira.js";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "./jj.js";
 import { LinearClient } from "./linear.js";
 import { loadLocalFixture } from "./local.js";
 import { enqueueSerial } from "./merge-queue.js";
-import { ensureVerificationContractStep, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
+import { ensureVerificationContractStep, enrichReviewPacket, formatTicketHorizon, PiHarness, verificationContractExists, workerWriteScope } from "./pi-harness.js";
 import { projectConfigPath } from "./project-config.js";
 import { compactReviewPacket } from "./review-packet.js";
 import { blockingReasons, dependencyArtifacts, dependencySteps, diffReviewBudget, findNode, flattenSteps, normalizeEditedPlan, normalizePlan, planReviewViolations, reviewBudgetRequiresRollback } from "./plan.js";
+import { canonicalPrimaryPath, freezeRunAccess, normalizeProjectPolicy, parseWriteScopeEntry, readProjectPolicy, writeProjectPolicy } from "./access-policy.js";
 import { JsonStore, normalizeSettings } from "./store.js";
 import { TrackerHub } from "./trackers.js";
-import { cherryPickCommit, commitWorkspace, createParallelWorktrees, ensureTicketWorktree, integrateBranch, needsLocalWorkspaceRepair, repairZeroStateWorkspace } from "./worktrees.js";
+import { cherryPickCommit, commitWorkspace, createParallelWorktrees, diffRepositoryTrees, ensureTicketWorktree, filesOutsideWriteScope, gitRepositoriesForStep, integrateBranch, mergeRepositoryDiff, needsLocalWorkspaceRepair, repairZeroStateWorkspace, restoreRepositoryTrees, snapshotRepositoryTrees } from "./worktrees.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, findingsFingerprint, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, localStages, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, normalizeRunCleanup, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicRun, publicState, recoverableCleanReview, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, selectWorkerSession, shouldPauseCorrection, storedFindingsFingerprint, supervisorReviewCheckpoint, unaddressedReviewClusters, verificationFocusFindings, workerReportCheckpoint, workflowResumeStage } from "./execution.js";
 import { dashboardModelProviders, normalizeStageProfiles, parseModelRef } from "./profiles.js";
 import { PreviewManager } from "./previews.js";
@@ -50,6 +51,8 @@ function cliOption(name, fallback, argv = process.argv.slice(2)) {
 
 export function repositoryCheckReview(checks) {
   const missingVisualEvidence = checks.failureKind === "visual-evidence";
+  const failed = checks.failedRepositories || [];
+  const where = failed.length ? ` in ${failed.map((item) => item.displayPath || item.repositoryId).join(", ")}` : "";
   const failureDiagnostic = String(checks.failureHighlights || "").trim().slice(-1500);
   return {
     role: "deterministic",
@@ -57,8 +60,8 @@ export function repositoryCheckReview(checks) {
     findings: checks.status === "failed" ? [{
       severity: "blocking",
       category: missingVisualEvidence ? "evidence" : "tests",
-      claim: missingVisualEvidence ? checks.summary : `Repository check failed: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
-      evidence: [],
+      claim: missingVisualEvidence ? checks.summary : `Repository check failed${where}: ${checks.command}${failureDiagnostic ? `\n${failureDiagnostic}` : ""}`,
+      evidence: failed.map((item) => ({ file: item.displayPath || item.repositoryId, line: 1 })),
       suggestedFix: missingVisualEvidence
         ? "Make the verification contract write ticket-bound screenshots (and video when required) into AGENT_PLAN_EVIDENCE_DIR with a final-proof-manifest.json for this ticket and run."
         : `Make ${checks.command} pass.${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : `\n\n${checks.output}`}`,
@@ -210,6 +213,8 @@ const activeContainments = new Map();
 const activeMerges = new Set();
 const steeringDrainTimers = new Map();
 const mergeQueues = new Map();
+const resolveDeliveryForRemote = options.deliveryForRemote || deliveryForRemote;
+const deliveryPollMs = Math.max(1, Number(options.deliveryPollMs) || 20_000);
 let ticketCache = new Map();
 let trackerRefresh = null;
 let pollTimer = null;
@@ -331,22 +336,6 @@ function retainChecks(checks) {
   return retained;
 }
 
-function repositoryCheckReview(checks) {
-  return {
-    role: "deterministic",
-    summary: checks.summary,
-    findings: checks.status === "failed" ? [{
-      severity: "blocking",
-      category: "tests",
-      claim: `Repository check failed: ${checks.command}`,
-      evidence: [],
-      suggestedFix: `Make ${checks.command} pass.\n\n${checks.output}`,
-      confidence: "high"
-    }] : [],
-    checks
-  };
-}
-
 function finalProofCaptureEnvironment(ticketId) {
   const run = ticketRun(store.read(), ticketId);
   const address = server.address();
@@ -399,6 +388,7 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     environment: required ? { ...liveCaptureEnvironment(preview?.url || server.address(), ticketId, current.runId), AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(projectProofMap(current).criteria.filter((criterion) => criterion.requiresVisualEvidence && (!stepId || criterion.stepId === stepId)).map(({ id, text, stepId, requiresVideoEvidence }) => ({ id, text, stepId, requiresVideoEvidence }))) } : {}
   });
   reconcileVisualChecks(checks, evidence, { required, requiredVideo, ticketId, runId: current.runId });
+  checks.repositoryId ||= "primary";
   const bound = required ? ticketBoundVisualEvidence(checks.evidence, { ticketId, runId: current.runId, evidenceDir: checks.evidenceDir }) : { bound: false };
   if (preview || checks.evidence.length || checks.previewEvidence.length) await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -415,6 +405,64 @@ async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required
     }
   });
   return retainChecks(checks);
+}
+
+async function snapshotProofRootMap(run, step) {
+  const snapshots = {};
+  for (const root of extraProofRoots(run, step)) snapshots[root.id] = await snapshotProofPath(root.path);
+  return snapshots;
+}
+
+function labeledProofRootDiffs(run, step, before, after) {
+  return extraProofRoots(run, step).map((root) => labelDiff(
+    diffFileSnapshots(before?.[root.id], after?.[root.id]),
+    root,
+    { evidenceKind: root.kind === "external" ? "external" : "nongit" }
+  ));
+}
+
+function repositoryBaselines(run, repos) {
+  const trees = {};
+  for (const repo of repos || []) {
+    const id = repo.id || "primary";
+    trees[id] = repo.baselineTree || (id === "primary" ? run.baselineTree : null);
+  }
+  return trees;
+}
+
+function extraReposForChecks(repos, diffs, writeScope = "") {
+  const scoped = String(writeScope || "").split(",").map((item) => parseWriteScopeEntry(item)).filter(Boolean);
+  return (repos || []).filter((repo) => {
+    const id = repo.id || "primary";
+    if (id === "primary" || !repo.cwd) return false;
+    if ((diffs?.[id]?.files || []).length) return true;
+    return scoped.some((entry) => entry.kind === "root" && entry.rootId === id);
+  });
+}
+
+async function runChangedRepositoryChecks({ ticketId, previewId, signal, required, requiredVideo = false, stepId = null, repositories, diffs, writeScope = "" }) {
+  const repos = repositories || [];
+  const primary = repos.find((repo) => (repo.id || "primary") === "primary") || repos[0];
+  const extras = extraReposForChecks(repos, diffs, writeScope);
+  const targets = [primary, ...extras].filter(Boolean);
+  const results = [];
+  for (const repo of targets) {
+    const id = repo.id || "primary";
+    const isPrimary = id === "primary";
+    const raw = isPrimary
+      ? await runChecksWithPreview({ ticketId, previewId, cwd: repo.cwd, signal, required, requiredVideo, stepId })
+      : retainChecks(await runContainedRepositoryChecks({
+        ticketId, stepId, cwd: repo.cwd, signal,
+        requireVisualEvidence: false, requireVideoEvidence: false, environment: {}
+      }));
+    results.push({
+      ...raw,
+      repositoryId: id,
+      displayPath: repo.displayPath || repo.sourceCwd || id,
+      kind: repo.kind || (isPrimary ? "primary" : "extra")
+    });
+  }
+  return combineRepositoryChecks(results);
 }
 
 async function update(change, { publish: shouldPublish = true } = {}) {
@@ -557,6 +605,8 @@ async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, 
   try {
     result = await harness.runStep({
       ...input, containment, ticketId, attemptId, signal,
+      access: input.access || ticketRun(store.read(), ticketId)?.access || null,
+      repositories: input.repositories || ticketRun(store.read(), ticketId)?.repositories || [],
       onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
     });
     return result;
@@ -944,21 +994,28 @@ function canonicalCheckOutput(run, { scope = "step", stepId = null, attemptId = 
   return [...(step.attempts || [])].reverse().map((attempt) => attempt.verification?.checks || attempt.checks).find(Boolean) || step.checks || null;
 }
 
+function withProofPatch(diff) {
+  if (!diff || typeof diff !== "object") return diff;
+  if (typeof diff.patch === "string") return diff;
+  const patch = (diff.repositories || []).map((item) => item.patch).filter(Boolean).join("\n");
+  return { ...diff, patch };
+}
+
 function canonicalDiffOutput(run, { scope = "step", stepId = null, attemptId = null, reviewId = null } = {}) {
   if (scope === "final") return reviewId
-    ? run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null
-    : run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null;
+    ? withProofPatch(run.finalDiffHistory?.[reviewId] || run.reviews?.find((review) => review.reviewId === reviewId || `final-review-${review.round}` === reviewId)?.diff || null)
+    : withProofPatch(run.deliveredDiff || run.integration?.diff || run.reviews?.at(-1)?.diff || null);
   if (!stepId) throw new Error("Step diff requires a step ID");
   const step = findNode(run.plan, stepId);
   if (!step) throw new Error("Step not found");
   if (scope === "attempt") {
     if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
-    return run.attemptDiffHistory?.[stepId]?.[attemptId]
+    return withProofPatch(run.attemptDiffHistory?.[stepId]?.[attemptId]
       || ((step.attempts || []).find((item) => item.attemptId === attemptId) || archivedAttempt(run, stepId, attemptId))?.diff
-      || null;
+      || null);
   }
   if (scope !== "step") throw new Error("Unknown diff scope");
-  return step.diff || null;
+  return withProofPatch(step.diff || null);
 }
 
 function nextAttemptId(step) {
@@ -1201,11 +1258,31 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   };
 }
 
+const namedCommandLimitationNotice = "Named project commands keep argv and environment allow-lists. They are not a filesystem sandbox and do not isolate subprocesses from the host. These controls are agent file-tool boundaries, not host-wide subprocess isolation.";
+
+function withPlanApprovalNotice(prompt) {
+  const text = String(prompt || "");
+  if (text.includes("not a filesystem sandbox")) return text;
+  return `${text}\n\n## Agent file-tool boundary\n${namedCommandLimitationNotice}`;
+}
+
+function planApprovalCheckpoint(prompt) {
+  return {
+    id: randomUUID(),
+    kind: "awaiting_approval",
+    title: "Approve implementation plan",
+    prompt: withPlanApprovalNotice(prompt),
+    notice: namedCommandLimitationNotice,
+    createdAt: new Date().toISOString()
+  };
+}
+
 function skillSession(state, run) {
   return {
     cwd: run?.workspace?.cwd || state.workspace.cwd,
     sessionFile: run?.sessionFile || null,
-    sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined
+    sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined,
+    access: run?.access || null
   };
 }
 
@@ -1301,18 +1378,28 @@ async function mirrorCheckpoint(ticketId) {
   }
 }
 
+async function snapshotWorkspaceAccess(state = store.read()) {
+  return freezeRunAccess({
+    primaryCwd: state.workspace.cwd,
+    policy: await readProjectPolicy(state, state.workspace.cwd)
+  });
+}
+
 async function beginTicket(ticket, { automaticAdmission = false, awaitWork = true } = {}) {
   if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
+  const access = await snapshotWorkspaceAccess();
   await update((state) => {
     state.selectedTicketId = automaticAdmission ? state.selectedTicketId : ticket.id;
-    if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission });
+    if (!state.ticketRuns[ticket.id] || replaceableRunStatusSet.has(state.ticketRuns[ticket.id].status)) {
+      state.ticketRuns[ticket.id] = newTicketRun(ticket, state.stageProfiles, { automaticAdmission, access });
+    }
   });
   await surfaceImmediateFailure(ticket.id, prepareTicket(ticket.id), { awaitWork });
   return ticket.id;
 }
 
-function newTicketRun(ticket, stageProfiles, { automaticAdmission = false, runId = randomUUID() } = {}) {
-  return createTicketRun(ticket, stageProfiles, { automaticAdmission, runId, proofStorageRoot: dataDir });
+function newTicketRun(ticket, stageProfiles, extras = {}) {
+  return createTicketRun(ticket, stageProfiles, { ...extras, proofStorageRoot: dataDir });
 }
 
 async function acceptCheckpointAnswer(ticketId, answers, source, { checkpointId } = {}) {
@@ -1418,8 +1505,8 @@ const design = [...(run.artifacts || [])].reverse().find((artifact) => artifact.
       await update((state) => {
         const current = ticketRun(state, ticketId);
         current.status = "awaiting_approval";
-        current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt, createdAt: new Date().toISOString() };
-        setStage(current, "design", "blocked", "Plan ready for approval");
+        current.checkpoint = planApprovalCheckpoint(prompt);
+        setStage(current, "design", "blocked", "Plan ready for approval. Named project commands are not a filesystem sandbox.");
       });
     }
     return;
@@ -1624,6 +1711,10 @@ async function loadLocalRun(inputPath) {
       }, null, 2)
     })
   ]);
+  const access = await freezeRunAccess({
+    primaryCwd: source,
+    policy: await readProjectPolicy(currentState, source)
+  });
   const state = await update((draft) => {
     draft.selectedTicketId = id;
     draft.ticketRuns[id] = {
@@ -1633,7 +1724,8 @@ async function loadLocalRun(inputPath) {
         prompt: fixture.feature, createdAt: new Date().toISOString()
       },
       plan, stageProfiles, artifacts, activeRuns: {}, auto: false, sessionFile: null, lastError: null,
-      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString()
+      workflow: initialWorkflow(), cleanup: normalizeRunCleanup(), createdAt: new Date().toISOString(),
+      access
     };
   });
   return { ticketId: id, state };
@@ -1777,16 +1869,20 @@ const [retainedRequirements, productContextBody] = await Promise.all([
       setStage(current, "explore", "active", "Preparing isolated repository exploration");
     });
     const workspace = await ensureTicketWorktree({
-      sourceCwd: before.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId
+      sourceCwd: before.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, access: run.access
     });
     if (vcsMode === "jj") {
       await initializeJjWorkspace(workspace.cwd);
       workspace.vcs = "jj";
+      for (const repo of workspace.repositories || []) {
+        if (repo.cwd !== workspace.cwd) await initializeJjWorkspace(repo.cwd);
+      }
     }
     const baselineTree = await snapshotTree(workspace.cwd);
     await update((state) => {
       const current = ticketRun(state, ticketId);
       current.workspace = workspace;
+      current.repositories = workspace.repositories || [];
       current.baselineTree = baselineTree;
       current.status = "exploring";
       setStage(current, "explore", "active", "Pi is mapping code, tests, and nearby tickets");
@@ -1795,6 +1891,7 @@ const [retainedRequirements, productContextBody] = await Promise.all([
     const explorationResults = await Promise.allSettled([
       harness.exploreTicket({
         cwd: workspace.cwd, ticket: run.ticket, sessionFile: latestRun.sessionFile, runId: run.runId,
+        access: latestRun.access, repositories: workspace.repositories || [],
 productContext: productContextBody, requirements, profile: run.stageProfiles.exploration,
         onEvent: (event) => activity.onEvent(event, "code explorer"),
         onSessionFile: saveRunSession(ticketId), signal
@@ -1887,6 +1984,7 @@ const ticketLookAheadArtifact = [...run.artifacts].reverse().find((artifact) => 
   try {
     const result = await harness.designTicket({
       cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId,
+      access: run.access, repositories: run.repositories || [],
 productContext: productContextBody.content, requirements: requirementsBody.content, exploration: explorationBody.content, ticketLookAhead, answers,
       profile: run.stageProfiles.architecture, onEvent: activity.onEvent,
       onSessionFile: saveRunSession(ticketId), signal
@@ -1906,8 +2004,8 @@ productContext: productContextBody.content, requirements: requirementsBody.conte
       current.plan = designPlan;
       current.artifacts.push(artifact);
       current.status = "awaiting_approval";
-      setStage(current, "design", "blocked", "Plan ready for approval").activity = activity.snapshot();
-      current.checkpoint = { id: randomUUID(), kind: "awaiting_approval", title: "Approve implementation plan", prompt: designArtifact, createdAt: new Date().toISOString() };
+      setStage(current, "design", "blocked", "Plan ready for approval. Named project commands are not a filesystem sandbox.").activity = activity.snapshot();
+      current.checkpoint = planApprovalCheckpoint(designArtifact);
     });
   } catch (error) {
     if (signal?.aborted) return;
@@ -1934,23 +2032,46 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
+      const repos = gitRepositoriesForStep(run, step);
       let vcsChange = null;
+      const repositoryVcs = { ...(step.repositoryVcs || {}) };
       if (run.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
-        vcsChange = await beginJjChange(stepCwd, { changeId: step.vcsChange?.changeId, title: step.title });
-        await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).vcsChange = vcsChange; });
+        for (const repo of repos) {
+          const id = repo.id || "primary";
+          const previous = id === "primary" ? step.vcsChange : step.repositoryVcs?.[id];
+          const change = await beginJjChange(repo.cwd, { changeId: previous?.changeId, title: step.title });
+          if (id === "primary") vcsChange = change;
+          else repositoryVcs[id] = change;
+        }
+        await update((state) => {
+          const target = findNode(ticketRun(state, ticketId).plan, stepId);
+          if (vcsChange) target.vcsChange = vcsChange;
+          if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+        });
       }
-      let beforeTree = await snapshotTree(stepCwd);
+      let beforeTrees = await snapshotRepositoryTrees(repos);
+      let beforeTree = beforeTrees.primary || await snapshotTree(stepCwd);
+      if (beforeTree) beforeTrees.primary ||= beforeTree;
+      const beforeProofRoots = await snapshotProofRootMap(run, step);
       const stepBaseTree = step.baseTree || beforeTree;
+      const stepBaseTrees = step.baseTrees || { ...beforeTrees };
+      const stepBaseProofRoots = step.baseProofRoots || beforeProofRoots;
       await update((state) => {
-        const target = findNode(ticketRun(state, ticketId).plan, stepId);
+        const current = ticketRun(state, ticketId);
+        const target = findNode(current.plan, stepId);
         target.baseTree ||= stepBaseTree;
+        target.baseTrees ||= stepBaseTrees;
+        target.baseProofRoots ||= stepBaseProofRoots;
+        current.baselineProofRoots ||= beforeProofRoots;
       });
       let rollbackFeedback = "";
       if (step.baseTree && beforeTree) {
-        const existingDiff = await diffTrees(stepCwd, step.baseTree, beforeTree);
+        const existingDiffs = await diffRepositoryTrees(repos, stepBaseTrees, beforeTrees);
+        const existingDiff = mergeRepositoryDiff(repos, existingDiffs);
         const existingBudget = diffReviewBudget(step, existingDiff);
         if (reviewBudgetRequiresRollback(existingBudget)) {
-          beforeTree = await restoreTree(stepCwd, step.baseTree);
+          beforeTree = await restoreRepositoryTrees(repos, stepBaseTrees) || await restoreTree(stepCwd, step.baseTree);
+          beforeTrees = await snapshotRepositoryTrees(repos);
           rollbackFeedback = `The harness rolled back a runaway prior diff before this attempt: ${existingBudget.reasons.join("; ")}. Re-implement this slice from its clean step checkpoint with focused edits; do not copy whole files from another worktree.`;
           await update((state) => {
             const target = findNode(ticketRun(state, ticketId).plan, stepId);
@@ -1998,7 +2119,9 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
         activeActivity = activity;
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
-        const attemptBaseTree = await snapshotTree(cwd);
+        const attemptRepos = gitRepositoriesForStep(latest, currentStep);
+        const attemptBaseTrees = await snapshotRepositoryTrees(attemptRepos);
+        const attemptBaseTree = attemptBaseTrees.primary || await snapshotTree(cwd);
         const sessionChoice = selectWorkerSession(currentStep, {
           forkSessionFile: findForkSession(latest.plan, currentStep),
           feedback: nextFeedback
@@ -2008,6 +2131,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
           feedback: nextFeedback, runId: latest.runId,
+          repositories: gitRepositoriesForStep(latest, currentStep),
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
@@ -2064,31 +2188,57 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             });
           }
         });
-        const workerTree = await snapshotTree(cwd);
-        let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
+        const workerTrees = await snapshotRepositoryTrees(attemptRepos);
+        const workerTree = workerTrees.primary || await snapshotTree(cwd);
+        const workerProofRoots = await snapshotProofRootMap(latest, currentStep);
+        const attemptDiffs = await diffRepositoryTrees(attemptRepos, attemptBaseTrees, workerTrees);
+        let checks = { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "", repositories: [], failedRepositories: [] };
         if (currentStep.permission === "write" && report.status === "completed") {
           activity.onEvent({ type: "phase", label: "Running repository checks" });
-          checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal, required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId });
+          checks = await runChangedRepositoryChecks({
+            ticketId, previewId: `${ticketId}:${stepId}`, cwd, signal,
+            required: currentStep.requiresVisualEvidence, requiredVideo: currentStep.requiresVideoEvidence, stepId,
+            repositories: attemptRepos, diffs: attemptDiffs, writeScope: workerWriteScope(currentStep)
+          });
         }
         attemptEvidence.checks = checks;
         signal?.throwIfAborted();
-        if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) vcsChange = await snapshotJjChange(cwd);
-        const afterTree = await snapshotTree(cwd);
-        const diff = await diffTrees(cwd, stepBaseTree, afterTree);
-        const attemptDiff = await diffTrees(cwd, attemptBaseTree, workerTree);
-        const checkDiff = await diffTrees(cwd, workerTree, afterTree);
+        if (latest.workspace.vcs === "jj" && currentStep.permission === "write" && !currentStep.workspace?.isolated) {
+          vcsChange = await snapshotJjChange(cwd);
+          for (const repo of attemptRepos.filter((item) => (item.id || "primary") !== "primary")) {
+            repositoryVcs[repo.id] = await snapshotJjChange(repo.cwd);
+          }
+        }
+        const afterTrees = await snapshotRepositoryTrees(attemptRepos);
+        const afterTree = afterTrees.primary || await snapshotTree(cwd);
+        const afterProofRoots = await snapshotProofRootMap(ticketRun(store.read(), ticketId), currentStep);
+        const repositoryDiffs = await diffRepositoryTrees(attemptRepos, stepBaseTrees, afterTrees);
+        const proofDiffs = [
+          ...labelRepositoryDiffs(attemptRepos, repositoryDiffs),
+          ...labeledProofRootDiffs(latest, currentStep, stepBaseProofRoots, afterProofRoots)
+        ];
+        const diff = aggregateProofDiffs(proofDiffs);
+        const attemptProofDiffs = [
+          ...labelRepositoryDiffs(attemptRepos, attemptDiffs),
+          ...labeledProofRootDiffs(latest, currentStep, beforeProofRoots, workerProofRoots)
+        ];
+        const attemptDiff = aggregateProofDiffs(attemptProofDiffs);
+        const checkDiffs = await diffRepositoryTrees(attemptRepos, workerTrees, afterTrees);
+        const checkDiff = aggregateProofDiffs(labelRepositoryDiffs(attemptRepos, checkDiffs));
         const reviewNotes = normalizeReviewNotes(result.reviewNotes, diff, currentStep.reviewNotes);
         const reviewBudget = diffReviewBudget(currentStep, diff);
         const runawayDiff = reviewBudgetRequiresRollback(reviewBudget);
-        const violations = currentStep.permission !== "write" ? attemptDiff.files : outsideWriteScope(attemptDiff.files, workerWriteScope(currentStep));
+        const violations = currentStep.permission !== "write"
+          ? attemptDiff.files
+          : attemptRepos.flatMap((repo) => filesOutsideWriteScope(repo, attemptDiffs[repo.id || "primary"]?.files || [], workerWriteScope(currentStep)));
         const artifactInput = { runId: latest.runId, stageId: "implement", stepId, attemptId };
         const reviewNotesArtifact = reviewNotes.length ? await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "review-notes.json", content: JSON.stringify(reviewNotes, null, 2), kind: "review-notes" }) : null;
         const artifacts = [
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: currentStep.expectedArtifacts[0] || `${currentStep.id}-result.md`, content: result.output, kind: "agent-output" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "prompt.md", content: result.prompt, kind: "agent-prompt" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "context.json", content: JSON.stringify({ profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation, contextPolicy: currentStep.contextPolicy, permission: currentStep.permission, writeScope: currentStep.writeScope, skills: currentStep.skills, references: currentStep.references, requirementIds: currentStep.requirementIds, capabilityIds: currentStep.capabilityIds, deltaIds: currentStep.deltaIds, productContext: currentStep.productContext, artifacts: contextArtifacts.map(({ id, name, path }) => ({ id, name, path })) }, null, 2), kind: "context-manifest" }),
-          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
-          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch || "", kind: "git-diff" }),
+          await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch || "", kind: "git-attempt-diff" })
         ];
         Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, report);
@@ -2104,6 +2254,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
             target.reviewBudgetResult = reviewBudget;
             if (vcsChange) target.vcsChange = vcsChange;
+            if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+            target.repositoryDiffs = repositoryDiffs;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
@@ -2119,7 +2271,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           await mirrorCheckpoint(ticketId);
           return;
         }
-        if (runawayDiff) await restoreTree(cwd, stepBaseTree);
+        if (runawayDiff) await restoreRepositoryTrees(attemptRepos, stepBaseTrees);
         if (violations.length || runawayDiff || (report.status !== "completed" && !workerGate)) {
           const error = redactText(violations.length
             ? `Changes outside permission or write scope: ${violations.join(", ")}`
@@ -2137,6 +2289,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
             target.reviewBudgetResult = reviewBudget;
             if (vcsChange) target.vcsChange = vcsChange;
+            if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+            target.repositoryDiffs = repositoryDiffs;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = error;
@@ -2166,6 +2320,8 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
             target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
             target.reviewBudgetResult = reviewBudget;
             if (vcsChange) target.vcsChange = vcsChange;
+            if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+            target.repositoryDiffs = repositoryDiffs;
             target.sessionFile = result.sessionFile;
             target.artifacts = [artifacts[0]];
             target.lastError = null;
@@ -2206,6 +2362,7 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
         } : {
           ...(await harness.verifyStep({
             cwd, ticket: latest.ticket, plan: latest.plan, step: currentStep,
+            access: latest.access,
             design, diff, output: result.output, checks,
             proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
             artifacts: ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)),
@@ -2259,6 +2416,8 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
           target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
           target.reviewBudgetResult = reviewBudget;
           if (vcsChange) target.vcsChange = vcsChange;
+          if (Object.keys(repositoryVcs).length) target.repositoryVcs = repositoryVcs;
+          target.repositoryDiffs = repositoryDiffs;
           target.sessionFile = result.sessionFile;
           if (supervisorReview) target.supervisorReview = { reply: supervisorReview.reply, error: supervisorReview.error || null, at: new Date().toISOString() };
           target.artifacts = [artifacts[0], verificationArtifact];
@@ -2439,9 +2598,10 @@ function waitForDelivery(milliseconds, signal) {
   });
 }
 
-async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback") {
+async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote review feedback", cwd = null) {
   const current = ticketRun(store.read(), ticketId);
-  const beforeTree = await snapshotTree(current.workspace.cwd);
+  const workCwd = cwd || current.workspace.cwd;
+  const beforeTree = await snapshotTree(workCwd);
   const references = deliveryFeedbackReferences(feedback);
   const step = {
     id: `remote-feedback-${Date.now()}`, type: "step", role: "implementation",
@@ -2452,18 +2612,18 @@ async function fixRemoteFeedback(ticketId, feedback, signal, reason = "remote re
     expectedArtifacts: [], acceptanceCriteria: feedback.map((item) => item.body), dependsOn: [], required: true, status: "ready", attempts: [], artifacts: [], attachments: []
   };
 const result = await runContainedWorker({
-    ticketId, stepId: step.id, cwd: current.workspace.cwd, plan: current.plan, step,
+    ticketId, stepId: step.id, cwd: workCwd, plan: current.plan, step,
     artifacts: compactReviewPacket({ ticket: current.ticket, plan: current.plan, artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "feature-brief", "architecture"].includes(artifact.kind)), dataDir) }).artifacts,
     proofMap: projectProofMap(current), images: [], forkSessionFile: null, resumeSessionFile: null, feedback: "",
     runId: current.runId, profile: current.stageProfiles.implementation, signal,
     onEvent: (event) => publishStepEvent(ticketId, step.id, step.id, event)
   });
   if (result.report.status !== "completed") throw new Error(result.report.request || result.report.summary || "Remote review fixer needs attention");
-  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((item) => item.requiresVideoEvidence) });
+  const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:remote-feedback`, cwd: workCwd, signal, required: flattenSteps(current.plan).some((item) => item.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((item) => item.requiresVideoEvidence) });
   if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
-  const afterTree = await snapshotTree(current.workspace.cwd);
-  const diff = await diffTrees(current.workspace.cwd, beforeTree, afterTree);
-  const commit = await commitWorkspace(current.workspace.cwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
+  const afterTree = await snapshotTree(workCwd);
+  const diff = await diffTrees(workCwd, beforeTree, afterTree);
+  const commit = await commitWorkspace(workCwd, `fix: address ${reason}\n\nWhy: The reviewed change must resolve concrete delivery feedback before merge.\nRequirement: ${current.ticket.identifier}`);
   const artifact = await persistArtifact(dataDir, current.ticket, {
     runId: current.runId, name: "remote-review-fix.md", content: result.output, stageId: "handoff", kind: "remote-review-fix"
   });
@@ -2476,174 +2636,417 @@ const result = await runContainedWorker({
   return { commit, checks };
 }
 
-async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
-  if (activeMerges.has(ticketId)) throw new Error("This ticket is already being delivered");
-  activeMerges.add(ticketId);
-  const promise = (async () => {
-    const current = ticketRun(store.read(), ticketId);
-    const sourceCwd = current.workspace.sourceCwd;
-    const resumedChange = current.merge?.change || null;
-    const remoteDetails = current.merge?.remote && current.merge?.base
+function patchRunDelivery(run, patch) {
+  run.deliveries = upsertDeliveryRecord(run.deliveries || [], patch);
+  const record = run.deliveries.find((item) => item.repositoryId === deliveryRepositoryId(patch));
+  const primary = run.deliveries.find((item) => item.repositoryId === "primary") || run.deliveries[0];
+  const failed = run.deliveries.filter((item) => item.status === "failed");
+  const unfinished = run.deliveries.filter((item) => !deliveryFinished(item) && item.status !== "failed");
+  const inFlight = unfinished[0] || null;
+  run.merge = {
+    ...(run.merge || {}),
+    status: inFlight?.status || (failed.length ? "failed" : primary?.status || run.merge?.status),
+    sourceCwd: primary?.sourceCwd || run.merge?.sourceCwd,
+    branch: primary?.branch || run.merge?.branch,
+    base: primary?.base ?? inFlight?.base ?? run.merge?.base,
+    remote: primary?.remote ?? inFlight?.remote ?? run.merge?.remote,
+    change: primary?.change || run.merge?.change || null,
+    checks: inFlight?.checks || primary?.checks || run.merge?.checks,
+    commit: primary?.commit || run.merge?.commit,
+    sync: primary?.sync || run.merge?.sync,
+    error: failed[0]?.error || null,
+    externalActionPending: inFlight?.externalActionPending || null,
+    feedbackIds: primary?.feedbackIds || run.merge?.feedbackIds || []
+  };
+  if (record?.status === "failed") {
+    Object.assign(run.merge, { status: "failed", error: record.error, failedAt: record.failedAt || new Date().toISOString() });
+  }
+  return record;
+}
+
+function forgeForRepository(remote, repo) {
+  if (options.deliveryForRemote) return options.deliveryForRemote(remote, { repository: repo });
+  return deliveryForRemote(remote);
+}
+
+async function requiredChangedGitRepos(run) {
+  const repos = gitRepositoriesForStep(run);
+  const trees = await snapshotRepositoryTrees(repos);
+  const diffs = await diffRepositoryTrees(repos, repositoryBaselines(run, repos), trees);
+  return changedGitDeliveryRepos(repos, diffs).map((repo) => ({ ...repo, deliveryDiff: diffs[deliveryRepositoryId(repo)] }));
+}
+
+async function persistRepoDeliveryFailure(ticketId, repo, error) {
+  const message = redactText(error.message);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId: deliveryRepositoryId(repo),
+      displayPath: repo.displayPath || repo.sourceCwd,
+      sourceCwd: repo.sourceCwd,
+      cwd: repo.cwd,
+      branch: repo.branch,
+      status: "failed",
+      error: message,
+      failedAt: new Date().toISOString()
+    });
+    run.lastError = classifyDeliveryFailure([{ repositoryId: deliveryRepositoryId(repo), displayPath: repo.displayPath || repo.sourceCwd, error: message }]);
+  });
+}
+
+async function completeNoChangeDelivery(ticketId, queuedRun, { diff, contextContent }) {
+  const integratedAt = new Date().toISOString();
+  const productContext = contextContent === null ? null : await persistProductContext(dataDir, queuedRun.workspace.sourceCwd, contextContent);
+  const handoff = await persistArtifact(dataDir, queuedRun.ticket, {
+    runId: queuedRun.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+    content: `# ${queuedRun.ticket.identifier} handoff\n\nVerified as already satisfied. No repository changes or remote review were required.`
+  });
+  await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, "Verified as already satisfied. No repository changes or remote review were required."));
+  await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.deliveries = [createDeliveryRecord(run.workspace || {}, { status: "not_required", integratedAt })];
+    run.deliveries[0].reason = "no_changes";
+    run.integration = { sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch, commit: null, integratedAt, diff, noChange: true };
+    run.deliveredDiff = diff;
+    run.merge = { status: "not_required", reason: "no_changes", integratedAt };
+    if (productContext) run.productContextPath = productContext.path;
+    run.artifacts.push(handoff);
+    run.checkpoint = null;
+    setStage(run, "handoff", "completed", "Verified with no repository changes");
+    run.status = "completed";
+    run.lastError = null;
+    run.completedAt = integratedAt;
+  });
+  await stopTicketPreviews(ticketId, "run_completed");
+  return { position: 0, promise: Promise.resolve({ noChange: true }) };
+}
+
+async function finalizeSuccessfulDelivery(ticketId, { diff, contextContent, activity }) {
+  const current = ticketRun(store.read(), ticketId);
+  const deliveries = current.deliveries || [];
+  if (!deliveries.length || deliveries.some((item) => !deliveryFinished(item))) return null;
+  const primary = deliveries.find((item) => item.repositoryId === "primary") || deliveries[0];
+  const integratedAt = new Date().toISOString();
+  const productContext = contextContent == null ? null : await persistProductContext(dataDir, current.workspace.sourceCwd, contextContent);
+  const evidenceArtifacts = current.artifacts;
+  const remoteLines = deliveries.map((item) => item.change?.url
+    ? `- ${item.displayPath || item.repositoryId}: ${item.change.url} (\"${item.commit || "pending"}\")`
+    : `- ${item.displayPath || item.repositoryId}: integrated \"${item.commit || ""}\"`);
+  const handoff = await persistArtifact(dataDir, current.ticket, {
+    runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
+    content: `# ${current.ticket.identifier} handoff\n\n${remoteLines.join("\n")}\n\n${diff?.stat || "See changed files."}${visualEvidenceHandoffSection(evidenceArtifacts)}`
+  });
+  const remoteUrl = deliveries.map((item) => item.change?.url).filter(Boolean).join(", ");
+  await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, remoteUrl
+    ? `Merged after remote checks and review: ${remoteUrl}\n\n${deliveries.map((item) => `${item.displayPath || item.repositoryId}: ${item.commit || ""}`).join("\n")}${visualEvidenceComment(evidenceArtifacts)}`
+    : `Integrated ${deliveries.length} repositor${deliveries.length === 1 ? "y" : "ies"}.${visualEvidenceComment(evidenceArtifacts)}`));
+  await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  const repos = gitRepositoriesForStep(current);
+  const diffsById = Object.fromEntries(deliveries.filter((item) => item.diff).map((item) => [item.repositoryId, item.diff]));
+  const deliveredDiff = Object.keys(diffsById).length ? mergeRepositoryDiff(repos, diffsById) : (primary.diff || diff);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    run.integration = {
+      sourceCwd: primary.sourceCwd || run.workspace.sourceCwd,
+      branch: primary.branch || run.workspace.branch,
+      commit: primary.commit,
+      integratedAt,
+      change: primary.change || null,
+      sync: primary.sync || null,
+      diff: deliveredDiff,
+      ...(deliveries.length > 1 ? { repositories: deliveries } : {})
+    };
+    run.deliveredDiff = deliveredDiff;
+    Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: deliveredDiff });
+    Object.assign(run.merge, { status: "integrated", commit: primary.commit, integratedAt, sync: primary.sync || null, change: primary.change || run.merge?.change, externalActionPending: null });
+    if (productContext) run.productContextPath = productContext.path;
+    run.artifacts.push(handoff);
+    run.status = "completed";
+    run.lastError = null;
+    run.completedAt = integratedAt;
+    const stage = setStage(run, "handoff", "completed", remoteUrl ? `Merged via ${remoteUrl}` : `Merged into ${primary.sourceCwd}`);
+    if (activity) stage.activity = activity.snapshot();
+  });
+  await stopTicketPreviews(ticketId, "run_completed");
+  return { commit: primary.commit, change: primary.change, sync: primary.sync, deliveries };
+}
+
+async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity, attempt }) {
+  const repositoryId = deliveryRepositoryId(repo);
+  const current = ticketRun(store.read(), ticketId);
+  const existing = (current.deliveries || []).find((item) => item.repositoryId === repositoryId);
+  if (deliveryFinished(existing)) return existing;
+  const sourceCwd = repo.sourceCwd || current.workspace.sourceCwd;
+  const cwd = repo.cwd || current.workspace.cwd;
+  const branch = repo.branch || current.workspace.branch;
+  const resumedChange = existing?.change || (repositoryId === "primary" ? current.merge?.change : null) || null;
+  const remoteDetails = existing?.remote && existing?.base
+    ? { remote: existing.remote, base: existing.base }
+    : current.merge?.remote && current.merge?.base && repositoryId === "primary"
       ? { remote: current.merge.remote, base: current.merge.base }
       : await remoteContext(sourceCwd);
-    const { remote, base } = remoteDetails;
-    const forge = deliveryForRemote(remote);
-    const attempt = (current.merge?.attempt || 0) + 1;
-    const activity = captureStageActivity(ticketId, "handoff", current.runId);
+  const { remote, base } = remoteDetails;
+  const forge = forgeForRepository(remote, repo);
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId, sourceCwd, cwd, branch, displayPath: repo.displayPath || sourceCwd, kind: repo.kind,
+      status: resumedChange ? "waiting_for_checks" : "rebasing",
+      attempt, base, remote, change: resumedChange,
+      feedbackIds: existing?.feedbackIds || (repositoryId === "primary" ? run.merge?.feedbackIds : []) || []
+    });
+    run.status = resumedChange ? "waiting_for_checks" : "rebasing";
+    run.recovery = null;
+    run.checkpoint = null;
+    setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling ${repo.displayPath || sourceCwd} with origin/${base}`);
+  });
+  const reconcile = () => reconcileWithRemote(cwd, base, {
+    resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
+  });
+  let checks = existing?.checks || (repositoryId === "primary" ? current.merge?.checks : null) || null;
+  let change = resumedChange;
+  let awaitingHeadAfterPush = null;
+  if ((await unmergedPaths(cwd)).length) await reconcile();
+  if (existing?.externalActionPending === "push_feedback_revision") {
+    await pushTicketBranch(cwd, branch);
+    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null }); });
+  }
+  if (!change) {
+    if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
+      const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
+        || String(current.lastError).slice(-4500);
+      ({ checks } = await fixRemoteFeedback(ticketId, [{
+        id: `delivery-recovery-${attempt}-${repositoryId}`,
+        body: `${failure}\n\nContinue from the current worktree and make ${existing?.checks?.command || current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
+      }], signal, "persisted delivery verification failure", cwd));
+    }
+    await reconcile();
+    checks = repositoryId === "primary"
+      ? await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery:${repositoryId}`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) })
+      : retainChecks(await runContainedRepositoryChecks({ ticketId, cwd, signal, requireVisualEvidence: false, requireVideoEvidence: false, environment: {} }));
+    if (checks.status === "failed") {
+      ({ checks } = await fixRemoteFeedback(ticketId, [{
+        id: `post-rebase-check-${attempt}-${repositoryId}`,
+        body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
+      }], signal, "post-rebase verification failures", cwd));
+    }
+    await pushTicketBranch(cwd, branch);
+    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: "create_remote_change", checks }); });
+    change = await forge.create({
+      branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
+      body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || repo.deliveryDiff?.stat || "See changed files."].join("\n\n")
+    });
+    await update((state) => {
+      patchRunDelivery(ticketRun(state, ticketId), {
+        repositoryId, status: "waiting_for_checks", change, remoteChangeId: change.id, checks,
+        openedAt: new Date().toISOString(), externalActionPending: null
+      });
+    });
+    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.merge = resumedChange
-        ? { ...run.merge, status: "waiting_for_checks", attempt, sourceCwd, branch: run.workspace.branch, base, remote }
-        : { status: "rebasing", attempt, sourceCwd, branch: run.workspace.branch, base, remote, feedbackIds: run.merge?.feedbackIds || [] };
-      run.status = resumedChange ? "waiting_for_checks" : "rebasing";
-      run.recovery = null;
-      run.checkpoint = null;
-      setStage(run, "handoff", "active", resumedChange ? `Inspecting existing remote review: ${resumedChange.url}` : `Reconciling with origin/${base}`);
+      run.status = "waiting_for_checks";
+      setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
     });
-    const reconcile = () => reconcileWithRemote(current.workspace.cwd, base, {
-      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt, operation: "rebase" })
-    });
-    let checks = current.merge?.checks || null;
-    let change = resumedChange;
-    let awaitingHeadAfterPush = null;
-    if ((await unmergedPaths(current.workspace.cwd)).length) await reconcile();
-    if (current.merge?.externalActionPending === "push_feedback_revision") {
-      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
-    }
-    if (!change) {
-      if (current.recovery?.kind === "delivery" && deliveryFailureNeedsFix(current.lastError)) {
-        const failure = String(current.lastError).match(/Failure highlights:\n([\s\S]*?)(?:\nFailed |$)/)?.[1]
-          || String(current.lastError).slice(-4500);
-        ({ checks } = await fixRemoteFeedback(ticketId, [{
-          id: `delivery-recovery-${attempt}`,
-          body: `${failure}\n\nContinue from the current worktree and make ${current.merge?.checks?.command || "the canonical verification command"} pass before reconciling with the target branch again.`
-        }], signal, "persisted delivery verification failure"));
+  }
+
+  if (change) {
+    const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd });
+    if (!status.trim()) {
+      const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd });
+      const reconciled = await reconcile();
+      if (reconciled.commit !== before.trim()) {
+        await pushTicketBranch(cwd, branch);
+        awaitingHeadAfterPush = before.trim();
       }
+    }
+  }
+
+  let mergeResult = null;
+  let lastRebaseHead = null;
+  for (;;) {
+    signal?.throwIfAborted();
+    const delivery = await forge.status(change);
+    if (awaitingHeadAfterPush === delivery.headSha) {
+      await waitForDelivery(deliveryPollMs, signal);
+      continue;
+    }
+    awaitingHeadAfterPush = null;
+    const processed = new Set((ticketRun(store.read(), ticketId).deliveries || []).find((item) => item.repositoryId === repositoryId)?.feedbackIds || []);
+    const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      patchRunDelivery(run, { repositoryId, status: feedback.length ? "addressing_feedback" : delivery.checks === "pending" ? "waiting_for_checks" : "waiting_for_merge", remoteStatus: delivery, checkedAt: new Date().toISOString() });
+      run.status = run.merge.status;
+      setStage(run, "handoff", "active", feedback.length ? `Addressing ${feedback.length} review comment${feedback.length === 1 ? "" : "s"} in ${repo.displayPath || repositoryId}` : `Remote checks (${repo.displayPath || repositoryId}): ${delivery.checks}; merge: ${delivery.mergeState}`);
+    });
+    if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
+    if (feedback.length) {
+      await fixRemoteFeedback(ticketId, feedback, signal, "remote review feedback", cwd);
       await reconcile();
-      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:delivery`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-      if (checks.status === "failed") {
-        ({ checks } = await fixRemoteFeedback(ticketId, [{
-          id: `post-rebase-check-${attempt}`,
-          body: `${checks.summary}${checks.failureHighlights ? `\n\nFailure highlights:\n${checks.failureHighlights}` : ""}\n\nRun ${checks.command} and reconcile only failures introduced by combining the verified ticket with the target branch.`
-        }], signal, "post-rebase verification failures"));
-      }
-      await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-      await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "create_remote_change"; });
-      change = await forge.create({
-        branch: current.workspace.branch, base, title: `${current.ticket.identifier}: ${current.ticket.title}`,
-        body: [`## Outcome`, current.plan.summary || current.ticket.description, `## Verification`, checks.summary, `## Change`, diff?.stat || "See changed files."].join("\n\n")
-      });
-      await trackerAction(ticketId, "remote_change", (ticket) => trackers.comment(ticket, `Remote review opened: ${change.url}`));
       await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(run.merge, { status: "waiting_for_checks", change, checks, openedAt: new Date().toISOString(), externalActionPending: null });
-        run.status = "waiting_for_checks";
-        setStage(run, "handoff", "active", `Waiting for checks and review: ${change.url}`);
-      });
-    }
-
-    if (change) {
-      const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd: current.workspace.cwd });
-      if (!status.trim()) {
-        const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd: current.workspace.cwd });
-        const reconciled = await reconcile();
-        if (reconciled.commit !== before.trim()) {
-          await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-          awaitingHeadAfterPush = before.trim();
-        }
-      }
-    }
-
-    let mergeResult = null;
-    let lastRebaseHead = null;
-    for (;;) {
-      signal?.throwIfAborted();
-      const delivery = await forge.status(change);
-      if (awaitingHeadAfterPush === delivery.headSha) {
-        await waitForDelivery(20000, signal);
-        continue;
-      }
-      awaitingHeadAfterPush = null;
-      const processed = new Set(ticketRun(store.read(), ticketId).merge.feedbackIds || []);
-      const feedback = delivery.feedback.filter((item) => !processed.has(item.id));
-      await update((state) => {
-        const run = ticketRun(state, ticketId);
-        Object.assign(run.merge, { status: feedback.length ? "addressing_feedback" : delivery.checks === "pending" ? "waiting_for_checks" : "waiting_for_merge", remoteStatus: delivery, checkedAt: new Date().toISOString() });
-        run.status = run.merge.status;
-        setStage(run, "handoff", "active", feedback.length ? `Addressing ${feedback.length} review comment${feedback.length === 1 ? "" : "s"}` : `Remote checks: ${delivery.checks}; merge: ${delivery.mergeState}`);
-      });
-      if (delivery.merged) { mergeResult = { commit: delivery.headSha, externallyMerged: true }; break; }
-      if (feedback.length) {
-        await fixRemoteFeedback(ticketId, feedback, signal);
-        await reconcile();
-        await update((state) => {
-          const merge = ticketRun(state, ticketId).merge;
-          merge.feedbackIds.push(...feedback.map((item) => item.id));
-          merge.externalActionPending = "push_feedback_revision";
+        const record = (ticketRun(state, ticketId).deliveries || []).find((item) => item.repositoryId === repositoryId);
+        patchRunDelivery(ticketRun(state, ticketId), {
+          repositoryId,
+          feedbackIds: [...(record?.feedbackIds || []), ...feedback.map((item) => item.id)],
+          externalActionPending: "push_feedback_revision"
         });
-        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-        awaitingHeadAfterPush = delivery.headSha;
-        await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
-        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = null; });
-        continue;
-      }
-      if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
-        await waitForDelivery(20000, signal);
-        continue;
-      }
-      if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
-      const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
-      if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
-        await update((state) => { ticketRun(state, ticketId).merge.externalActionPending = "squash_merge"; });
-        mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`);
-        break;
-      }
-      if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
-        lastRebaseHead = delivery.headSha;
-        await reconcile();
-        await pushTicketBranch(current.workspace.cwd, current.workspace.branch);
-        continue;
-      }
-      await waitForDelivery(20000, signal);
+      });
+      await pushTicketBranch(cwd, branch);
+      awaitingHeadAfterPush = delivery.headSha;
+      await forge.comment(change, `Addressed review feedback in the latest pushed revision:\n\n${feedback.map((item) => `- ${item.body}`).join("\n")}`);
+      await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null }); });
+      continue;
     }
+    if (delivery.checks === "failed" && awaitingHeadAfterPush === delivery.headSha) {
+      await waitForDelivery(deliveryPollMs, signal);
+      continue;
+    }
+    if (delivery.checks === "failed") throw new Error(`Remote CI failed for ${change.url}`);
+    const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
+    if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
+      await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: "squash_merge" }); });
+      mergeResult = await forge.merge(change, `${current.ticket.identifier}: ${current.ticket.title}`);
+      break;
+    }
+    if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
+      lastRebaseHead = delivery.headSha;
+      await reconcile();
+      await pushTicketBranch(cwd, branch);
+      continue;
+    }
+    await waitForDelivery(deliveryPollMs, signal);
+  }
 
-    const deliveredTree = await snapshotTree(current.workspace.cwd);
-    const deliveredDiff = await diffTrees(current.workspace.cwd, `origin/${base}^{tree}`, deliveredTree);
-    const sync = await safeSyncLocal(sourceCwd, base);
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent == null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
-    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
-    const handoff = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nRemote review: ${change.url}\n\nSquash commit: \`${mergeResult.commit}\`\n\nLocal sync: ${sync.status}${sync.reason ? ` — ${sync.reason}` : ""}.${visualEvidenceHandoffSection(evidenceArtifacts)}`
+  const deliveredTree = await snapshotTree(cwd);
+  const deliveredDiff = await diffTrees(cwd, `origin/${base}^{tree}`, deliveredTree);
+  const sync = await safeSyncLocal(sourceCwd, base);
+  await update((state) => {
+    patchRunDelivery(ticketRun(state, ticketId), {
+      repositoryId, status: "integrated", commit: mergeResult.commit, change, checks, sync, diff: deliveredDiff,
+      integratedAt: new Date().toISOString(), externalActionPending: null, error: null
     });
-    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, `Merged after remote checks and review: ${change.url}\n\nSquash commit: ${mergeResult.commit}${visualEvidenceComment(evidenceArtifacts)}`));
-    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
+  });
+  return { commit: mergeResult.commit, change, sync, diff: deliveredDiff };
+}
+
+async function deliverLocalRepository(ticketId, repo, { signal, activity, attempt }) {
+  const repositoryId = deliveryRepositoryId(repo);
+  const current = ticketRun(store.read(), ticketId);
+  const existing = (current.deliveries || []).find((item) => item.repositoryId === repositoryId);
+  if (deliveryFinished(existing)) return existing;
+  const sourceCwd = repo.sourceCwd || current.workspace.sourceCwd;
+  const queued = enqueueSerial(mergeQueues, sourceCwd, (position) => update((state) => {
+    const run = ticketRun(state, ticketId);
+    patchRunDelivery(run, {
+      repositoryId, sourceCwd, cwd: repo.cwd, branch: repo.branch, displayPath: repo.displayPath || sourceCwd,
+      status: "queued", position, attempt, conflicts: []
+    });
+    run.status = "queued_for_merge";
+    run.recovery = null;
+    run.checkpoint = null;
+    setStage(run, "handoff", "active", `Merge queue position ${position} (${repo.displayPath || sourceCwd})`);
+  }), async () => {
+    signal?.throwIfAborted();
+    const live = ticketRun(store.read(), ticketId);
     await update((state) => {
       const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: mergeResult.commit, integratedAt, change, sync, diff: deliveredDiff };
-      run.deliveredDiff = deliveredDiff;
-      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: deliveredDiff });
-      Object.assign(run.merge, { status: "integrated", commit: mergeResult.commit, integratedAt, sync, externalActionPending: null });
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.status = "completed";
+      patchRunDelivery(run, { repositoryId, status: "merging", position: 1, startedAt: new Date().toISOString() });
+      run.status = "merging";
       run.lastError = null;
-      run.completedAt = integratedAt;
-      setStage(run, "handoff", "completed", `Merged via ${change.url}`).activity = activity.snapshot();
+      setStage(run, "handoff", "active", `Merging ${repo.branch || run.workspace.branch} (${repo.displayPath || sourceCwd})`);
     });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return { commit: mergeResult.commit, change, sync };
+    activity.onEvent({ type: "phase", label: `Automated merge started (${repo.displayPath || sourceCwd})` }, "merge queue");
+    const integrationCwd = repositoryId === "primary"
+      ? join(dataDir, "ticket-runs", safeName(live.ticket.identifier || live.ticket.id), "runs", safeName(live.runId), "integration")
+      : join(dataDir, "ticket-runs", safeName(live.ticket.identifier || live.ticket.id), "runs", safeName(live.runId), "repos", safeName(repositoryId), "integration");
+    const integration = await integrateBranch({
+      sourceCwd, branch: repo.branch || live.workspace.branch, integrationCwd, dependencyCwd: repo.cwd || live.workspace.cwd,
+      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt }),
+      verify: async ({ cwd, conflicts }) => {
+        signal?.throwIfAborted();
+        await update((state) => {
+          const run = ticketRun(state, ticketId);
+          patchRunDelivery(run, { repositoryId, status: "verifying", conflicts, verificationStartedAt: new Date().toISOString() });
+          run.status = "verifying_merge";
+          setStage(run, "handoff", "active", `Verifying merged result (${repo.displayPath || sourceCwd})`);
+        });
+        activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
+        const checks = repositoryId === "primary"
+          ? await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration:${repositoryId}`, cwd, signal, required: flattenSteps(live.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(live.plan).some((step) => step.requiresVideoEvidence) })
+          : retainChecks(await runContainedRepositoryChecks({ ticketId, cwd, signal, requireVisualEvidence: false, requireVideoEvidence: false, environment: {} }));
+        if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
+        await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, checks, verifiedAt: new Date().toISOString() }); });
+      }
+    });
+    await update((state) => {
+      patchRunDelivery(ticketRun(state, ticketId), {
+        repositoryId, status: "integrated", commit: integration.commit, conflicts: integration.conflicts,
+        diff: integration.diff, integratedAt: new Date().toISOString(), error: null
+      });
+    });
+    return integration;
+  });
+  return queued.promise;
+}
+
+async function scheduleAllDeliveries(ticketId, { diff, contextContent = null, signal } = {}) {
+  if (activeMerges.has(ticketId)) {
+    const live = ticketRun(store.read(), ticketId);
+    throw new Error(live.ticket.source === "local" ? "This ticket is already in the merge queue" : "This ticket is already being delivered");
+  }
+  const queuedRun = ticketRun(store.read(), ticketId);
+  const required = await requiredChangedGitRepos(queuedRun);
+  if (!required.length) return completeNoChangeDelivery(ticketId, queuedRun, { diff, contextContent });
+  if (queuedRun.ticket.source === "local" && ["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) {
+    throw new Error("This ticket is already in the merge queue");
+  }
+  activeMerges.add(ticketId);
+  const attempt = (queuedRun.merge?.attempt || 0) + 1;
+  const promise = (async () => {
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      run.merge = { ...(run.merge || {}), attempt, sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch };
+      for (const repo of required) {
+        const repositoryId = deliveryRepositoryId(repo);
+        if ((run.deliveries || []).some((item) => item.repositoryId === repositoryId && deliveryFinished(item))) continue;
+        if ((run.deliveries || []).some((item) => item.repositoryId === repositoryId)) continue;
+        patchRunDelivery(run, createDeliveryRecord(repo, { status: "pending", attempt }));
+      }
+    });
+    const activity = captureStageActivity(ticketId, "handoff", queuedRun.runId);
+    const failures = [];
+    for (const repo of required) {
+      const live = ticketRun(store.read(), ticketId);
+      const existing = (live.deliveries || []).find((item) => item.repositoryId === deliveryRepositoryId(repo));
+      if (deliveryFinished(existing)) continue;
+      try {
+        if (queuedRun.ticket.source === "local") await deliverLocalRepository(ticketId, repo, { signal, activity, attempt });
+        else await deliverRemoteRepository(ticketId, repo, { diff: repo.deliveryDiff || diff, signal, activity, attempt });
+      } catch (error) {
+        await persistRepoDeliveryFailure(ticketId, repo, error);
+        failures.push({ repositoryId: deliveryRepositoryId(repo), displayPath: repo.displayPath || repo.sourceCwd, error: redactText(error.message) });
+      }
+    }
+    if (failures.length) throw new Error(classifyDeliveryFailure(failures));
+    return finalizeSuccessfulDelivery(ticketId, { diff, contextContent, activity });
   })().catch(async (error) => {
     if (!signal?.aborted) await update((state) => {
       const run = ticketRun(state, ticketId);
       const previousStatus = run.status;
       const previousMergeStatus = run.merge?.status || null;
       run.status = "needs_attention";
-run.lastError = redactText(error.message);
+      run.lastError = redactText(error.message);
       if (run.merge) Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
-      run.recovery = { kind: "delivery", previousStatus, previousMergeStatus, uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending), message: "Delivery failed before completion. Resume will retry from the persisted delivery state." };
+      const deliveries = run.deliveries || [];
+      run.recovery = {
+        kind: "delivery",
+        previousStatus,
+        previousMergeStatus,
+        uncertainExternalActions: Boolean(run.merge?.change || run.merge?.externalActionPending || deliveries.some((item) => item.change || item.externalActionPending)),
+        message: "Delivery failed before completion. Resume will retry from the persisted delivery state."
+      };
       setStage(run, "handoff", "blocked", redactText(error.message));
     });
     await mirrorExecutionBlocker(ticketId, error);
@@ -2652,116 +3055,12 @@ run.lastError = redactText(error.message);
   return { position: 1, promise };
 }
 
+async function scheduleRemoteDelivery(ticketId, { diff, contextContent, signal } = {}) {
+  return scheduleAllDeliveries(ticketId, { diff, contextContent, signal });
+}
+
 async function scheduleTicketIntegration(ticketId, { diff, contextContent = null, signal } = {}) {
-  const queuedRun = ticketRun(store.read(), ticketId);
-  if (diff?.available && diff.files?.length === 0) {
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent === null ? null : await persistProductContext(dataDir, queuedRun.workspace.sourceCwd, contextContent);
-    const handoff = await persistArtifact(dataDir, queuedRun.ticket, {
-      runId: queuedRun.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${queuedRun.ticket.identifier} handoff\n\nVerified as already satisfied. No repository changes or remote review were required.`
-    });
-    await trackerAction(ticketId, "delivery_complete", (ticket) => trackers.comment(ticket, "Verified as already satisfied. No repository changes or remote review were required."));
-    await trackerAction(ticketId, "tracker_done", (ticket) => trackers.transition(ticket, "done"));
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd: run.workspace.sourceCwd, branch: run.workspace.branch, commit: null, integratedAt, diff, noChange: true };
-      run.deliveredDiff = diff;
-      run.merge = { status: "not_required", reason: "no_changes", integratedAt };
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.checkpoint = null;
-      setStage(run, "handoff", "completed", "Verified with no repository changes");
-      run.status = "completed";
-      run.lastError = null;
-      run.completedAt = integratedAt;
-    });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return { position: 0, promise: Promise.resolve({ noChange: true }) };
-  }
-  if (queuedRun.ticket.source !== "local") return scheduleRemoteDelivery(ticketId, { diff, contextContent, signal });
-  if (["queued", "merging", "resolving_conflicts", "verifying"].includes(queuedRun.merge?.status)) throw new Error("This ticket is already in the merge queue");
-  const sourceCwd = queuedRun.workspace.sourceCwd;
-  const attempt = (queuedRun.merge?.attempt || 0) + 1;
-  const queuedAt = new Date().toISOString();
-  let queuedState;
-  const queued = enqueueSerial(mergeQueues, sourceCwd, (position) => {
-    activeMerges.add(ticketId);
-    queuedState = update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.merge = { status: "queued", position, attempt, queuedAt, sourceCwd, branch: run.workspace.branch, conflicts: [] };
-      run.status = "queued_for_merge";
-      run.recovery = null;
-      run.checkpoint = null;
-      setStage(run, "handoff", "active", `Merge queue position ${position}`);
-    });
-    return queuedState;
-  }, async () => {
-    signal?.throwIfAborted();
-    const current = ticketRun(store.read(), ticketId);
-    const activity = captureStageActivity(ticketId, "handoff", current.runId);
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "merging", position: 1, startedAt: new Date().toISOString() });
-      run.status = "merging";
-      run.lastError = null;
-      setStage(run, "handoff", "active", `Merging ${run.workspace.branch}`);
-    });
-    activity.onEvent({ type: "phase", label: "Automated merge started" }, "merge queue");
-    const integrationCwd = join(dataDir, "ticket-runs", safeName(current.ticket.identifier || current.ticket.id), "runs", safeName(current.runId), "integration");
-    const integration = await integrateBranch({
-      sourceCwd, branch: current.workspace.branch, integrationCwd, dependencyCwd: current.workspace.cwd,
-      resolveConflicts: (input) => resolveMergeConflicts(ticketId, { ...input, activity, signal, attempt }),
-      verify: async ({ cwd, conflicts }) => {
-        signal?.throwIfAborted();
-        await update((state) => {
-          const run = ticketRun(state, ticketId);
-          Object.assign(run.merge, { status: "verifying", conflicts, verificationStartedAt: new Date().toISOString() });
-          run.status = "verifying_merge";
-          setStage(run, "handoff", "active", "Verifying merged result");
-        });
-        activity.onEvent({ type: "phase", label: "Running post-merge repository checks" }, "merge queue");
-        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:integration`, cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
-        if (checks.status === "failed") throw new Error(`${checks.summary}\n\n${checks.output}`);
-        await update((state) => { Object.assign(ticketRun(state, ticketId).merge, { checks, verifiedAt: new Date().toISOString() }); });
-      }
-    });
-    const integratedAt = new Date().toISOString();
-    const productContext = contextContent === null ? null : await persistProductContext(dataDir, sourceCwd, contextContent);
-    const evidenceArtifacts = ticketRun(store.read(), ticketId).artifacts;
-    const handoff = await persistArtifact(dataDir, current.ticket, {
-      runId: current.runId, name: "handoff.md", stageId: "handoff", kind: "handoff",
-      content: `# ${current.ticket.identifier} handoff\n\nCompleted ${flattenSteps(current.plan).length} accepted implementation slices.\n\nIntegrated into: \`${sourceCwd}\`\n\nSource branch: \`${current.workspace.branch}\`\n\nCommit: \`${integration.commit}\`${productContext ? `\n\nLiving product context: \`${productContext.path}\`.` : ""}\n\n${diff?.stat || "No changed files."}${visualEvidenceHandoffSection(evidenceArtifacts)}`
-    });
-    await update((state) => {
-      const run = ticketRun(state, ticketId);
-      run.integration = { sourceCwd, branch: current.workspace.branch, commit: integration.commit, integratedAt, diff: integration.diff };
-      run.deliveredDiff = integration.diff;
-      Object.assign(run.stages.find((stage) => stage.id === "handoff"), { diff: integration.diff });
-      Object.assign(run.merge, { status: "integrated", commit: integration.commit, conflicts: integration.conflicts, integratedAt });
-      if (productContext) run.productContextPath = productContext.path;
-      run.artifacts.push(handoff);
-      run.checkpoint = null;
-      setStage(run, "handoff", "completed", `Merged into ${sourceCwd}`).activity = activity.snapshot();
-      run.status = "completed";
-      run.lastError = null;
-      run.completedAt = integratedAt;
-    });
-    await stopTicketPreviews(ticketId, "run_completed");
-    return integration;
-  });
-  await queuedState;
-  const tracked = queued.promise.catch(async (error) => {
-    if (!signal?.aborted) await update((state) => {
-      const run = ticketRun(state, ticketId);
-      Object.assign(run.merge, { status: "failed", error: redactText(error.message), failedAt: new Date().toISOString() });
-      run.status = "needs_attention";
-      run.lastError = redactText(error.message);
-      setStage(run, "handoff", "blocked", redactText(error.message));
-    });
-    throw error;
-  }).finally(() => activeMerges.delete(ticketId));
-  return { position: queued.position, promise: tracked };
+  return scheduleAllDeliveries(ticketId, { diff, contextContent, signal });
 }
 
 async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = null, restartFeedback = "", reviewImages, verificationBaseTree, activity, signal, rootCauseClusters = [] }) {
@@ -2893,8 +3192,15 @@ async function finalReviewLoop(ticketId, signal) {
   const started = ticketRun(store.read(), ticketId);
   const removedReviewArtifacts = await cleanupLegacyReviewArtifacts(started.workspace.cwd);
   const activity = captureStageActivity(ticketId, "verify", started.runId);
-  const implementationTree = await snapshotTree(started.workspace.cwd);
-  const implementationDiff = await diffTrees(started.workspace.cwd, started.baselineTree, implementationTree);
+  const implementationRepos = gitRepositoriesForStep(started);
+  const implementationTrees = await snapshotRepositoryTrees(implementationRepos);
+  const implementationTree = implementationTrees.primary || implementationTrees[implementationRepos[0]?.id || "primary"];
+  const implementationDiffs = await diffRepositoryTrees(implementationRepos, repositoryBaselines(started, implementationRepos), implementationTrees);
+  const implementationProofRoots = await snapshotProofRootMap(started, null);
+  const implementationDiff = aggregateProofDiffs([
+    ...labelRepositoryDiffs(implementationRepos, implementationDiffs),
+    ...labeledProofRootDiffs(started, null, started.baselineProofRoots || implementationProofRoots, implementationProofRoots)
+  ]);
   const verificationBaseTree = started.stages.find((stage) => stage.id === "verify")?.baseTree || implementationTree;
   await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -2948,11 +3254,23 @@ async function finalReviewLoop(ticketId, signal) {
     let verificationDiff = savedAttempt?.verificationDiff;
     if (!savedAttempt) {
       activity.onEvent({ type: "thinking", label: `Running deterministic checks · round ${round}` }, "checks");
-      checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:combined`, cwd: current.workspace.cwd, signal, required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence), requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence) });
+      const combinedRepos = gitRepositoriesForStep(current);
+      const preCheckTrees = await snapshotRepositoryTrees(combinedRepos);
+      const changedVsBaseline = await diffRepositoryTrees(combinedRepos, repositoryBaselines(current, combinedRepos), preCheckTrees);
+      checks = await runChangedRepositoryChecks({
+        ticketId, previewId: `${ticketId}:combined`, signal,
+        required: flattenSteps(current.plan).some((step) => step.requiresVisualEvidence),
+        requiredVideo: flattenSteps(current.plan).some((step) => step.requiresVideoEvidence),
+        repositories: combinedRepos, diffs: changedVsBaseline
+      });
       signal?.throwIfAborted();
-      const afterTree = await snapshotTree(current.workspace.cwd);
-      diff = await diffTrees(current.workspace.cwd, current.baselineTree, afterTree);
-      verificationDiff = await diffTrees(current.workspace.cwd, verificationBaseTree, afterTree);
+      const afterTrees = await snapshotRepositoryTrees(combinedRepos);
+      const afterProofRoots = await snapshotProofRootMap(current, null);
+      diff = aggregateProofDiffs([
+        ...labelRepositoryDiffs(combinedRepos, await diffRepositoryTrees(combinedRepos, repositoryBaselines(current, combinedRepos), afterTrees)),
+        ...labeledProofRootDiffs(current, null, current.baselineProofRoots || afterProofRoots, afterProofRoots)
+      ]);
+      verificationDiff = aggregateProofDiffs(labelRepositoryDiffs(combinedRepos, await diffRepositoryTrees(combinedRepos, { ...repositoryBaselines(current, combinedRepos), primary: verificationBaseTree }, afterTrees)));
       await update((state) => {
         ticketRun(state, ticketId).pendingReviewAttempt = { round, checks, diff, verificationDiff, createdAt: new Date().toISOString() };
       });
@@ -2971,6 +3289,7 @@ const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback)
     const reviews = [repositoryCheckReview(checks), ...await Promise.all(["requirements", "integration", "verification"].map((role) => harness.reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
+      access: current.access,
       plan: current.plan,
       artifacts: reviewArtifacts,
       diff,
@@ -3112,19 +3431,82 @@ async function acceptStep(ticketId, stepId) {
   let commit;
   let vcsChange = step.vcsChange || null;
   const noChanges = step.diff?.available && step.diff.files?.length === 0;
+  const repos = gitRepositoriesForStep(current, step);
+  const persistAcceptance = (patch) => update((state) => {
+    const target = findNode(ticketRun(state, ticketId).plan, stepId);
+    if (patch.workspaceCommit !== undefined) target.workspaceCommit = patch.workspaceCommit;
+    if (patch.vcsChange) target.vcsChange = patch.vcsChange;
+    if (patch.commit) target.commit = patch.commit;
+    if (patch.workspaceCommits) target.workspaceCommits = { ...(target.workspaceCommits || {}), ...patch.workspaceCommits };
+    if (patch.acceptedRepositories) target.acceptedRepositories = { ...(target.acceptedRepositories || {}), ...patch.acceptedRepositories };
+    if (patch.repositoryVcs) target.repositoryVcs = { ...(target.repositoryVcs || {}), ...patch.repositoryVcs };
+  }, { publish: false });
+  const liveStep = () => findNode(ticketRun(store.read(), ticketId).plan, stepId);
   if (!noChanges && current.workspace.vcs === "jj" && step.permission === "write" && !step.workspace?.isolated) {
-    if (!vcsChange?.changeId) throw new Error("The editable Jujutsu change is missing for this step");
-    vcsChange = await acceptJjChange(current.workspace.cwd, { changeId: vcsChange.changeId, message, bookmark: current.workspace.branch });
-    commit = vcsChange.commitId;
-  } else if (!noChanges && step.workspace?.isolated) {
-    let workspaceCommit = step.workspaceCommit;
-    if (!workspaceCommit) {
-      workspaceCommit = await commitWorkspace(step.workspace.cwd, message);
-      await update((state) => { findNode(ticketRun(state, ticketId).plan, stepId).workspaceCommit = workspaceCommit; });
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const already = liveStep().acceptedRepositories?.[id];
+      if (already?.commit) {
+        if (id === "primary") {
+          commit = already.commit;
+          vcsChange = already.vcsChange || vcsChange;
+        }
+        continue;
+      }
+      const previous = id === "primary" ? (liveStep().vcsChange || vcsChange) : liveStep().repositoryVcs?.[id];
+      if (!previous?.changeId) throw new Error(id === "primary" ? "The editable Jujutsu change is missing for this step" : `The editable Jujutsu change is missing for ${repo.displayPath || repo.id}`);
+      const acceptedChange = await acceptJjChange(repo.cwd, { changeId: previous.changeId, message, bookmark: repo.branch });
+      const record = { commit: acceptedChange.commitId, vcsChange: acceptedChange };
+      await persistAcceptance({
+        acceptedRepositories: { [id]: record },
+        ...(id === "primary" ? { vcsChange: acceptedChange, commit: acceptedChange.commitId } : { repositoryVcs: { [id]: acceptedChange } })
+      });
+      if (id === "primary") {
+        vcsChange = acceptedChange;
+        commit = acceptedChange.commitId;
+      }
     }
-    if (workspaceCommit) commit = await cherryPickCommit(current.workspace.cwd, workspaceCommit);
+  } else if (!noChanges && step.workspace?.isolated) {
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const latest = liveStep();
+      if (latest.acceptedRepositories?.[id]?.commit) {
+        if (id === "primary") commit = latest.acceptedRepositories[id].commit;
+        continue;
+      }
+      let workspaceCommit = latest.workspaceCommits?.[id] || (id === "primary" ? latest.workspaceCommit : repo.workspaceCommit);
+      if (!workspaceCommit) {
+        workspaceCommit = await commitWorkspace(repo.cwd, message);
+        await persistAcceptance({
+          workspaceCommits: { [id]: workspaceCommit },
+          ...(id === "primary" ? { workspaceCommit } : {})
+        });
+      }
+      const targetCwd = id === "primary"
+        ? current.workspace.cwd
+        : (current.repositories || []).find((item) => item.id === id)?.cwd;
+      let accepted = workspaceCommit;
+      if (workspaceCommit && targetCwd && resolve(targetCwd) !== resolve(repo.cwd)) {
+        accepted = await cherryPickCommit(targetCwd, workspaceCommit);
+      }
+      await persistAcceptance({ acceptedRepositories: { [id]: { commit: accepted || null } } });
+      if (id === "primary") commit = accepted;
+    }
   } else if (!noChanges) {
-    commit = await commitWorkspace(current.workspace.cwd, message);
+    for (const repo of repos) {
+      const id = repo.id || "primary";
+      const already = liveStep().acceptedRepositories?.[id];
+      if (already && Object.hasOwn(already, "commit")) {
+        if (id === "primary") commit = already.commit;
+        continue;
+      }
+      const accepted = await commitWorkspace(repo.cwd, message);
+      await persistAcceptance({
+        acceptedRepositories: { [id]: { commit: accepted || null } },
+        ...(id === "primary" && accepted ? { commit: accepted } : {})
+      });
+      if (id === "primary") commit = accepted;
+    }
   }
   await update((state) => {
     const run = ticketRun(state, ticketId);
@@ -3170,7 +3552,8 @@ async function advanceTicket(ticketId, signal) {
     if (batch.length > 1) {
       const tree = await snapshotTree(run.workspace.cwd);
       const workspaces = await createParallelWorktrees({
-        sourceCwd: run.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, steps: batch, tree
+        sourceCwd: run.workspace.cwd, dataDir, ticket: run.ticket, runId: run.runId, steps: batch, tree,
+        repositories: run.repositories || []
       });
       await update((state) => {
         const current = ticketRun(state, ticketId);
@@ -3191,6 +3574,9 @@ async function advanceTicket(ticketId, signal) {
   if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
     if (run.workspace.vcs === "jj" && !run.workspace.jjFinalized) {
       await prepareJjForGit(run.workspace.cwd, run.workspace.branch);
+      for (const repo of (run.repositories || []).filter((item) => (item.id || "primary") !== "primary" && item.cwd && item.branch)) {
+        await prepareJjForGit(repo.cwd, repo.branch);
+      }
       await update((state) => { ticketRun(state, ticketId).workspace.jjFinalized = true; });
     }
     await finalReviewLoop(ticketId, signal);
@@ -3276,7 +3662,7 @@ async function restartAuditArtifact(run, audit) {
   });
 }
 
-async function freshLocalRun(previous, runId) {
+async function freshLocalRun(previous, runId, access) {
   const source = store.read().workspace.cwd;
   const fixture = await loadLocalFixture(source, previous.ticket.fixturePath);
   const [contractExists, projectConfigExists] = await Promise.all([
@@ -3307,7 +3693,7 @@ async function freshLocalRun(previous, runId) {
       prompt: fixture.feature, createdAt: new Date().toISOString()
     },
     plan, stageProfiles: structuredClone(previous.stageProfiles), artifacts, activeRuns: {}, auto: false,
-    sessionFile: null, lastError: null, createdAt: new Date().toISOString()
+    sessionFile: null, lastError: null, createdAt: new Date().toISOString(), access
   };
 }
 
@@ -3322,7 +3708,8 @@ async function startFreshRun(ticketId) {
     previousStages: previous.stages.map(({ id, status }) => ({ id, status })),
     previousSteps: flattenSteps(previous.plan).map((step) => ({ id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null, commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0 }))
   };
-  const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId) : null;
+  const access = await snapshotWorkspaceAccess();
+  const fixture = previous.ticket.source === "local" && previous.ticket.fixturePath ? await freshLocalRun(previous, audit.nextRunId, access) : null;
   if (previous.ticket.source === "local" && previous.workspace?.cwd && previous.baselineTree) await restoreTree(previous.workspace.cwd, previous.baselineTree);
   const artifact = await restartAuditArtifact(previous, audit);
   // Start preview cleanup before archiving. Settlement is bounded, so its
@@ -3334,7 +3721,7 @@ async function startFreshRun(ticketId) {
     old.restartHistory.push(audit);
     old.artifacts.push(artifact);
     archiveRun(state, ticketId);
-    state.ticketRuns[ticketId] = fixture || newTicketRun(old.ticket, old.stageProfiles, { runId: audit.nextRunId });
+    state.ticketRuns[ticketId] = fixture || newTicketRun(old.ticket, old.stageProfiles, { runId: audit.nextRunId, access });
     state.ticketRuns[ticketId].startedFreshFrom = { runId: old.runId, auditArtifactId: artifact.id, at };
     state.selectedTicketId = ticketId;
   });
@@ -3352,6 +3739,25 @@ async function restartFrom(ticketId, target) {
     if (!previous.workspace?.cwd) throw new Error("The run has no worktree to restore");
     const restored = await restoreTree(previous.workspace.cwd, audit.restoredTree);
     if (restored !== audit.restoredTree) throw new Error("The worktree did not match the selected restart checkpoint");
+    const stepId = String(target || "").replace(/^step:/, "");
+    const selected = findNode(previous.plan, stepId);
+    const trees = { ...(selected?.baseTrees || {}), ...(audit.restoredTrees || {}), primary: audit.restoredTree };
+    if (target === "stage:explore" || target === "stage:design") {
+      for (const repo of gitRepositoriesForStep(previous)) {
+        if ((repo.id || "primary") === "primary" || trees[repo.id] || !repo.baselineTree) continue;
+        trees[repo.id] = repo.baselineTree;
+      }
+    }
+    const resetIds = new Set(audit.resetStepIds || []);
+    const extraCommits = {};
+    for (const step of flattenSteps(previous.plan)) {
+      if (resetIds.has(step.id)) continue;
+      for (const [id, record] of Object.entries(step.acceptedRepositories || {})) {
+        if (id === "primary" || !record?.commit) continue;
+        extraCommits[id] = record.commit;
+      }
+    }
+    await restoreRepositoryTrees(gitRepositoriesForStep(previous), trees, { commits: extraCommits });
   }
   const artifact = await restartAuditArtifact(previous, audit);
   await stopTicketPreviews(ticketId, "run_restart");
@@ -3408,11 +3814,16 @@ async function api(request, response, url) {
     const run = ticketRun(store.read(), decodeURIComponent(reviewPacket[1]));
     const latestReview = run.reviews?.at(-1);
     const checks = latestReview?.reviews?.find((review) => review.role === "deterministic")?.checks || run.finalChecks || {};
-    return json(response, 200, compactReviewPacket({
+    const packetDiff = [
+      run.deliveredDiff,
+      latestReview?.diff,
+      ...flattenSteps(run.plan).flatMap((step) => [step.diff, ...[...(step.attempts || [])].reverse().map((attempt) => attempt.diff)])
+    ].find((diff) => diff && (diff.patch || diff.repositories?.length || diff.files?.length)) || {};
+    return json(response, 200, enrichReviewPacket(compactReviewPacket({
       ticket: run.ticket, plan: run.plan, artifacts: run.artifacts,
-      diff: run.deliveredDiff || latestReview?.diff || {}, checks,
+      diff: packetDiff, checks,
       proofMap: projectProofMap(run)
-    }));
+    }), { diff: packetDiff, checks }));
   }
   const ticketInspection = url.pathname.match(/^\/api\/tickets\/([^/]+)\/inspection$/);
   if (request.method === "GET" && ticketInspection) {
@@ -3706,6 +4117,18 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/workspace/pick") return json(response, 200, { cwd: await pickDirectory() });
+  if (request.method === "GET" && url.pathname === "/api/workspace/access-policy") {
+    const state = store.read();
+    return json(response, 200, await readProjectPolicy(state, state.workspace.cwd));
+  }
+  if (request.method === "POST" && url.pathname === "/api/workspace/access-policy") {
+    const input = await body(request);
+    const primaryCwd = store.read().workspace.cwd;
+    const policy = await normalizeProjectPolicy(input, { primaryCwd });
+    const key = await canonicalPrimaryPath(primaryCwd);
+    await update((draft) => { writeProjectPolicy(draft, key, policy); });
+    return json(response, 200, policy);
+  }
   if (request.method === "POST" && url.pathname === "/api/workspace") {
     const input = await body(request);
     const cwd = normalize(String(input.cwd || ""));
@@ -3789,7 +4212,7 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
     const id = decodeURIComponent(resume[1]);
     const run = ticketRun(store.read(), id);
     if (run.recovery?.kind === "delivery") {
-      if (run.recovery.uncertainExternalActions && !run.merge?.change) throw new Error(run.recovery.message);
+      if (run.recovery.uncertainExternalActions && !run.merge?.change && !(run.deliveries || []).some((item) => item.change)) throw new Error(run.recovery.message);
 const contextContent = await artifactText([...(run.artifacts || [])].reverse().find((artifact) => artifact.kind === "product-context-update")) || null;
       const diff = run.reviews?.at(-1)?.diff || null;
       void settleScheduledDelivery(scheduleTicketIntegration(id, { diff, contextContent }));

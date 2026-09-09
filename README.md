@@ -118,4 +118,6 @@ node src/cli.js list backlog        # same actions as the dashboard
 
 See [scripts/README.md](scripts/README.md).
 
+For agent orientation, read the [feature map](docs/feature-map.md) and separate [navigation reference](docs/feature-navigation.md). The [interactive repository review](docs/feature-review.html) records findings and lets you assemble a follow-up task brief. These are dated snapshots; refresh the live helpers before changing behavior.
+
 Jujutsu is the default history layer: each serial implementation step is an editable change whose stable change ID survives evolving revisions. Accepted changes are exported as ordinary Git commits before the existing review and delivery flow. Dependency-ready siblings run serially in this mode for now. Use `--vcs git` (or `AGENT_PLAN_VCS=git`) only when a repository needs the compatibility path.
