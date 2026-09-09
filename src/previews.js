@@ -1,3 +1,4 @@
+import { prepareDependencies } from "./dependencies.js";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -7,7 +8,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { visualEvidenceMedia } from "./artifacts.js";
 import { createProcessContainment } from "./process-containment.js";
-import { detectPreviewCommand, loadProjectConfig, projectEnvironment, redactCommandOutput, runManagedCommand } from "./project-config.js";
+import { detectPreviewCommand, loadProjectConfig, projectEnvironment, redactCommandOutput, runManagedCommand, runProjectCommand } from "./project-config.js";
 
 const exec = promisify(execFile);
 
@@ -173,6 +174,7 @@ export class PreviewManager {
     let output = "";
     const url = `http://127.0.0.1:${port}`;
     try {
+      await prepareDependencies(cwd, config, () => runProjectCommand(cwd, "install", { containment: previewContainment, dependenciesPrepared: true }));
       // Apply the marker after all repository-controlled values are assembled,
       // preserving the allow-list and avoiding any ambient environment merge.
       // A previous shared cleanup may have settled, so register this launch

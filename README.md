@@ -132,3 +132,19 @@ command declarations: doctor never runs project commands or paid model calls.
 Local authentication presence does not establish that a provider will accept it.
 Ticket requirements planning checks Node, Git, selected VCS, and configured Pi
 models/authentication first; project contract bootstrap can still follow planning.
+
+`agent-plan init [--install] [--verify]` initializes the selected daemon workspace
+and preserves existing project configuration and verifier files. It detects Node
+package-manager scripts when creating a new contract. Empty projects receive a
+verifier that fails until real checks are configured. Non-Node projects should
+supply their named install/test/build commands in project.json.
+
+A declared `commands.install` enables automatic dependency preparation before
+project commands, canonical verification, and preview startup. Preparation tracks
+package manifests and lockfiles in a Git-local fingerprint, removes worktree
+node_modules links before installing private dependencies, and repeats when inputs
+change or installed directories disappear. Tracked node_modules are never removed.
+Projects without an install declaration retain their existing dependency behavior;
+add that command to opt into managed preparation. `init --verify` reports baseline
+failures without claiming they are feature regressions. Initialization is blocked
+while ticket execution or delivery is active.

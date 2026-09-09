@@ -337,6 +337,7 @@ export class RunRuntime {
     }
   }
   start(ticketId, work) {
+    if (this.projectSetup) throw new Error("Wait for project initialization before starting work");
     if (this.activeTickets.has(ticketId))
       return this.activeTickets.get(ticketId).promise;
     const controller = new AbortController();

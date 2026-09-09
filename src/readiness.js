@@ -1,3 +1,4 @@
+import { dependencyState } from "./dependencies.js";
 import { execFile } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,6 +44,12 @@ export async function inspectReadiness({ cwd, vcsMode = "jj", visual = false, ph
       const needsDependencies = Object.keys({ ...pkg?.dependencies, ...pkg?.devDependencies }).length > 0;
       const installed = await exists(join(cwd, "node_modules"));
       add("dependencies", needsDependencies ? installed : null, needsDependencies ? installed ? "node_modules exists; lockfile consistency not verified" : "Project dependencies are missing" : "No Node dependencies declared", "Configure and run the project install command");
+      if (config.commands.install) {
+        try {
+          const dependencies = await dependencyState(cwd, config);
+          add("dependency-preparation", !dependencies.required, dependencies.required ? "Dependencies need preparation for current manifests" : "Dependency preparation matches current manifests", "Run agent-plan init --install");
+        } catch { add("dependency-preparation", false, "Dependency preparation cannot be inspected", "Initialize the repository, then run agent-plan init --install"); }
+      }
       for (const name of ["verify", ...(visual ? ["ui", "ui-test", "capture-proof", "test-capture-proof"] : [])]) {
         const valid = Boolean(config.commands[name]) && !config.commandErrors?.[name];
         add(name, valid, valid ? `${name} declared; not executed` : `${name} command missing or invalid`, `Configure commands.${name} in .agent-plan/project.json`);

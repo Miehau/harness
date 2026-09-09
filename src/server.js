@@ -298,7 +298,7 @@ const routeInspection = createRouteInspectionService({
 });
 
 const workspaceService = createWorkspaceService({
-  vcsMode,
+  vcsMode, runtime,
   state: { read: store.read.bind(store), update },
   harness,
   ticketSources: { clear: () => { ticketCache = new Map(); } },

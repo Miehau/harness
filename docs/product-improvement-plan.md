@@ -13,6 +13,11 @@ Make project startup reliable, bring frontend decisions forward, improve the tru
 - An external conversational agent shapes and submits work through the existing CLI/API. Pi remains the execution harness; execution, recovery, and gates remain owned by this daemon.
 - Preserve localhost operation and JSON persistence. Bot-specific remote connectivity is a later decision once a bot is selected.
 
+## Implementation record
+
+- R1 merged: [PR #13](https://github.com/Miehau/harness/pull/13). Read-only doctor/API and planning prerequisite checks.
+- R2: initialization and private dependency preparation implemented; validation and delivery in progress.
+
 ## Findings behind the plan
 
 | Area | Current behavior | Gap |

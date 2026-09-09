@@ -1,3 +1,4 @@
+import { prepareDependencies } from "./dependencies.js";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readdir } from "node:fs/promises";
@@ -72,6 +73,7 @@ export async function runRepositoryChecks({ cwd, signal, requireVisualEvidence =
         evidenceDir = await mkdtemp(join(evidenceRoot, "run-"));
       }
       const config = await loadProjectConfig(cwd);
+      await prepareDependencies(cwd, config, () => runProjectCommand(cwd, "install", { signal, containment: executionContainment, ownership: executionOwnership, dependenciesPrepared: true }));
       if (requireVisualEvidence && !config.commands["capture-proof"]) {
         result = { status: "failed", command: "capture-proof", failureKind: "capture-configuration", summary: "Required visual proof has no valid capture-proof command.", output: config.commandErrors?.["capture-proof"] || "Declare a separate capture-proof argv command in .agent-plan/project.json; keep the canonical verifier independent of browser capture.", evidence: [], evidenceDir, durationMs: Date.now() - startedAt };
         return result;

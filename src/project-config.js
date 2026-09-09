@@ -1,3 +1,4 @@
+import { prepareDependencies } from "./dependencies.js";
 import { execFile, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
@@ -176,7 +177,7 @@ export function runManagedCommand(executable, args, { cwd, env, signal, timeout,
   });
 }
 
-export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership, containment, timeoutMs = 10 * 60 * 1000, environment: overrides = {} } = {}) {
+export async function runProjectCommand(cwd, name, { signal, execImpl = exec, source = process.env, args = [], ownership, containment, timeoutMs = 10 * 60 * 1000, environment: overrides = {}, dependenciesPrepared = false } = {}) {
   const config = await loadProjectConfig(cwd);
   if (config.commandErrors?.[name]) throw new Error(config.commandErrors[name]);
   const argv = config.commands[name];
@@ -188,6 +189,10 @@ export async function runProjectCommand(cwd, name, { signal, execImpl = exec, so
     ? argument.length > 0 && argument.length <= 4096 && !argument.includes("\0")
     : /^[a-z0-9][a-z0-9._-]*$/i.test(argument));
   if (!Array.isArray(args) || args.length > (uiCommand ? 16 : 8) || !args.every(validArgument)) throw new Error(`Project command “${name}” received unsafe arguments`);
+  if (!dependenciesPrepared && config.commands.install) {
+    const prepared = await prepareDependencies(cwd, config, () => runProjectCommand(cwd, "install", { signal, execImpl, source, ownership, containment, timeoutMs, environment: overrides, dependenciesPrepared: true }), { force: name === "install" });
+    if (name === "install") return prepared;
+  }
   const baseEnvironment = await projectEnvironment(cwd, config, { source, execImpl });
   // Ownership augments the deliberately curated command environment; it never
   // substitutes process.env or grants a command access to ambient secrets.

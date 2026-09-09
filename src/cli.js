@@ -7,6 +7,7 @@ const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
 Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
+  init [--install] [--verify]       Initialize the selected project; optionally install/check it
   doctor [--visual]                Inspect project readiness without running project commands
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
@@ -75,6 +76,12 @@ function revisionInput(words) {
 
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
+  if (command === "init") {
+    if (rest.some((arg) => !["--install", "--verify"].includes(arg))) throw new Error("Usage: agent-plan init [--install] [--verify]");
+    const result = await request("POST", "/api/workspace/init", { body: { install: rest.includes("--install"), verify: rest.includes("--verify") }, env, fetchImpl });
+    print(stdout, result);
+    return Object.values(result.results).some((check) => check.status === "failed") ? 1 : 0;
+  }
   if (command === "doctor") {
     if (rest.length && (rest.length !== 1 || rest[0] !== "--visual")) throw new Error("Usage: agent-plan doctor [--visual]");
     const result = await request("GET", `/api/workspace/readiness${rest.length ? "?visual=1" : ""}`, { env, fetchImpl });
