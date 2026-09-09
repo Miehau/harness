@@ -811,8 +811,9 @@ export function runProgress(run = {}, now = Date.now()) {
   const workers = Object.values(run.activeRuns || {});
   const activity = [...workers.map((worker) => worker.activity), ...(run.stages || []).filter((stage) => stage.status === "active").map((stage) => stage.activity)].filter(Boolean).sort((a,b) => Date.parse(b.lastEventAt || 0)-Date.parse(a.lastEventAt || 0))[0];
   const replaying = run.uiReplay?.status === "running";
-  const working = replaying || !providerWait && !run.checkpoint && ["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "addressing_feedback"].includes(status);
-  return { working, title: replaying ? "Replaying proof checks" : providerWait ? "Waiting for provider" : labels[status] || status.replaceAll("_", " "),
-    detail: replaying ? "Checking the isolated ticket preview" : run.checkpoint?.title || run.lastError || activity?.lastEvent || (working ? "Waiting for the next activity event" : ""), workers: workers.length,
+  const proposing = run.uiProposalGenerating === true;
+  const working = replaying || proposing || !providerWait && !run.checkpoint && ["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "addressing_feedback"].includes(status);
+  return { working, title: replaying ? "Replaying proof checks" : proposing ? "Revising UI proposal" : providerWait ? "Waiting for provider" : labels[status] || status.replaceAll("_", " "),
+    detail: replaying ? "Checking the isolated ticket preview" : proposing ? "Preparing revised direction for your review" : run.checkpoint?.title || run.lastError || activity?.lastEvent || (working ? "Waiting for the next activity event" : ""), workers: workers.length,
     lastActivitySeconds: activity?.lastEventAt ? Math.max(0, Math.floor((now-Date.parse(activity.lastEventAt))/1000)) : null };
 }

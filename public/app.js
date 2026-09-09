@@ -359,8 +359,8 @@ function uiProposalHtml(run, editable = false) {
   if (artifact) hydrateArtifact(run, artifact);
   const body = artifact && artifactBody(artifact, run);
   const preview = body?.state === "available" ? `<iframe title="UI proposal preview" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${escapeHtml(artifactRoute(run, artifact.id, "/preview"))}" style="width:100%;height:420px;border:1px solid var(--border);background:white"></iframe>` : `<p>Loading retained proposal…</p>`;
-  const changes = editable ? `<form data-revise-ui="${escapeHtml(run.id)}" data-proposal-revision="${escapeHtml(proposal.revisionId)}"><label>Request UI changes<textarea name="feedback" rows="2" required></textarea></label><button class="button" type="submit">Revise proposal</button></form>` : "";
-  return `<section class="ui-proposal"><h3>${proposal.approvedAt ? "Approved UI direction" : "Review UI proposal"}</h3><p>${escapeHtml(proposal.summary)}</p><small>Proposal revision ${escapeHtml(proposal.revisionId)} · prototype, not implementation evidence</small>${preview}${changes}</section>`;
+  const changes = editable && run.uiProposalGenerating ? `<p role="status">Revising UI proposal…</p>` : editable ? `<form data-revise-ui="${escapeHtml(run.id)}" data-proposal-revision="${escapeHtml(proposal.revisionId)}"><label>Request UI changes<textarea name="feedback" rows="2" required></textarea></label><button class="button" type="submit">Revise proposal</button></form>` : "";
+  return `<section class="ui-proposal"><h3>${proposal.approvedAt ? "Approved UI direction" : "Review UI proposal"}</h3><p>${escapeHtml(proposal.summary)}</p><small>Proposal revision ${escapeHtml(proposal.revisionId)} · prototype, not implementation evidence</small>${proposal.invalidatedAt ? `<p class="error-banner">This direction needs a revised proposal before approval.</p>` : ""}${preview}${changes}</section>`;
 }
 
 function replayHtml(run) {
@@ -404,7 +404,7 @@ function checkpointHtml(run) {
   }
   const proposalRevision = run.uiProposal?.revisionId || "";
   const proposalArtifact = run.artifacts?.find((item) => item.id === run.uiProposal?.artifactId);
-  const proposalReady = run.plan?.uiImpact?.level !== "material" || (proposalArtifact && artifactBody(proposalArtifact, run)?.state === "available");
+  const proposalReady = run.plan?.uiImpact?.level !== "material" || (!run.uiProposalGenerating && !run.uiProposal?.invalidatedAt && proposalArtifact && artifactBody(proposalArtifact, run)?.state === "available");
   return `${uiProposalHtml(run, true)}<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-approve-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & run manually" : "Run manually"}</button><button class="button success" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-auto-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & auto run" : "Auto run graph"}</button></div></div>`;
 }
 
@@ -608,14 +608,19 @@ function renderPlanTree() {
     ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
   const stageWork = stage && ["requirements", "explore", "design", "handoff"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
-  if (stage?.id === "verify") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && run.checkpoint?.kind !== "evidence_review" && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
+  if (stage?.id === "verify" && run.checkpoint?.kind !== "evidence_review") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && run.checkpoint?.kind !== "evidence_review" && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
 
   if (isArchivedRun(run)) {
     target.innerHTML = `${stageSurface}${stageWork}${workerOutputHtml(run)}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
     return;
   }
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>${stageWork}`;
+    const markup = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>${run.uiProposal ? "" : stageWork}`;
+    // Keep a reviewed prototype's browsing context through unrelated hydration.
+    const key = JSON.stringify([run.runId, run.planRevision, run.uiProposal?.invalidatedAt, run.uiProposalGenerating, markup]);
+    if (run.uiProposal && target.dataset.proposalView === key && target.querySelector(".ui-proposal iframe")) return;
+    target.dataset.proposalView = key;
+    target.innerHTML = markup;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
     if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
       lastClarificationKey = clarificationKey;
@@ -998,6 +1003,7 @@ function artifactBody(artifact, run = runFor()) {
 }
 
 function artifactPreview(artifact) {
+  if (artifact.kind === "ui-proposal") return `<p>Review the rendered proposal in the main workspace. This prototype records UI direction; it is not final implementation evidence.</p>`;
   const resource = artifactBody(artifact);
   const content = resource?.content;
   if (artifact.kind === "visual-evidence") return artifact.summary ? `<p>${escapeHtml(artifact.summary)}</p>` : `<div class="run-empty">No written summary was recorded for this evidence.</div>`;
