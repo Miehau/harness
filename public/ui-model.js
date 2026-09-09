@@ -603,7 +603,9 @@ export function stageMilestones(run, stage) {
 export function runHeartbeat(active, live = {}, now = Date.now()) {
   if (!active) return null;
   const saved = active.activity || active;
-  const elapsed = Math.max(0, Math.floor((now - Date.parse(active.startedAt || saved.startedAt)) / 1000));
+  const started = Date.parse(active.startedAt || saved.startedAt || live.startedAt);
+  if (!Number.isFinite(started)) return null;
+  const elapsed = Math.max(0, Math.floor((now - started) / 1000));
   const idle = Math.max(0, Math.floor((now - Date.parse(live.lastAt || saved.lastEventAt || active.lastEventAt || active.startedAt || saved.startedAt)) / 1000));
   const warning = Boolean(live.warning || saved.warning || active.warning);
   return {
@@ -800,4 +802,17 @@ export function verificationProgress(run) {
     resolved: findings.filter((entry) => entry.status === "resolved").length,
     rounds: rounds.map((round) => ({ round: round.round, findings: round.actionableFindings?.length || 0, checks: round.reviews?.find((item) => item.role === "deterministic")?.checks, fix: round.fix }))
   };
+}
+
+export function runProgress(run = {}, now = Date.now()) {
+  const status = run.status || "draft";
+  const providerWait = run.checkpoint?.kind === "provider_wait" || status === "waiting_for_provider";
+  const labels = { preparing: "Preparing workspace", clarifying: "Shaping requirements", exploring: "Exploring repository", planning: "Designing the solution", running: "Implementing", fixing: "Correcting findings", verifying: "Running checks", reviewing: "Reviewing results", paused: "Paused", interrupted: "Interrupted", failed: "Failed", needs_attention: "Needs attention", completed: "Completed", cancelled: "Cancelled", awaiting_approval: "Review the plan and UI direction", awaiting_requirements: "Review requirements", awaiting_step_review: "Review the completed step", awaiting_evidence_review: "Review final proof" };
+  const workers = Object.values(run.activeRuns || {});
+  const activity = [...workers.map((worker) => worker.activity), ...(run.stages || []).filter((stage) => stage.status === "active").map((stage) => stage.activity)].filter(Boolean).sort((a,b) => Date.parse(b.lastEventAt || 0)-Date.parse(a.lastEventAt || 0))[0];
+  const replaying = run.uiReplay?.status === "running";
+  const working = replaying || !providerWait && !run.checkpoint && ["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "addressing_feedback"].includes(status);
+  return { working, title: replaying ? "Replaying proof checks" : providerWait ? "Waiting for provider" : labels[status] || status.replaceAll("_", " "),
+    detail: replaying ? "Checking the isolated ticket preview" : run.checkpoint?.title || run.lastError || activity?.lastEvent || (working ? "Waiting for the next activity event" : ""), workers: workers.length,
+    lastActivitySeconds: activity?.lastEventAt ? Math.max(0, Math.floor((now-Date.parse(activity.lastEventAt))/1000)) : null };
 }

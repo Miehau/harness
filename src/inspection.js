@@ -1546,6 +1546,7 @@ export function compactRun(run, revision = null) {
     status: run?.status || null,
     checkpoint: publicCheckpoint(run?.checkpoint),
     uiProposal: run?.uiProposal || null,
+    uiReplay: run?.uiReplay || null,
     uiImpact: run?.plan?.uiImpact || run?.uiImpactProvisional || null,
     lastError: boundedText(run?.lastError, 1000).value || null,
     workflow: publicWorkflow(run?.workflow),

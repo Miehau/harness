@@ -105,6 +105,7 @@ test("review notes attach only to their current old or new diff lines", () => {
 });
 
 test("live run heartbeat distinguishes active, stale, and permission-risk states", () => {
+  assert.equal(runHeartbeat({}), null);
   const startedAt = "2026-08-24T18:00:00.000Z";
   const now = Date.parse("2026-08-24T18:01:00.000Z");
   assert.equal(runHeartbeat({ startedAt, lastEventAt: "2026-08-24T18:00:55.000Z", lastEvent: "Using bash" }, {}, now).state, "active");
@@ -547,4 +548,13 @@ test("token totals deduplicate repeated saved attempt identities", () => {
   const run = { plan: { nodes: [{ id: "one", attempts: [attempt, { ...attempt }] }, { id: "two", attempts: [{ ...attempt }] }] }, activeRuns: { one: { attemptId: "attempt-1", activity: { usage } } } };
   assert.equal(runMetrics(run).input, 20);
   assert.equal(runMetrics(run).calls, 2);
+});
+
+test("progress distinguishes actual work, provider waits and user gates", async () => {
+  const { runProgress } = await import("../public/ui-model.js");
+  assert.equal(runProgress({ status: "running" }).working, true);
+  for (const status of ["paused", "completed", "failed", "interrupted", "awaiting_approval"]) assert.equal(runProgress({ status }).working, false);
+  assert.equal(runProgress({ status: "running", checkpoint: { kind: "provider_wait" } }).title, "Waiting for provider");
+  assert.equal(runProgress({ status: "planning", checkpoint: { title: "Approve direction" } }).working, false);
+  assert.equal(runProgress({ status: "paused", uiReplay: { status: "running" } }).title, "Replaying proof checks");
 });

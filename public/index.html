@@ -50,6 +50,14 @@
       <label class="dialog-field" for="workspace-path">Primary repository (not removable)<div class="directory-picker"><input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" readonly required><button id="pick-workspace" class="button" type="button">Choose…</button></div></label>
       <footer><span class="profiles-note">Opens the primary repository. Directory access is saved separately.</span><button class="button primary" type="submit">Open repository</button></footer>
     </form>
+    <section class="workspace-readiness" aria-labelledby="readiness-title">
+      <h3 id="readiness-title">Project readiness</h3>
+      <label><input id="readiness-visual" type="checkbox"> Include frontend capabilities</label>
+      <div id="readiness-results" role="status">Open repository settings to check readiness.</div>
+      <div class="readiness-actions"><button id="check-readiness" class="button" type="button">Recheck readiness</button><button id="initialize-project" class="button" type="button">Initialize project</button></div>
+      <label><input id="initialize-install" type="checkbox"> Install project dependencies during initialization</label>
+      <label><input id="initialize-verify" type="checkbox"> Run baseline verification during initialization</label>
+    </section>
     <form id="access-policy-form">
       <p id="access-mode-status" class="profiles-note" role="status">Effective mode: Restricted. File tools stay inside the primary repository and extra roots.</p>
       <p class="profiles-note"><label for="access-any"><input id="access-any" name="anyAccess" type="checkbox" disabled> Any access — opt-in; agents may use any filesystem path. This is not a path wildcard.</label></p>

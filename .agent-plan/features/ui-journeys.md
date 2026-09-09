@@ -54,3 +54,5 @@ execution gating and restart persistence; `.agent-plan/ui.test.mjs` renders the
 proposal and checks sandboxing. Set AGENT_PLAN_PROPOSAL_PROOF to retain its screenshot.
 
 SDK-reported cost totals are retained beside token aggregates and exposed by attempt, stage, and compact run metrics. The header distinguishes tool calls from model calls with recorded usage, and cost states distinguish reported zero, partial coverage, and unavailable reporting. Failed model responses retain any reported usage.
+
+Repository settings show read-only readiness and explicit initialization, install, and baseline-verification controls. Meaningful UI review occupies the main workspace; final review compares approved direction and implemented proof, with retained journey assertions. The activity summary animates only during active work and respects reduced motion. `preview replay <ticketId> <runId>` and the final-proof replay button run checks and journeys only in a stopped ticket’s isolated workspace. Replay may change preview data; results remain diagnostic and cannot replace approved evidence.
