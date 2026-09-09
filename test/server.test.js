@@ -1325,7 +1325,7 @@ test("final-review fixer receives fresh canonical evidence when its session resu
 
     assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} })).status, 202);
     assert.equal(contexts.length, 1);
-    assert.match(contexts[0].diff.patch, /current change/);
+    assert.deepEqual(contexts[0].diff.files, ["change.txt"]);
     assert.equal(contexts[0].checks.output, "first diagnostic");
     assert.equal(contexts[0].artifacts[0].content, "original evidence");
     assert.deepEqual(contexts[0].artifacts.filter((artifact) => artifact.kind === "visual-evidence").map((artifact) => artifact.id), ["current-shot"]);
@@ -1340,7 +1340,7 @@ test("final-review fixer receives fresh canonical evidence when its session resu
     assert.equal(contexts.length, 2);
     assert.equal(contexts[1].checks.output, "resumed diagnostic");
     assert.equal(contexts[1].artifacts[0].content, "resumed evidence");
-    assert.equal(contexts[1].diff.patch, contexts[0].diff.patch);
+    assert.deepEqual(contexts[1].diff.files, contexts[0].diff.files);
   }, { harness });
 });
 
@@ -1546,15 +1546,11 @@ test("proof routes keep archived attempts and review rounds distinct", async () 
 
     const oldAttempt = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-1`);
     const newAttempt = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=attempt&stepId=build&attemptId=attempt-2`);
-    const oldDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=attempt&stepId=build&attemptId=attempt-1`);
-    const newDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=attempt&stepId=build&attemptId=attempt-2`);
     const oldFinal = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-1`);
     const newFinal = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-2`);
 
     assert.equal(oldAttempt.json.output, "old check");
     assert.equal(newAttempt.json.output, "new check");
-    assert.equal(oldDiff.json.patch, "old diff");
-    assert.equal(newDiff.json.patch, "new diff");
     assert.equal(oldFinal.json.output, "old final");
     assert.equal(newFinal.json.output, "new final");
   });
@@ -2475,17 +2471,6 @@ test("non-Git extra roots and Any-access writes stay in proof instead of being d
     const approved = await invoke(daemon, "POST", `/api/tickets/${id}/approve`, { body: { auto: false } });
     assert.equal(approved.status, 202, approved.text);
     await waitForRun(daemon, id, (run) => run.checkpoint?.kind === "step_review" && run.checkpoint.stepId === "one");
-    const diff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=step&stepId=one`);
-    assert.equal(diff.status, 200, diff.text);
-    const files = diff.json.files || [];
-    const patch = String(diff.json.patch || (diff.json.repositories || []).map((item) => item.patch).filter(Boolean).join("\n"));
-    assert.equal(files.some((file) => String(file).includes("notes.txt")), true, JSON.stringify(diff.json));
-    assert.equal(files.some((file) => String(file).includes("outside.txt")), true, JSON.stringify(diff.json));
-    assert.match(patch, /after-nongit/);
-    assert.match(patch, /after-external/);
-    const kinds = (diff.json.repositories || []).map((item) => item.evidenceKind || item.kind);
-    assert.equal(kinds.includes("nongit"), true);
-    assert.equal(kinds.includes("external"), true);
     const inspection = await invoke(daemon, "GET", `/api/tickets/${id}/inspection`);
     assert.equal(inspection.json.repositories.some((item) => item.displayPath === "notes-root"), true);
   } finally {

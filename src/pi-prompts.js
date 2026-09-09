@@ -253,27 +253,17 @@ export function enrichReviewPacket(packet, { diff = {}, checks = {} } = {}) {
       displayPath: labeled.displayPath || check?.displayPath || id,
       evidenceKind: labeled.evidenceKind || labeled.kind || "git",
       files: (labeled.files || []).slice(0, 100),
-      patch: String(labeled.patch || "").slice(0, 30_000),
       error: labeled.error || null,
       status: check?.status || null,
       command: check?.command || null,
       summary: check?.summary || null,
     });
   }
-  const joinedPatch = repositories
-    .map((item) => item.patch)
-    .filter(Boolean)
-    .join("\n");
-  const canonicalPatch = packet.canonicalDiff?.patch;
   return {
     ...packet,
     ...(repositories.length ? { repositories } : {}),
-    canonicalDiff: {
-      ...packet.canonicalDiff,
-      ...((!canonicalPatch || canonicalPatch === "No textual diff") &&
-      joinedPatch
-        ? { patch: joinedPatch.slice(0, 60_000) }
-        : {}),
+    changes: {
+      ...packet.changes,
       ...(diff.error ? { error: diff.error } : {}),
     },
     checks: {
@@ -407,8 +397,8 @@ ${step.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- The reque
 ${step.permission === "write" ? "Use the supplied design and dependency artifacts as your starting point; do not repeat repository-wide discovery. Read the affected call paths and required references, then implement once the slice is understood. Before additional inspection, identify the concrete unresolved correctness, security, or integration question it answers. If the current code already satisfies the criteria, report it rather than expanding the implementation or adding unrelated tests." : ""}
 
 ## Criterion proof report
-Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt), artifact/media (artifactId shown in Dependency artifacts), or diff (scope and stepId for step/attempt).
-For this slice, check and diff locator shapes are ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })} and ${JSON.stringify({ type: "diff", scope: "step", stepId: step.id })}. Cite only evidence that exists; never omit stepId or invent an artifactId.
+Only report the exact criterion IDs below in worker_report. Omit criterionResults entirely when you have no structured result; do not infer proof from prose, exit status, or another criterion. A verified result needs at least one run-owned locator: check (scope and stepId for step/attempt) or artifact/media (artifactId shown in Dependency artifacts).
+For this slice, a check locator is ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })}. Cite only evidence that exists; never omit stepId or invent an artifactId.
 ${stepCriteria}
 
 Visual evidence: ${step.requiresVideoEvidence ? `required; configure capture-proof to write both a screenshot and a real WebM or MP4 interaction recording into process.env.AGENT_PLAN_EVIDENCE_DIR (never make a video from screenshots)` : step.requiresVisualEvidence ? `required; configure capture-proof to write PNG, JPEG, or WebP screenshots into process.env.AGENT_PLAN_EVIDENCE_DIR` : "not required"}

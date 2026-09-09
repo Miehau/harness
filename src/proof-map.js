@@ -159,6 +159,7 @@ export function resolveEvidence(run, raw) {
     if (!check) return { valid: false, reason: "missing_evidence", locator };
     return { valid: check.status === "passed", reason: check.status === "passed" ? null : "check_not_passed", locator, target: { status: check.status, command: check.command || null, summary: check.summary || null } };
   }
+  if (raw.type === "diff") return { valid: false, reason: "unsupported_locator", locator };
   const step = stepIn(run, locator.stepId);
   const diff = locator.scope === "attempt"
     ? attemptIn(run, locator.stepId, locator.attemptId)?.diff

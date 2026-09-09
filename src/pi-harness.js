@@ -586,7 +586,7 @@ ${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifa
 ${evidenceContext(lookup)}
 
 Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
-For the supplied deterministic gate and diff, use ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })} and ${JSON.stringify({ type: "diff", scope: "step", stepId: step.id })} respectively. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
+For the supplied deterministic gate, use ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })}. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
 
 Return ONLY JSON:
 {

@@ -794,7 +794,7 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.match(prompt, /Checks passed\./);
     assert.match(prompt, /Step ID: slice/);
     assert.ok(prompt.includes(JSON.stringify({ type: "check", scope: "step", stepId: "slice" })));
-    assert.ok(prompt.includes(JSON.stringify({ type: "diff", scope: "step", stepId: "slice" })));
+    assert.doesNotMatch(prompt, /"type":"diff"/);
     assert.doesNotMatch(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
@@ -1076,7 +1076,7 @@ test("fresh verification stops after its repository inspection budget", async ()
       assert.match(prompt, /Continue the interrupted verification/);
       assert.match(prompt, /Do not repeat completed reads/);
       const navigation = JSON.parse(prompt.split("# Current evidence index\n")[1].split("\n\n")[0]);
-      assert.equal(await readFile(join(dirname(navigation.index), "changes.patch"), "utf8"), "+current");
+      assert.deepEqual(JSON.parse(await readFile(join(dirname(navigation.index), "changes.json"), "utf8")).files, ["src/a.js"]);
       session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Inspected remaining evidence","findings":[]}' }] });
     };
     const result = await harness.verifyStep({
@@ -1686,28 +1686,24 @@ test("UI workers cannot start before the design-system prerequisite exists", asy
 
 });
 
-test("slice verification keeps large evidence out of prompts and serves its complete tail on demand", async (t) => {
+test("slice verification keeps large evidence out of prompts and indexes changed files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "slice-context-budget-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const harness = new PiHarness({ dataDir: root });
   let customTools;
   let rendered;
   const events = [];
-  const patch = "diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n" + "+payload\n".repeat(75000) + "+tail-sentinel\n";
   const session = {
     state: { messages: [] }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
     async prompt(prompt) {
       rendered = prompt;
       assert.ok(prompt.length < 20000, prompt.length);
-      assert.doesNotMatch(prompt, /tail-sentinel|worker-body-sentinel|design-body-sentinel/);
+      assert.doesNotMatch(prompt, /worker-body-sentinel|design-body-sentinel/);
       const tool = customTools.find((tool) => tool.name === "review_evidence");
       const read = async (file, offset = 0) => JSON.parse((await tool.execute("read", { file, offset })).content[0].text);
       await assert.rejects(read("../index.json"), /current review index/);
       const changes = JSON.parse((await read("changes.json")).content);
-      const part = changes.repositories[0].patches[0];
-      const tail = await read(part.detail, patch.length - 15);
-      assert.equal(tail.total, patch.length);
-      assert.match(tail.content, /tail-sentinel/);
+      assert.deepEqual(changes.files, ["src/a.js"]);
       const index = JSON.parse((await read("index.json")).content);
       const worker = index.evidence.find((item) => item.kind === "agent-output");
       assert.match((await read(worker.detail)).content, /worker-body-sentinel/);
@@ -1718,7 +1714,7 @@ test("slice verification keeps large evidence out of prompts and serves its comp
   const plan = normalizePlan({ nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
   await harness.verifyStep({ cwd: root, ticket: { id: "T" }, runId: "run", round: 1, plan, step: plan.nodes[0],
     artifacts: [{ kind: "agent-output", stepId: "slice", content: "stale-worker" }],
-    design: "design-body-sentinel".repeat(30000), output: "worker-body-sentinel", diff: { files: ["src/a.js"], patch },
+    design: "design-body-sentinel".repeat(30000), output: "worker-body-sentinel", diff: { files: ["src/a.js"] },
     checks: { status: "passed", output: "check-body".repeat(10000) }, onEvent: (event) => events.push(event)
   });
   assert.equal(events.find((event) => event.type === "prompt").content, rendered);

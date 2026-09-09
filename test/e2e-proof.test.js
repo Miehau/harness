@@ -234,10 +234,8 @@ test("verification restart preserves old final evidence and assigns a fresh revi
     assert.equal(reverified.proofMap.criteria[0].history.some((result) => result.evidence?.some((evidence) => evidence.reviewId === "final-review-1")), true);
 
     const oldCheck = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-1`);
-    const oldFinalDiff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=final&reviewId=final-review-1`);
     const newCheck = await invoke(daemon, "GET", `/api/tickets/${id}/proof/check-output?scope=final&reviewId=final-review-2`);
     assert.equal(oldCheck.json.output, "old output");
-    assert.equal(oldFinalDiff.json.patch, "old final diff");
     assert.equal(newCheck.json.output, "new output");
     assert.equal(daemon.store.read().ticketRuns[id].reviews.length, 2);
   }, { harness });

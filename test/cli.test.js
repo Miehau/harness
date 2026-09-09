@@ -717,7 +717,6 @@ test("timeline and review packet name both repositories when A and B changed", a
       ["primary", "repo-a"],
       [extraId, "repo-b"]
     ]);
-    assert.match(packet.json.canonicalDiff.patch, /from-a/);
-    assert.match(packet.json.canonicalDiff.patch, /from-b/);
+    assert.deepEqual(packet.json.changes.files, ["one-a.txt", `root:${extraId}:one-b.txt`]);
   });
 });

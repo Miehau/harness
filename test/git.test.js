@@ -27,10 +27,25 @@ test("tree snapshots isolate one run without modifying the real index", async ()
 
     assert.deepEqual(diff.files.sort(), ["artifact.md", "tracked.txt"]);
     assert.equal(diff.changedLines, 3);
-    assert.match(diff.patch, /pre-existing dirty state/);
-    assert.match(diff.patch, /changed by this run/);
+    assert.equal("patch" in diff, false);
     const { stdout } = await exec("git", ["diff", "--cached", "--name-only"], { cwd });
     assert.equal(stdout, "");
+  } finally {
+    await rm(cwd, { recursive: true });
+  }
+});
+
+test("records large binary changes without collecting patch output", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "agent-plan-large-binary-"));
+  try {
+    await exec("git", ["init", "-q"], { cwd });
+    const before = await snapshotTree(cwd);
+    await writeFile(join(cwd, "large.bin"), Buffer.alloc(8 * 1024 * 1024 + 1));
+    const after = await snapshotTree(cwd);
+    const changes = await diffTrees(cwd, before, after);
+    assert.deepEqual(changes.files, ["large.bin"]);
+    assert.equal(changes.fileStats[0].binary, true);
+    assert.equal("patch" in changes, false);
   } finally {
     await rm(cwd, { recursive: true });
   }

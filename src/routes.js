@@ -73,16 +73,6 @@ export function createRoutes({
         ),
       );
     }
-    const proofDiff = url.pathname.match(
-      /^\/api\/tickets\/([^/]+)\/proof\/diff$/,
-    );
-    if (request.method === "GET" && proofDiff) {
-      return json(
-        response,
-        200,
-        await inspection.diffOutput(routeId(proofDiff[1]), queryIdentity(url)),
-      );
-    }
     const reviewPacket = url.pathname.match(
       /^\/api\/tickets\/([^/]+)\/review-packet$/,
     );

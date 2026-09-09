@@ -209,10 +209,6 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     await assert.rejects(readFile(join(extra, "done-b.txt"), "utf8"), /ENOENT/);
     await assert.rejects(readFile(join(primary, "done-a.txt"), "utf8"), /ENOENT/);
 
-    const diff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=step&stepId=one`);
-    assert.equal(diff.status, 200, diff.text);
-    const repoPaths = (diff.json.repositories || []).map((item) => item.displayPath);
-    assert.equal(repoPaths.includes("repo-b") || JSON.stringify(diff.json).includes("repo-b"), true, JSON.stringify(diff.json));
     const timeline = await runAgainstDaemon(daemon, ["list", "timeline", id]);
     assert.equal(timeline.code, 0, timeline.stderr);
     assert.match(JSON.stringify(timeline.json), /repo-b/);
@@ -324,14 +320,6 @@ test("Any-access writes outside configured roots are reviewable and never auto-d
     assert.equal(await readFile(join(external, "after-external.txt"), "utf8"), "after-external\n");
     assert.equal(await readFile(join(external, "outside.txt"), "utf8"), "before\n");
 
-    const diff = await invoke(daemon, "GET", `/api/tickets/${id}/proof/diff?scope=step&stepId=one`);
-    assert.equal(diff.status, 200, diff.text);
-    const files = diff.json.files || [];
-    const patch = String(diff.json.patch || (diff.json.repositories || []).map((item) => item.patch).filter(Boolean).join("\n"));
-    assert.equal(files.some((file) => String(file).includes("after-external.txt")), true, JSON.stringify(diff.json));
-    assert.match(patch, /after-external/);
-    const kinds = (diff.json.repositories || []).map((item) => item.evidenceKind || item.kind);
-    assert.equal(kinds.includes("external"), true, JSON.stringify(diff.json.repositories));
 
     const accepted = await invoke(daemon, "POST", `/api/tickets/${id}/steps/one/accept`, { body: {} });
     assert.equal(accepted.status, 202, accepted.text);

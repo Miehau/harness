@@ -982,55 +982,6 @@ function checkOutput(
   );
 }
 
-function diffOutput(
-  run,
-  { scope = "step", stepId = null, attemptId = null, reviewId = null } = {},
-) {
-  const withPatch = (diff) =>
-    !diff || typeof diff.patch === "string"
-      ? diff
-      : {
-          ...diff,
-          patch: (diff.repositories || [])
-            .map((item) => item.patch)
-            .filter(Boolean)
-            .join("\n"),
-        };
-  if (scope === "final")
-    return reviewId
-      ? withPatch(
-          run.finalDiffHistory?.[reviewId] ||
-            run.reviews?.find(
-              (review) =>
-                review.reviewId === reviewId ||
-                `final-review-${review.round}` === reviewId,
-            )?.diff ||
-            null,
-        )
-      : withPatch(
-          run.deliveredDiff ||
-            run.integration?.diff ||
-            run.reviews?.at(-1)?.diff ||
-            null,
-        );
-  if (!stepId) throw new Error("Step diff requires a step ID");
-  const step = findNode(run.plan, stepId);
-  if (!step) throw new Error("Step not found");
-  if (scope === "attempt") {
-    if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
-    return withPatch(
-      run.attemptDiffHistory?.[stepId]?.[attemptId] ||
-        (
-          (step.attempts || []).find((item) => item.attemptId === attemptId) ||
-          archivedAttempt(run, stepId, attemptId)
-        )?.diff ||
-        null,
-    );
-  }
-  if (scope !== "step") throw new Error("Unknown diff scope");
-  return withPatch(step.diff || null);
-}
-
 export function createRouteInspectionService({
   state,
   details,
@@ -1066,11 +1017,6 @@ export function createRouteInspectionService({
       const checks = checkOutput(current(ticketId), options);
       if (!checks) throw new Error("Check output not found");
       return checks;
-    },
-    diffOutput(ticketId, options) {
-      const diff = diffOutput(current(ticketId), options);
-      if (!diff) throw new Error("Diff not found");
-      return diff;
     },
     reviewPacket(ticketId) {
       const run = current(ticketId);

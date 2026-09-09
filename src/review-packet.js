@@ -1,4 +1,3 @@
-import { diffOutline } from "./git.js";
 import { flattenSteps } from "./plan.js";
 
 const relevantArtifactKinds = new Set([
@@ -103,12 +102,11 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
     },
     artifacts: selectedArtifacts,
     media: selectedArtifacts.filter((artifact) => artifact.kind === "visual-evidence").map(({ id, name, stepId, path }) => ({ id, name, stepId, path })),
-    canonicalDiff: {
+    changes: {
       reference: diff.reference || diff.path || null,
       files,
       omittedFiles: Math.max(0, (diff.files?.length || 0) - files.length),
-      stat: clip(diff.stat, 4_000),
-      patch: clip(diff.patch || "No textual diff", 60_000)
+      stat: clip(diff.stat, 4_000)
     },
     proofMap: compactProofMap(proofMap),
     checks: {
@@ -126,7 +124,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
 }
 
 // Full detail stays in immutable run-owned files. The initial prompt never grows
-// with accumulated review history, patch size or attached image bytes.
+// with accumulated review history or attached image bytes.
 export async function writeReviewIndex(directory, { ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {}, proofMap = {}, focusFindings = [], operatorFeedback = "", currentStepId = null }) {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
@@ -159,19 +157,11 @@ export async function writeReviewIndex(directory, { ticket = {}, plan = {}, arti
       expectedFiles: step.expectedFiles || [], acceptanceCriteria: step.acceptanceCriteria || []
     })
   }));
-  const repositories = (diff.repositories?.length ? diff.repositories : [{ repositoryId: "primary", ...diff }]).map((repository, repositoryIndex) => {
-    const { patch = "", ...metadata } = repository;
-    const blocks = String(patch).split(/(?=^diff --git )/m).filter(Boolean);
-    const outline = diffOutline(patch);
-    return { ...metadata, patches: blocks.map((block, index) => ({
-      file: outline[index]?.file || "Unstructured patch", hunks: outline[index]?.hunks || [], characters: block.length,
-      detail: put(`repository-${repositoryIndex + 1}-file-${index + 1}.patch`, block)
-    })) };
-  });
+  const repositories = (diff.repositories?.length ? diff.repositories : [{ repositoryId: "primary", ...diff }]).map(({ patch, ...repository }) => repository);
   const index = {
     ticket: put("ticket.json", { id: ticket.id, identifier: ticket.identifier, title: ticket.title, description: ticket.description, scope: plan.summary }),
     revision: { before: diff.before || null, after: diff.after || null, reference: diff.reference || null },
-    changes: put("changes.json", { files: diff.files || [], stat: diff.stat, repositories, error: diff.error || null, truncated: Boolean(diff.truncated || repositories.some((repository) => repository.truncated)), patch: put("changes.patch", diff.patch || "No textual diff") }),
+    changes: put("changes.json", { files: diff.files || [], stat: diff.stat, repositories, error: diff.error || null }),
     checks: put("checks.json", checks), constraints: put("constraints.md", operatorFeedback || "No additional operator constraints."),
     criteria, findings, groups, evidence
   };

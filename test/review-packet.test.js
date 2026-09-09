@@ -108,19 +108,18 @@ test("keeps the ordered proof projection, locators, and retained history in the 
   assert.equal(packet.proofMap.criteria[0].current.status, "verified");
 });
 
-test("bounds canonical diff and deterministic check output", () => {
+test("keeps a bounded change summary and deterministic check output", () => {
   const longText = "x".repeat(80_000);
   const packet = compactReviewPacket({
     plan,
     artifacts: [{ kind: "architecture", name: "architecture.md", content: longText }],
-    diff: { reference: "baseline..head", files: Array.from({ length: 120 }, (_, index) => `src/${index}.js`), stat: "2 files", patch: longText },
+    diff: { reference: "baseline..head", files: Array.from({ length: 120 }, (_, index) => `src/${index}.js`), stat: "2 files" },
     checks: { status: "passed", command: "node .agent-plan/verify.mjs", summary: "passed", output: longText, durationMs: 42 }
   });
 
-  assert.equal(packet.canonicalDiff.reference, "baseline..head");
-  assert.equal(packet.canonicalDiff.files.length, 100);
-  assert.equal(packet.canonicalDiff.omittedFiles, 20);
-  assert.match(packet.canonicalDiff.patch, /characters omitted/);
+  assert.equal(packet.changes.reference, "baseline..head");
+  assert.equal(packet.changes.files.length, 100);
+  assert.equal(packet.changes.omittedFiles, 20);
   assert.match(packet.checks.output, /characters omitted/);
   assert.match(packet.artifacts[0].content, /characters omitted/);
   assert.equal(packet.checks.durationMs, 42);
@@ -134,17 +133,17 @@ test("progressive index stays bounded while preserving every current criterion a
   const root = await mkdtemp(join(tmpdir(), "progressive-review-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const proofMap = { legacy: { reviews: "historical-sentinel".repeat(100000) }, criteria: Array.from({ length: 120 }, (_, n) => ({ id: `c-${n}`, stepId: `step-${n % 12}`, text: `Outcome ${n}`, current: { status: "verified", evidence: [] }, history: [{ summary: "historical-sentinel" }] })) };
-  const input = { plan: { nodes: Array.from({ length: 12 }, (_, n) => ({ id: `step-${n}`, title: `Behavior ${n}`, status: "accepted", dependsOn: n ? [`step-${n - 1}`] : [] })) }, proofMap, diff: { before: "before", after: "after", files: ["src/app.js"], patch: "+current-change\n".repeat(50000) }, checks: { status: "passed", output: "check-detail-sentinel" }, operatorFeedback: "authoritative-constraint-sentinel", focusFindings: [{ claim: "Fix regression", suggestedFix: "finding-detail-sentinel" }] };
+  const input = { plan: { nodes: Array.from({ length: 12 }, (_, n) => ({ id: `step-${n}`, title: `Behavior ${n}`, status: "accepted", dependsOn: n ? [`step-${n - 1}`] : [] })) }, proofMap, diff: { before: "before", after: "after", files: ["src/app.js"] }, checks: { status: "passed", output: "check-detail-sentinel" }, operatorFeedback: "authoritative-constraint-sentinel", focusFindings: [{ claim: "Fix regression", suggestedFix: "finding-detail-sentinel" }] };
   const result = await writeReviewIndex(root, input);
   const initial = JSON.stringify(result.summary);
   assert.ok(initial.length < 12000, initial.length);
-  assert.doesNotMatch(initial, /historical-sentinel|check-detail-sentinel|authoritative-constraint-sentinel|finding-detail-sentinel|current-change/);
+  assert.doesNotMatch(initial, /historical-sentinel|check-detail-sentinel|authoritative-constraint-sentinel|finding-detail-sentinel/);
   const index = JSON.parse(await readFile(result.summary.index, "utf8"));
   assert.equal(index.criteria.length, 120);
   assert.equal(index.groups.length, 12);
   assert.match(await readFile(join(result.root, index.criteria.at(-1).detail), "utf8"), /Outcome 119/);
   assert.doesNotMatch(await readFile(join(result.root, index.criteria[0].detail), "utf8"), /historical-sentinel/);
-  assert.match(await readFile(join(result.root, "changes.patch"), "utf8"), /current-change/);
+  assert.equal(index.changes.endsWith("changes.json"), true);
   assert.match(await readFile(join(result.root, index.constraints), "utf8"), /authoritative-constraint-sentinel/);
   const group = JSON.parse(await readFile(join(result.root, index.groups[1].detail), "utf8"));
   assert.deepEqual(group.dependsOn, ["step-0"]);
@@ -154,30 +153,23 @@ test("progressive index stays bounded while preserving every current criterion a
   assert.match(await readFile(join(result.root, index.constraints), "utf8"), /authoritative-constraint-sentinel/, "old reviewer snapshots remain immutable");
 });
 
-test("indexed patches retain every repository and hunk without duplicating bodies in navigation", async (t) => {
+test("review index retains repository change metadata without patch bodies", async (t) => {
   const { mkdtemp, readFile, rm } = await import("node:fs/promises");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
   const { writeReviewIndex } = await import("../src/review-packet.js");
   const root = await mkdtemp(join(tmpdir(), "context-patches-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const first = "diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-old\n+first-sentinel\n";
-  const second = "diff --git a/src/b.js b/src/b.js\n@@ -1 +1 @@\n-old\n+second-sentinel\n";
   const result = await writeReviewIndex(root, { plan, currentStepId: "future", artifacts: [
     { kind: "agent-output", stepId: "future", content: "current-worker-sentinel" },
     { kind: "agent-output", stepId: "search", content: "accepted-worker-sentinel" },
     { kind: "agent-output", stepId: "removed-step", content: "orphaned-worker-sentinel" }
-  ], diff: { files: ["src/a.js", "src/b.js"], patch: first + second, repositories: [
-    { repositoryId: "primary", patch: first + second },
-    { repositoryId: "secondary", patch: second, truncated: true }
+  ], diff: { files: ["src/a.js", "src/b.js"], repositories: [
+    { repositoryId: "primary", files: ["src/a.js", "src/b.js"] },
+    { repositoryId: "secondary", files: ["src/b.js"] }
   ] } });
   const changes = JSON.parse(await readFile(join(result.root, "changes.json"), "utf8"));
-  assert.equal(changes.truncated, true);
-  assert.doesNotMatch(JSON.stringify(changes), /first-sentinel|second-sentinel/);
-  assert.deepEqual(changes.repositories[0].patches.map((item) => [item.file, item.hunks.length]), [["src/a.js", 1], ["src/b.js", 1]]);
-  const restored = await Promise.all(changes.repositories[0].patches.map((item) => readFile(join(result.root, item.detail), "utf8")));
-  assert.equal(restored.join(""), first + second);
-  assert.equal(await readFile(join(result.root, changes.repositories[1].patches[0].detail), "utf8"), second);
+  assert.deepEqual(changes.repositories.map((item) => [item.repositoryId, item.files]), [["primary", ["src/a.js", "src/b.js"]], ["secondary", ["src/b.js"]]]);
   const index = JSON.parse(await readFile(result.summary.index, "utf8"));
   assert.equal(index.evidence.length, 2, "the current unaccepted worker report and accepted handoffs remain accessible");
 });

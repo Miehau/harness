@@ -86,7 +86,7 @@ test("resolves only typed canonical run-owned evidence", () => {
   run.reviews = [{ round: 1, diff: { available: true, files: ["legacy.js"] } }];
   assert.deepEqual(resolveEvidence(run, { type: "check", scope: "final" }).locator, { type: "check", scope: "final" });
   assert.equal(resolveEvidence(run, { type: "check", scope: "final" }).valid, true);
-  assert.equal(resolveEvidence(run, { type: "diff", stepId: "api" }).valid, true);
+  assert.equal(resolveEvidence(run, { type: "diff", stepId: "api" }).valid, false);
   assert.equal(resolveEvidence(run, { type: "artifact", artifactId: "other-run" }).valid, false);
   assert.equal(resolveEvidence(run, { type: "url", href: "https://example.test" }).valid, false);
 
@@ -110,7 +110,7 @@ test("resolves archived attempts and review-round checks without following mutab
   run.finalChecks = run.finalCheckHistory["final-review-2"];
 
   assert.equal(resolveEvidence(run, { type: "check", scope: "attempt", stepId: "api", attemptId: "attempt-1" }).target.command, "node test");
-  assert.equal(resolveEvidence(run, { type: "diff", scope: "attempt", stepId: "api", attemptId: "attempt-1" }).valid, true);
+  assert.equal(resolveEvidence(run, { type: "diff", scope: "attempt", stepId: "api", attemptId: "attempt-1" }).valid, false);
   assert.equal(resolveEvidence(run, { type: "check", scope: "final", reviewId: "final-review-1" }).target.summary, "original final output");
   assert.equal(resolveEvidence(run, { type: "check", scope: "final", reviewId: "final-review-2" }).target.summary, "replacement final output");
 });

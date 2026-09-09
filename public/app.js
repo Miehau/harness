@@ -22,7 +22,7 @@ let selectedStageKey = null;
 let selectedWorkerId = null;
 let selectedAttemptId = null;
 let selectedRunId = null;
-let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
+let activeTab = currentView && ["activity", "details", "overview", "run", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
 let deliberateSelection = false;
 let transportState = "connected";
@@ -970,7 +970,7 @@ function stageDetailsPanel(run, stage, profile, artifacts) {
   const index = run.stages.findIndex((item) => item.id === stage.id);
   const next = run.stages[index + 1];
   const milestones = stageMilestones(run, stage);
-  return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stageStepIndexHtml(run, stage)}${stageDependencyMapHtml(run, stage)}${stage.diff?.available ? `<details class="stage-diff"><summary>Repository changes <span>${escapeHtml(compactDiffLabel(stage.diff))}</span></summary><div class="tab-panel">${diffPanel(stage.diff, { id: `stage-${stage.id}` })}</div></details>` : ""}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
+  return `<section class="stage-details"><p>${escapeHtml(stage.summary || "Waiting to start")}</p><dl><div><dt>Workflow step</dt><dd>${index + 1} of ${run.stages.length}</dd></div><div><dt>Agent profile</dt><dd>${escapeHtml(profile ? `${profile.model} · ${profile.thinking}` : "system")}</dd></div><div><dt>Saved artifacts</dt><dd>${artifacts.length}</dd></div><div><dt>Next</dt><dd>${escapeHtml(next?.title || "Complete")}</dd></div></dl>${stageStepIndexHtml(run, stage)}${stageDependencyMapHtml(run, stage)}${profile?.prompt ? `<details class="stage-guidance"><summary>Stage instructions</summary><div class="artifact-body">${renderMarkdown(profile.prompt)}</div></details>` : ""}${milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : ""}</section>`;
 }
 
 function resourceFallbackHtml(resource) {
@@ -1003,7 +1003,6 @@ function attemptDetailContent(detail, tab) {
   if (tab === "activity") return `${warning}<section class="run-events"><span class="eyebrow">Recorded activity · ${resource.total || resource.items?.length || 0} events</span><div>${(resource.items || []).map((item) => `<article class="attempt-event ${item.isError ? "warning" : ""}"><strong>${escapeHtml(item.label || item.type || "Activity")}</strong><small>${escapeHtml(item.at || "time not recorded")}</small>${item.detail || item.result ? `<pre>${escapeHtml(formatOutput(item.detail || item.result))}</pre>` : ""}</article>`).join("") || resourceStateHtml({ state: "not_retained" }, "Activity")}</div></section>`;
   if (tab === "output") return `${warning}<pre data-attempt-output>${escapeHtml(resource.content || "")}</pre>`;
   if (tab === "artifacts") return resource.items?.length ? `${warning}${artifactsPanel(null, resource.items)}` : resourceStateHtml(resource, "Artifacts");
-  if (tab === "diff") return `${warning}${diffPanel({ available: true, patch: resource.content || "", files: resource.files || [], stat: resource.stat || "", truncated: resource.state === "truncated" }, { id: `attempt-${selectedAttemptId}`, actions: false })}`;
   if (tab === "checks") return `${warning}<section class="attempt-checks"><dl><div><dt>Status</dt><dd>${escapeHtml(resource.status || "not recorded")}</dd></div><div><dt>Command</dt><dd>${escapeHtml(resource.command || "not retained")}</dd></div><div><dt>Summary</dt><dd>${escapeHtml(resource.summary || "No check summary retained")}</dd></div></dl>${resource.output ? `<pre>${escapeHtml(formatOutput(resource.output))}</pre>` : resourceStateHtml(resource, "Check output")}</section>`;
   if (tab === "trace") return `${warning}<section class="attempt-trace"><span class="eyebrow">Trace availability</span>${resource.content?.rawOutput ? `<pre>${escapeHtml(formatOutput(resource.content.rawOutput))}</pre>` : resourceStateHtml(resource, "Trace")}</section>`;
   return `${warning}<article class="artifact"><div class="artifact-body">${renderMarkdown(resource.content || "")}</div></article>`;
@@ -1036,7 +1035,7 @@ function canonicalAttemptInspector(run, step, projection, worker, attempt) {
   const stored = attemptDetails.get(attemptDetailKey(run, attempt));
   loadAttemptDetails(run, attempt);
   const detail = liveAttemptDetail(run, step, attempt, stored?.detail || (stored?.error ? { error: stored.error } : null));
-  const tab = ["overview", "activity", "prompt", "output", "checks", "diff", "artifacts", "trace"].includes(activeTab) ? activeTab : "overview";
+  const tab = ["overview", "activity", "prompt", "output", "checks", "artifacts", "trace"].includes(activeTab) ? activeTab : "overview";
   const attempts = worker.attemptIds.map((id) => inspectionAttempt(id, projection)).filter(Boolean);
   const evidence = summary.evidence;
   // The canonical projection is immediately useful; detail only supplements it
@@ -1047,7 +1046,7 @@ function canonicalAttemptInspector(run, step, projection, worker, attempt) {
   const provenance = [failureKind, failurePhase].filter(Boolean).join(" · ") || "not recorded";
   const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(terminationReason)}</dd></div><div><dt>Failure provenance</dt><dd>${escapeHtml(provenance)}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : attemptDetailContent(detail, tab);
   const steering = attempt.lifecycle === "active" ? steeringPanel(run, step?.id) : "";
-  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}${steering}</div>`;
+  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}${steering}</div>`;
 }
 
 function renderInspector() {
@@ -1086,7 +1085,7 @@ function renderInspector() {
     target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
-  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
+  const workerTab = ["overview", "run", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
   const promptArtifact = workerTab === "prompt" ? [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt") : null;
   if (workerTab === "prompt") {
     loadSessionTrace(run, step);
@@ -1099,8 +1098,7 @@ function renderInspector() {
     : promptResource ? resourceStateHtml(promptResource, "Rendered agent prompt") : `<div class="run-empty">Prompt has not been rendered yet.</div>`;
   const stepArtifacts = run.artifacts.filter((artifact) => artifact.stepId === step.id);
   const panel = workerTab === "overview" ? overviewPanel(step)
-    : workerTab === "diff" ? stepDiffPanel(step)
-      : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
+    : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
         : workerTab === "ticket" ? artifactsPanel(null)
           : workerTab === "prompt" ? promptPanel
               : runPanel(step);
@@ -1110,7 +1108,7 @@ function renderInspector() {
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
     : (() => { const proof = proofMapView(run, { stepId: step.id }); return `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : proof.eligibility.eligible ? "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted." : `Proof gate blocked: ${escapeHtml(proof.eligibility.blockingReasons.map((reason) => reason.message).join(" "))}`}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea>${correctionCriterionPicker(run, { stepId: step.id })}<button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept & auto-run</button></section>`; })() : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
-  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
+  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
   target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header>${inspectorTabs(auxiliary ? [...tabs, [workerTab, auxiliary]] : tabs, workerTab)}${inspectorPanel(panel)}${reviewActions}<footer class="inspector-footer"><span>${outputLabel}${run.workspace?.cwd ? "" : " pending approval"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);

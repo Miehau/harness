@@ -129,20 +129,19 @@ function proofEvidenceNavigation(run, locator = {}) {
       label: locator.type === "media" ? "Open media" : "Open artifact"
     };
   }
-  if (locator.type === "check" || locator.type === "diff") {
+  if (locator.type === "check") {
     const params = new URLSearchParams({ scope: locator.scope || "step" });
     if (locator.stepId) params.set("stepId", locator.stepId);
     if (locator.attemptId) params.set("attemptId", locator.attemptId);
     if (locator.reviewId) params.set("reviewId", locator.reviewId);
-    const isDiff = locator.type === "diff";
     return {
       ...locator,
-      label: isDiff ? (locator.scope === "final" ? "Open final diff" : "Open diff") : "Open check output",
-      route: `/api/tickets/${ticketId}/proof/${isDiff ? "diff" : "check-output"}?${params}`,
-      tab: isDiff ? "diff" : "run"
+      label: "Open check output",
+      route: `/api/tickets/${ticketId}/proof/check-output?${params}`,
+      tab: "run"
     };
   }
-  return { ...locator, label: "Evidence unavailable" };
+  return { ...locator, unavailable: true, label: "Evidence unavailable" };
 }
 
 function projectedEligibility(criteria) {
