@@ -56,6 +56,9 @@ export function createRoutes({
     if (request.method === "POST" && coordinationAccept) return json(response, 200, await coordination.accept(routeId(coordinationAccept[1]), routeId(coordinationAccept[2]), await body(request)));
     const coordinationReject = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/revisions\/([^/]+)\/reject$/);
     if (request.method === "POST" && coordinationReject) return json(response, 200, await coordination.reject(routeId(coordinationReject[1]), routeId(coordinationReject[2]), await body(request)));
+    if (request.method === "GET" && url.pathname === "/api/workspace/readiness") {
+      return json(response, 200, await workspace.readiness({ visual: url.searchParams.get("visual") === "1" }));
+    }
     if (request.method === "GET" && url.pathname === "/api/health") {
       return json(response, 200, { ok: true, version });
     }

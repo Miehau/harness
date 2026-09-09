@@ -1,3 +1,4 @@
+import { inspectReadiness } from "./readiness.js";
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { isAbsolute, normalize } from "node:path";
@@ -28,6 +29,7 @@ export function createWorkspaceService({
   harness,
   loadLocal,
   ticketSources,
+  vcsMode = "jj",
 } = {}) {
   if (
     !state?.read ||
@@ -41,6 +43,11 @@ export function createWorkspaceService({
     );
   }
   return {
+    readiness({ visual = false } = {}) {
+      const snapshot = state.read();
+      return inspectReadiness({ cwd: snapshot.workspace.cwd, vcsMode, visual,
+        validateModels: () => harness.inspectModels ? harness.inspectModels(snapshot.stageProfiles) : harness.validateProfiles(snapshot.stageProfiles) });
+    },
     async pick() {
       if (process.platform !== "darwin")
         throw new Error("Native repository selection currently requires macOS");

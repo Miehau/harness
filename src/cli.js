@@ -7,6 +7,7 @@ const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
 Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
+  doctor [--visual]                Inspect project readiness without running project commands
   new text <prompt>                 Start a free-text ticket (New task dialog)
   list backlog                      Queue and tracker tickets
   list runs [ticketId]              Active and archived run identities for a ticket
@@ -74,6 +75,12 @@ function revisionInput(words) {
 
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
+  if (command === "doctor") {
+    if (rest.length && (rest.length !== 1 || rest[0] !== "--visual")) throw new Error("Usage: agent-plan doctor [--visual]");
+    const result = await request("GET", `/api/workspace/readiness${rest.length ? "?visual=1" : ""}`, { env, fetchImpl });
+    print(stdout, result);
+    return result.ready ? 0 : 1;
+  }
   if (command === "coordination") {
     const [action = "show", explicitId, input, ...extra] = rest;
     if (!["show", "conflict", "propose", "decide", "resolve", "accept", "reject"].includes(action) || (action !== "reject" && extra.length)) throw new Error("Usage: agent-plan coordination show|conflict|propose|resolve|accept|reject [ticketId] [input]");

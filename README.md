@@ -121,3 +121,14 @@ See [scripts/README.md](scripts/README.md).
 For agent orientation, read the [feature map](docs/feature-map.md) and separate [navigation reference](docs/feature-navigation.md). The [interactive repository review](docs/feature-review.html) records findings and lets you assemble a follow-up task brief. These are dated snapshots; refresh the live helpers before changing behavior.
 
 Jujutsu is the default history layer: each serial implementation step is an editable change whose stable change ID survives evolving revisions. Accepted changes are exported as ordinary Git commits before the existing review and delivery flow. Dependency-ready siblings run serially in this mode for now. Use `--vcs git` (or `AGENT_PLAN_VCS=git`) only when a repository needs the compatibility path.
+
+## Project readiness
+
+Run `agent-plan doctor` (or `node src/cli.js doctor`) against the running daemon.
+Add `--visual` to inspect UI command and preview declarations. The same read-only
+report is available at `GET /api/workspace/readiness?visual=1`. Exit status 1 means
+setup needs attention. Reports distinguish executed prerequisite checks from
+command declarations: doctor never runs project commands or paid model calls.
+Local authentication presence does not establish that a provider will accept it.
+Ticket requirements planning checks Node, Git, selected VCS, and configured Pi
+models/authentication first; project contract bootstrap can still follow planning.
