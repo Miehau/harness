@@ -1,3 +1,4 @@
+import { buildUiProposal } from "./ui-proposal.js";
 import { uiPlanSummary } from "./design-system.js";
 import { inspectReadiness } from "./readiness.js";
 import { randomUUID } from "node:crypto";
@@ -308,6 +309,7 @@ export function createPlanningRunner({
       const designArtifact = retainDurableRecord(result.artifact + uiPlanSummary(result.plan));
       const designPlan = retainDurableRecord(result.plan);
       const artifact = await persistArtifact(dataDir, run.ticket, { runId: run.runId, name: "design.md", content: designArtifact, stageId: "design", kind: "architecture" });
+      const proposal = await buildUiProposal({ dataDir, run, plan: designPlan, design: designArtifact, harness, signal, onEvent: captured.onEvent });
       let adopted = false;
       await state.update((draft) => {
         const current = ownedRun(draft, ticketId, run.runId, signal);
@@ -315,6 +317,10 @@ export function createPlanningRunner({
         adopted = true;
         current.sessionFile = result.sessionFile;
         current.plan = designPlan;
+        current.uiReviewRequired = designPlan.uiImpact?.level === "material";
+        if (current.uiProposal) (current.uiProposalHistory ||= []).push(current.uiProposal);
+        current.uiProposal = proposal ? (({ artifact, ...metadata }) => metadata)(proposal) : null;
+        if (proposal) current.artifacts.push(proposal.artifact);
         current.artifacts.push(artifact);
         current.status = "awaiting_approval";
         setStage(current, "design", "blocked", "Plan ready for approval. Named project commands are not a filesystem sandbox.").activity = captured.snapshot();
@@ -336,5 +342,28 @@ export function createPlanningRunner({
     }
   }
 
-  return { continueAfterRequirements, designTicket, prepareTicket };
+  async function reviseUiProposal(ticketId, feedback) {
+    return start(ticketId, async (signal) => {
+      const run = ticketRun(state.read(), ticketId);
+      const captured = capture(ticketId, "design", run.runId);
+      const design = await artifactText([...run.artifacts].reverse().find((artifact) => artifact.kind === "architecture"));
+      const proposal = await buildUiProposal({ dataDir, run, plan: run.plan, design, feedback, harness, signal, onEvent: captured.onEvent });
+      if (!proposal) throw new Error("This plan does not require a UI proposal");
+      await state.update((draft) => {
+        const current = ownedRun(draft, ticketId, run.runId, signal);
+        if (!current) return;
+        if (current.uiProposal) (current.uiProposalHistory ||= []).push(current.uiProposal);
+        const { artifact, ...metadata } = proposal;
+        current.uiProposal = metadata;
+        current.uiReviewRequired = true;
+        current.artifacts.push(artifact);
+        current.status = "awaiting_approval";
+        current.checkpoint = planApprovalCheckpoint(`Review revised UI proposal: ${proposal.summary}`);
+        setStage(current, "design", "blocked", "Revised UI proposal awaiting approval").activity = captured.snapshot();
+      });
+      return { ticketId, revisionId: proposal.revisionId };
+    });
+  }
+
+  return { continueAfterRequirements, designTicket, prepareTicket, reviseUiProposal };
 }

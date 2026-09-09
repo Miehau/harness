@@ -206,6 +206,16 @@ export function createRoutes({
         }),
       );
     }
+    const proposalPreview = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/artifacts\/([^/]+)\/preview$/);
+    if (request.method === "GET" && proposalPreview) {
+      const content = await inspection.uiProposalPreview({ ticketId: routeId(proposalPreview[1]), runId: routeId(proposalPreview[2]), artifactId: routeId(proposalPreview[3]) });
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
+      });
+      response.end(content);
+      return;
+    }
     const artifactMedia = url.pathname.match(
       /^\/api\/tickets\/([^/]+)(?:\/runs\/([^/]+))?\/artifacts\/([^/]+)\/media$/,
     );
@@ -502,6 +512,8 @@ export function createRoutes({
         await tickets.editPlan(routeId(editPlan[1]), await body(request)),
       );
     }
+    const proposal = url.pathname.match(/^\/api\/tickets\/([^/]+)\/ui-proposal\/changes$/);
+    if (request.method === "POST" && proposal) return json(response, 202, await tickets.reviseProposal(routeId(proposal[1]), await body(request)));
     const approve = url.pathname.match(/^\/api\/tickets\/([^/]+)\/approve$/);
     if (request.method === "POST" && approve) {
       return json(

@@ -16,7 +16,9 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   select <ticketId> [action]        Select; action: resume|approve|pause|cancel
   resume [ticketId]                 Resume paused, interrupted, or failed work
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
-  approve [ticketId] [--auto]       Run manually, or auto-run the graph
+  proposal show <ticketId>         Inspect current UI proposal and its artifact
+  proposal revise <ticketId> <revisionId> <feedback> Revise UI direction
+  approve [ticketId] [--auto] [--proposal revisionId]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
   revise-proof <ticketId> <feedback> [--criterion <id>] Request final-proof corrections (repeat flag for multiple criteria)
   restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
@@ -285,10 +287,34 @@ async function handleCommand(command, rest, ctx) {
     print(stdout, result);
     return 0;
   }
+  if (command === "proposal") {
+    const [action, id, revision, ...words] = rest;
+    if (!id || !["show", "revise"].includes(action)) throw new Error("Usage: agent-plan proposal show <ticketId> | revise <ticketId> <revisionId> <feedback>");
+    if (action === "show") {
+      const run = await request("GET", `/api/tickets/${encodeURIComponent(id)}/run?detail=1`, { env, fetchImpl });
+      const proposal = run.uiProposal;
+      if (!proposal) throw new Error("No UI proposal retained");
+      const artifact = await request("GET", `/api/tickets/${encodeURIComponent(id)}/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(proposal.artifactId)}/content`, { env, fetchImpl });
+      print(stdout, { ticketId: id, runId: run.runId, ...proposal, artifact });
+    } else {
+      if (!revision || !words.length) throw new Error("Proposal revision and feedback are required");
+      print(stdout, await request("POST", `/api/tickets/${encodeURIComponent(id)}/ui-proposal/changes`, { body: { proposalRevision: revision, feedback: words.join(" ") }, env, fetchImpl }));
+    }
+    return 0;
+  }
   if (command === "approve") {
-    const auto = rest.includes("--auto");
-    const id = await resolveTicketId(rest.find((arg) => arg !== "--auto"), ctx);
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/approve", { body: { auto }, env, fetchImpl });
+    const args = [...rest];
+    const at = args.indexOf("--proposal");
+    let proposalRevision;
+    if (at !== -1) {
+      if (!args[at + 1] || args[at + 1].startsWith("--")) throw new Error("--proposal requires a revision ID");
+      proposalRevision = args[at + 1]; args.splice(at, 2);
+    }
+    const auto = args.includes("--auto");
+    const positional = args.filter((arg) => arg !== "--auto");
+    if (positional.length > 1 || positional[0]?.startsWith("--")) throw new Error("Usage: agent-plan approve [ticketId] [--auto] [--proposal revisionId]");
+    const id = await resolveTicketId(positional[0], ctx);
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/approve", { body: { auto, ...(proposalRevision ? { proposalRevision } : {}) }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

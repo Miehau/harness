@@ -148,3 +148,17 @@ Projects without an install declaration retain their existing dependency behavio
 add that command to opt into managed preparation. `init --verify` reports baseline
 failures without claiming they are feature regressions. Initialization is blocked
 while ticket execution or delivery is active.
+
+Material frontend plans now generate a self-contained UI proposal during Design.
+Review the sandboxed prototype in the dashboard, request revisions, then approve
+the proposal and plan together. Minor cosmetic exemptions remain normal plan
+approvals. The operator equivalents are `proposal show <ticketId>`,
+`proposal revise <ticketId> <revisionId> <feedback>`, and
+`approve <ticketId> --proposal <revisionId> [--auto]`.
+
+Approval binds to the exact retained proposal and plan. Plan changes invalidate
+that binding; auto execution and final delivery cannot bypass it. Paused work can
+request a new direction, which invalidates prior visual proof. Old revisions remain
+available as artifacts/history. Prototype artifacts describe approved direction;
+only actual application captures can count as final visual evidence. Final review
+shows the approved prototype beside the implementation proof.

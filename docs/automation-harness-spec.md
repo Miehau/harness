@@ -114,5 +114,7 @@ classify impact as none, minor, or material with a reason; frontend additions ar
 material by default. Visual steps bind every AC to a stable criterion ID and an
 appropriate check/screenshot/video evidence type, with stable journey IDs for UI
 proof. Legacy authored plans retain their prior contract. Operator changes to the
-classification are recorded before plan approval. Proposal approval enforcement
-is delivered in the following product-plan slice.
+classification are recorded before plan approval. Material UI plans generate a retained HTML proposal before implementation. Approval
+binds its revision and content to the plan; changed direction requires revision
+and renewed approval, including in auto mode. The sandboxed prototype is direction,
+not implementation proof, and appears beside actual evidence at final review.

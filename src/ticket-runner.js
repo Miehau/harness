@@ -1,3 +1,4 @@
+import { assertUiProposal, requiresUiProposal } from "./ui-proposal.js";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
@@ -64,7 +65,7 @@ export function createTicketRunner({
   const { schedule } = delivery;
   const { artifactText } = artifacts;
   const { persistSnapshot } = proof;
-  const { prepare: prepareTicket, continueRequirements: continueAfterRequirements, design: designTicket } = planning;
+  const { prepare: prepareTicket, continueRequirements: continueAfterRequirements, design: designTicket, reviseProposal: reviseUiProposal } = planning;
   const { continueWorkflow: continueWorkflowWorker, generateCommitMessage } = harness;
   const { packageMetadata = {}, isAsyncResponse = () => false, ticketById = () => null, publishSelection = () => {} } = config;
   const readRun = (ticketId) => ticketRun(state.read(), ticketId);
@@ -158,6 +159,7 @@ export function createTicketRunner({
   async function advanceTicket(ticketId, signal) {
     signal?.throwIfAborted();
     const current = readRun(ticketId);
+    assertUiProposal(current);
     const ownerRunId = current.runId;
     if (executionBlockedByWorkflow(current)) {
       await state.update((draft) => pauseIfWorkflowBlocked(ticketRun(draft, ticketId)));
@@ -241,6 +243,7 @@ export function createTicketRunner({
       const ownerRunId = readRun(ticketId).runId;
       try {
         signal.throwIfAborted();
+        assertUiProposal(readRun(ticketId));
         await ensureExecutionStarted(ticketId);
         if (!ownedRun(ticketId, ownerRunId, signal)) return superseded(ticketId, signal);
         await ensureLocalWorkspace(ticketId, signal);
@@ -288,6 +291,7 @@ export function createTicketRunner({
 
   async function finishHandoff(ticketId) {
     const current = readRun(ticketId);
+    assertUiProposal(current);
     if (current.checkpoint?.kind !== "evidence_review") throw new Error("No final proof review is awaiting approval");
     const ownerRunId = current.runId;
     const checkpointId = current.checkpoint.id;
@@ -332,6 +336,7 @@ export function createTicketRunner({
       const current = ticketRun(draft, ticketId);
       if (JSON.stringify(current.plan.uiImpact) !== JSON.stringify(plan.uiImpact)) (current.uiImpactHistory ||= []).push({ before: current.plan.uiImpact || null, after: plan.uiImpact || null, source: "operator", at: new Date().toISOString() });
       current.plan = plan;
+      current.uiReviewRequired = plan.uiImpact?.level === "material";
       current.planEditedAt = new Date().toISOString();
     });
   }
@@ -943,16 +948,44 @@ export function createTicketRunner({
     return { accepted: true, ticketId };
   }
 
+  async function reviseProposal(ticketId, input = {}) {
+    const run = readRun(ticketId);
+    const feedback = String(input.feedback || "").trim().slice(0, 4000);
+    if (!feedback) throw new Error("Describe the requested UI proposal changes");
+    if (runtime.activeTickets.has(ticketId) || runtime.activeMerges.has(ticketId)) throw new Error("Pause active work before revising UI direction");
+    if (!["awaiting_approval", "paused", "interrupted", "needs_attention", "awaiting_input", "failed"].includes(run.status)) throw new Error("UI proposals can be revised only before execution or while work is stopped");
+    if (run.uiProposal && input.proposalRevision !== run.uiProposal.revisionId) throw new Error("UI proposal revision is stale");
+    if (run.plan?.uiImpact?.level !== "material") throw new Error("This plan does not require a UI proposal");
+    await state.update((draft) => {
+      const current = ticketRun(draft, ticketId);
+      if (current.uiProposalGenerating || current.runId !== run.runId || current.uiProposal?.revisionId !== run.uiProposal?.revisionId) throw new Error("UI proposal revision is no longer current");
+      current.uiProposalGenerating = true;
+      if (current.uiProposal) current.uiProposal.invalidatedAt = new Date().toISOString();
+      if (current.proofMap) current.proofMap = invalidateProof(current.proofMap, current.proofMap.criteria.filter((criterion) => criterion.requiresVisualEvidence).map((criterion) => criterion.id), { reason: "UI direction revised" });
+    });
+    try { return await reviseUiProposal(ticketId, feedback); }
+    finally { await state.update((draft) => { if (draft.ticketRuns[ticketId]?.runId === run.runId) draft.ticketRuns[ticketId].uiProposalGenerating = false; }); }
+  }
+
   async function approvePlan(ticketId, input = {}) {
     const run = readRun(ticketId);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
     const violations = [...planReviewViolations(run.plan), ...uiContractViolations(run.plan)];
     if (violations.length) throw new Error(`Split or justify oversized plan steps before approval: ${violations.join("; ")}`);
+    assertUiProposal(run, input.proposalRevision, { approving: true });
+    if (requiresUiProposal(run)) {
+      const html = await artifactText(run.artifacts.find((artifact) => artifact.id === run.uiProposal.artifactId));
+      if (!html || createHash("sha256").update(html).digest("hex") !== run.uiProposal.contentHash) throw new Error("Retained UI proposal is missing or changed; generate a new revision before approval");
+    }
+    const approvalRunId = run.runId;
     const approvedAt = new Date().toISOString();
     const proofMap = run.proofMap || initializeProofMap(run.plan, { approvedAt });
     const proofArtifact = run.proofMap ? null : await persistArtifact(dataDir, run.ticket, { runId: run.runId, stageId: "design", name: "proof-map-approved.json", kind: "proof-map", content: JSON.stringify(proofMap, null, 2) });
     await state.update((draft) => {
       const current = ticketRun(draft, ticketId);
+      if (current.runId !== approvalRunId) throw new Error("Plan approval is stale");
+      assertUiProposal(current, input.proposalRevision, { approving: true });
+      if (requiresUiProposal(current)) current.uiProposal.approvedAt = approvedAt;
       current.auto = input.auto === undefined ? Boolean(current.automaticAdmission) : Boolean(input.auto);
       current.status = "awaiting_approval";
       current.ticketSnapshot = structuredClone(current.ticket);
@@ -1051,6 +1084,7 @@ export function createTicketRunner({
     createReviewMap,
     decideStep,
     editPlan,
+    reviseProposal,
     ensureLocalWorkspace,
     expandStepScope,
     finishHandoff,

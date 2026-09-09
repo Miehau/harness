@@ -352,6 +352,17 @@ function proofGalleryHtml(review) {
   return `<section class="proof-gallery" aria-label="Visual proof">${proof}</section>`;
 }
 
+function uiProposalHtml(run, editable = false) {
+  const proposal = run?.uiProposal;
+  if (!proposal) return run?.plan?.uiImpact?.level === "material" ? `<p class="error-banner">A UI proposal is required before implementation.</p>` : "";
+  const artifact = run.artifacts?.find((item) => item.id === proposal.artifactId);
+  if (artifact) hydrateArtifact(run, artifact);
+  const body = artifact && artifactBody(artifact, run);
+  const preview = body?.state === "available" ? `<iframe title="UI proposal preview" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${escapeHtml(artifactRoute(run, artifact.id, "/preview"))}" style="width:100%;height:420px;border:1px solid var(--border);background:white"></iframe>` : `<p>Loading retained proposal…</p>`;
+  const changes = editable ? `<form data-revise-ui="${escapeHtml(run.id)}" data-proposal-revision="${escapeHtml(proposal.revisionId)}"><label>Request UI changes<textarea name="feedback" rows="2" required></textarea></label><button class="button" type="submit">Revise proposal</button></form>` : "";
+  return `<section class="ui-proposal"><h3>${proposal.approvedAt ? "Approved UI direction" : "Review UI proposal"}</h3><p>${escapeHtml(proposal.summary)}</p><small>Proposal revision ${escapeHtml(proposal.revisionId)} · prototype, not implementation evidence</small>${preview}${changes}</section>`;
+}
+
 function checkpointHtml(run) {
   const checkpoint = run?.checkpoint;
   const history = clarificationHistoryHtml(run);
@@ -377,7 +388,7 @@ function checkpointHtml(run) {
     const review = finalReview(run);
     const checks = review.checks ? `<section class="final-review-summary"><span class="eyebrow">Automated checks</span><strong class="status-${escapeHtml(review.checks.status || "completed")}">${escapeHtml(review.checks.status || "completed")}</strong><p>${escapeHtml(review.checks.summary || review.checks.command || "Completed")}</p></section>` : "";
     const reviews = review.reviews.length ? `<section class="final-review-summary"><span class="eyebrow">Independent review</span>${review.reviews.map((item) => `<p><strong>${escapeHtml(item.role)}</strong> ${escapeHtml(item.summary || "Completed")}</p>`).join("")}</section>` : "";
-    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header>${proofGalleryHtml(review)}${criterionProofHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
+    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header>${uiProposalHtml(run)}${proofGalleryHtml(review)}${criterionProofHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
   }
   if (checkpoint.kind === "product_context_review") {
     return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Product-context gate</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract"><summary>Review proposed PRD and capability update</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details></div><button class="button success" type="button" data-approve-context="${escapeHtml(run.id)}">Approve & complete</button></div>`;
@@ -385,7 +396,10 @@ function checkpointHtml(run) {
   if (checkpoint.kind === "review_blocked") {
     return `<div class="checkpoint"><div class="checkpoint-icon">!</div><div class="checkpoint-copy"><span class="eyebrow">Final review blocked</span><strong>${escapeHtml(checkpoint.title)}</strong><p>${checkpoint.findings?.length || 0} blocking finding${checkpoint.findings?.length === 1 ? "" : "s"} require human attention.</p></div></div>`;
   }
-  return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" data-approve-ticket="${escapeHtml(run.id)}">Run manually</button><button class="button success" type="button" data-auto-ticket="${escapeHtml(run.id)}">Auto run graph</button></div></div>`;
+  const proposalRevision = run.uiProposal?.revisionId || "";
+  const proposalArtifact = run.artifacts?.find((item) => item.id === run.uiProposal?.artifactId);
+  const proposalReady = run.plan?.uiImpact?.level !== "material" || (proposalArtifact && artifactBody(proposalArtifact, run)?.state === "available");
+  return `${uiProposalHtml(run, true)}<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-approve-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & run manually" : "Run manually"}</button><button class="button success" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-auto-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & auto run" : "Auto run graph"}</button></div></div>`;
 }
 
 function workflowCheckpointsHtml(run) {
@@ -1753,13 +1767,13 @@ document.addEventListener("click", async (event) => {
   }
   const approve = event.target.closest("[data-approve-ticket]");
   if (approve) {
-    try { await api(`/api/tickets/${encodeURIComponent(approve.dataset.approveTicket)}/approve`, { method: "POST", body: "{}" }); notify("Plan approved; agents are running"); }
+    try { await api(`/api/tickets/${encodeURIComponent(approve.dataset.approveTicket)}/approve`, { method: "POST", body: JSON.stringify({ proposalRevision: approve.dataset.proposalRevision || undefined }) }); notify("Plan approved; agents are running"); }
     catch (error) { notify(error.message); }
     return;
   }
   const auto = event.target.closest("[data-auto-ticket]");
   if (auto) {
-    try { await api(`/api/tickets/${encodeURIComponent(auto.dataset.autoTicket)}/approve`, { method: "POST", body: JSON.stringify({ auto: true }) }); notify("Auto mode started; verified commits will advance automatically"); }
+    try { await api(`/api/tickets/${encodeURIComponent(auto.dataset.autoTicket)}/approve`, { method: "POST", body: JSON.stringify({ auto: true, proposalRevision: auto.dataset.proposalRevision || undefined }) }); notify("Auto mode started; verified commits will advance automatically"); }
     catch (error) { notify(error.message); }
     return;
   }
@@ -1927,6 +1941,15 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  if (event.target.dataset.reviseUi) {
+    event.preventDefault();
+    const form = event.target;
+    try {
+      await api(`/api/tickets/${encodeURIComponent(form.dataset.reviseUi)}/ui-proposal/changes`, { method: "POST", body: JSON.stringify({ proposalRevision: form.dataset.proposalRevision, feedback: new FormData(form).get("feedback") }) });
+      notify("Revised UI proposal ready for review");
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
   if (event.target.dataset.coordinationForm) {
     event.preventDefault();
     const form = event.target;

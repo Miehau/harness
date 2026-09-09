@@ -137,3 +137,42 @@ test("journeys reject covered controls and broken keyboard navigation, retaining
     }), /Keyboard cannot reach.*access-any/);
   });
 });
+
+test("material UI proposals render in a sandbox before plan approval", { timeout: 60000 }, async () => {
+  const { buildUiProposal } = await import("../src/ui-proposal.js");
+  const { planApprovalCheckpoint } = await import("../src/planning.js");
+  const { capturePage } = await import("../scripts/screenshot.mjs");
+  await withDaemon(async (daemon, { dataDir }) => {
+    const plan = normalizePlan({ uiImpact: { level: "material", reason: "New panel" }, nodes: [{ id: "panel", title: "Panel" }] });
+    const id = await seedRun(daemon, { plan, status: "awaiting_approval", checkpoint: planApprovalCheckpoint("Review panel") });
+    const run = daemon.store.read().ticketRuns[id];
+    const proposal = await buildUiProposal({ dataDir, run, plan, design: "Panel", harness: { proposeUi: async () => ({
+      html: `<main style="font-family:system-ui;padding:28px"><h1>Activity panel</h1><p>Current work and recent updates</p><button onclick="this.textContent='Expanded';parent.postMessage({proposalExpanded:true},'*')">Expand details</button></main><script>onload=()=>{const r=document.querySelector('button').getBoundingClientRect();parent.postMessage({proposalReady:{x:r.x+r.width/2,y:r.y+r.height/2}},'*')}</script>`, summary: "Activity panel direction" }) } });
+    await daemon.store.update((draft) => {
+      const { artifact, ...metadata } = proposal;
+      draft.ticketRuns[id].uiProposal = metadata;
+      draft.ticketRuns[id].artifacts.push(artifact);
+      draft.ticketRuns[id].stages.find((stage) => stage.id === "design").status = "blocked";
+    });
+    await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
+    await runJourney({ url: `http://127.0.0.1:${daemon.server.address().port}`, screenshot: process.env.AGENT_PLAN_PROPOSAL_PROOF || join(dataDir, "proposal.png"),
+      commands: [["tasks", "open", id], ["stage", "design"]], assertions: [{ selector: ".ui-proposal", text: "Activity panel direction" }],
+      capture: (options) => capturePage({ ...options, interact: async (browser) => {
+        await browser.evaluate(`addEventListener('message', e => { if(e.data?.proposalReady) globalThis.proposalReady=e.data.proposalReady; if(e.data?.proposalExpanded) globalThis.proposalExpanded=true; })`);
+        await options.interact(browser);
+        await browser.evaluate(`(async () => {
+          for(let n=0;n<100&&!globalThis.proposalReady;n++) await new Promise(r=>setTimeout(r,50));
+          if(!globalThis.proposalReady) throw new Error('Proposal did not render');
+          await new Promise(r=>setTimeout(r,500));
+          const frame=document.querySelector('.ui-proposal iframe');
+          if(frame.getAttribute('sandbox')!=='allow-scripts') throw new Error('Missing sandbox');
+          frame.scrollIntoView({block:'center',behavior:'instant'});
+          const r=frame.getBoundingClientRect(), p=globalThis.proposalReady;
+          await __agentPlanInput('Input.dispatchMouseEvent',{type:'mouseMoved',x:r.x+p.x+1,y:r.y+p.y+1});
+          for(const type of ['mousePressed','mouseReleased']) await __agentPlanInput('Input.dispatchMouseEvent',{type,x:r.x+p.x+1,y:r.y+p.y+1,button:'left',clickCount:1});
+          for(let n=0;n<100&&!globalThis.proposalExpanded;n++) await new Promise(r=>setTimeout(r,50));
+          if(!globalThis.proposalExpanded) throw new Error('Proposal interaction did not execute '+JSON.stringify({p,rect:{x:r.x,y:r.y},hit:document.elementFromPoint(r.x+p.x+1,r.y+p.y+1)?.outerHTML?.slice(0,200)}));
+        })()`);
+      } }) });
+  });
+});

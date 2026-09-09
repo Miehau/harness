@@ -361,6 +361,14 @@ export class PiHarness {
     }, `${ticket.id}:ticket-lookahead`);
   }
 
+  async proposeUi({ cwd, ticket, runId, plan, design, feedback, profile, access, repositories, signal, onEvent }) {
+    return this.supervisorTurn(async () => {
+      const session = await this.planningSession(cwd, null, `${ticket.id}-${runId}-ui-proposal`, { profile, access, repositories });
+      const reply = await this.visibleSupervisorPrompt(session, `Produce a reviewable UI proposal before product implementation. Inspect existing components and design conventions as needed, without editing files. Return JSON with html and summary. html must be a self-contained prototype under 16000 characters, with inline CSS, no external dependencies or network requests. Use the existing visual language. Show relevant normal/loading/empty/error/success states, responsive layout and keyboard/focus behavior. Include clickable interactions with inline JavaScript when interaction is central. This is proposal evidence, never implementation proof. Summarize reuse and intentional deviations.\n\nPlan: ${JSON.stringify(plan)}\nDesign: ${design}\nRequested changes: ${feedback || "Initial proposal"}`, { publishText: false, onEvent, signal });
+      return parseModelOutput(reply, { html: "nonEmptyString", summary: "nonEmptyString" }, "UI proposal");
+    }, this.supervisorRunKey(ticket.id, runId));
+  }
+
   async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, uiImpact, profile, access, repositories, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access, repositories });

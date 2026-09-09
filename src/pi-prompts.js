@@ -383,6 +383,7 @@ ${discoveryInstruction}
 ${
   step.requiresVisualEvidence || step.requiresVideoEvidence
     ? `## UI plan and existing conventions
+The current ui-proposal artifact is the approved direction, not implementation evidence. Implement its intent and compare final behavior against it. If a material departure is needed, stop with needs_input and request a UI proposal revision before proceeding.
 ${uiPlanningInstruction}
 ${step.criterionBindings ? `Approved criterion/journey bindings: ${JSON.stringify(step.criterionBindings)}` : ""}
 ${step.uiPlan ? JSON.stringify(step.uiPlan, null, 2) : "Before editing UI, state the existing pattern to reuse, hierarchy, required states, interaction and proof journey. Explain any deviation."}`
