@@ -307,7 +307,7 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     ...mockHarness(),
     sessionTrace: async () => ({
       prompts: [{ prompt: "trace token=secret_abcdefgh", at: "2026-09-03T10:00:00.000Z" }],
-      events: [{ type: "reasoning_summary", detail: "Safe summary", at: "2026-09-03T10:00:01.000Z" }],
+      events: [{ type: "reasoning_summary", detail: "Safe summary", at: "2026-09-03T10:00:01.000Z" }, { type: "usage", input: 12, output: 3, cacheRead: 7, cacheWrite: 2 }],
       rawOutput: "trace ghp_0123456789abcdefghijklmnop " + "y".repeat(21000)
     })
   };
@@ -343,6 +343,8 @@ test("attempt details are bounded, redacted, and require the exact retained iden
     assert.equal(JSON.stringify(detail.json).includes("ghp_0123456789abcdefghijklmnop"), false);
     assert.equal(JSON.stringify(detail.json).includes("/tmp/private-session.jsonl"), false);
     assert.equal(detail.json.trace.content.events[0].type, "reasoning_summary");
+    const usage = detail.json.trace.content.events[1];
+    assert.deepEqual([usage.input, usage.output, usage.cacheRead, usage.cacheWrite], [12, 3, 7, 2]);
     assert.equal(detail.json.trace.state, "truncated");
     assert.equal((await invoke(daemon, "GET", `/api/tickets/${id}/runs/other/steps/build/attempts/attempt-1/details`)).status, 400);
 

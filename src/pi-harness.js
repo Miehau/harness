@@ -1044,6 +1044,8 @@ export class PiHarness {
         trace.prompt = redactText(textFromContent(message.content));
         trace.prompts.push({ prompt: trace.prompt, at });
       }
+      const usage = safeEvent({ type: "message_end", message });
+      if (usage?.type === "usage") pushBounded(trace.events, { ...usage, at }, 200);
       if (message.role === "assistant") for (const part of message.content || []) {
         if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, redactText(part.text), 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
@@ -1835,8 +1837,11 @@ Every reported finding triggers an automatic correction round. Report concrete d
     });
     try {
       signal?.throwIfAborted();
-      const turnPrompt = existingFile
+      const resumed = Boolean(existingFile && session.state.messages.length);
+      if (existingFile && !resumed) onEvent?.({ type: "phase", label: "Saved reviewer context unavailable; rebuilding full review context" });
+      const turnPrompt = resumed
         ? `Continue the interrupted independent review from the existing conversation. Preserve verified inspection; use this current index and its constraints to supersede stale evidence.\n\n${prompt}`
+
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });
       await session.prompt(turnPrompt, { images: [] });

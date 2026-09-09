@@ -1209,6 +1209,7 @@ function textDetail(saved, limit, unavailable, artifact = null) {
 function detailActivityEvent(event = {}) {
   const item = redactRecord({ type: event.type || "activity", tool: event.tool || null, callId: event.callId || null, label: boundedText(event.label, 240).value, at: event.at || null, actor: boundedText(event.actor, 120).value || null, isError: Boolean(event.isError) });
   if (item.type === "thinking") return item;
+  if (item.type === "usage") return { ...item, ...Object.fromEntries(["input", "output", "cacheRead", "cacheWrite"].map((key) => [key, Number(event[key]) || 0])) };
   if (event.type === "reasoning_summary") return { ...item, detail: boundedText(event.detail, 1000).value };
   for (const key of ["args", "detail", "result"]) if (event[key] != null) item[key] = boundedText(event[key], 2000).value;
   return item;
