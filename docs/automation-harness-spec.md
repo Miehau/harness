@@ -105,3 +105,14 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 4. Replace direct-main integration with GitHub/GitLab PR/MR adapters, existing-CI gates, review feedback handling, squash merge, and safe local fast-forward.
 5. Add isolated preview process/port management and strengthen visual evidence workflows.
 6. Add manual retained-worktree/artifact cleanup, dashboard usage reporting, and end-to-end adapter scenario coverage.
+
+### Frontend planning contract
+
+Requirements record provisional UI impact. Exploration confirms existing patterns,
+journeys, and material scope changes before design. New generated plans explicitly
+classify impact as none, minor, or material with a reason; frontend additions are
+material by default. Visual steps bind every AC to a stable criterion ID and an
+appropriate check/screenshot/video evidence type, with stable journey IDs for UI
+proof. Legacy authored plans retain their prior contract. Operator changes to the
+classification are recorded before plan approval. Proposal approval enforcement
+is delivered in the following product-plan slice.

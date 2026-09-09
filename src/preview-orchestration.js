@@ -24,19 +24,18 @@ function assertOwningRun(state, ticketId, runId, signal) {
 }
 
 export function captureProofCriteria(criteria = [], stepId = null) {
-  const hasVisualCriteria = criteria.some((criterion) =>
-    criterion.requiresVisualEvidence || criterion.requiresVideoEvidence
-  );
+  const hasVisualCriteria = criteria.some((criterion) => criterion.evidenceType || criterion.requiresVisualEvidence || criterion.requiresVideoEvidence);
   return criteria
     .filter((criterion) =>
       (!stepId || criterion.stepId === stepId) &&
       (!hasVisualCriteria || criterion.requiresVisualEvidence || criterion.requiresVideoEvidence)
     )
-    .map(({ id, text, stepId: criterionStepId, requiresVideoEvidence }) => ({
+    .map(({ id, text, stepId: criterionStepId, requiresVideoEvidence, journeyId }) => ({
       id,
       text,
       stepId: criterionStepId,
-      requiresVideoEvidence
+      requiresVideoEvidence,
+      ...(journeyId ? { journeyId } : {})
     }));
 }
 
@@ -143,11 +142,12 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
             AGENT_PLAN_CAPTURE_CRITERIA: JSON.stringify(
               criteria
                 .filter((criterion) => criterion.requiresVisualEvidence)
-                .map(({ id, text, stepId: criterionStepId, requiresVideoEvidence }) => ({
+                .map(({ id, text, stepId: criterionStepId, requiresVideoEvidence, journeyId }) => ({
                   id,
                   text,
                   stepId: criterionStepId,
-                  requiresVideoEvidence
+                  requiresVideoEvidence,
+                  ...(journeyId ? { journeyId } : {})
                 }))
             )
           }

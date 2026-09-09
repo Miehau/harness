@@ -1,3 +1,4 @@
+import { uiPlanSummary } from "./design-system.js";
 import { inspectReadiness } from "./readiness.js";
 import { randomUUID } from "node:crypto";
 import { persistArtifact, readProductContext } from "./artifacts.js";
@@ -93,6 +94,7 @@ export function createPlanningRunner({
           if (!current) return;
           adopted = true;
           current.requirementsSessionFile = clarified.sessionFile;
+          if (clarified.uiImpact) current.uiImpactProvisional = clarified.uiImpact;
           current.artifacts.push(contextSnapshot, artifact);
           if (pauseIfWorkflowBlocked(current)) {
             setStage(current, "requirements", "blocked", current.checkpoint.title).activity = captured.snapshot();
@@ -155,6 +157,7 @@ export function createPlanningRunner({
             if (!current) return;
             adopted = true;
             current.requirementsSessionFile = clarified.sessionFile;
+          if (clarified.uiImpact) current.uiImpactProvisional = clarified.uiImpact;
             current.artifacts.push(artifact);
             current.status = "awaiting_requirements";
             setStage(current, "requirements", "blocked", "Review the revised requirements or answer a follow-up").activity = captured.snapshot();
@@ -297,12 +300,12 @@ export function createPlanningRunner({
       const result = await harness.designTicket({
         cwd: run.workspace.cwd, ticket: run.ticket, sessionFile: run.sessionFile, runId: run.runId, access: run.access, repositories: run.repositories || [],
         productContext: productContextBody, requirements: requirementsBody, exploration: explorationBody,
-        ticketLookAhead: ticketLookAhead || "No nearby ticket implications were found.", answers,
+        ticketLookAhead: ticketLookAhead || "No nearby ticket implications were found.", answers, uiImpact: run.uiImpactProvisional,
         profile: run.stageProfiles.architecture, onEvent: captured.onEvent, onSessionFile: saveOwnedSession(ticketId, run.runId, "sessionFile", signal), signal
       });
       signal?.throwIfAborted();
       if (!ownedRun(state.read(), ticketId, run.runId, signal)) return outcome(ticketId, signal?.aborted ? "aborted" : "superseded");
-      const designArtifact = retainDurableRecord(result.artifact);
+      const designArtifact = retainDurableRecord(result.artifact + uiPlanSummary(result.plan));
       const designPlan = retainDurableRecord(result.plan);
       const artifact = await persistArtifact(dataDir, run.ticket, { runId: run.runId, name: "design.md", content: designArtifact, stageId: "design", kind: "architecture" });
       let adopted = false;

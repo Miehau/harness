@@ -16,7 +16,7 @@ import { initializeProofMap, invalidateProof, proofGate, proofGateError, stepCri
 import { planApprovalCheckpoint } from "./planning.js";
 import { freezeRunAccess, readProjectPolicy } from "./access-policy.js";
 import { persistArtifact, safeName } from "./artifacts.js";
-import { designSystemExists, ensureDesignSystemStep } from "./design-system.js";
+import { designSystemExists, ensureDesignSystemStep, uiContractViolations } from "./design-system.js";
 import { loadLocalFixture } from "./local.js";
 import { auditHarnessWriteScopes, ensureVerificationContractStep, verificationContractExists } from "./pi-prompts.js";
 import { loadProjectConfig, projectConfigPath } from "./project-config.js";
@@ -325,10 +325,12 @@ export function createTicketRunner({
     const run = readRun(ticketId);
     if (!planApprovalPending(run)) throw new Error("Plans can only be edited at the approval checkpoint");
     const plan = normalizeEditedPlan(input.plan);
-    const violations = planReviewViolations(plan);
+    if (run.plan.uiImpact && !plan.uiImpact) plan.uiImpact = run.plan.uiImpact;
+    const violations = [...planReviewViolations(plan), ...uiContractViolations(plan)];
     if (violations.length) throw new Error(violations.join("; "));
     return state.update((draft) => {
       const current = ticketRun(draft, ticketId);
+      if (JSON.stringify(current.plan.uiImpact) !== JSON.stringify(plan.uiImpact)) (current.uiImpactHistory ||= []).push({ before: current.plan.uiImpact || null, after: plan.uiImpact || null, source: "operator", at: new Date().toISOString() });
       current.plan = plan;
       current.planEditedAt = new Date().toISOString();
     });
@@ -944,7 +946,7 @@ export function createTicketRunner({
   async function approvePlan(ticketId, input = {}) {
     const run = readRun(ticketId);
     if (!planApprovalPending(run)) throw new Error("This ticket has no plan awaiting approval");
-    const violations = planReviewViolations(run.plan);
+    const violations = [...planReviewViolations(run.plan), ...uiContractViolations(run.plan)];
     if (violations.length) throw new Error(`Split or justify oversized plan steps before approval: ${violations.join("; ")}`);
     const approvedAt = new Date().toISOString();
     const proofMap = run.proofMap || initializeProofMap(run.plan, { approvedAt });

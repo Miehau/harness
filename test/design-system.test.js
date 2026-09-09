@@ -41,3 +41,28 @@ test("UI decisions survive plan normalization and validation asks for missing de
   const prepared = ensureDesignSystemStep(grouped, false);
   assert.ok(flattenSteps(prepared).find((step) => step.id === "ui").dependsOn.includes(prepared.nodes[0].id));
 });
+
+test("frontend plans preserve impact exemptions and stable per-criterion journey contracts", async () => {
+  const { prepareUiPlan, uiContractViolations, uiPlanSummary } = await import("../src/design-system.js");
+  const { initializeProofMap } = await import("../src/proof-map.js");
+  const { captureProofCriteria } = await import("../src/preview-orchestration.js");
+  const input = { uiImpact: { level: "minor", reason: "Change button colour using an existing token" }, nodes: [{ ...ui,
+    acceptanceCriteria: ["Button uses the approved colour", "Settings persist after restart"],
+    criterionBindings: [{ index: 0, id: "ac-colour", evidence: "screenshot", journeyId: "button-colour" }, { index: 1, id: "ac-persistence", evidence: "check" }]
+  }] };
+  const plan = normalizePlan(input);
+  assert.deepEqual(uiContractViolations(plan), []);
+  assert.equal(prepareUiPlan(plan).uiImpact.level, "minor");
+  assert.equal(prepareUiPlan(normalizePlan({ nodes: [ui] })).uiImpact.level, "material");
+  assert.equal(prepareUiPlan(plan, { level: "material", reason: "New panel" }).uiImpact.level, "material");
+  assert.match(uiPlanSummary(plan), /minor.*\nChange button colour/);
+  const criteria = initializeProofMap(plan).criteria;
+  assert.equal(criteria[1].requiresVisualEvidence, false);
+  assert.deepEqual(captureProofCriteria(criteria).map((criterion) => criterion.journeyId), ["button-colour"]);
+  assert.deepEqual(captureProofCriteria([criteria[1]]), []);
+  input.nodes[0].acceptanceCriteria[0] = "Reworded colour requirement";
+  assert.equal(initializeProofMap(normalizePlan(input)).criteria[0].id, "ac-colour");
+  assert.throws(() => normalizePlan({ ...input, uiImpact: { level: "minor" } }), /reason/);
+  assert.throws(() => normalizePlan({ nodes: [{ ...input.nodes[0], criterionBindings: [{ index: 8, id: "bad", evidence: "check" }] }] }), /indices/);
+  assert.ok(uiContractViolations(normalizePlan({ ...input, uiImpact: { level: "none", reason: "Incorrectly exempted" } })).length);
+});

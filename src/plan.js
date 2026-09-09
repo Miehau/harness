@@ -39,6 +39,26 @@ function strings(value) {
   return [];
 }
 
+export function normalizeUiImpact(value) {
+  if (!value || !["none", "minor", "material"].includes(value.level)) throw new Error("UI impact must be none, minor, or material");
+  const reason = String(value.reason || "").trim().slice(0, 1000);
+  if (!reason) throw new Error("UI impact requires a reason (including minor-change exemptions)");
+  return { level: value.level, reason };
+}
+
+function normalizeCriterionBindings(value, criteria) {
+  if (!Array.isArray(value)) throw new Error("criterionBindings must be an array");
+  const seen = new Set();
+  return value.map((binding) => {
+    if (!binding || !Number.isInteger(binding.index) || binding.index < 0 || binding.index >= criteria.length || seen.has(binding.index)) throw new Error("Criterion bindings require unique valid acceptance-criterion indices");
+    seen.add(binding.index);
+    if (!/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(binding.id || "")) throw new Error("Criterion bindings require stable IDs");
+    if (!["check", "screenshot", "video"].includes(binding.evidence)) throw new Error("Criterion evidence must be check, screenshot, or video");
+    if (binding.evidence !== "check" && !/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(binding.journeyId || "")) throw new Error("Visual criteria require a stable journeyId");
+    return { index: binding.index, id: binding.id, evidence: binding.evidence, ...(binding.evidence !== "check" ? { journeyId: binding.journeyId } : {}) };
+  });
+}
+
 function normalizeStep(raw, used, defaultHarness) {
   if (!raw || typeof raw !== "object") throw new Error("Each step must be an object");
   const title = String(raw.title || raw.name || "Untitled step").trim();
@@ -66,6 +86,7 @@ function normalizeStep(raw, used, defaultHarness) {
     productContext: String(raw.productContext || "").trim(),
     expectedArtifacts: strings(raw.expectedArtifacts),
     acceptanceCriteria: strings(raw.acceptanceCriteria),
+    ...(raw.criterionBindings !== undefined ? { criterionBindings: normalizeCriterionBindings(raw.criterionBindings, strings(raw.acceptanceCriteria)) } : {}),
     ...(raw.uiPlan && typeof raw.uiPlan === "object" ? { uiPlan: Object.fromEntries(["reuse", "hierarchy", "states", "interaction", "proof", "deviations"].map((key) => [key, String(raw.uiPlan[key] || "").trim().slice(0, 600)])) } : {}),
     requiresVisualEvidence: raw.requiresVisualEvidence === true || raw.requiresVideoEvidence === true,
     requiresVideoEvidence: raw.requiresVideoEvidence === true,
@@ -153,7 +174,10 @@ export function normalizePlan(raw) {
     step.dependsOn = step.dependsOn.filter((id) => id !== step.id && known.has(id));
   }
 
+  const criterionIds = flattenSteps({ nodes }).flatMap((step) => (step.criterionBindings || []).map((binding) => binding.id));
+  if (new Set(criterionIds).size !== criterionIds.length) throw new Error("Criterion IDs must be unique across the plan");
   return {
+    ...(raw.uiImpact !== undefined ? { uiImpact: normalizeUiImpact(raw.uiImpact) } : {}),
     id: String(raw.id || `plan-${randomUUID().slice(0, 8)}`),
     title: String(raw.title || "Untitled plan").trim(),
     summary: String(raw.summary || "").trim(),

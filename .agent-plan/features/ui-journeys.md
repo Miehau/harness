@@ -36,3 +36,12 @@ Regression/proof: `AGENT_PLAN_INSPECTION_PROOF=/tmp/inspection node scripts/test
 Token counters use cumulative usage retained independently of bounded activity logs. Active workers contribute immediately; saved attempts retain totals on completion. Older runs use available usage events and mark totals partial; missing usage is shown as “—”, not zero. The streaming browser regression also checks token totals before and after reload.
 
 Journeys use Chromium mouse/key events and pointer hit testing. The policy keyboard journey traverses controls with Tab and operates the access checkbox with Space. Failed journeys report the action and retain a screenshot plus a `.failure.json` diagnostic when a screenshot path was requested. UI media supplements persistence/API checks; it does not replace them.
+
+New generated plans record `uiImpact: {level, reason}` and each visual step binds
+all acceptance criteria with `criterionBindings` (zero-based index, stable id,
+evidence type, and journeyId for screenshot/video). Backend assertions can use
+`check` within a visual step without inheriting a screenshot requirement. Keep
+IDs when wording changes; assign new IDs for new behavior. Plan editing preserves
+the existing impact classification unless an explicit replacement is supplied;
+classification changes retain an operator audit record. New panels and interaction
+changes default to material; minor cosmetic exemptions require a reason.

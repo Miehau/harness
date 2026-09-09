@@ -62,6 +62,7 @@ Schema:
   "title": "short plan title",
   "summary": "one sentence",
   "designArtifact": "concise markdown design when requested, otherwise blank",
+  "uiImpact": { "level": "none|minor|material", "reason": "why this classification applies; a minor exemption names the existing pattern" },
   "harness": "pi",
   "nodes": [
     {
@@ -117,6 +118,8 @@ Rules:
 - Ordinary planned write steps must use finite write scopes. Do not use "*" or "**" unless reviewBudget.justification explains why the change is genuinely indivisible.
 - Prefer complete vertical outcomes over file-layer steps such as “change types”, “change service”, or “add tests”. Put proportionate tests in the step that delivers the behavior.
 - Default to serial vertical slices. Use a shared-contract plus parallel-conformance shape only when both sides are independently testable, have disjoint write scopes, and parallel execution materially reduces risk or latency. Put cross-branch integration tests in the dependent integration step.
+- Classify UI impact explicitly: none for no rendered UI change; minor for cosmetic edits such as button colour using existing patterns; material for new panels, screens, forms, navigation, or meaningful interaction changes. Most frontend additions are material. Surface material scope/AC changes discovered during exploration in the approval artifact.
+- Every visual step must include criterionBindings: [{"index":0,"id":"stable-ac-id","evidence":"screenshot","journeyId":"stable-journey-id"}]. Bind every AC by its zero-based index. Use check for backend/persistence assertions, screenshot for visual states, video for temporal interaction (and enable requiresVideoEvidence). Preserve IDs when wording changes; new behaviors receive new IDs. Name existing journeys to reuse and missing journeys to implement in uiPlan.proof. Include CLI/scenario/test updates in the owning step's scope. Never claim that opening a dialog proves persistence or API equivalence.
 - Every write plan must use ".agent-plan/verify.mjs" as its single deterministic verification entry point. The first architecture write step establishes missing harness files inside .agent-plan. The entry point must run all repository tests, lint, type checks, builds and the UI CLI tests, propagate every failed command, and remain usable by every later step. Every isolated step must keep its applicable checks green; the downstream integration step owns checks that require multiple parallel branches.
 - The verification bootstrap creates project.json, feature-map.md, ui.mjs and ui.test.mjs inside .agent-plan. Declare a named install argv command for project dependencies using the existing package manager and lockfile; managed preparation runs it privately when manifests change. Store executable commands as argv arrays in project.json; never parse prose for commands. ${discoveryInstruction} Each feature slice owns its affected map leaves, navigation commands and tests within its declared write scope. Keep writes to shared CLI/index files serial. Bootstrap must not modify product code or agent guidance.
 - Prefer built-ins and existing dependencies. A small conventional dependency is acceptable when it is clearly the simplest complete solution. Never introduce a framework, infrastructure component, large package, unusual license, or architecture-shaping dependency unless the supplied technical-exception answers explicitly approve it.
@@ -132,10 +135,12 @@ export const requirementsInstruction = `You are beginning a ticket-scoped develo
 3. Questions are a last resort. Leave questions empty when the ticket, product context, or a conservative minimal interpretation supplies a safe answer.
 4. Ask at most three questions only when competing product outcomes would materially change user-visible behavior or scope and choosing incorrectly risks meaningful rework or harm.
 5. Never ask the user to choose implementation mechanics before repository exploration, including script shape, command composition, naming, libraries, or fail-fast versus aggregate execution.
+6. Record provisional uiImpact (none, minor, material) with a reason. New panels/screens/forms/navigation or meaningful interaction changes are material; existing-pattern cosmetic edits may be minor. Approved intent can be refined after exploration, but material scope changes require a visible decision.
 
 Return ONLY valid JSON:
 {
   "artifact": "a concise markdown PRD addendum and requirements contract",
+  "uiImpact": {"level":"none|minor|material", "reason":"provisional UI impact"},
   "questions": ["one focused question", "another focused question"]
 }`;
 
@@ -148,11 +153,12 @@ export const requirementsFollowUpInstruction = `Continue the requirements clarif
 Return ONLY valid JSON:
 {
   "artifact": "the complete revised markdown PRD addendum and requirements contract",
+  "uiImpact": {"level":"none|minor|material", "reason":"revised UI impact"},
   "questions": ["one focused follow-up question"]
 }`;
 
 export const ticketExplorationInstruction = `The requirements have already been clarified and approved. You may inspect the repository but must not modify it.
-1. Start at .agent-plan/feature-map.md if present; read only the relevant feature leaf, directory owners and UI CLI journeys. Validate the supplied capability ledger against relevant code, tests, conventions, and dependency boundaries.
+1. For frontend work, inspect existing design conventions and relevant UI journeys now, before choosing the design; identify reuse, missing states, and any material scope change needing approval. Execute a relevant existing journey only against an isolated fixture when the supplied tools permit it; otherwise report it as unexecuted and assign the check explicitly. Start at .agent-plan/feature-map.md if present; read only the relevant feature leaf, directory owners and UI CLI journeys. Validate the supplied capability ledger against relevant code, tests, conventions, and dependency boundaries.
 2. Produce a verified implementation delta with stable CAP-* and DELTA-* IDs, classifying behavior as shipped, partial, missing, or conflicting.
 3. Never silently reinterpret an approved requirement. Report only technical exceptions that require a user decision.
 
@@ -378,6 +384,7 @@ ${
   step.requiresVisualEvidence || step.requiresVideoEvidence
     ? `## UI plan and existing conventions
 ${uiPlanningInstruction}
+${step.criterionBindings ? `Approved criterion/journey bindings: ${JSON.stringify(step.criterionBindings)}` : ""}
 ${step.uiPlan ? JSON.stringify(step.uiPlan, null, 2) : "Before editing UI, state the existing pattern to reuse, hierarchy, required states, interaction and proof journey. Explain any deviation."}`
     : ""
 }

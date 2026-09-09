@@ -46,3 +46,31 @@ export function ensureDesignSystemStep(plan, exists) {
   for (const step of steps) if (step.id !== id) step.dependsOn = [...new Set([id, ...(step.dependsOn || [])])];
   return normalizePlan(copy);
 }
+
+export function prepareUiPlan(plan, provisional) {
+  const visual = flattenSteps(plan).some((step) => step.requiresVisualEvidence);
+  const uiImpact = plan.uiImpact || { level: visual ? "material" : "none", reason: visual ? "Rendered UI changes require proposal review by default" : "No rendered UI change in the implementation plan" };
+  if (provisional?.level === "material" && uiImpact.level !== "material") return { ...plan, uiImpact: provisional };
+  return { ...plan, uiImpact };
+}
+
+export function uiContractViolations(plan) {
+  if (!plan.uiImpact) return []; // Previously authored plans retain their existing contract.
+  const visual = flattenSteps(plan).filter((step) => step.requiresVisualEvidence);
+  const violations = [];
+  for (const step of flattenSteps(plan)) if (step.criterionBindings?.some((binding) => binding.evidence !== "check") && !step.requiresVisualEvidence) violations.push(`${step.title}: visual bindings require visual evidence on the step`);
+  if (visual.length && plan.uiImpact.level === "none") violations.push("Rendered UI steps cannot declare no UI impact");
+  if (!visual.length && plan.uiImpact.level !== "none") violations.push("UI changes need a step with visual evidence");
+  for (const step of visual) {
+    if (!step.acceptanceCriteria.length || step.criterionBindings?.length !== step.acceptanceCriteria.length) violations.push(`${step.title}: bind every criterion to a stable ID and evidence type`);
+    if (!step.criterionBindings?.some((binding) => binding.evidence !== "check")) violations.push(`${step.title}: identify at least one observable UI journey`);
+    if (step.criterionBindings?.some((binding) => binding.evidence === "video") && !step.requiresVideoEvidence) violations.push(`${step.title}: video criteria require video evidence on the step`);
+  }
+  return violations;
+}
+
+export function uiPlanSummary(plan) {
+  if (!plan.uiImpact) return "";
+  const bindings = flattenSteps(plan).flatMap((step) => (step.criterionBindings || []).map((binding) => `- ${binding.id}: ${step.acceptanceCriteria[binding.index]} — ${binding.evidence}${binding.journeyId ? ` via ${binding.journeyId}` : ""}`));
+  return `\n\n## UI impact: ${plan.uiImpact.level}\n${plan.uiImpact.reason}\n\n${bindings.join("\n")}`;
+}
