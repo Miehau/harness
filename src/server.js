@@ -32,6 +32,7 @@ import { createFinalReviewRunner } from "./final-review.js";
 import { createStepRunner } from "./step-runner.js";
 import { createPlanningRunner } from "./planning.js";
 import { createTicketRunner } from "./ticket-runner.js";
+import { createCoordinationService } from "./coordination-service.js";
 import { createPreviewOrchestrator } from "./preview-orchestration.js";
 import { auditHarnessWriteScopes } from "./pi-prompts.js";
 export { auditHarnessWriteScopes } from "./pi-prompts.js";
@@ -212,8 +213,10 @@ const stepService = createStepRunner({
   checks: { runChanged: runChangedRepositoryChecks, repositoryCheckReview }, proof: { snapshot: persistProofSnapshot },
   artifacts: { hydrate: hydrateArtifacts, persist: persistArtifact, text: artifactText, dataDir }, activity: { capture: captureStepActivity },
   steering: { drain: drainSteering, clear: clearSteeringDrain },
-  lifecycle: { mirrorCheckpoint }
+  lifecycle: { mirrorCheckpoint },
+  coordination: { forWorker: (target) => coordinationService.forWorker(target) }
 });
+const coordinationService = createCoordinationService({ readState: store.read.bind(store), update, runtime, harness, dataDir });
 const planningService = createPlanningRunner({
   state: { read: store.read.bind(store), update },
   runtime,
@@ -641,6 +644,7 @@ const routeApi = createRoutes({
   workspace: workspaceService,
   previews: { start: startOperatorPreview, stop: stopOperatorPreview },
   steering: { submit: steeringService.submit },
+  coordination: coordinationService,
   settings: settingsService
 });
 
@@ -674,6 +678,7 @@ async function close({ exit = false } = {}) {
     clearInterval(pollTimer);
     clearInterval(sseHeartbeat);
     runtime.clearSteeringTimers();
+    coordinationService.close();
     closeSseClients(clients);
     for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
     await Promise.all([

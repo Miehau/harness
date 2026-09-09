@@ -4,6 +4,7 @@ import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { cleanupOutcomes, gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, normalizeRunCleanup, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 import { createSteeringLedger } from "./steering.js";
+import { writeScopesOverlap } from "./coordination.js";
 import { publicPreviewState, publicRun, publicState, compactRun } from "./inspection.js";
 import { appendBounded, createActivityCapture, groupActivityEvents, pushBounded, retainedUsage } from "./activity.js";
 import { actionableFindings, executionFailure, findingsFingerprint, findingsRequireVisualEvidence, humanProofFindings, recurringReviewClusters, refreshedReviewFindings, reviewFindingLedger, reviewFixImages, reviewScopeExpanded, storedFindingsFingerprint, unaddressedReviewClusters, unresolvedReviewFindings } from "./review-findings.js";
@@ -298,6 +299,8 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     stages: stages || initialStages(),
     checkpoint,
     plan,
+    planRevision: 1,
+    coordination: { messages: [], conflicts: [], decisions: [], revisions: [] },
     artifacts,
     activeRuns,
     steering: createSteeringLedger(steering),
@@ -375,6 +378,7 @@ export function snapshotActiveAttempt(step, active = {}, {
   const failure = failureDetails(error, { status, reason, phase });
   return {
     runId: active.runId || null,
+    planRevision: active.planRevision || step.activeAttempt?.planRevision || 1,
     attemptId,
     startedAt: active.startedAt || activity.startedAt || completedAt,
     completedAt,
@@ -701,20 +705,23 @@ export function prepareRunResume(run) {
   return true;
 }
 
-export function nextRunnableStep(plan) {
+export function nextRunnableStep(plan, { blockedStepIds = new Set() } = {}) {
   return flattenSteps(plan).find((step) =>
-    runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
+    !blockedStepIds.has(step.id) && runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
   ) || null;
 }
 
-export function nextRunnableBatch(plan) {
-  if (flattenSteps(plan).some((step) => gateStepStatusSet.has(step.status))) return [];
-  const first = nextRunnableStep(plan);
+export function nextRunnableBatch(plan, { blockedStepIds = new Set() } = {}) {
+  if (flattenSteps(plan).some((step) => !blockedStepIds.has(step.id) && gateStepStatusSet.has(step.status))) return [];
+  const first = nextRunnableStep(plan, { blockedStepIds });
   if (!first) return [];
   const group = parentGroup(plan, first.id);
-  return group ? group.children.filter((step) =>
-    runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
+  const candidates = group ? group.children.filter((step) =>
+    !blockedStepIds.has(step.id) && runnableStepStatusSet.has(step.status) && blockingReasons(plan, step).length === 0
   ) : [first];
+  const batch = [];
+  for (const step of candidates) if (!batch.some((other) => step.permission === "write" && other.permission === "write" && writeScopesOverlap(step.writeScope, other.writeScope))) batch.push(step);
+  return batch;
 }
 
 export const MAX_CORRECTION_ROUNDS = 12;

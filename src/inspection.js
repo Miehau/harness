@@ -6,6 +6,7 @@ import { storedProjectPolicy } from "./access-policy.js";
 import { artifactPathForOpen, visualEvidenceMedia } from "./artifacts.js";
 import { retainedUsage } from "./activity.js";
 import { dependencySteps, findNode, flattenSteps } from "./plan.js";
+import { coordinationBlockedStepIds, writeScopesOverlap } from "./coordination.js";
 import { dashboardModelProviders } from "./profiles.js";
 import { enrichReviewPacket } from "./pi-prompts.js";
 import { projectProofMap } from "./proof-map.js";
@@ -1363,11 +1364,26 @@ function publicChecks(checks) {
   return summary;
 }
 
+export function publicCoordination(run) {
+  const ledger = structuredClone(run?.coordination || { messages: [], conflicts: [], decisions: [], revisions: [] });
+  const stepSummary = (step) => ({ id: step.id, type: "step", title: step.title, description: step.description, agentId: step.agentId, permission: step.permission, writeScope: step.writeScope, dependsOn: step.dependsOn, acceptanceCriteria: step.acceptanceCriteria, status: step.status });
+  const planSummary = (plan) => plan && ({ title: plan.title, nodes: (plan.nodes || []).map((node) => node.type === "group" ? { id: node.id, type: "group", title: node.title, children: node.children.map(stepSummary) } : stepSummary(node)) });
+  for (const revision of ledger.revisions || []) {
+    revision.before = planSummary(revision.before);
+    revision.after = planSummary(revision.after);
+    if (revision.beforeWork) revision.beforeWork = revision.beforeWork.map((step) => ({ ...stepSummary(step), attempts: (step.attempts || []).map((attempt) => ({ attemptId: attempt.attemptId, planRevision: attempt.planRevision, status: attempt.status })), diff: step.diff && { files: step.diff.files, stat: step.diff.stat }, artifacts: (step.artifacts || []).map(safeArtifactMetadata) }));
+    if (revision.workPreparation) revision.workPreparation = { status: revision.workPreparation.status, createdAt: revision.workPreparation.createdAt, preparedAt: revision.workPreparation.preparedAt, repositories: revision.workPreparation.repositories.map((record) => ({ stepIds: record.stepIds, isolated: record.isolated, files: record.files, artifact: safeArtifactMetadata(record.artifact) })) };
+  }
+  return removePrivateLocations(redactRecord(ledger));
+}
+
 export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
   clone.inspectionFocus = inspectionFocus(run);
   clone.reviewFindings = reviewFindingLedger(run.reviews);
+  clone.coordination = publicCoordination(run);
+  clone.planRevision = run.planRevision || 1;
   clone.checkpoint = publicCheckpoint(clone.checkpoint);
   clone.workflow = publicWorkflow(clone.workflow);
   clone.lastError = boundedText(clone.lastError, 1000).value || null;
@@ -1385,7 +1401,13 @@ export function publicRun(run) {
       delete stage.activity.rawOutput;
     }
   clone.proofMap = projectProofMap(run);
+  const coordinationBlocked = new Set(coordinationBlockedStepIds(run));
   for (const step of flattenSteps(clone.plan)) {
+    if (coordinationBlocked.has(step.id)) step.blockedReason = "Waiting for a coordination decision or plan adjustment.";
+    else if (["ready", "interrupted"].includes(step.status)) {
+      const overlap = flattenSteps(run.plan).find((other) => other.id !== step.id && run.activeRuns?.[other.id] && step.permission === "write" && other.permission === "write" && writeScopesOverlap(step.writeScope, other.writeScope));
+      if (overlap) step.blockedReason = `Waiting for ${overlap.title}: overlapping write scope.`;
+    }
     delete step.prompt;
     delete step.productContext;
     if (Array.isArray(step.artifacts))
@@ -1516,6 +1538,8 @@ export function compactRun(run, revision = null) {
     workflow: publicWorkflow(run?.workflow),
     steering: run?.steering || { nextSequence: 1, records: [] },
     steeringRejections: run?.steeringRejections || [],
+    coordination: publicCoordination(run),
+    planRevision: run?.planRevision || 1,
     proofMap: projectProofMap(run),
     cleanup: normalizeRunCleanup(run?.cleanup),
     revision

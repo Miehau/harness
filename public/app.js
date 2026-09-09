@@ -1,3 +1,4 @@
+import { coordinationPanel } from "/coordination.js";
 import { renderMarkdown } from "/markdown.js";
 import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
 
@@ -22,7 +23,7 @@ let selectedStageKey = null;
 let selectedWorkerId = null;
 let selectedAttemptId = null;
 let selectedRunId = null;
-let activeTab = currentView && ["activity", "details", "overview", "run", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
+let activeTab = currentView && ["activity", "details", "overview", "run", "artifacts", "ticket", "prompt", "output", "checks", "trace", "coordination", "coordination-artifact"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
 let deliberateSelection = false;
 let transportState = "connected";
@@ -461,7 +462,7 @@ function renderHeader() {
     : "";
   const histories = runsForTicket(ticket.id);
   const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${historySelector}</div><div class="plan-actions">${action}${reviewAction}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${runNoticesHtml(run)}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${runNoticesHtml(run)}`;
 }
 
 function openRestartDialog(target = null) {
@@ -978,7 +979,7 @@ function artifactPreview(artifact) {
   if (!resource) return `<div class="run-empty">Loading artifact…</div>`;
   if (resource.state !== "available" && resource.state !== "truncated") return resourceStateHtml(resource, "Artifact content");
   const truncation = resource.state === "truncated" ? `<div class="diff-warning">This retained artifact is truncated in the dashboard. Open the artifact for its full retained file.</div>` : "";
-  if (artifact.kind === "git-diff") return `${truncation}${diffPanel({ available: true, patch: content }, { id: `artifact-${artifact.id}`, actions: false })}`;
+  if (["git-diff", "coordination-work"].includes(artifact.kind)) return `${truncation}${diffPanel({ available: true, patch: content }, { id: `artifact-${artifact.id}`, actions: false })}`;
   if (artifact.name.endsWith(".json")) return `${truncation}<pre><code data-language="json">${escapeHtml(formatOutput(content))}</code></pre>`;
   return `${truncation}${renderMarkdown(content)}`;
 }
@@ -1093,6 +1094,8 @@ function renderInspector() {
   const stage = run?.stages?.find((item) => item.id === selectedStageId);
   const step = nodeById(selectedStepId);
   if (!run) { target.innerHTML = `<div class="empty"><div><strong>Ticket details</strong>Select a tracker ticket, then start its workflow.</div></div>`; return; }
+  if (activeTab === "coordination-artifact") { target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><h2>Preserved coordination artifact</h2><button class="button" data-tab="coordination">Back to coordination</button></header><div class="tab-panel">${artifactsPanel(null)}</div></div>`; return; }
+  if (activeTab === "coordination") { target.innerHTML = coordinationPanel(run, isArchivedRun(run)); return; }
   const projection = inspectionFor(run);
   if (!projection) {
     loadInspection(run);
@@ -1276,6 +1279,8 @@ function renderContext() {
               : focusData?.tab ? `[role="tab"][data-tab="${CSS.escape(focusData.tab)}"]` : null);
   const details = (root) => [...root.querySelectorAll("details[open]")].map(disclosureKey);
   return {
+    coordinationRun: runIdentity(runFor()),
+    coordinationForms: [...document.querySelectorAll("[data-coordination-form]")].map((form) => ({ kind: form.dataset.coordinationForm, conflictId: form.dataset.conflictId, revisionId: form.dataset.revisionId, fields: [...form.elements].filter((el) => el.name).map((el) => ({ name: el.name, value: el.value, checked: el.checked, selected: el.multiple ? [...el.selectedOptions].map((option) => option.value) : null, focused: el === document.activeElement })) })),
     outputScroll: [...document.querySelectorAll("#plan-tree pre, #inspector pre")].map((item) => ({ top: item.scrollTop, left: item.scrollLeft })),
     planScroll: $("#plan-tree")?.scrollTop || 0,
     inspectorScroll: $("#inspector")?.scrollTop || 0,
@@ -1284,6 +1289,18 @@ function renderContext() {
 }
 
 function restoreRenderContext(context) {
+  if (context.coordinationRun === runIdentity(runFor())) for (const saved of context.coordinationForms || []) {
+    const form = [...document.querySelectorAll("[data-coordination-form]")].find((item) => item.dataset.coordinationForm === saved.kind && item.dataset.conflictId === saved.conflictId && item.dataset.revisionId === saved.revisionId);
+    if (!form) continue;
+    for (const field of saved.fields) {
+      const el = form.elements.namedItem(field.name);
+      if (!el) continue;
+      if (field.selected) for (const option of el.options) option.selected = field.selected.includes(option.value);
+      else el.value = field.value;
+      if (el.type === "checkbox") el.checked = field.checked;
+      if (field.focused) el.focus({ preventScroll: true });
+    }
+  }
   const restoreDetails = (root, keys) => [...root.querySelectorAll("details")].forEach((item, index) => { item.open = keys.includes(disclosureKey(item, index)); });
   const plan = $("#plan-tree");
   const inspector = $("#inspector");
@@ -1496,6 +1513,21 @@ function updateReviewQueue(formId) {
 }
 
 document.addEventListener("click", async (event) => {
+  const coordinationArtifact = event.target.closest("[data-coordination-artifact]");
+  if (coordinationArtifact) { selectedArtifactId = coordinationArtifact.dataset.coordinationArtifact; activeTab = "coordination-artifact"; renderInspector(); return; }
+  const coordinationAction = event.target.closest("[data-coordination-action]");
+  if (coordinationAction) {
+    const action = coordinationAction.dataset.coordinationAction;
+    const run = runFor();
+    if (isArchivedRun(run)) return;
+    coordinationAction.disabled = true;
+    const path = action === "resolve" ? "resolve" : `revisions/${encodeURIComponent(coordinationAction.dataset.revisionId)}/${action}`;
+    try {
+      await api(`/api/tickets/${encodeURIComponent(run.id)}/coordination/${path}`, { method: "POST", body: JSON.stringify(action === "resolve" ? { conflictId: coordinationAction.dataset.conflictId } : {}) });
+      state = await api("/api/state"); render();
+    } catch (error) { coordinationAction.disabled = false; notify(error.message); }
+    return;
+  }
   const jump = event.target.closest("[data-jump-output]");
   if (jump) {
     const output = document.querySelector(`[data-stream-key="${CSS.escape(jump.dataset.jumpOutput)}"]`);
@@ -1895,6 +1927,42 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  if (event.target.dataset.coordinationForm) {
+    event.preventDefault();
+    const form = event.target;
+    const run = runFor();
+    if (isArchivedRun(run)) return;
+    const data = new FormData(form);
+    const kind = form.dataset.coordinationForm;
+    let body;
+    if (kind === "conflicts") body = { summary: data.get("summary"), stepIds: data.getAll("stepIds"), proposal: data.get("proposal") };
+    else if (kind === "reject") body = { reason: data.get("reason") };
+    else if (kind === "decisions") body = { summary: data.get("summary"), reason: data.get("reason"), conflictIds: [form.dataset.conflictId], stepIds: run.coordination.conflicts.find((item) => item.id === form.dataset.conflictId)?.stepIds || [] };
+    else {
+      const change = { stepId: data.get("stepId") };
+      for (const key of ["description", "agentId", "writeScope"]) if (String(data.get(key) || "").trim()) change[key] = String(data.get(key)).trim();
+      if (data.has("changeDependencies")) change.dependsOn = data.getAll("dependsOn");
+      const addSteps = [];
+      if (change.stepId === "__new") {
+        const id = String(data.get("newStepId") || "").trim();
+        const title = String(data.get("title") || "").trim();
+        if (!id || !title || !change.description) { notify("Added work needs an ID, title and assignment"); return; }
+        const { stepId, ...fields } = change;
+        const lines = (key) => String(data.get(key) || "").split("\n").map((line) => line.trim()).filter(Boolean);
+        if (!lines("acceptanceCriteria").length) { notify("Added work needs at least one acceptance criterion"); return; }
+        addSteps.push({ id, title, permission: fields.writeScope ? "write" : "read", ...fields, expectedFiles: lines("expectedFiles"), estimatedChangedLines: Number(data.get("estimatedChangedLines")) || 0, acceptanceCriteria: lines("acceptanceCriteria") });
+      }
+      if (!addSteps.length && Object.keys(change).length === 1) { notify("Enter an assignment, owner, scope, or prerequisite change"); return; }
+      body = { reason: data.get("reason"), changes: addSteps.length ? [] : [change], addSteps, correctiveStepIds: data.getAll("correctiveStepIds"), conflictIds: data.getAll("conflictIds") };
+    }
+    const submit = form.querySelector("button[type=submit]");
+    submit.disabled = true;
+    try {
+      await api(`/api/tickets/${encodeURIComponent(run.id)}/coordination/${kind === "reject" ? `revisions/${encodeURIComponent(form.dataset.revisionId)}/reject` : kind}`, { method: "POST", body: JSON.stringify(body) });
+      form.reset(); state = await api("/api/state"); render();
+    } catch (error) { submit.disabled = false; notify(error.message); }
+    return;
+  }
   if (event.target.dataset.steering) {
     event.preventDefault();
     const form = event.target;

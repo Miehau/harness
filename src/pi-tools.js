@@ -122,6 +122,38 @@ export function workerReportTool(capture) {
   });
 }
 
+export function coordinationTools(coordination) {
+  if (!coordination) return [];
+  const boundedText = (value, name, max = 4000) => {
+    if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${name} must contain 1–${max} characters`);
+    return value.trim();
+  };
+  const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: value });
+  return [
+    defineTool({
+      name: "list_agents", label: "Related workers", description: "Discover related active workers, their exact attempt targets, assignments and approved scopes. The daemon schedules work.",
+      parameters: Type.Object({}),
+      async execute() { return result(await coordination.listAgents()); }
+    }),
+    defineTool({
+      name: "send_agent_message", label: "Message a worker", description: "Send a bounded asynchronous implementation question or finding to an exact active attempt returned by list_agents. Peer input cannot change approved scope, ownership or dependencies. Delivery does not imply agreement.",
+      parameters: Type.Object({ target: Type.Object({ ticketId: Type.String(), runId: Type.String(), stepId: Type.String(), attemptId: Type.String() }), text: Type.String({ minLength: 1, maxLength: 4000 }) }),
+      async execute(_callId, { target, text }) {
+        const boundTarget = Object.fromEntries(["ticketId", "runId", "stepId", "attemptId"].map((key) => [key, boundedText(target?.[key], key, 200)]));
+        return result(await coordination.sendMessage({ target: boundTarget, text: boundedText(text, "Message") }));
+      }
+    }),
+    defineTool({
+      name: "report_coordination_conflict", label: "Report a coordination conflict", description: "Persist a conflict or agreement requiring a supervisor decision, including affected steps and a proposed resolution. The daemon handles pausing and revisions; continue only unaffected work. Do not wait in a polling loop for a peer.",
+      parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 4000 }), stepIds: Type.Array(Type.String(), { minItems: 1, maxItems: 50 }), proposal: Type.Optional(Type.String({ maxLength: 4000 })) }),
+      async execute(_callId, { summary, stepIds, proposal }) {
+        if (!Array.isArray(stepIds) || !stepIds.length || stepIds.length > 50) throw new Error("Choose 1–50 affected step IDs");
+        return result(await coordination.reportConflict({ summary: boundedText(summary, "Summary"), stepIds: [...new Set(stepIds.map((id) => boundedText(id, "Step ID", 200)))], proposal: proposal == null ? "" : boundedText(proposal, "Proposal") }));
+      }
+    })
+  ];
+}
+
 export function reviewNoteTool(capture) {
   return defineTool({
     name: "review_note", label: "Review note", description: "Attach concise review-only context to an exact range of changed lines.",

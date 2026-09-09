@@ -1767,3 +1767,14 @@ button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:
 .verification-finding small, .verification-rounds small { display: block; color: var(--muted); }
 .verification-rounds li { margin: 12px 0; }
 .verification-rounds li > span { display: block; }
+
+.coordination-panel { overflow-wrap: anywhere; }
+.coordination-panel form, .coordination-panel label { display: grid; gap: 8px; }
+.coordination-panel form { margin: 12px 0; }
+.coordination-panel input, .coordination-panel textarea, .coordination-panel select { max-width: 100%; }
+.coordination-panel select[multiple] { min-height: 90px; }
+.coordination-panel h3 { margin-top: 24px; }
+.coordination-record { border-bottom: 1px solid var(--border, #ddd); padding: 14px 0; }
+.coordination-record small { display: block; opacity: .75; }
+.coordination-record table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.coordination-record td, .coordination-record th { text-align: left; vertical-align: top; padding: 8px; border: 1px solid var(--border, #ddd); }

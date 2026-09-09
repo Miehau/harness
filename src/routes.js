@@ -25,6 +25,7 @@ export function createRoutes({
   workspace,
   previews,
   steering,
+  coordination,
   settings,
 } = {}) {
   if (
@@ -41,6 +42,20 @@ export function createRoutes({
   }
 
   return async function routeApi(request, response, url) {
+    const coordinationRead = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination$/);
+    if (request.method === "GET" && coordinationRead) return json(response, 200, coordination.read(routeId(coordinationRead[1])));
+    const coordinationConflict = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/conflicts$/);
+    if (request.method === "POST" && coordinationConflict) return json(response, 200, await coordination.conflict(routeId(coordinationConflict[1]), await body(request)));
+    const coordinationProposal = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/revisions$/);
+    if (request.method === "POST" && coordinationProposal) return json(response, 200, await coordination.propose(routeId(coordinationProposal[1]), await body(request)));
+    const coordinationDecision = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/decisions$/);
+    if (request.method === "POST" && coordinationDecision) return json(response, 200, await coordination.decide(routeId(coordinationDecision[1]), await body(request)));
+    const coordinationResolve = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/resolve$/);
+    if (request.method === "POST" && coordinationResolve) return json(response, 200, await coordination.resolveConflict(routeId(coordinationResolve[1]), await body(request)));
+    const coordinationAccept = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/revisions\/([^/]+)\/accept$/);
+    if (request.method === "POST" && coordinationAccept) return json(response, 200, await coordination.accept(routeId(coordinationAccept[1]), routeId(coordinationAccept[2]), await body(request)));
+    const coordinationReject = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/revisions\/([^/]+)\/reject$/);
+    if (request.method === "POST" && coordinationReject) return json(response, 200, await coordination.reject(routeId(coordinationReject[1]), routeId(coordinationReject[2]), await body(request)));
     if (request.method === "GET" && url.pathname === "/api/health") {
       return json(response, 200, { ok: true, version });
     }

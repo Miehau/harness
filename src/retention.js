@@ -57,6 +57,10 @@ function repositoryWorkspaces(run) {
       for (const repo of step.workspace?.repositories || []) items.push(repo);
     }
   }
+  for (const revision of run.coordination?.revisions || []) for (const step of revision.beforeWork || []) {
+    if (step.workspace) items.push(step.workspace);
+    for (const repo of step.workspace?.repositories || []) items.push(repo);
+  }
   return items;
 }
 
@@ -81,6 +85,10 @@ export async function cleanupRetainedRun({ run, dataDir, previewManager, execImp
   const retainedRoot = join(dataDir, "ticket-runs");
   if (!within(retainedRoot, root) || root === resolve(retainedRoot)) throw new Error("Refusing to clean a path outside retained ticket data");
   previewManager?.stopMatching(`${run.id}:`);
+  for (const revision of run.coordination?.revisions || []) for (const record of revision.workPreparation?.repositories || []) {
+    const prefix = `refs/agent-plan/coordination/${safeName(run.runId)}/${safeName(revision.id)}/`;
+    if (record.cwd && within(root, record.cwd) && record.ref?.startsWith(prefix)) await execImpl("git", ["update-ref", "-d", record.ref], { cwd: record.cwd });
+  }
   const paths = worktreePaths(run, root);
   for (const source of sourceCleanupTargets(run)) {
     for (const path of paths) {

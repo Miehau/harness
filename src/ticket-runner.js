@@ -21,6 +21,7 @@ import { loadLocalFixture } from "./local.js";
 import { auditHarnessWriteScopes, ensureVerificationContractStep, verificationContractExists } from "./pi-prompts.js";
 import { loadProjectConfig, projectConfigPath } from "./project-config.js";
 import { publicRun, publicState } from "./inspection.js";
+import { coordinationBlockedSteps } from "./coordination-service.js";
 
 function ticketRun(state, ticketId) {
   const run = state.ticketRuns?.[ticketId];
@@ -165,45 +166,62 @@ export function createTicketRunner({
     }
     const run = await ensureLocalWorkspace(ticketId, signal);
     if (!run || run.runId !== ownerRunId) return superseded(ticketId, signal);
-    const reviewReady = flattenSteps(run.plan).filter((step) => step.status === "review_ready");
+    const planRevision = run.planRevision || 1;
+    const blocked = coordinationBlockedSteps(run);
+    const reviewReady = flattenSteps(run.plan).filter((step) => step.status === "review_ready" && !blocked.has(step.id));
     if (reviewReady.length) {
       if (!run.auto) return { kind: "awaiting_step_review" };
       for (const step of reviewReady) await accept(ticketId, step.id);
       return advanceTicket(ticketId, signal);
     }
-    const ready = nextRunnableBatch(run.plan);
+    const ready = nextRunnableBatch(run.plan, { blockedStepIds: blocked });
     const batch = run.workspace.vcs === "jj" ? ready.slice(0, 1) : ready;
     if (batch.length) {
-      if (batch.length > 1) {
+      let schedulingCurrent = true;
+      if (batch.length > 1 || batch.some((step) => step.coordinationRestart)) {
         const tree = await snapshotTree(run.workspace.cwd);
         const workspaces = await createParallelWorktrees({
           sourceCwd: run.workspace.cwd,
           dataDir,
           ticket: run.ticket,
           runId: run.runId,
-          steps: batch,
+          revision: run.planRevision > 1 ? run.planRevision : null,
+          steps: batch.filter((step) => !step.workspace?.isolated || step.coordinationRestart),
           tree,
           repositories: run.repositories || []
         });
         await state.update((draft) => {
           const current = ticketRun(draft, ticketId);
           if (signal?.aborted || current.runId !== ownerRunId) return;
-          for (const [stepId, workspace] of workspaces) Object.assign(findNode(current.plan, stepId), { workspace, baseTree: tree });
+          if ((current.planRevision || 1) !== planRevision || batch.some((step) => coordinationBlockedSteps(current).has(step.id))) { schedulingCurrent = false; return; }
+          for (const [stepId, workspace] of workspaces) Object.assign(findNode(current.plan, stepId), { workspace, baseTree: tree, coordinationRestart: false });
         });
       }
       await state.update((draft) => {
         const current = ticketRun(draft, ticketId);
         if (signal?.aborted || current.runId !== ownerRunId) return;
+        if ((current.planRevision || 1) !== planRevision || batch.some((step) => coordinationBlockedSteps(current).has(step.id))) { schedulingCurrent = false; return; }
         current.status = "running";
         current.checkpoint = null;
         setStage(current, "implement", "active", batch.length > 1 ? `Running ${batch.length} tickets in parallel` : `Running ${batch[0].title}`);
       });
+      if (!schedulingCurrent) return advanceTicket(ticketId, signal);
       await Promise.all(batch.map((step) => execute(ticketId, step.id, { signal })));
       const after = readRun(ticketId);
       if (!ownedRun(ticketId, ownerRunId, signal)) return superseded(ticketId, signal);
       return after.auto && !terminalRunStatusSet.has(after.status)
         ? advanceTicket(ticketId, signal)
         : { kind: "steps_finished" };
+    }
+    if (blocked.size) {
+      await state.update((draft) => {
+        const current = ticketRun(draft, ticketId);
+        if (current.runId !== ownerRunId || signal?.aborted) return;
+        current.status = "needs_attention";
+        current.checkpoint = { id: randomUUID(), kind: "needs_attention", source: "coordination", title: "Resolve work coordination", prompt: "Review the open conflicts and proposed plan revisions, then resume execution.", createdAt: new Date().toISOString() };
+        setStage(current, "implement", "blocked", "Waiting for a coordination decision");
+      });
+      return { kind: "coordination" };
     }
     if (flattenSteps(run.plan).every((step) => step.status === "accepted")) {
       if (run.workspace.vcs === "jj" && !run.workspace.jjFinalized) {
