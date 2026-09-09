@@ -9,6 +9,7 @@ const escapeHtml = (value = "") => String(value)
   .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
 let state = null;
+let renderedHeaderMarkup = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
 let piModels = [];
 const viewVersion = 4;
@@ -455,6 +456,7 @@ function renderHeader() {
   const ticket = selectedTicket();
   const run = runFor();
   if (!ticket) {
+    renderedHeaderMarkup = null;
     target.innerHTML = `<div class="plan-heading"><div><span class="eyebrow">No ticket selected</span><h2>Load a local fixture or choose tracker work</h2><p>Local fixtures start from an empty repository and use their authored ticket graph.</p></div></div>`;
     return;
   }
@@ -487,7 +489,9 @@ function renderHeader() {
     : "";
   const histories = runsForTicket(ticket.id);
   const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
+  const markup = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
+  // Keep controls attached through unrelated state hydration and SSE updates.
+  if (markup !== renderedHeaderMarkup) { target.innerHTML = markup; renderedHeaderMarkup = markup; }
 }
 
 function openRestartDialog(target = null) {
