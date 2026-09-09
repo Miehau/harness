@@ -1037,6 +1037,8 @@ export class PiHarness {
         trace.prompt = redactText(textFromContent(message.content));
         trace.prompts.push({ prompt: trace.prompt, at });
       }
+      const usage = safeEvent({ type: "message_end", message });
+      if (usage?.type === "usage") pushBounded(trace.events, { ...usage, at }, 200);
       if (message.role === "assistant") for (const part of message.content || []) {
         if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, redactText(part.text), 100000);
         if (part.type === "thinking" && part.thinkingSignature) {
@@ -1804,7 +1806,9 @@ Every reported finding triggers an automatic correction round. Report concrete d
     });
     try {
       signal?.throwIfAborted();
-      const turnPrompt = existingFile
+      const resumed = Boolean(existingFile && session.state.messages.length);
+      if (existingFile && !resumed) onEvent?.({ type: "phase", label: "Saved reviewer context unavailable; rebuilding full review context" });
+      const turnPrompt = resumed
         ? `Continue the interrupted independent review from the existing conversation. Do not restart repository inspection.\n\nExpected ticket: ${ticket.identifier} — ${ticket.title}\n\nCurrent deterministic gate (authoritative; supersedes every earlier check result in this conversation):\n${JSON.stringify(packet.checks, null, 2)}\n${images.length ? visualProofIdentityInstruction : ""}${operatorFeedback ? `\n\nNew operator final-proof feedback that this review must explicitly validate:\n${operatorFeedback}` : ""}\n\n# Approved criterion IDs\n${(proofMap?.criteria || []).map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None"}\n\n${outputContract}`
         : prompt;
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: turnPrompt });

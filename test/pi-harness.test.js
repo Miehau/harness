@@ -917,7 +917,7 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     let promptImages;
     const prompts = [];
     const session = {
-      state: { messages: [] },
+      state: { messages: [{ role: "user", content: "Original review packet" }] },
       setSessionName() {},
       subscribe() { return () => {}; },
       async prompt(value, options) {
@@ -961,12 +961,25 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.match(prompt, /# Approved criterion IDs/);
     assert.match(prompt, /criterion-exact: Preserve the checkpoint/);
     assert.deepEqual(promptImages, [{ data: "large" }]);
+    session.state.messages = [];
+    const events = [];
+    await harness.reviewTicket({ ...input, onEvent: (event) => events.push(event) });
+    assert.match(prompts.at(-1), /# Independent integration review/);
+    assert.match(prompts.at(-1), /# Compact review packet/);
+    assert.match(prompts.at(-1), /criterion-exact/);
+    assert.ok(events.some((event) => /rebuilding full review context/.test(event.label)));
+    harness.sdk = async () => ({
+      createAgentSession: async () => ({ session }),
+      SessionManager: { create: () => ({}), open: () => { session.state.messages = []; throw new Error("Unreadable session"); } }
+    });
+    await harness.reviewTicket(input);
+    assert.match(prompts.at(-1), /# Compact review packet/);
     session.prompt = async (value) => {
       prompts.push(value);
       session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"assessment":"Still invalid","findings":[]}' }] });
     };
     await assert.rejects(harness.reviewTicket(input), /Independent-review output.summary must be non empty string/);
-    assert.equal(prompts.length, 4, "invalid output gets only one repair attempt per invocation");
+    assert.equal(prompts.length, 6, "invalid output gets only one repair attempt per invocation");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1085,7 +1098,7 @@ test("recovers a chronological, detailed trace from a persisted Pi session", asy
     await mkdir(directory);
     await writeFile(file, [
       { type: "message", message: { role: "user", timestamp: 1, content: [{ type: "text", text: "Rendered prompt" }] } },
-      { type: "message", message: { role: "assistant", timestamp: 2, content: [
+      { type: "message", message: { role: "assistant", timestamp: 2, usage: { input: 12, output: 3, cacheRead: 7, cacheWrite: 2 }, content: [
         { type: "thinking", thinkingSignature: JSON.stringify({ summary: [{ text: "Inspecting files" }, { text: "Checking the task model" }] }) },
         { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "npm test" } },
         { type: "toolCall", id: "call-2", name: "worker_report", arguments: { status: "completed", summary: "Derived the architecture", artifact: "# Architecture" } }
@@ -1096,11 +1109,14 @@ test("recovers a chronological, detailed trace from a persisted Pi session", asy
     const trace = await new PiHarness({ dataDir: root }).sessionTrace(file);
     assert.equal(trace.prompt, "Rendered prompt");
     assert.deepEqual(trace.prompts, [{ prompt: "Rendered prompt", at: "1970-01-01T00:00:00.001Z" }]);
-    assert.deepEqual(trace.events.map((event) => event.type), ["reasoning_summary", "reasoning_summary", "tool_start", "tool_start", "tool_end", "tool_end"]);
-    assert.match(trace.events[2].args, /npm test/);
-    assert.match(trace.events[3].args, /Derived the architecture/);
-    assert.equal(trace.events[4].result, "32 tests pass");
-    assert.equal(trace.events[5].result, "Reported completed");
+    assert.deepEqual(trace.events.map((event) => event.type), ["usage", "reasoning_summary", "reasoning_summary", "tool_start", "tool_start", "tool_end", "tool_end"]);
+    assert.deepEqual(trace.events[0], { type: "usage", input: 12, output: 3, cacheRead: 7, cacheWrite: 2, label: "Usage recorded", at: "1970-01-01T00:00:00.002Z" });
+    assert.match(trace.events[3].args, /npm test/);
+    assert.match(trace.events[4].args, /Derived the architecture/);
+    assert.equal(trace.events[5].result, "32 tests pass");
+    assert.equal(trace.events[6].result, "Reported completed");
+    const later = await new PiHarness({ dataDir: root }).sessionTrace(file, { after: "1970-01-01T00:00:00.003Z" });
+    assert.ok(later.events.every((event) => event.type !== "usage"), "attempt bounds exclude earlier usage");
   } finally {
     await rm(root, { recursive: true });
   }
