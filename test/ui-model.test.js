@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
+
 
 test("resolves canonical attempt selection without replacing a retained choice", () => {
   const projection = {
@@ -60,7 +61,7 @@ test("summarizes subscription usage without imposing a budget", () => {
       { events: [{ type: "usage", input: 40, output: 10 }, { type: "tool_start" }] }
     ] }] }, stages: []
   };
-  assert.deepEqual(runMetrics(run), { input: 140, output: 30, cacheRead: 50, cacheWrite: 5, calls: 2, correctionRounds: 2, durationSeconds: 120 });
+  assert.deepEqual(runMetrics(run), { input: 140, output: 30, cacheRead: 50, cacheWrite: 5, calls: 2, usageState: "partial", correctionRounds: 2, durationSeconds: 120 });
 });
 
 test("builds graph levels and readable diff rows", () => {
@@ -410,7 +411,7 @@ test("cleanup inspector keeps every durable outcome and marks only advisories as
     }
   }).advisory, false);
   assert.match(app, /cleanup-advisory/);
-  assert.match(app, /cleanup-inspector \$\{cleanup\.advisory \? "advisory" : "neutral"\}/);
+  assert.doesNotMatch(app, /data-tab="cleanup"|function cleanupInspectorHtml/);
 });
 
 test("step inspector surfaces real attention findings without inventing criterion progress", () => {
@@ -514,4 +515,28 @@ test("offers only restart points backed by durable checkpoints", () => {
   };
   assert.deepEqual(restartOptions(run).map((option) => option.value), ["stage:explore", "stage:design", "step:one", "stage:verify"]);
   assert.deepEqual(restartOptions({ ...run, merge: { status: "queued" } }), []);
+});
+
+
+test("verification progress keeps open findings until an independent review resolves them", () => {
+  const run = { status: "fixing", reviews: [{ round: 1, actionableFindings: [{ claim: "Missing empty state" }], fix: { diff: { files: ["ui.js"] } } }], reviewFindings: [{ id: "one", status: "open", finding: { claim: "Missing empty state" } }] };
+  assert.equal(verificationProgress(run).phase, "Correction in progress");
+  run.status = "verifying";
+  assert.match(verificationProgress(run).phase, /awaiting independent review/);
+  assert.equal(verificationProgress(run).open, 1);
+  run.reviewFindings[0].status = "resolved";
+  run.reviews.push({ round: 2, actionableFindings: [] });
+  assert.equal(verificationProgress(run).resolved, 1);
+  assert.equal(verificationProgress(run).open, 0);
+  assert.deepEqual(verificationProgress({}).findings, []);
+});
+
+
+test("token totals include active work without recounting its saved attempt", () => {
+  const usage = { input: 10, output: 4, cacheRead: 8, cacheWrite: 0, calls: 3, records: 1, complete: true };
+  const run = { plan: { nodes: [{ attempts: [{ runId: "old", usage }] }] }, activeRuns: { old: { runId: "old", activity: { usage } }, current: { runId: "current", activity: { usage } } } };
+  assert.equal(runMetrics(run).input, 20);
+  assert.equal(runMetrics(run).calls, 6);
+  assert.equal(runMetrics(run).usageState, "recorded");
+  assert.equal(runMetrics({ plan: { nodes: [] } }).usageState, "unavailable");
 });

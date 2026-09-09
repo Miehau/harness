@@ -358,19 +358,29 @@ export function runMetrics(run, now = Date.now()) {
   if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, correctionRounds: 0, durationSeconds: 0 };
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   const attempts = steps.flatMap((step) => step.attempts || []);
-  const stageEvents = (run.stages || []).flatMap((stage) => stage.activity?.events || []);
-  const events = [...attempts.flatMap((attempt) => attempt.events || []), ...stageEvents];
-  const usage = events.filter((event) => event.type === "usage").reduce((total, event) => ({
-    input: total.input + Number(event.input || 0),
-    output: total.output + Number(event.output || 0),
-    cacheRead: total.cacheRead + Number(event.cacheRead || 0),
-    cacheWrite: total.cacheWrite + Number(event.cacheWrite || 0)
-  }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  const completedRunIds = new Set(attempts.map((attempt) => attempt.runId).filter(Boolean));
+  const active = Object.values(run.activeRuns || {}).filter((worker) => !completedRunIds.has(worker.runId)).map((worker) => worker.activity || {});
+  const activities = [...attempts, ...(run.stages || []).map((stage) => stage.activity || {}), ...active];
+  const totals = activities.map((activity) => activity.usage || (activity.events || []).reduce((total, event) => {
+    if (event.type === "tool_start") total.calls++;
+    if (event.type === "usage") {
+      total.records++;
+      for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
+        const value = Number(event[key]);
+        if (Number.isFinite(value) && value >= 0) total[key] += value;
+      }
+    }
+    return total;
+  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length }));
+  const usage = totals.reduce((total, item) => {
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "calls", "records"]) total[key] += Number(item[key] || 0);
+    return total;
+  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0 });
+  const usageState = !usage.records ? "unavailable" : totals.some((item) => !item.complete) ? "partial" : "recorded";
   const end = run.completedAt || (run.status === "completed" ? run.integration?.integratedAt : null) || now;
   const start = Date.parse(run.createdAt || end);
   return {
-    ...usage,
-    calls: events.filter((event) => event.type === "tool_start").length,
+    input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, calls: usage.calls, usageState,
     correctionRounds: steps.reduce((total, step) => total + Math.max(0, (step.attempts?.length || 0) - 1), 0) + Math.max(0, (run.reviews?.length || 0) - 1),
     durationSeconds: Math.max(0, Math.floor((new Date(end).getTime() - start) / 1000))
   };
@@ -761,5 +771,20 @@ export function fleetTicketView(ticket, run, { selected = false, now = Date.now(
       progress: agentProgress(step.status),
       meta: agentMeta(step)
     }))
+  };
+}
+
+/** Durable review state, shared by live and retained run views. */
+export function verificationProgress(run) {
+  const rounds = run?.reviews || [];
+  const latest = rounds.at(-1);
+  const findings = run?.reviewFindings || (latest?.actionableFindings || []).map((finding, index) => ({ id: `finding-${index + 1}`, finding, status: "open", history: [] }));
+  return {
+    round: latest?.round || 0,
+    phase: run?.status === "fixing" ? "Correction in progress" : latest?.fix ? "Fix applied — awaiting independent review" : run?.stages?.find((stage) => stage.id === "verify")?.summary || "Verification has not started",
+    findings,
+    open: findings.filter((entry) => entry.status !== "resolved").length,
+    resolved: findings.filter((entry) => entry.status === "resolved").length,
+    rounds: rounds.map((round) => ({ round: round.round, findings: round.actionableFindings?.length || 0, checks: round.reviews?.find((item) => item.role === "deterministic")?.checks, fix: round.fix }))
   };
 }

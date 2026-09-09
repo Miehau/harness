@@ -1,5 +1,6 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
+
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -21,7 +22,7 @@ let selectedStageKey = null;
 let selectedWorkerId = null;
 let selectedAttemptId = null;
 let selectedRunId = null;
-let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "output", "checks", "trace", "cleanup"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
+let activeTab = currentView && ["activity", "details", "overview", "run", "diff", "artifacts", "ticket", "prompt", "output", "checks", "trace"].includes(savedView.activeTab) ? savedView.activeTab : "activity";
 let selectedArtifactId = null;
 let deliberateSelection = false;
 let transportState = "connected";
@@ -438,7 +439,7 @@ function renderHeader() {
   const metrics = runMetrics(run);
   const restartPoints = restartOptions(run);
   const restartable = run && !["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge", "completed"].includes(run.status) && !run.merge && !run.integration;
-  const usage = run ? `<span class="usage-strip"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
+  const usage = run ? `<span class="usage-strip" title="${metrics.usageState === "unavailable" ? "Token usage was not recorded" : metrics.usageState === "partial" ? "Partial token usage: older events may not have been retained" : "Recorded token usage; input includes cached tokens"}"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} calls</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
   const previewControls = preview?.status === "running" && preview.url
     ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>${previewBusy === "stop" ? busyButton("Stopping preview", `data-stop-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-stop-preview="${escapeHtml(run.id)}">Stop preview</button>`}`
@@ -529,6 +530,13 @@ function stageContextHtml(run, stage) {
   return `<section class="stage-context"><div><span class="eyebrow">Stage ${index} of ${run.stages.length}</span><h1>${escapeHtml(stage.title)}</h1><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><div class="stage-context-meta"><span>${steps.length} worker${steps.length === 1 ? "" : "s"}</span><span>${dependencies.length} dependenc${dependencies.length === 1 ? "y" : "ies"}</span><span>${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}</span></div></section>`;
 }
 
+function verificationPanel(run) {
+  const progress = verificationProgress(run);
+  const findings = progress.findings.map(({ finding, status, history }) => `<article class="verification-finding"><header><strong>${escapeHtml(status === "resolved" ? "Resolved by review" : status === "regressed" ? "Regressed" : "Open")}</strong><span>${escapeHtml(finding.severity || "issue")}</span></header><p>${escapeHtml(finding.claim)}</p>${finding.acceptanceCriterion ? `<small>Criterion: ${escapeHtml(finding.acceptanceCriterion)}</small>` : ""}${finding.suggestedFix ? `<details><summary>Correction requested</summary><p>${escapeHtml(finding.suggestedFix)}</p></details>` : ""}<small>${escapeHtml((history || []).map((item) => `Round ${item.round}: ${item.status}`).join(" · "))}</small></article>`).join("");
+  const rounds = progress.rounds.map((item) => `<li><strong>Round ${escapeHtml(item.round)}</strong><span>${item.findings} issues reported${item.checks ? ` · Checks ${escapeHtml(item.checks.status)}: ${escapeHtml(item.checks.summary || "")}` : ""}</span>${item.fix ? `<small>Correction applied${item.fix.diff?.files?.length ? ` · ${item.fix.diff.files.length} files changed` : ""}; resolution requires a later review.</small>` : ""}</li>`).join("");
+  return `<section class="verification-workspace" aria-label="Verification progress"><header><span class="eyebrow">Verification progress</span><h2>${escapeHtml(progress.phase)}</h2><p>${progress.open} open · ${progress.resolved} resolved · ${progress.rounds.length} review rounds</p></header><section aria-label="Issues found"><h3>Issues found</h3>${findings || `<p>No issues recorded${progress.rounds.length ? " in the retained reviews" : " yet"}.</p>`}</section>${progress.rounds.length ? `<details class="verification-rounds"><summary>Review and correction history</summary><ol>${rounds}</ol></details>` : ""}${criterionProofHtml(run, { compact: true })}</section>`;
+}
+
 function stageWorkerMapHtml(run, stage) {
   const steps = stageSteps(run, stage);
   if (!steps.length) {
@@ -571,9 +579,11 @@ function renderPlanTree() {
   const retainedProof = stage?.id === "handoff" && run?.checkpoint?.kind !== "evidence_review" && run?.finalEvidenceArtifactIds?.length
     ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
-  const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
+  const stageWork = stage && ["requirements", "explore", "design", "handoff"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
+  if (stage?.id === "verify") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
+
   if (isArchivedRun(run)) {
-    target.innerHTML = `${stageSurface}${stageWork}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
+    target.innerHTML = `${stageSurface}${stageWork}${workerOutputHtml(run)}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
     return;
   }
   if (checkpointUsesWorkspace(run)) {
@@ -677,7 +687,7 @@ function workerOutputHtml(run) {
   const stored = attemptDetails.get(attemptDetailKey(run, attempt));
   const detail = liveAttemptDetail(run, step, attempt, stored?.detail);
   const output = detail?.output;
-  return `<section class="stage-work-surface stage-output"><span class="eyebrow">${attempt.lifecycle === "active" ? "Live agent output" : "Saved agent output"} · ${escapeHtml(step.title)}</span>${output?.state === "truncated" ? truncatedResourceWarning(output, "output") : ""}<pre data-worker-output data-worker-run="${escapeHtml(attempt.lifecycle === "active" ? attempt.runId : "")}">${escapeHtml(output?.content || (stored?.error ? "Output unavailable." : "Waiting for agent output…"))}</pre></section>`;
+  return `<section class="stage-work-surface stage-output"><span class="eyebrow">${attempt.lifecycle === "active" ? "Live agent output" : "Saved agent output"} · ${escapeHtml(step.title)}</span>${output?.state === "truncated" ? truncatedResourceWarning(output, "output") : ""}<pre data-worker-output data-worker-run="${escapeHtml(attempt.lifecycle === "active" ? attempt.runId : "")}">${escapeHtml(output?.content || (stored?.error ? "Output unavailable." : (attempt.lifecycle === "active" ? "Waiting for agent output…" : "No transcript retained. Inspect the saved result, checks and artifacts below.")))}</pre>${attempt.lifecycle !== "active" ? `<p>${escapeHtml(attempt.latestAction || step.description || step.title)}</p><button class="button" type="button" data-tab="checks">Inspect checks</button> <button class="button" type="button" data-tab="artifacts">Saved artifacts</button>` : ""}</section>`;
 }
 
 function loadStageOutput(run, stage) {
@@ -687,7 +697,7 @@ function loadStageOutput(run, stage) {
   pendingStageOutputs.add(key);
   api(`/api/tickets/${encodeURIComponent(run.id)}/runs/${encodeURIComponent(run.runId)}/stages/${encodeURIComponent(stage.id)}/output`)
     .then((output) => { stageOutputs.set(key, { signature, ...output }); if (sameRun(run, runFor())) render(); })
-    .catch(() => { stageOutputs.set(key, { signature, state: "unavailable" }); if (sameRun(run, runFor())) render(); })
+    .catch((error) => { stageOutputs.set(key, { signature, state: "unavailable", error: error.message }); if (sameRun(run, runFor())) render(); })
     .finally(() => pendingStageOutputs.delete(key));
 }
 
@@ -706,19 +716,20 @@ function stageOutputHtml(run, stage) {
   const active = stage.status === "active";
   const streamed = live?.runId === run.runId ? live.output : "";
   const output = (active ? streamed || retained?.content : retained?.content || streamed) || "";
-  const stream = active || output || retained?.state === "unavailable" ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Saved model output"}</span><small>Retained output · latest 100,000 characters</small><pre data-stage-output>${escapeHtml(output || (retained?.state === "unavailable" ? "Saved output unavailable." : "Waiting for model output…"))}</pre></section>` : "";
-  return `${saved}${stream}`;
+  const stream = active || output || retained?.state === "unavailable" ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Saved model output"}</span><small>Retained output · latest 100,000 characters</small><pre data-stage-output>${escapeHtml(output || (retained?.state === "unavailable" ? `Saved output unavailable: ${retained?.error || "unknown"}` : "Waiting for model output…"))}</pre></section>` : "";
+  return `${saved}${stream || `<section class="stage-output"><span class="eyebrow">Saved stage result</span><p>${escapeHtml(stage.summary || "This stage has no retained output or result.")}</p><small>Model transcript was not retained for this stage.</small></section>`}`;
 }
 
 function stageActivityPanel(run, stage) {
-  const live = liveStages.get(`${run.id}:${stage.id}`);
+  const candidate = liveStages.get(`${run.id}:${stage.id}`);
+  const live = candidate?.runId === run.runId ? candidate : undefined;
   const activity = live || stage.activity || {};
   const milestones = stageMilestones(run, stage);
   const history = stage.id === "requirements" && !checkpointUsesWorkspace(run) ? clarificationHistoryHtml(run) : "";
   const active = stage.status === "active";
   const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: activity.lastEventAt || stage.updatedAt, lastEvent: activity.lastEvent || stage.summary, warning: activity.warning }, live)) : "";
-  const activityTimeline = timelineHtml(activity.events || [], active, activity.groups);
-  const milestoneTimeline = milestones.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : "";
+  const activityTimeline = activity.events?.length ? timelineHtml(activity.events, active, activity.groups) : milestones.length ? milestoneTimelineHtml(milestones) : `<p class="run-empty">${active ? "Waiting for the next recorded action." : "No detailed activity was retained. See the saved result and artifacts."}</p>`;
+  const milestoneTimeline = milestones.length && activity.events?.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : "";
   const output = ["requirements", "explore"].includes(stage.id) ? "" : stageOutputHtml(run, stage);
   return `<div class="stage-activity">${history}${pulse}${output}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
 }
@@ -801,7 +812,7 @@ function criterionProofHtml(run, options = {}) {
     const evidence = criterion.evidence.length ? `<div class="proof-controls">${criterion.evidence.map(proofEvidenceHtml).join("")}</div>` : `<span class="proof-no-evidence">No evidence reference recorded.</span>`;
     return `<article class="criterion-proof proof-${escapeHtml(criterion.state)}"><header><span class="proof-statuses"><span class="proof-state">${escapeHtml(criterion.resultLabel)}</span><span class="proof-evidence evidence-${escapeHtml(criterion.current.evidenceValidity || "missing")}">${escapeHtml(criterion.evidenceLabel)}</span></span><code>${escapeHtml(criterion.id)}</code></header><strong>${escapeHtml(criterion.text)}</strong><small>${escapeHtml(criterion.stepTitle || criterion.stepId)}</small><p>${escapeHtml(criterion.current.explanation?.summary || "No structured result was reported.")}</p>${evidence}${history}</article>`;
   }).join("") || `<div class="run-empty">No approved acceptance criteria were recorded.</div>`;
-  return `<section class="criterion-proof-map"><header><div><span class="eyebrow">Criterion proof</span><strong>${proof.criteria.length} criterion${proof.criteria.length === 1 ? "" : "ia"}</strong></div><span class="proof-eligibility ${gate.eligibility.eligible ? "eligible" : "blocked"}">${gate.eligibility.eligible ? "ready" : "blocked"}</span></header>${compatibility}${!gate.eligibility.eligible ? `<ul class="proof-blockers">${blockers}</ul>` : ""}<div class="criterion-proof-list">${list}</div></section>`;
+  return `<section class="criterion-proof-map"><header><div><span class="eyebrow">Criterion proof</span><strong>${proof.criteria.length} criterion${proof.criteria.length === 1 ? "" : "ia"}</strong></div><span class="proof-eligibility ${proof.compatibility ? "unknown" : gate.eligibility.eligible ? "eligible" : "blocked"}">${proof.compatibility ? "not recorded" : gate.eligibility.eligible ? "ready" : "blocked"}</span></header>${compatibility}${!options.compact && !gate.eligibility.eligible ? `<ul class="proof-blockers">${blockers}</ul>` : ""}<div class="criterion-proof-list">${list}</div></section>`;
 }
 
 function correctionCriterionPicker(run, options = {}) {
@@ -809,30 +820,10 @@ function correctionCriterionPicker(run, options = {}) {
   return criteria.length ? `<fieldset class="criterion-picker"><legend>Affected criteria</legend>${criteria.map((criterion) => `<label><input type="checkbox" name="criterionId" value="${escapeHtml(criterion.id)}">${escapeHtml(criterion.text)}</label>`).join("")}</fieldset>` : "";
 }
 
-function cleanupList(items, empty, render) {
-  return items.length ? `<ul>${items.map(render).join("")}</ul>` : `<p class="cleanup-empty">${escapeHtml(empty)}</p>`;
-}
-
-function cleanupInspectorHtml(run) {
-  const cleanup = cleanupInspectorModel(run);
-  const executionHtml = cleanup.executions.map((execution) => {
-    const identities = [
-      ...execution.discovered,
-      ...execution.unresolved.filter((item) => item?.pid && !execution.discovered.some((known) => known.pid === item.pid))
-    ];
-    const platform = execution.platform
-      ? `${execution.platform.name || "unknown platform"} · ${execution.platform.supported ? "supported" : "unsupported"}${execution.platform.reason ? ` · ${execution.platform.reason}` : ""}`
-      : "Platform support was not recorded";
-    const title = `${execution.executionId}${execution.stepId ? ` · ${execution.stepId}` : ""}`;
-    return `<details class="cleanup-execution" ${cleanup.advisory ? "open" : ""}><summary><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(execution.outcome)}</small></span><time>${escapeHtml((execution.completedAt || execution.startedAt || "").replace("T", " ").slice(0, 19) || "not recorded")}</time></summary><div class="cleanup-evidence"><dl><div><dt>Platform</dt><dd>${escapeHtml(platform)}</dd></div><div><dt>Ownership</dt><dd>${escapeHtml(execution.ownership?.tokenPresent ? "ownership token established" : "ownership token not recorded")}</dd></div><div><dt>Started</dt><dd>${escapeHtml(execution.startedAt || "not recorded")}</dd></div><div><dt>Completed</dt><dd>${escapeHtml(execution.completedAt || "not recorded")}</dd></div></dl><section><span>Lifecycle triggers</span>${cleanupList(execution.triggers, "No lifecycle trigger was recorded.", (trigger) => `<li><code>${escapeHtml(trigger.trigger || "unspecified")}</code> ${escapeHtml(trigger.at || "")}</li>`)}</section><section><span>Affected processes</span>${cleanupList(identities, "No attributable process was discovered.", (identity) => `<li><code>pid ${escapeHtml(identity.pid || "unknown")}</code> · parent ${escapeHtml(identity.ppid ?? identity.identity?.ppid ?? "unknown")} · started ${escapeHtml(identity.startTime || identity.identity?.startTime || "unknown")}</li>`)}</section><section><span>Attempted actions</span>${cleanupList(execution.actions, "No process signal was attempted.", (action) => `<li><code>${escapeHtml(action.signal || "action")}</code> pid ${escapeHtml(action.pid || "unknown")} · ${escapeHtml(action.status || "recorded")}${action.error ? ` · ${escapeHtml(action.error)}` : ""}${action.at ? ` · ${escapeHtml(action.at)}` : ""}</li>`)}</section><section><span>Unresolved evidence</span>${cleanupList(execution.unresolved, "No unresolved process evidence.", (item) => `<li><strong>${escapeHtml(item.reason || "unresolved")}</strong>${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ""}${item.error ? ` · ${escapeHtml(item.error)}` : ""}</li>`)}</section><section><span>Diagnostics</span>${cleanupList(execution.diagnostics, "No diagnostics were recorded.", (diagnostic) => `<li>${escapeHtml(diagnostic)}</li>`)}</section></div></details>`;
-  }).join("") || `<div class="run-empty">No worker execution has registered process containment yet.</div>`;
-  return `<section class="cleanup-inspector ${cleanup.advisory ? "advisory" : "neutral"}"><header><div><span class="eyebrow">Process containment</span><h3>${escapeHtml(cleanup.label)}</h3><p>${cleanup.advisory ? "Cleanup did not establish a successful result. Review the retained process evidence before continuing." : "Durable process-cleanup evidence remains available for this run."}</p></div><span class="cleanup-outcome">${escapeHtml(cleanup.outcome)}</span></header>${cleanup.updatedAt ? `<time class="cleanup-updated">Updated ${escapeHtml(cleanup.updatedAt)}</time>` : ""}<div class="cleanup-executions">${executionHtml}</div></section>`;
-}
-
 function cleanupAdvisoryHtml(run) {
   const cleanup = cleanupInspectorModel(run);
   if (!cleanup.advisory) return "";
-  return `<section class="cleanup-advisory" role="alert"><span class="eyebrow">Cleanup advisory</span><strong>${escapeHtml(cleanup.label)}</strong><p>Process cleanup is not confirmed. Open the Cleanup inspector for affected process identities, lifecycle triggers, and diagnostic reasons.</p></section>`;
+  return `<section class="cleanup-advisory" role="alert"><span class="eyebrow">Cleanup advisory</span><strong>${escapeHtml(cleanup.label)}</strong><p>Process cleanup is not confirmed. ${escapeHtml(cleanup.executions.flatMap((item) => item.diagnostics).join("; ") || "Process ownership could not be confirmed; inspect the retained run diagnostics before continuing.")}</p></section>`;
 }
 
 function overviewPanel(step) {
@@ -1010,6 +1001,7 @@ function attemptDetailContent(detail, tab) {
   if (resource.state !== "available" && resource.state !== "truncated") return resourceStateHtml(resource, tab);
   const warning = resource.state === "truncated" ? truncatedResourceWarning(resource, tab) : "";
   if (tab === "activity") return `${warning}<section class="run-events"><span class="eyebrow">Recorded activity · ${resource.total || resource.items?.length || 0} events</span><div>${(resource.items || []).map((item) => `<article class="attempt-event ${item.isError ? "warning" : ""}"><strong>${escapeHtml(item.label || item.type || "Activity")}</strong><small>${escapeHtml(item.at || "time not recorded")}</small>${item.detail || item.result ? `<pre>${escapeHtml(formatOutput(item.detail || item.result))}</pre>` : ""}</article>`).join("") || resourceStateHtml({ state: "not_retained" }, "Activity")}</div></section>`;
+  if (tab === "output") return `${warning}<pre data-attempt-output>${escapeHtml(resource.content || "")}</pre>`;
   if (tab === "artifacts") return resource.items?.length ? `${warning}${artifactsPanel(null, resource.items)}` : resourceStateHtml(resource, "Artifacts");
   if (tab === "diff") return `${warning}${diffPanel({ available: true, patch: resource.content || "", files: resource.files || [], stat: resource.stat || "", truncated: resource.state === "truncated" }, { id: `attempt-${selectedAttemptId}`, actions: false })}`;
   if (tab === "checks") return `${warning}<section class="attempt-checks"><dl><div><dt>Status</dt><dd>${escapeHtml(resource.status || "not recorded")}</dd></div><div><dt>Command</dt><dd>${escapeHtml(resource.command || "not retained")}</dd></div><div><dt>Summary</dt><dd>${escapeHtml(resource.summary || "No check summary retained")}</dd></div></dl>${resource.output ? `<pre>${escapeHtml(formatOutput(resource.output))}</pre>` : resourceStateHtml(resource, "Check output")}</section>`;
@@ -1080,20 +1072,21 @@ function renderInspector() {
     const profile = run.stageProfiles?.[profileId];
     const artifacts = artifactsForStage(run.artifacts, stage.id);
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
-    const stageTab = ["activity", "prompt", "artifacts", "details", "cleanup"].includes(activeTab) ? activeTab : "activity";
+    const stageTab = ["activity", "prompt", "artifacts", "details"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
-    const stagePanel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageTab === "cleanup" ? cleanupInspectorHtml(run) : stageDetailsPanel(run, stage, profile, artifacts);
+    const stagePanel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageDetailsPanel(run, stage, profile, artifacts);
     const panel = `${stagePanel}${steeringPanel(run)}`;
-    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header>${inspectorTabs([["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"], ["cleanup", "Cleanup"]], stageTab)}${inspectorPanel(panel)}<footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header>${inspectorTabs([["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"]], stageTab)}${inspectorPanel(panel)}<footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
+
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
     return;
   }
   if (!step) {
-    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${cleanupInspectorHtml(run)}${artifactsPanel(null)}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>sessions stored separately</span></footer></div>`;
+    target.innerHTML = `<div class="inspector-shell"><header class="inspector-header"><div><span class="eyebrow">Isolated ticket run</span><h2>Persistent artifacts</h2></div><span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span></header><div class="tab-panel">${artifactsPanel(null)}</div><footer class="inspector-footer"><span>Run details retained locally</span><span>sessions stored separately</span></footer></div>`;
     return;
   }
-  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt", "cleanup"].includes(activeTab) ? activeTab : "run";
+  const workerTab = ["overview", "run", "diff", "artifacts", "ticket", "prompt"].includes(activeTab) ? activeTab : "run";
   const promptArtifact = workerTab === "prompt" ? [...(run.artifacts || [])].reverse().find((artifact) => artifact.stepId === step.id && artifact.kind === "agent-prompt") : null;
   if (workerTab === "prompt") {
     loadSessionTrace(run, step);
@@ -1110,7 +1103,6 @@ function renderInspector() {
       : workerTab === "artifacts" ? artifactsPanel(null, stepArtifacts)
         : workerTab === "ticket" ? artifactsPanel(null)
           : workerTab === "prompt" ? promptPanel
-            : workerTab === "cleanup" ? cleanupInspectorHtml(run)
               : runPanel(step);
   const isolated = Boolean(step.workspace?.isolated);
   const changeLabel = step.vcsChange ? ` · jj ${step.vcsChange.changeId.slice(0, 8)} · rev ${step.vcsChange.commitId.slice(0, 8)}` : "";
@@ -1118,7 +1110,7 @@ function renderInspector() {
     ? `<section class="step-review-actions"><p>Auto mode is accepting this verified step. No action is needed.</p></section>`
     : (() => { const proof = proofMapView(run, { stepId: step.id }); return `<section class="step-review-actions"><p>${step.reviewBudgetResult?.exceeded ? `<strong>Manual review required:</strong> ${escapeHtml(step.reviewBudgetResult.reasons.join("; "))}.` : proof.eligibility.eligible ? "Accepting commits this step. The next batch starts after every verified item at this barrier is accepted." : `Proof gate blocked: ${escapeHtml(proof.eligibility.blockingReasons.map((reason) => reason.message).join(" "))}`}</p><details class="review-feedback"><summary>Request changes</summary><form data-request-changes="${escapeHtml(step.id)}"><textarea name="feedback" rows="3" placeholder="Describe a focused correction…" required></textarea>${correctionCriterionPicker(run, { stepId: step.id })}<button class="button" type="submit">Send changes</button></form></details><button class="button" type="button" data-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept commit</button><button class="button success" type="button" data-auto-accept-step="${escapeHtml(step.id)}" ${proof.eligibility.eligible ? "" : "disabled"}>Accept & auto-run</button></section>`; })() : "";
   const outputLabel = isolated ? "Isolated parallel commit · accepting cherry-picks it into the ticket worktree" : "Working directory";
-  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"],["cleanup","Cleanup"]];
+  const tabs = [["run","Activity"],["overview","Details"],["artifacts","Artifacts"],["diff","Diff"]];
   const auxiliary = ({ ticket: "Ticket", prompt: "Prompt" })[workerTab];
   target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Current worker · ${escapeHtml(step.agentId)}</span><h2>${escapeHtml(step.title)}</h2><p>${escapeHtml(step.status === "accepted" ? "Completed successfully." : step.status === "review_ready" ? "Ready for review." : stepInspectorSummary(step).needsAttention ? "Needs attention before the workflow can continue." : step.description || "Worker summary and evidence.")}</p></div><span class="run-pill status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span></header>${inspectorTabs(auxiliary ? [...tabs, [workerTab, auxiliary]] : tabs, workerTab)}${inspectorPanel(panel)}${reviewActions}<footer class="inspector-footer"><span>${outputLabel}${run.workspace?.cwd ? "" : " pending approval"}</span><span title="${escapeHtml(`${step.contextPolicy} context · ${step.permission} permission · ${step.status.replaceAll("_", " ")}${changeLabel}`)}">${escapeHtml(step.contextPolicy)} · ${escapeHtml(step.permission)}</span></footer></div>`;
   for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
@@ -1251,6 +1243,7 @@ function renderContext() {
               : focusData?.tab ? `[role="tab"][data-tab="${CSS.escape(focusData.tab)}"]` : null);
   const details = (root) => [...root.querySelectorAll("details[open]")].map(disclosureKey);
   return {
+    outputScroll: [...document.querySelectorAll("#plan-tree pre, #inspector pre")].map((item) => ({ top: item.scrollTop, left: item.scrollLeft })),
     planScroll: $("#plan-tree")?.scrollTop || 0,
     inspectorScroll: $("#inspector")?.scrollTop || 0,
     planDetails: details($("#plan-tree")), inspectorDetails: details($("#inspector")), focusSelector
@@ -1263,6 +1256,7 @@ function restoreRenderContext(context) {
   const inspector = $("#inspector");
   restoreDetails(plan, context.planDetails);
   restoreDetails(inspector, context.inspectorDetails);
+  [...document.querySelectorAll("#plan-tree pre, #inspector pre")].forEach((item, index) => { const saved = context.outputScroll[index]; if (saved) { item.scrollTop = saved.top; item.scrollLeft = saved.left; } });
   plan.scrollTop = context.planScroll;
   inspector.scrollTop = context.inspectorScroll;
   context.focusSelector && document.querySelector(context.focusSelector)?.focus({ preventScroll: true });
@@ -2070,6 +2064,10 @@ events.onmessage = ({ data }) => {
   }
   if (event.type === "tickets") { ticketSources = event.ticketSources; render(); return; }
   if (event.channel === "run" && event.ticketId && event.stepId) {
+    if (event.usageTotals) {
+      const worker = state.ticketRuns?.[event.ticketId]?.activeRuns?.[event.stepId];
+      if (worker?.runId === event.runId) { worker.activity ||= {}; worker.activity.usage = event.usageTotals; if (event.ticketId === state.selectedTicketId) renderHeader(); }
+    }
     const key = `${event.ticketId}:${event.stepId}`;
     const selectedRun = runFor();
     const selectedAttempt = inspectionAttempt(selectedAttemptId);
@@ -2093,12 +2091,21 @@ events.onmessage = ({ data }) => {
     if (event.ticketId === state.selectedTicketId && event.stepId === selectedStepId) {
       const output = $("[data-worker-output]");
       if (event.type === "text_delta" && output?.dataset.workerRun === event.runId) updateStreamOutput(output, live.output);
+      if (event.type === "text_delta") {
+        const retainedOutput = $("[data-attempt-output]");
+        if (retainedOutput && selectedAttempt?.lifecycle === "active" && selectedAttempt.runId === event.runId) updateStreamOutput(retainedOutput, live.output.slice(-20000));
+        return;
+      }
       if (event.type === "prompt" && activeTab === "prompt") renderInspectorPreservingContext();
-      else if (selectedAttemptId && activeTab !== "run") renderInspectorPreservingContext();
+      else if (selectedAttemptId && ["activity", "overview"].includes(activeTab) && event.type !== "thinking") renderInspectorPreservingContext();
       else refreshLiveRun({ events: ["tool_start", "tool_update", "tool_end", "agent_error"].includes(event.type) });
     }
   }
   if (event.channel === "stage" && event.ticketId && event.stageId) {
+    if (event.usageTotals && state.ticketRuns?.[event.ticketId]?.runId === event.runId) {
+      const stage = state.ticketRuns[event.ticketId].stages?.find((item) => item.id === event.stageId);
+      if (stage) { stage.activity ||= {}; stage.activity.usage = event.usageTotals; if (event.ticketId === state.selectedTicketId) renderHeader(); }
+    }
     const key = `${event.ticketId}:${event.stageId}`;
     const persisted = state.ticketRuns?.[event.ticketId]?.stages?.find((stage) => stage.id === event.stageId)?.activity;
     let live = liveStages.get(key) || { events: [...(persisted?.events || [])], output: stageOutputs.get(`${event.ticketId}:${event.runId}:${event.stageId}`)?.content || persisted?.rawOutput || "", startedAt: persisted?.startedAt || new Date().toISOString() };
@@ -2115,7 +2122,7 @@ events.onmessage = ({ data }) => {
     if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId && event.runId === runFor()?.runId) {
       if (event.type === "text_delta") {
         for (const output of document.querySelectorAll("[data-stage-output]")) updateStreamOutput(output, live.output);
-      } else if (event.type !== "text_delta") renderInspectorPreservingContext();
+      } else if (event.type !== "thinking" && ["activity", "prompt"].includes(activeTab)) renderInspectorPreservingContext();
     }
   }
 };

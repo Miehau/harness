@@ -346,7 +346,25 @@ export function groupActivityEvents(events = []) {
   });
 }
 
+function retainedUsage(activity = {}) {
+  if (activity.usage) return { ...activity.usage };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length };
+  for (const event of activity.events || []) addUsage(usage, event);
+  return usage;
+}
+
+function addUsage(usage, event) {
+  if (event.type === "tool_start") usage.calls++;
+  if (event.type !== "usage") return;
+  usage.records++;
+  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
+    const value = Number(event[key]);
+    if (Number.isFinite(value) && value >= 0) usage[key] += value;
+  }
+}
+
 export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
+  const usage = retainedUsage(existing);
   const startedAt = existing.startedAt || new Date(now()).toISOString();
   const events = redactRecord((existing.events || []).slice(-eventLimit));
   const prompts = redactRecord((existing.prompts || []).slice(-20));
@@ -359,7 +377,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   let dirty = false;
   const lastThinkingAt = new Map();
   const current = () => ({
-    startedAt, lastEventAt, lastEvent, warning, rawOutput, events: events.slice(), prompts: prompts.slice(), groups: groupActivityEvents(events),
+    startedAt, lastEventAt, lastEvent, warning, rawOutput, usage: { ...usage }, events: events.slice(), prompts: prompts.slice(), groups: groupActivityEvents(events),
     ...(completedAt ? { completedAt } : {})
   });
   const save = () => {
@@ -382,6 +400,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
       if (event.type === "thinking" && timestamp - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
       if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
       const item = redactRecord({ ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() });
+      addUsage(usage, item);
       if (item.type === "prompt") {
         const prompt = boundedText(item.content || item.prompt, 16000);
         item.content = prompt.value;
@@ -404,7 +423,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
         warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
         save();
       }
-      emit?.(item);
+      emit?.(["usage", "tool_start"].includes(item.type) ? { ...item, usageTotals: { ...usage } } : item);
     },
     snapshot() {
       completedAt ||= new Date(now()).toISOString();
@@ -424,6 +443,7 @@ const attemptOutputLimit = 100000;
 
 function boundedAttemptActivity(activity = {}, rawOutput = "") {
   return {
+    usage: retainedUsage(activity),
     events: redactRecord(structuredClone((activity.events || []).slice(-attemptEventLimit))),
     activityGroups: redactRecord(structuredClone((activity.groups || []).slice(-attemptEventLimit))),
     prompts: (activity.prompts || []).slice(-20).map((item) => {
@@ -1188,12 +1208,14 @@ export function artifactMetadata(artifact) {
 function compactActivityEvent(event = {}) {
   return redactRecord({
     type: event.type || "activity", tool: event.tool || null, label: boundedText(event.label, 240).value,
+    ...(event.type === "usage" ? { input: event.input, output: event.output, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite } : {}),
     at: event.at || null, isError: Boolean(event.isError), ...(event.actor ? { actor: boundedText(event.actor, 120).value } : {})
   });
 }
 
 function publicAttempt(attempt) {
   const clone = structuredClone(attempt);
+  clone.usage = retainedUsage(attempt);
   for (const key of ["rawOutput", "activityGroups", "sessionFile", "prompt", "artifactRefs"]) delete clone[key];
   if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20)
     // Short tool-end payloads duplicate durable activity without adding a
@@ -1311,6 +1333,7 @@ export function publicRun(run) {
   clone.lastError = boundedText(clone.lastError, 1000).value || null;
   if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
   for (const stage of clone.stages || []) if (stage.activity) {
+    stage.activity.usage = retainedUsage(stage.activity);
     delete stage.activity.prompts;
     if (Array.isArray(stage.activity.events)) stage.activity.events = stage.activity.events.slice(-20).map(compactActivityEvent);
     delete stage.activity.groups;
@@ -1346,6 +1369,7 @@ export function publicRun(run) {
     delete active.prompt;
     delete active.sessionFile;
     if (active.activity) {
+      active.activity.usage = retainedUsage(active.activity);
       delete active.activity.prompts;
       if (Array.isArray(active.activity.events)) active.activity.events = active.activity.events.slice(-20).map(compactActivityEvent);
       delete active.activity.groups;

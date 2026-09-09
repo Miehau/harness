@@ -2628,3 +2628,21 @@ test("a primary-only project still completes through the existing single-repo de
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+
+test("saved attempt details recover session activity and worker reports without stream artifacts", async () => {
+  const harness = { ...mockHarness(), sessionTrace: async () => ({ rawOutput: "Recovered session output", events: [{ type: "tool_end", label: "Inspected existing UI" }] }) };
+  await withDaemon(async (daemon) => {
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Build", permission: "write", writeScope: "src" }] });
+    plan.nodes[0].attempts = [
+      { attemptId: "session", runId: "worker-1", status: "verified", sessionFile: "/saved/session.jsonl" },
+      { attemptId: "report", runId: "worker-2", status: "verified", report: { summary: "Built the empty state" } }
+    ];
+    const id = await seedRun(daemon, { plan });
+    const read = async (attempt) => (await invoke(daemon, "GET", `/api/tickets/${id}/runs/run-1/steps/build/attempts/${attempt}/details`)).json;
+    assert.equal((await read("session")).output.content, "Recovered session output");
+    assert.equal((await read("session")).activity.items[0].label, "Inspected existing UI");
+    assert.match((await read("report")).output.content, /Built the empty state/);
+  }, { harness });
+
+});

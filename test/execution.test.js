@@ -937,3 +937,22 @@ test("createTicketRun freezes access so later Any-access policy cannot enlarge i
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("usage totals survive event trimming, resume, attempt materialization and public projection", async () => {
+  let persisted;
+  const capture = createActivityCapture({ eventLimit: 2, persist: async (activity) => { persisted = activity; } });
+  capture.onEvent({ type: "usage", input: 123, output: 45, cacheRead: 7 });
+  for (let i = 0; i < 5; i++) capture.onEvent({ type: "tool_start", label: "Read" });
+  await capture.flush();
+  assert.equal(persisted.events.some((event) => event.type === "usage"), false);
+  assert.equal(persisted.usage.input, 123);
+  const resumed = createActivityCapture({ existing: JSON.parse(JSON.stringify(persisted)) });
+  resumed.onEvent({ type: "usage", input: 10, output: 2, cacheWrite: 3 });
+  const activity = resumed.snapshot();
+  const plan = normalizePlan({ nodes: [{ id: "build", title: "Build" }] });
+  materializeActiveAttempt(plan.nodes[0], { runId: "worker", attemptId: "attempt", activity }, { status: "verified" });
+  const published = publicState({ selectedTicketId: "t", ticketRuns: { t: { id: "t", runId: "r", plan, stages: [] } }, retainedRuns: {} });
+  assert.deepEqual(published.ticketRuns.t.plan.nodes[0].attempts[0].usage, { input: 133, output: 47, cacheRead: 7, cacheWrite: 3, calls: 5, records: 2, complete: true });
+
+});

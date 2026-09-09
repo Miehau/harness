@@ -1226,10 +1226,9 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
   const prompt = await artifactContent(promptArtifact, 16000)
     || savedPrompt(typeof attempt.prompt === "string" ? attempt.prompt : attempt.prompt?.content, attempt.promptTruncated ?? attempt.prompt?.truncated, attempt.promptTotal ?? attempt.prompt?.total)
     || savedPrompt(lastPrompt?.content || lastPrompt?.prompt, lastPrompt?.truncated, lastPrompt?.total);
-  const activity = attempt.events || attempt.activity?.events || [];
-  const activityItems = activity.slice(-100).map(detailActivityEvent);
+  let activity = attempt.events || attempt.activity?.events || [];
   const rawOutput = redactText(attempt.rawOutput || attempt.activity?.rawOutput || "");
-  const output = await artifactContent(outputArtifact, 20000) || rawOutput;
+  let output = await artifactContent(outputArtifact, 20000) || rawOutput;
   const artifactItems = await Promise.all(artifacts.map(async (artifact) => {
     const content = await artifactContent(artifact, 12000);
     return { ...safeArtifactMetadata(artifact), ...textDetail(content, 12000, "not_retained", artifact) };
@@ -1240,6 +1239,9 @@ async function attemptDetails(run, step, attempt, { active = false } = {}) {
     try { trace = redactRecord(await harness.sessionTrace(traceFile, { after: attempt.startedAt, before: attempt.completedAt })); }
     catch { trace = null; }
   }
+  output ||= trace?.rawOutput || (attempt.report ? redactText(JSON.stringify(attempt.report, null, 2)) : "");
+  if (!activity.length) activity = trace?.events || [];
+  const activityItems = activity.slice(-100).map(detailActivityEvent);
   const traceOutput = trace && boundedText(trace.rawOutput || "", 20000);
   const tracePrompts = trace?.prompts || [];
   const traceEvents = trace?.events || [];

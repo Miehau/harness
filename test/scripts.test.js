@@ -98,7 +98,6 @@ test("dashboard source keeps supervision controls semantic and visibly focusable
   assert.match(app, /hydrateArtifact\(run, promptArtifact\)/);
   assert.match(app, /data-view-artifact/);
   assert.match(app, /event\.type === "prompt" && activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
-  assert.match(app, /event\.type !== "text_delta"\) renderInspectorPreservingContext\(\)/);
   assert.match(app, /activeTab === "prompt"\) renderInspectorPreservingContext\(\)/);
   assert.match(app, /function truncatedResourceWarning\(resource, tab\)/);
   assert.match(app, /const warning = resource\.state === "truncated" \? truncatedResourceWarning\(resource, tab\) : ""/);

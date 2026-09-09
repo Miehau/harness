@@ -31,7 +31,7 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
     await capturePage({
       url,
       interact: async ({ evaluate }) => {
-        const check = async (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
+        const check = async (expression) => waitFor(async () => assert.equal(await evaluate(expression), true, await evaluate('document.querySelector("#plan-tree")?.textContent')), { timeoutMs: 5000 });
         await check('Boolean(document.querySelector("#free-text-open"))');
         // Empty required fields and invalid input must never block Close.
         for (const id of ["workspace", "tracker", "free-text", "local-load", "plan", "restart"]) {
@@ -46,7 +46,8 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
         await check('Boolean(document.querySelector("[data-start-preview]"))');
         clarifyEvent({ type: "text_delta", delta: "Shaping the requested feature." });
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Shaping the requested feature.")');
-        await evaluate('location.reload()');
+        await evaluate('window.beforeReload = true; location.reload()');
+        await check('!window.beforeReload');
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Shaping the requested feature.")');
         finishClarify();
         await check('Boolean(document.querySelector("[data-clarify]"))');
@@ -71,13 +72,15 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
         finishExplore();
         await check('document.querySelector("#plan-tree .stage-artifacts")?.textContent.includes("implementation-delta.md")');
         await check('document.querySelector("#plan-tree .artifact-preview")?.textContent.includes("The new repository is ready.")');
-        await evaluate('location.reload()');
+        await evaluate('window.beforeReload = true; location.reload()');
+        await check('!window.beforeReload');
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Inspecting the initialized repository.")');
         if (process.env.AGENT_PLAN_DASHBOARD_PROOF) await capturePage({ url, out: `${process.env.AGENT_PLAN_DASHBOARD_PROOF}-artifacts.png` });
         await evaluate(`document.querySelector('#clear-queue').click(); document.querySelector('#clear-queue').click()`);
         await check('document.querySelectorAll(".ticket-card").length === 0');
         assert.equal(Object.keys(daemon.store.read().retainedRuns).length, 1);
-        await evaluate('location.reload()');
+        await evaluate('window.beforeReload = true; location.reload()');
+        await check('!window.beforeReload');
         await check('document.querySelector("#ticket-list")?.textContent.includes("No tickets")');
         assert.equal(await evaluate('document.querySelectorAll(".ticket-card").length'), 0);
       }
@@ -99,15 +102,24 @@ test("selected implementation worker streams in the main window and survives rel
     const work = invoke(daemon, "POST", `/api/tickets/${id}/steps/build/changes`, { body: { feedback: "Implement the feature" } });
     await waitFor(() => assert.ok(emit));
     try {
-      await capturePage({ url: `http://127.0.0.1:${daemon.server.address().port}`, interact: async ({ evaluate }) => {
-        const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
+      await capturePage({ url: `http://127.0.0.1:${daemon.server.address().port}`, out: process.env.AGENT_PLAN_INSPECTION_PROOF ? `${process.env.AGENT_PLAN_INSPECTION_PROOF}-stream.png` : null, interact: async ({ evaluate }) => {
+        const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true, await evaluate('document.querySelector("#plan-tree")?.textContent')), { timeoutMs: 5000 });
         await check('Boolean(document.querySelector("[data-worker-output]"))');
+        emit({ type: "usage", input: 1200, output: 345, cacheRead: 100 });
+        await check('document.querySelector(".usage-strip")?.textContent.includes("345 out")');
         emit({ type: "text_delta", delta: "Implementing the feature now." });
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now.")');
-        await evaluate('location.reload()');
+        await evaluate('window.beforeReload = true; location.reload()');
+        await check('!window.beforeReload');
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now.")');
+        await check('document.querySelector(".usage-strip")?.textContent.includes("345 out")');
+        await evaluate('document.querySelector("[data-tab=output]").click()');
+        await check('Boolean(document.querySelector("[data-attempt-output]"))');
+        await evaluate('window.retainedOutputNode = document.querySelector("[data-attempt-output]")');
         emit({ type: "text_delta", delta: " Checking the result." });
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now. Checking the result.")');
+        await check('document.querySelector("[data-attempt-output]")?.textContent.includes("Checking the result.")');
+        assert.equal(await evaluate('window.retainedOutputNode === document.querySelector("[data-attempt-output]")'), true);
       } });
     } finally {
       await invoke(daemon, "POST", `/api/tickets/${id}/cancel`, { body: {} });
@@ -285,4 +297,40 @@ test("workspace policy does not POST while load is delayed or failed and ignores
       await rm(extra, { recursive: true, force: true });
     }
   }, { listen: true });
+});
+
+
+test("Verify main pane retains criteria, findings and correction history across reload", { timeout: 30000 }, async () => {
+  await withDaemon(async (daemon) => {
+    if (!daemon.server.listening) await once(daemon.server, "listening");
+    const plan = normalizePlan({ nodes: [{ id: "build", title: "Search results", status: "accepted", acceptanceCriteria: ["Empty results explain how to retry", "Keyboard users can submit a search"] }] });
+    await seedRun(daemon, { status: "needs_attention", plan,
+      stages: [{ id: "implement", title: "Implement", status: "completed" }, { id: "verify", title: "Verify", status: "blocked", summary: "Waiting to recheck the empty state" }],
+      reviews: [{ round: 1, reviewMode: "independent", actionableFindings: [{ severity: "high", claim: "Empty results have no retry action", acceptanceCriterion: "Empty results explain how to retry", suggestedFix: "Reuse the existing retry button" }], reviews: [{ role: "requirements", summary: "Empty state needs correction" }], fix: { diff: { files: ["public/app.js"] } } }]
+    });
+    const url = `http://127.0.0.1:${daemon.server.address().port}`;
+    await capturePage({ url, out: process.env.AGENT_PLAN_INSPECTION_PROOF ? `${process.env.AGENT_PLAN_INSPECTION_PROOF}-verify.png` : null, interact: async ({ evaluate }) => {
+      const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true, await evaluate('document.querySelector("#plan-tree")?.textContent')), { timeoutMs: 5000 });
+      await check('Boolean(document.querySelector("[data-stage=verify]"))');
+      await evaluate('document.querySelector("[data-stage=verify]").click()');
+      await check('document.querySelector("#plan-tree")?.textContent.includes("Empty results have no retry action")');
+      await check('document.querySelector("#plan-tree")?.textContent.includes("Keyboard users can submit a search")');
+      assert.equal(await evaluate('document.querySelectorAll("[data-tab=cleanup]").length'), 0);
+      assert.equal(await evaluate('document.querySelector("#plan-tree .proof-eligibility").textContent'), "not recorded");
+      await evaluate('window.beforeReload = true; location.reload()');
+        await check('!window.beforeReload');
+      await check('Boolean(document.querySelector("[data-stage=verify]"))');
+      await evaluate('document.querySelector("[data-stage=verify]").click()');
+      await check('document.querySelector("#plan-tree")?.textContent.includes("Fix applied — awaiting independent review")');
+      await evaluate('document.querySelector(".verification-rounds").open = true');
+      await check('document.querySelector("#plan-tree")?.textContent.includes("resolution requires a later review")');
+      await evaluate('document.querySelector(".verification-rounds").open = false');
+    } });
+    if (process.env.AGENT_PLAN_INSPECTION_PROOF) await capturePage({ url, out: `${process.env.AGENT_PLAN_INSPECTION_PROOF}-criteria.png`, interact: async ({ evaluate }) => {
+      await waitFor(async () => assert.ok(await evaluate('document.querySelector("[data-stage=verify]")')));
+      await evaluate('document.querySelector("[data-stage=verify]").click(); document.querySelector("#plan-tree").scrollTop = 650');
+      await waitFor(async () => assert.equal(await evaluate('document.querySelectorAll("#plan-tree .criterion-proof").length'), 2));
+    } });
+  }, { harness: mockHarness(), listen: true });
+
 });
