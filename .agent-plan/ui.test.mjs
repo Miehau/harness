@@ -43,8 +43,8 @@ test("UI CLI validates commands and exercises real task navigation and creation"
     const added = await runJourney({ url, commands: [["tasks", "add", "UI CLI test task"]], assertions: [{ selector: "#ticket-header h2", text: "UI CLI test task" }] });
     assert.equal(added.results[0].added, "UI CLI test task");
     assert.ok(Object.values(daemon.store.read().ticketRuns).some((run) => run.ticket.title === "UI CLI test task"));
-    const criterion = { id: "criterion-select", text: "Selected task title is visible", requiresVideoEvidence: true };
-    const scenario = { criterion: criterion.text, commands: [["tasks", "open", "$ticketId"]], assertions: [{ selector: "#ticket-header h2", text: daemon.store.read().ticketRuns[id].ticket.title }] };
+    const criterion = { id: "criterion-select", text: "Selected task title is visible", requiresVideoEvidence: true, journeyId: "selected-task" };
+    const scenario = { id: "selected-task", criterion: "Original wording before revision", commands: [["tasks", "open", "$ticketId"]], assertions: [{ selector: "#ticket-header h2", text: daemon.store.read().ticketRuns[id].ticket.title }] };
     await assert.rejects(captureTicketProof({ url, ticketId: id, runId: "run-1", evidenceDir: dataDir, criteria: [criterion], scenarios: [] }), /Define one UI CLI scenario/);
     const manifest = await captureTicketProof({ url, ticketId: id, runId: "run-1", evidenceDir: dataDir, criteria: [criterion], scenarios: [scenario] });
     assert.equal(manifest.captures.length, 4);
@@ -90,10 +90,7 @@ test("UI CLI opens the workspace policy dialog and reports invalid extra roots",
         }))
       });
       assert.ok(savedRoots.assertions);
-      const persistedScenario = scenarios.find((scenario) => scenario.criterion === "Two store primaries keep extra roots only on the project that saved them after re-init.");
-      assert.ok(persistedScenario, "ticket-bound proof scenario exists for project-keyed persisted roots");
-      const persisted = await runJourney({ url, commands: persistedScenario.commands, assertions: persistedScenario.assertions });
-      assert.ok(persisted.assertions);
+      assert.ok(!scenarios.some((scenario) => /Two store primaries|operator CLI/.test(scenario.criterion)), "UI screenshots do not claim persistence or CLI equivalence");
       const invalidScenario = scenarios.find((scenario) => scenario.criterion.startsWith("Invalid extra roots"));
       const invalid = await runJourney({ url, commands: invalidScenario.commands, assertions: invalidScenario.assertions });
       assert.ok(invalid.assertions);
@@ -117,5 +114,26 @@ test("UI CLI opens the workspace policy dialog and reports invalid extra roots",
     } finally {
       await rm(extra, { recursive: true, force: true });
     }
+  });
+});
+
+test("journeys reject covered controls and broken keyboard navigation, retaining failure evidence", { timeout: 60000 }, async () => {
+  const { capturePage } = await import("../scripts/screenshot.mjs");
+  await withDaemon(async (daemon, { dataDir }) => {
+    await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${daemon.server.address().port}`;
+    const inject = (script) => (options) => capturePage({ ...options, interact: async (browser) => {
+      await browser.evaluate(script);
+      await options.interact(browser);
+    } });
+    const screenshot = join(dataDir, "covered.png");
+    await assert.rejects(runJourney({ url, screenshot, commands: [["workspace", "open"]],
+      capture: inject('document.body.insertAdjacentHTML("beforeend", \'<div style="position:fixed;inset:0;z-index:999999;background:white"></div>\')')
+    }), /covered/);
+    assert.ok((await readFile(screenshot)).length > 100);
+    assert.match(JSON.parse(await readFile(`${screenshot}.failure.json`, "utf8")).error, /covered/);
+    await assert.rejects(runJourney({ url, commands: [["workspace", "open"], ["workspace", "keyboard"]],
+      capture: inject('document.querySelector("#access-any").tabIndex = -1')
+    }), /Keyboard cannot reach.*access-any/);
   });
 });

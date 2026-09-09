@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { capturePage } from "../scripts/screenshot.mjs";
 
@@ -12,7 +12,7 @@ export const help = `Usage: node .agent-plan/ui.mjs <command> [--url URL] [--scr
   workspace extra-root <path> <read-only|read/write>
   workspace any on|off
   workspace save-policy
-  workspace keyboard            Focus every policy control in the open dialog
+  workspace keyboard            Tab through policy controls and operate the access checkbox
   journey <scenario.json>      Runs commands and assertions in one browser session
 
 Scenario: {"commands":[["tasks","open","id"],["stage","verify"],["tab","details"]],
@@ -58,18 +58,35 @@ async function navigate(commands, assertions) {
     }
     throw new Error(`UI assertion failed: ${description}`);
   };
+  const press = async (key, modifiers = 0) => {
+    const codes = { Tab: 9, Enter: 13, " ": 32, ArrowDown: 40, ArrowUp: 38, Home: 36, a: 65 };
+    for (const type of ["keyDown", "keyUp"]) await globalThis.__agentPlanInput("Input.dispatchKeyEvent", { type, key, code: key === " " ? "Space" : key, windowsVirtualKeyCode: codes[key], modifiers });
+  };
+  const clickElement = async (element) => {
+    element.scrollIntoView({ block: "center" });
+    const box = element.getBoundingClientRect();
+    const x = (Math.max(0, box.left) + Math.min(innerWidth, box.right)) / 2;
+    const y = (Math.max(0, box.top) + Math.min(innerHeight, box.bottom)) / 2;
+    if (!element.contains(document.elementFromPoint(x, y))) throw new Error(`UI target is covered: ${element.id || element.textContent}`);
+    for (const type of ["mousePressed", "mouseReleased"]) await globalThis.__agentPlanInput("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+  };
   const click = async (selector) => {
     const element = await wait(() => {
       const matches = [...document.querySelectorAll(selector)].filter(visible);
       if (matches.length > 1) throw new Error(`Ambiguous UI target: ${selector}`);
       return matches[0] && !matches[0].disabled ? matches[0] : null;
     }, `visible enabled ${selector}`);
-    element.scrollIntoView({ block: "center" });
-    element.click();
+    await clickElement(element);
+  };
+  const fill = async (selector, value) => {
+    await click(selector);
+    await press("a", /Mac/.test(navigator.platform) ? 4 : 2);
+    await globalThis.__agentPlanInput("Input.insertText", { text: value });
   };
   await wait(() => visible(document.querySelector("#free-text-open")), "dashboard loaded");
   const results = [];
-  for (const command of commands) {
+  for (const [commandIndex, command] of commands.entries()) {
+    try {
     const [noun, verb, value, extra] = command;
     if (noun === "tasks" && verb === "list") {
       await wait(() => document.querySelector("#ticket-list")?.textContent.trim(), "task list loaded");
@@ -83,8 +100,7 @@ async function navigate(commands, assertions) {
     } else if (noun === "tasks" && verb === "add") {
       await click("#free-text-open");
       const input = document.querySelector('#free-text-form [name="description"]');
-      input.value = value;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await fill('#free-text-form [name="description"]', value);
       await click('#free-text-form button[type="submit"]');
       await wait(() => !document.querySelector("#free-text-dialog").open && document.querySelector("#ticket-header h2")?.textContent === value.split("\n")[0], "new task selected");
       results.push({ added: value.split("\n")[0] });
@@ -97,8 +113,7 @@ async function navigate(commands, assertions) {
         await wait(() => !document.querySelector("#workspace-dialog")?.open, "workspace dialog closed");
       } else if (verb === "any") {
         const box = document.querySelector("#access-any");
-        box.checked = value === "on";
-        box.dispatchEvent(new Event("change", { bubbles: true }));
+        if (box.checked !== (value === "on")) await click("#access-any");
         await wait(() => document.querySelector("#access-mode-status")?.textContent.includes(value === "on" ? "Any access" : "Restricted"), "access mode label");
       } else if (verb === "extra-root") {
         const before = document.querySelectorAll("[data-extra-root]").length;
@@ -106,11 +121,13 @@ async function navigate(commands, assertions) {
         await wait(() => document.querySelectorAll("[data-extra-root]").length === before + 1, "extra root row added");
         const row = [...document.querySelectorAll("[data-extra-root]")].at(-1);
         const input = row.querySelector(".extra-root-path");
-        input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        await fill(`[data-extra-root]:last-child .extra-root-path`, value);
         const select = row.querySelector(".extra-root-mode");
-        select.value = extra;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
+        await click("[data-extra-root]:last-child .extra-root-mode");
+        const targetIndex = [...select.options].findIndex((option) => option.value === extra);
+        await press("Home");
+        for (let i = 0; i < targetIndex; i++) await press("ArrowDown");
+        await press("Enter");
         await wait(() => row.querySelector(".extra-root-path")?.value === value && row.querySelector(".extra-root-mode")?.value === extra, "extra root filled");
       } else if (verb === "save-policy") {
         await click("#save-access-policy");
@@ -123,18 +140,29 @@ async function navigate(commands, assertions) {
         const dialog = document.querySelector("#workspace-dialog");
         const controls = [...dialog.querySelectorAll("button, input, select")].filter((element) => !element.disabled && visible(element));
         if (controls.length < 4) throw new Error("Policy controls are not keyboard-reachable");
-        for (const control of controls) {
-          control.focus();
-          if (document.activeElement !== control) throw new Error(`Cannot focus ${control.id || control.getAttribute("aria-label") || control.textContent.trim()}`);
+        const reached = new Set();
+        for (let i = 0; i < controls.length + 2; i++) {
+          await press("Tab");
+          reached.add(document.activeElement);
         }
+        const missing = controls.filter((control) => !reached.has(control));
+        if (missing.length) throw new Error(`Keyboard cannot reach: ${missing.map((control) => control.id || control.textContent.trim()).join(", ")}`);
+        const checkbox = document.querySelector("#access-any");
+        for (let i = 0; document.activeElement !== checkbox && i <= controls.length; i++) await press("Tab");
+        const before = checkbox.checked;
+        await press(" ");
+        await wait(() => checkbox.checked !== before, "Space operates access checkbox");
+        await press(" ");
+        await wait(() => checkbox.checked === before, "Space restores access checkbox");
       }
     } else if (noun === "stage" || noun === "tab") {
       await click(`[data-${noun}=${JSON.stringify(verb)}]`);
     } else {
       const matches = [...document.querySelectorAll("button")].filter((element) => visible(element) && (element.getAttribute("aria-label") || element.textContent).trim() === verb);
       if (matches.length !== 1 || matches[0].disabled) throw new Error(`Missing, disabled or ambiguous button: ${verb}`);
-      matches[0].click();
+      await clickElement(matches[0]);
     }
+    } catch (error) { throw new Error(`Journey action ${commandIndex + 1} (${command.join(" ")}): ${error.message}`); }
   }
   for (const { selector, text, value } of assertions) await wait(() => {
     const matches = [...document.querySelectorAll(selector)].filter(visible).filter((element) => (
@@ -152,9 +180,13 @@ export async function runJourney({ url, commands, assertions = [], screenshot, v
   const parsedUrl = new URL(url);
   if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new Error("UI URL must use HTTP or HTTPS");
   let result;
-  await capture({ url, out: screenshot, video, width, height, interact: async ({ evaluate }) => {
+  try { await capture({ url, out: screenshot, video, width, height, interact: async ({ evaluate }) => {
     result = await evaluate(`(${navigate.toString()})(${JSON.stringify(commands)}, ${JSON.stringify(assertions)})`);
-  } });
+  } }); }
+  catch (error) {
+    if (screenshot) await writeFile(`${screenshot}.failure.json`, JSON.stringify({ url, commands, assertions, error: error.message }, null, 2));
+    throw error;
+  }
   return { ...result, commands, screenshot: screenshot || null, video: video || null };
 }
 
