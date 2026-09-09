@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -65,6 +65,25 @@ test("stamped artifact identity also binds without a manifest", () => {
 test("ticket-bound capture refuses to run without live ticket identity", async () => {
   await assert.rejects(captureTicketProof({ url: "", ticketId: "t", runId: "r", evidenceDir: "/tmp" }), /AGENT_PLAN_CAPTURE_URL/);
   await assert.rejects(captureTicketProof({ url: "http://127.0.0.1:4317", ticketId: "", runId: "r", evidenceDir: "/tmp" }), /AGENT_PLAN_CAPTURE_TICKET_ID/);
+});
+
+test("ticket-bound capture writes an empty manifest when no visual criteria are selected", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "no-visual-criteria-"));
+  let journeyCalled = false;
+  try {
+    const manifest = await captureTicketProof({
+      url: "http://127.0.0.1:1", ticketId: "ticket-1", runId: "run-2", evidenceDir: directory, criteria: [],
+      journey: async () => { journeyCalled = true; }
+    });
+    assert.equal(journeyCalled, false);
+    assert.deepEqual(manifest.captures, []);
+    assert.deepEqual(manifest.identity, { ticketId: "ticket-1", runId: "run-2", ticketIdentifier: "ticket-1", ticketTitle: null });
+    const written = JSON.parse(await readFile(join(directory, visualEvidenceManifestName), "utf8"));
+    assert.deepEqual(written.captures, []);
+    assert.equal(written.source, "live-ticket-run");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("repository failures stay test failures even when screenshots are missing", () => {

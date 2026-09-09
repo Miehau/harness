@@ -33,6 +33,7 @@ import { CredentialStore, effectiveTrackerCredentials, publicTrackerSettings } f
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, runCheckpointFromWorkflow, workflowBlockers } from "./workflow.js";
 import { body, createHandleRequest, json } from "./http.js";
 import { earlyFailureStatusSet, replaceableRunStatusSet, terminalRunStatusSet } from "./run-status.js";
+import { acknowledgeSteering, claimNextSteering, failSteering, markSteeringDelivered, recoverSteeringClaims, releaseSteeringClaim, submitSteering, targetMatches } from "./steering.js";
 import { projectInspection } from "./inspection.js";
 import { applyIndependentProofReports, applyProofReports, initializeProofMap, invalidateProof, projectProofMap, proofEligibility } from "./proof-map.js";
 import { createProcessContainment } from "./process-containment.js";
@@ -224,6 +225,7 @@ const activeSteps = new Map();
 const activeTickets = new Map();
 const activeContainments = new Map();
 const activeMerges = new Set();
+const steeringDrainTimers = new Map();
 const mergeQueues = new Map();
 let ticketCache = new Map();
 let trackerRefresh = null;
@@ -560,7 +562,7 @@ async function runContainedWorker({ ticketId, stepId, attemptId = null, signal, 
   let result;
   try {
     result = await harness.runStep({
-      ...input, containment, ticketId, signal,
+      ...input, containment, ticketId, attemptId, signal,
       onCleanup: (evidence, trigger) => persistContainment(ticketId, runId, executionId, evidence, trigger)
     });
     return result;
@@ -756,6 +758,161 @@ function ticketRun(state, ticketId) {
   const run = state.ticketRuns[ticketId];
   if (!run) throw new Error("Ticket run not found");
   return run;
+}
+
+function steeringResponse(record, { reason = null, nextCondition = null } = {}) {
+  const target = record && { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId };
+  const state = record?.state || "rejected";
+  const defaultCondition = state === "queued" ? "The bound worker must be active before Pi delivery can begin."
+    : state === "claimed" ? "Wait for the current Pi delivery claim to settle or expire."
+    : state === "withheld" ? "Answer the steering checkpoint before changing scope or authority."
+    : state === "failed" ? "Inspect the delivery audit and submit a new focused correction if appropriate."
+    : state === "delivered" ? "The worker can acknowledge the delivered correction in its report."
+    : "No further steering action is required.";
+  return { steerId: record?.id || null, target: target || null, state, reason: reason || record?.reason || null, nextCondition: nextCondition || defaultCondition };
+}
+
+function appendSteeringRejection(run, input, outcome) {
+  run.steeringRejections ||= [];
+  run.steeringRejections.push({
+    id: `steer-rejection-${randomUUID()}`,
+    instruction: String(input.instruction ?? input.text ?? "").trim(),
+    author: String(input.author || "operator").trim() || "operator",
+    code: outcome.code || outcome.validation?.code || "rejected",
+    reason: outcome.reason || outcome.validation?.reason || "The steering request was rejected.",
+    createdAt: new Date().toISOString()
+  });
+  if (run.steeringRejections.length > 50) run.steeringRejections.splice(0, run.steeringRejections.length - 50);
+  return run.steeringRejections.at(-1);
+}
+
+function steeringCheckpointPending(run) {
+  return run?.status === "awaiting_input" && run.checkpoint?.source === "steering" && run.checkpoint.kind === "needs_input";
+}
+
+function steeringDrainKey(target) {
+  return `${target.ticketId}\0${target.runId}\0${target.stepId}\0${target.attemptId}`;
+}
+
+function clearSteeringDrain(target) {
+  const key = steeringDrainKey(target);
+  const timer = steeringDrainTimers.get(key);
+  if (timer) clearTimeout(timer);
+  steeringDrainTimers.delete(key);
+}
+
+function scheduleSteeringDrain(ticketId, target) {
+  clearSteeringDrain(target);
+  const run = store.read().ticketRuns[ticketId];
+  const active = run?.activeRuns?.[target.stepId];
+  if (active?.piSessionState !== "active" || !targetMatches(run, target)) return;
+  const claim = run.steering?.records
+    ?.filter((record) => record.state === "claimed" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId)
+    .sort((left, right) => left.sequence - right.sequence)[0];
+  const expiresAt = Date.parse(claim?.claim?.expiresAt || "");
+  if (!Number.isFinite(expiresAt)) return;
+  const key = steeringDrainKey(target);
+  const timer = setTimeout(() => {
+    (async () => {
+      steeringDrainTimers.delete(key);
+      const current = store.read().ticketRuns[ticketId];
+      if (!targetMatches(current, target) || current.activeRuns?.[target.stepId]?.piSessionState !== "active") {
+        await update((state) => {
+          const run = state.ticketRuns[ticketId];
+          for (const record of run?.steering?.records || []) {
+            if (record.state !== "claimed" || record.runId !== target.runId || record.stepId !== target.stepId || record.attemptId !== target.attemptId) continue;
+            failSteering(run, record.id, {
+              code: "target_replaced",
+              reason: "The bound worker attempt ended or was replaced before the delivery claim expired."
+            });
+          }
+        });
+        return;
+      }
+      await drainSteering(ticketId, target);
+      scheduleSteeringDrain(ticketId, target);
+    })().catch(() => {});
+  }, Math.max(0, expiresAt - Date.now()) + 1);
+  timer.unref();
+  steeringDrainTimers.set(key, timer);
+}
+
+async function drainSteering(ticketId, target) {
+  let next = null;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    // A resumed saved session is the only place a stale claim can be retried. This
+    // preserves FIFO and never lets a surviving claim bypass its predecessor.
+    recoverSteeringClaims(run);
+    next = run.steering.records.find((record) =>
+      record.state === "queued" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId
+    );
+  });
+  if (next) await deliverSteering(ticketId, next.id);
+  scheduleSteeringDrain(ticketId, target);
+}
+
+async function deliverSteering(ticketId, steerId) {
+  if (typeof harness.steer !== "function") return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  let claim = null;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    const record = run.steering?.records?.find((item) => item.id === steerId);
+    if (!record || record.state !== "queued") return;
+    // Claim the target's earliest pending record, not necessarily the just-submitted
+    // one, so concurrent submissions retain durable FIFO order.
+    claim = claimNextSteering(run, { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId });
+  });
+  if (!claim) return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  let deliverable = false;
+  await update((state) => {
+    const run = ticketRun(state, ticketId);
+    if (!targetMatches(run, claim)) {
+      failSteering(run, claim.id, { reason: "The bound worker attempt changed before Pi accepted this correction.", code: "target_replaced" });
+      return;
+    }
+    deliverable = true;
+  });
+  if (!deliverable) return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  try {
+    const evidence = await harness.steer({
+      ticketId: claim.ticketId,
+      runId: claim.runId,
+      stepId: claim.stepId,
+      attemptId: claim.attemptId,
+      steerId: claim.id,
+      instruction: `[agent-plan-steer:${claim.id}]\n${claim.instruction}`
+    });
+    let delivered = null;
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      if (!targetMatches(run, claim)) {
+        failSteering(run, claim.id, { reason: "The bound worker attempt changed before Pi accepted this correction.", code: "target_replaced" });
+        return;
+      }
+      if (run.activeRuns?.[claim.stepId]?.piSessionState !== "active") {
+        failSteering(run, claim.id, { reason: "The bound Pi worker session ended before this correction could be recorded as delivered.", code: "target_replaced" });
+        return;
+      }
+      delivered = markSteeringDelivered(run, claim.id, claim.claim.claimId, { evidence: evidence || { queuedBy: "pi" } });
+    });
+    if (delivered) await drainSteering(ticketId, claim);
+    return delivered || ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  } catch (error) {
+    if (error?.code === "steering_session_unavailable") {
+      let requeued = null;
+      await update((state) => {
+        const run = ticketRun(state, ticketId);
+        const active = run.activeRuns?.[claim.stepId];
+        if (active?.piSessionState === "starting" && targetMatches(run, claim)) requeued = releaseSteeringClaim(run, claim.id, claim.claim.claimId, { reason: error.message });
+      });
+      return requeued || ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+    }
+    // A thrown session.steer() may have queued the message. Keep that claim for
+    // bounded crash-safe recovery instead of guessing whether Pi accepted it.
+    scheduleSteeringDrain(ticketId, claim);
+    return ticketRun(store.read(), ticketId).steering.records.find((record) => record.id === steerId) || null;
+  }
 }
 
 function stepCriterionIds(run, stepId) {
@@ -1819,7 +1976,8 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const currentStep = findNode(latest.plan, stepId);
         const workerRunId = randomUUID();
         const startedAt = new Date().toISOString();
-        const attemptId = nextAttemptId(currentStep);
+        const reusableAttempt = currentStep.status === "interrupted" && currentStep.activeAttempt?.id && currentStep.activeAttempt.status === "interrupted";
+        const attemptId = reusableAttempt ? currentStep.activeAttempt.id : nextAttemptId(currentStep);
         attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
         const contextArtifacts = await hydrateArtifacts([
           ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
@@ -1828,11 +1986,17 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         await update((state) => {
           const current = ticketRun(state, ticketId);
           const target = findNode(current.plan, stepId);
+          const reuse = target.status === "interrupted" && target.activeAttempt?.id === attemptId && target.activeAttempt.status === "interrupted";
+          target.activeAttempt = {
+            ...(reuse ? target.activeAttempt : {}), id: attemptId, status: "active",
+            startedAt: target.activeAttempt?.startedAt || startedAt, resumedAt: reuse ? startedAt : null, workerRunId
+          };
+          const sequence = Number(String(attemptId).match(/^attempt-(\d+)$/)?.[1]) || Number(target.attemptSequence) || 0;
+          target.attemptSequence = Math.max(Number(target.attemptSequence) || 0, sequence);
           target.status = pendingVerification ? "verifying" : nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-target.attemptSequence = Number(attemptId.slice("attempt-".length));
-          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false };
+          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
         });
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
@@ -1851,11 +2015,59 @@ const result = pendingVerification?.result || await runContainedWorker({
           profile: latest.stageProfiles[currentStep.role] || latest.stageProfiles.implementation,
           onEvent: activity.onEvent,
           onSessionFile: saveStepSession(ticketId, stepId, workerRunId),
+          onSessionActive: async (target) => {
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              const active = current.activeRuns?.[target.stepId];
+              if (active?.attemptId === target.attemptId && targetMatches(current, target)) active.piSessionState = "active";
+            });
+            await drainSteering(ticketId, target);
+          },
+          onSessionInactive: async (target) => {
+            if (!target) return;
+            clearSteeringDrain(target);
+            // Mark the exact live handle unavailable before an operator can submit
+            // another steer during verification or result persistence.
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              const active = current.activeRuns?.[target.stepId];
+              if (active?.attemptId === target.attemptId) active.piSessionState = "unavailable";
+            });
+            // Pausing intentionally retains this logical attempt and its queued work.
+            // Every other session end makes its bound target terminal for steering.
+            if (signal?.aborted && /run paused/i.test(String(signal.reason?.message || signal.reason || ""))) return;
+            await update((state) => {
+              const current = ticketRun(state, ticketId);
+              for (const record of current.steering?.records || []) {
+                if (!["queued", "claimed"].includes(record.state) || record.runId !== target.runId || record.stepId !== target.stepId || record.attemptId !== target.attemptId) continue;
+                failSteering(current, record.id, {
+                  code: "target_replaced",
+                  reason: "The bound Pi worker session ended before this steering delivery settled."
+                });
+              }
+            });
+          },
+          onSteering: (delivery) => activity.onEvent({
+            type: "steering_delivery", label: `Pi accepted steering ${delivery.steerId}`,
+            steerId: delivery.steerId, instruction: delivery.instruction, acceptedAt: delivery.acceptedAt
+          }),
+          attemptId,
           signal
         });
         Object.assign(attemptEvidence, { report: result.report, rawOutput: result.rawOutput || "", sessionFile: result.sessionFile || null });
         signal?.throwIfAborted();
-const report = redactRecord(result.report);
+        const report = redactRecord(result.report);
+        const acknowledgedSteerIds = [...new Set((report.acknowledgedSteerIds || []).map(String).filter(Boolean))];
+        if (acknowledgedSteerIds.length) await update((state) => {
+          const current = ticketRun(state, ticketId);
+          for (const steerId of acknowledgedSteerIds) {
+            const record = current.steering?.records?.find((item) => item.id === steerId);
+            if (!record || record.runId !== current.runId || record.stepId !== stepId || record.attemptId !== attemptId) continue;
+            acknowledgeSteering(current, steerId, {
+              evidence: { source: "worker_report", workerRunId, summary: report.summary, acknowledgedSteerIds }
+            });
+          }
+        });
         const workerTree = pendingVerification?.workerTree || await snapshotTree(cwd);
         let checks = pendingVerification?.checks || { status: "skipped", command: null, summary: "No repository changes require a deterministic check.", output: "" };
         if (!pendingVerification && currentStep.permission === "write" && report.status === "completed") {
@@ -1882,8 +2094,35 @@ const report = redactRecord(result.report);
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "diff.patch", content: diff.patch, kind: "git-diff" }),
           await persistArtifact(dataDir, latest.ticket, { ...artifactInput, name: "attempt-diff.patch", content: attemptDiff.patch, kind: "git-attempt-diff" })
         ];
-Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
+        Object.assign(attemptEvidence, { diff: attemptDiff, checkDiff, aggregateDiff: diff, reviewNotes, reviewBudgetResult: reviewBudget, violations, vcsChange, artifacts });
         const workerGate = workerReportCheckpoint(currentStep, report);
+        if (steeringCheckpointPending(ticketRun(store.read(), ticketId))) {
+          const attemptActivity = activity.snapshot();
+          await update((state) => {
+            const current = ticketRun(state, ticketId);
+            if (!steeringCheckpointPending(current)) return;
+            const target = findNode(current.plan, stepId);
+            target.status = "needs_input";
+            target.diff = diff;
+            target.reviewNotes = reviewNotes;
+            target.reviewNotesArtifact = reviewNotesArtifact ? { id: reviewNotesArtifact.id, name: reviewNotesArtifact.name, path: reviewNotesArtifact.path, createdAt: reviewNotesArtifact.createdAt } : null;
+            target.reviewBudgetResult = reviewBudget;
+            if (vcsChange) target.vcsChange = vcsChange;
+            target.sessionFile = result.sessionFile;
+            target.artifacts = [artifacts[0]];
+            materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRunId, attemptId, startedAt }, {
+              status: "needs_input", reason: "steering_checkpoint", phase: "worker_execution",
+              activity: attemptActivity, rawOutput: result.rawOutput, report, verification: { checks }, violations,
+              feedback: nextFeedback || null, diff: attemptDiff, vcsChange,
+              artifactRefs: artifacts.map(({ id, kind, name }) => ({ id, kind, name }))
+            });
+            current.artifacts.push(...artifacts);
+            delete current.activeRuns[stepId];
+            setStage(current, "implement", "blocked", current.checkpoint.title);
+          });
+          await mirrorCheckpoint(ticketId);
+          return;
+        }
         // Size is a review decision, not evidence of invalid code. Preserve the
         // worker output while blocking further work until the budget is approved.
         if (violations.length || runawayDiff || (report.status !== "completed" && !workerGate)) {
@@ -2114,11 +2353,24 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
         const failed = findNode(current.plan, stepId);
         const active = current.activeRuns[stepId] || {};
         const activity = active.activity || {};
-// A post-completion transition can fail after its active record was removed;
+        const preserveSteeringCheckpoint = steeringCheckpointPending(current);
+        const failedAt = new Date().toISOString();
+        // A worker failure belongs to the logical attempt that accepted steering;
+        // never invent a sequential ID that would orphan its delivery ledger.
+        const attemptId = active.attemptId || failed.activeAttempt?.id;
+        if (attemptId) failed.activeAttempt = {
+          ...(failed.activeAttempt || {}), id: attemptId,
+          status: preserveSteeringCheckpoint || providerWait ? "interrupted" : "failed",
+          workerRunId: null,
+          startedAt: failed.activeAttempt?.startedAt || active.startedAt || null,
+          ...(providerWait ? { interruptedAt: failedAt } : { failedAt })
+        };
+        // A post-completion transition can fail after its active record was removed;
         // only materialize when there is still a mutable worker to snapshot.
         if (active.runId) materializeActiveAttempt(failed, active, {
-          status: providerWait ? "interrupted" : "failed", reason: "worker_failure", error: error.message,
-          phase: "worker_execution", activity, rawOutput: attemptEvidence?.rawOutput || "", report: attemptEvidence?.report,
+          status: preserveSteeringCheckpoint ? "needs_input" : providerWait ? "interrupted" : "failed",
+          reason: preserveSteeringCheckpoint ? "steering_checkpoint_worker_failure" : "worker_failure",
+          error: error.message, phase: "worker_execution", activity, rawOutput: attemptEvidence?.rawOutput || "", report: attemptEvidence?.report,
           ...(attemptEvidence?.checks ? { checks: attemptEvidence.checks, verification: { checks: attemptEvidence.checks } } : {}),
           ...(attemptEvidence?.diff ? { diff: attemptEvidence.diff } : {}),
           ...(attemptEvidence?.checkDiff ? { checkDiff: attemptEvidence.checkDiff } : {}),
@@ -2129,13 +2381,19 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
         });
         if (attemptEvidence?.aggregateDiff) failed.diff = attemptEvidence.aggregateDiff;
         if (attemptEvidence?.reviewNotes) failed.reviewNotes = attemptEvidence.reviewNotes;
-        failed.status = providerWait ? "interrupted" : "failed";
+        failed.status = preserveSteeringCheckpoint ? "needs_input" : providerWait ? "interrupted" : "failed";
         failed.lastError = redactText(error.message);
         delete current.activeRuns[stepId];
-        current.status = providerWait ? "paused" : "needs_attention";
-        current.lastError = redactText(error.message);
-        current.checkpoint = { id: randomUUID(), ...(providerWait || { kind: "needs_attention", title: `Step failed: ${failed.title}`, prompt: redactText(error.message) }), stepId, source: "execution", createdAt: new Date().toISOString() };
-        setStage(current, "implement", providerWait ? "paused" : "blocked", redactText(error.message));
+        if (preserveSteeringCheckpoint) {
+          // The withheld instruction is an operator decision that remains valid
+          // even when its bound worker fails before the decision is answered.
+          setStage(current, "implement", "blocked", current.checkpoint.title);
+        } else {
+          current.status = providerWait ? "paused" : "needs_attention";
+          current.lastError = redactText(error.message);
+          current.checkpoint = { id: randomUUID(), ...(providerWait || { kind: "needs_attention", title: `Step failed: ${failed.title}`, prompt: redactText(error.message) }), stepId, source: "execution", createdAt: new Date().toISOString() };
+          setStage(current, "implement", providerWait ? "paused" : "blocked", redactText(error.message));
+        }
       });
     }
   })().finally(async () => {
@@ -3346,6 +3604,48 @@ const { artifact } = artifactForIdentity(store.read(), decodeURIComponent(artifa
       prompts: (trace.prompts || []).slice(-20).map((item) => ({ prompt: boundedText(item.prompt, 4000).value, at: item.at || null })), events: (trace.events || []).slice(-100).map(detailActivityEvent), rawOutput: rawOutput.value
     } });
   }
+  const steering = url.pathname.match(/^\/api\/tickets\/([^/]+)\/steering$/);
+  if (request.method === "GET" && steering) {
+    const run = ticketRun(store.read(), decodeURIComponent(steering[1]));
+    return json(response, 200, { records: run.steering?.records || [], rejections: run.steeringRejections || [] });
+  }
+  if (request.method === "POST" && steering) {
+    const ticketId = decodeURIComponent(steering[1]);
+    const input = await body(request);
+    let outcome;
+    await update((state) => {
+      const run = ticketRun(state, ticketId);
+      outcome = submitSteering(run, input, { author: input.author || "operator", stepId: String(input.stepId || "").trim() || null });
+      if (!outcome.record) appendSteeringRejection(run, input, outcome);
+      if (outcome.escalated) {
+        run.status = "awaiting_input";
+        run.checkpoint = {
+          id: randomUUID(), kind: "needs_input", title: "Steering requires clarification",
+          prompt: `${outcome.validation.reason}\n\nInstruction:\n${outcome.record.instruction}`,
+          questions: [outcome.validation.reason], stepId: outcome.record.stepId, source: "steering", steerId: outcome.record.id,
+          createdAt: new Date().toISOString()
+        };
+        setStage(run, "implement", "blocked", outcome.validation.reason);
+      }
+    });
+    if (!outcome.record) return json(response, 200, steeringResponse(null, {
+      reason: outcome.reason || outcome.validation?.reason,
+      nextCondition: outcome.terminal ? "Start a new run or resume a non-terminal run before submitting steering."
+        : outcome.code === "worker_unavailable" ? "Wait for the worker outcome or resume its interrupted attempt before submitting steering."
+          : "Submit one concrete, safely scoped correction to an active worker."
+    }));
+    if (outcome.escalated) {
+      await mirrorCheckpoint(ticketId);
+      return json(response, 200, steeringResponse(outcome.record));
+    }
+    let record = outcome.record;
+    if (!outcome.paused) {
+      await deliverSteering(ticketId, outcome.record.id);
+      record = ticketRun(store.read(), ticketId).steering.records.find((item) => item.id === outcome.record.id) || outcome.record;
+    }
+    return json(response, 200, steeringResponse(record, outcome.paused ? { nextCondition: "Resume this paused run manually; the correction remains queued for its saved attempt." } : {}));
+  }
+
   const stageOutput = url.pathname.match(/^\/api\/tickets\/([^/]+)\/runs\/([^/]+)\/stages\/([^/]+)\/output$/);
   if (request.method === "GET" && stageOutput) {
     const run = runForIdentity(store.read(), decodeURIComponent(stageOutput[1]), decodeURIComponent(stageOutput[2]));
@@ -3866,6 +4166,8 @@ async function close({ exit = false } = {}) {
   closePromise = (async () => {
     clearInterval(pollTimer);
     clearInterval(sseHeartbeat);
+    for (const timer of steeringDrainTimers.values()) clearTimeout(timer);
+    steeringDrainTimers.clear();
     closeSseClients(clients);
     for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
     await Promise.all([
