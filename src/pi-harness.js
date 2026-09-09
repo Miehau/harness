@@ -86,19 +86,19 @@ function failureHighlights(output) {
   return [...new Set(lines.filter((line) => /^(?:not ok\b|FAIL(?:ED)?\b|.*\b(?:timed out|did not render|did not become|within \d+ seconds)\b|\s+.*:\d+:\d+\)?$|\s+(?:location|failureType|error|code|name|expected|actual|operator|stack|command failed|fatal|stderr):)/i.test(line)).map((line) => line.slice(0, 500)))].slice(-40).join("\n").slice(-4500);
 }
 
-function safeEvent(event) {
+export function safeEvent(event) {
   if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     return { type: "text_delta", delta: event.assistantMessageEvent.delta, label: "Writing the response" };
   }
   if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
     return { type: "thinking", label: "Model is reasoning" };
   }
-  if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "error") {
-    return { type: "agent_error", label: event.message.errorMessage || "Model request failed" };
-  }
-  if (event.type === "message_end" && event.message?.role === "assistant" && event.message.usage) {
-    const { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 } = event.message.usage;
-    return { type: "usage", input, output, cacheRead, cacheWrite, label: "Usage recorded" };
+  if (event.type === "message_end" && event.message?.role === "assistant") {
+    const usage = event.message.usage;
+    const record = usage ? { input: usage.input || 0, output: usage.output || 0, cacheRead: usage.cacheRead || 0, cacheWrite: usage.cacheWrite || 0,
+      ...(typeof usage.cost?.total === "number" && Number.isFinite(usage.cost.total) && usage.cost.total >= 0 ? { costUsd: usage.cost.total } : {}) } : null;
+    if (event.message.stopReason === "error") return { type: "agent_error", label: event.message.errorMessage || "Model request failed", ...(record ? { usage: record } : {}) };
+    if (record) return { type: "usage", ...record, label: "Usage recorded" };
   }
   if (event.type === "tool_execution_start") return { type: "tool_start", tool: event.toolName, callId: event.toolCallId, args: eventText(event.args), label: `Using ${event.toolName}` };
   if (event.type === "tool_execution_update") return { type: "tool_update", tool: event.toolName, callId: event.toolCallId, detail: eventText(event.partialResult), replace: true, label: `${event.toolName} is running` };
@@ -159,7 +159,7 @@ export class PiHarness {
         trace.prompts.push({ prompt: trace.prompt, at });
       }
       const usage = safeEvent({ type: "message_end", message });
-      if (usage?.type === "usage") pushBounded(trace.events, { ...usage, at }, 200);
+      if (usage?.type === "usage" || usage?.usage) pushBounded(trace.events, { ...usage, at }, 200);
       if (message.role === "assistant") for (const part of message.content || []) {
         if (part.type === "text") trace.rawOutput = appendBounded(trace.rawOutput, redactText(part.text), 100000);
         if (part.type === "thinking" && part.thinkingSignature) {

@@ -64,7 +64,7 @@ test("summarizes subscription usage without imposing a budget", () => {
       { events: [{ type: "usage", input: 40, output: 10 }, { type: "tool_start" }] }
     ] }] }, stages: []
   };
-  assert.deepEqual(runMetrics(run), { input: 140, output: 30, cacheRead: 50, cacheWrite: 5, calls: 2, usageState: "partial", correctionRounds: 2, durationSeconds: 120 });
+  assert.deepEqual(runMetrics(run), { modelCalls: 2, cost: { usd: null, currency: "USD", state: "unavailable", reportedCalls: 0 }, input: 140, output: 30, cacheRead: 50, cacheWrite: 5, calls: 2, usageState: "partial", correctionRounds: 2, durationSeconds: 120 });
 });
 
 test("builds graph levels and readable diff rows", () => {

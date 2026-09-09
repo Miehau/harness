@@ -162,3 +162,5 @@ request a new direction, which invalidates prior visual proof. Old revisions rem
 available as artifacts/history. Prototype artifacts describe approved direction;
 only actual application captures can count as final visual evidence. Final review
 shows the approved prototype beside the implementation proof.
+
+Reported model cost appears beside token usage in USD. This is the SDK-reported amount, which may differ from billing. Unknown cost is unavailable; mixed reporting shows a partial total; a reported zero remains $0.0000. Totals include failed responses and corrections and survive activity-log trimming and reload. Tool calls and model responses with recorded usage are counted separately. No budget enforcement is added.

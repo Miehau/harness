@@ -59,6 +59,7 @@ export function groupActivityEvents(events = []) {
 export function retainedUsage(activity = {}) {
   if (activity.usage) return {
     ...Object.fromEntries(["input", "output", "cacheRead", "cacheWrite", "calls", "records"].map((key) => [key, Number(activity.usage[key]) || 0])),
+    ...(activity.usage.costRecords > 0 ? { costUsd: activity.usage.costUsd, costRecords: activity.usage.costRecords } : {}),
     complete: activity.usage.complete === true
   };
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length };
@@ -68,10 +69,15 @@ export function retainedUsage(activity = {}) {
 
 function addUsage(usage, event) {
   if (event.type === "tool_start") usage.calls++;
-  if (event.type !== "usage") return;
+  const record = event.type === "usage" ? event : event.usage;
+  if (!record) return;
   usage.records++;
+  if (typeof record.costUsd === "number" && Number.isFinite(record.costUsd) && record.costUsd >= 0) {
+    usage.costUsd = (usage.costUsd || 0) + record.costUsd;
+    usage.costRecords = (usage.costRecords || 0) + 1;
+  }
   for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
-    const value = Number(event[key]);
+    const value = Number(record[key]);
     if (Number.isFinite(value) && value >= 0) usage[key] += value;
   }
 }
@@ -134,7 +140,7 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
         warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
         save();
       }
-      emit?.(["usage", "tool_start"].includes(item.type) ? { ...item, usageTotals: { ...usage } } : item);
+      emit?.(["usage", "tool_start"].includes(item.type) || item.usage ? { ...item, usageTotals: { ...usage } } : item);
     },
     snapshot() {
       completedAt ||= new Date(now()).toISOString();

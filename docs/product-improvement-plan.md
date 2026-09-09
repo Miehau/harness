@@ -19,7 +19,8 @@ Make project startup reliable, bring frontend decisions forward, improve the tru
 - R2 merged: [PR #14](https://github.com/Miehau/harness/pull/14). Repeatable initialization and private dependency preparation.
 - J1 merged: [PR #15](https://github.com/Miehau/harness/pull/15). Real browser input, stable journey mappings, and honest proof scenarios.
 - F1 merged: [PR #16](https://github.com/Miehau/harness/pull/16). Explicit UI impact and per-criterion journey contracts.
-- F2: retained UI proposals, revision approval, lifecycle guards, and review preview implemented; validation and delivery in progress.
+- F2: merged in [PR #17](https://github.com/Miehau/harness/pull/17): retained proposals, revision approval, execution guards, and sandboxed review preview.
+- O1: reported cost metrics implemented; validation and delivery in progress.
 
 ## Findings behind the plan
 
