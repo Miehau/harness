@@ -356,7 +356,7 @@ export function restartOptions(run) {
 }
 
 export function runMetrics(run, now = Date.now()) {
-  if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, usageState: "unavailable", correctionRounds: 0, durationSeconds: 0 };
+  if (!run) return { modelCalls: 0, cost: { usd: null, state: "unavailable", currency: "USD", reportedCalls: 0 }, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, usageState: "unavailable", correctionRounds: 0, durationSeconds: 0 };
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   const attemptKeys = new Set();
   const keyFor = (item, stepId) => item.runId ? `run:${item.runId}` : item.attemptId ? `attempt:${stepId}:${item.attemptId}` : null;
@@ -371,24 +371,29 @@ export function runMetrics(run, now = Date.now()) {
   const activities = [...uniqueAttempts, ...(run.stages || []).map((stage) => stage.activity || {}), ...active];
   const totals = activities.map((activity) => activity.usage || (activity.events || []).reduce((total, event) => {
     if (event.type === "tool_start") total.calls++;
-    if (event.type === "usage") {
+    const record = event.type === "usage" ? event : event.usage;
+    if (record) {
       total.records++;
+      if (typeof record.costUsd === "number" && Number.isFinite(record.costUsd) && record.costUsd >= 0) { total.costUsd += record.costUsd; total.costRecords++; }
       for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
-        const value = Number(event[key]);
+        const value = Number(record[key]);
         if (Number.isFinite(value) && value >= 0) total[key] += value;
       }
     }
     return total;
-  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length }));
+  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, costUsd: 0, costRecords: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length }));
   const usage = totals.reduce((total, item) => {
-    for (const key of ["input", "output", "cacheRead", "cacheWrite", "calls", "records"]) total[key] += Number(item[key] || 0);
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "calls", "records", "costUsd", "costRecords"]) total[key] += Number(item[key] || 0);
     return total;
-  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0 });
+  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, costUsd: 0, costRecords: 0 });
   const usageState = !usage.records ? "unavailable" : totals.some((item) => !item.complete) ? "partial" : "recorded";
   const end = run.completedAt || (run.status === "completed" ? run.integration?.integratedAt : null) || now;
   const start = Date.parse(run.createdAt || end);
   return {
     input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, calls: usage.calls, usageState,
+    modelCalls: usage.records,
+    cost: { usd: usage.costRecords ? usage.costUsd : null, currency: "USD", reportedCalls: usage.costRecords,
+      state: !usage.costRecords ? "unavailable" : totals.some((item) => !item.complete || (item.records || 0) > (item.costRecords || 0)) ? "partial" : "reported" },
     correctionRounds: steps.reduce((total, step) => total + Math.max(0, (step.attempts?.length || 0) - 1), 0) + Math.max(0, (run.reviews?.length || 0) - 1),
     durationSeconds: Math.max(0, Math.floor((new Date(end).getTime() - start) / 1000))
   };

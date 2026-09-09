@@ -106,14 +106,16 @@ test("selected implementation worker streams in the main window and survives rel
       await capturePage({ url: `http://127.0.0.1:${daemon.server.address().port}`, out: process.env.AGENT_PLAN_INSPECTION_PROOF ? `${process.env.AGENT_PLAN_INSPECTION_PROOF}-stream.png` : null, interact: async ({ evaluate }) => {
         const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true, await evaluate('document.querySelector("#plan-tree")?.textContent')), { timeoutMs: 5000 });
         await check('Boolean(document.querySelector("[data-worker-output]"))');
-        emit({ type: "usage", input: 1200, output: 345, cacheRead: 100 });
+        emit({ type: "usage", input: 1200, output: 345, cacheRead: 100, costUsd: 0.0123 });
         await check('document.querySelector(".usage-strip")?.textContent.includes("345 out")');
+        await check('document.querySelector(".usage-strip")?.textContent.includes("$0.0123")');
         emit({ type: "text_delta", delta: "Implementing the feature now." });
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now.")');
         await evaluate('window.beforeReload = true; location.reload()');
         await check('!window.beforeReload');
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now.")');
         await check('document.querySelector(".usage-strip")?.textContent.includes("345 out")');
+        await check('document.querySelector(".usage-strip")?.textContent.includes("$0.0123")');
         await evaluate('document.querySelector("[data-tab=output]").click()');
         await check('Boolean(document.querySelector("[data-attempt-output]"))');
         await evaluate('window.retainedOutputNode = document.querySelector("[data-attempt-output]")');

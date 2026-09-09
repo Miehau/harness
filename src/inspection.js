@@ -1,3 +1,4 @@
+import { runMetrics } from "../public/ui-model.js";
 import { realpathSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
@@ -678,9 +679,11 @@ export function createInspectionService({ artifactContent, sessionTrace }) {
       isError: Boolean(event.isError),
     });
     if (item.type === "thinking") return item;
-    if (item.type === "usage")
+    if (item.type === "usage" || event.usage)
       return {
         ...item,
+        ...(event.usage ? { usage: event.usage } : {}),
+        ...(event.costUsd != null ? { costUsd: event.costUsd } : {}),
         ...Object.fromEntries(
           ["input", "output", "cacheRead", "cacheWrite"].map((key) => [
             key,
@@ -1255,7 +1258,8 @@ export function createRouteInspectionService({
 function compactActivityEvent(event = {}) {
   return redactRecord({
     type: event.type || "activity", tool: event.tool || null, label: boundedText(event.label, 240).value,
-    ...(event.type === "usage" ? { input: event.input, output: event.output, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite } : {}),
+    ...(event.type === "usage" ? { input: event.input, output: event.output, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite, ...(event.costUsd != null ? { costUsd: event.costUsd } : {}) } : {}),
+    ...(event.usage ? { usage: event.usage } : {}),
     at: event.at || null, isError: Boolean(event.isError), ...(event.actor ? { actor: boundedText(event.actor, 120).value } : {})
   });
 }
@@ -1528,6 +1532,7 @@ export function publicPreviewState(state, ticketId) {
 
 export function compactRun(run, revision = null) {
   return {
+    metrics: runMetrics(run),
     id: run?.id || null,
     runId: run?.runId || null,
     ticket: run?.ticket ? {

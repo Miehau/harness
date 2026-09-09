@@ -147,7 +147,7 @@ test("material UI proposals render in a sandbox before plan approval", { timeout
     const id = await seedRun(daemon, { plan, status: "awaiting_approval", checkpoint: planApprovalCheckpoint("Review panel") });
     const run = daemon.store.read().ticketRuns[id];
     const proposal = await buildUiProposal({ dataDir, run, plan, design: "Panel", harness: { proposeUi: async () => ({
-      html: `<main style="font-family:system-ui;padding:28px"><h1>Activity panel</h1><p>Current work and recent updates</p><button onclick="this.textContent='Expanded';parent.postMessage({proposalExpanded:true},'*')">Expand details</button></main><script>onload=()=>{const r=document.querySelector('button').getBoundingClientRect();parent.postMessage({proposalReady:{x:r.x+r.width/2,y:r.y+r.height/2}},'*')}</script>`, summary: "Activity panel direction" }) } });
+      html: `<main style="font-family:system-ui;padding:28px"><h1>Activity panel</h1><p>Current work and recent updates</p><button onclick="this.textContent='Expanded';parent.postMessage({proposalExpanded:true},'*')">Expand details</button></main><script>onload=()=>parent.postMessage({proposalReady:true},'*');onmessage=e=>{if(e.data!=='measure')return;const r=document.querySelector('button').getBoundingClientRect();parent.postMessage({proposalPosition:{x:r.x+r.width/2,y:r.y+r.height/2}},'*')}</script>`, summary: "Activity panel direction" }) } });
     await daemon.store.update((draft) => {
       const { artifact, ...metadata } = proposal;
       draft.ticketRuns[id].uiProposal = metadata;
@@ -167,7 +167,13 @@ test("material UI proposals render in a sandbox before plan approval", { timeout
           const frame=document.querySelector('.ui-proposal iframe');
           if(frame.getAttribute('sandbox')!=='allow-scripts') throw new Error('Missing sandbox');
           frame.scrollIntoView({block:'center',behavior:'instant'});
-          const r=frame.getBoundingClientRect(), p=globalThis.proposalReady;
+          const p=await new Promise((resolve,reject)=>{
+            const timer=setTimeout(()=>reject(new Error('Prototype measurement timed out')),3000);
+            const receive=e=>{if(e.source!==frame.contentWindow||!e.data?.proposalPosition)return;clearTimeout(timer);removeEventListener('message',receive);resolve(e.data.proposalPosition)};
+            addEventListener('message',receive);frame.contentWindow.postMessage('measure','*');
+          });
+          if(!frame.isConnected) throw new Error('Proposal changed before interaction');
+          const r=frame.getBoundingClientRect();
           await __agentPlanInput('Input.dispatchMouseEvent',{type:'mouseMoved',x:r.x+p.x+1,y:r.y+p.y+1});
           for(const type of ['mousePressed','mouseReleased']) await __agentPlanInput('Input.dispatchMouseEvent',{type,x:r.x+p.x+1,y:r.y+p.y+1,button:'left',clickCount:1});
           for(let n=0;n<100&&!globalThis.proposalExpanded;n++) await new Promise(r=>setTimeout(r,50));
