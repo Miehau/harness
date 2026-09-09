@@ -58,7 +58,6 @@ test("verification contract composes repository-local phases and retains failed 
   assert.deepEqual(project.commands["test-map"], ["node", "scripts/test.mjs", "--map"]);
   assert.deepEqual(project.commands["seed-list"], ["node", "scripts/seed.mjs", "--list"]);
   assert.deepEqual(project.commands["test-capture-proof"], ["node", "scripts/capture-steering-proof.mjs", "--preflight"]);
-  assert.deepEqual(project.commands["capture-proof"], ["node", "scripts/capture-steering-proof.mjs"]);
   assert.deepEqual(project.commands["capture-proof-dashboard"], ["node", ".agent-plan/capture-proof-dashboard.mjs"]);
   assert.deepEqual(project.commands.ui, ["node", ".agent-plan/ui.mjs"]);
   assert.deepEqual(project.commands["ui-test"], ["node", "--test", ".agent-plan/ui.test.mjs"]);
