@@ -221,3 +221,32 @@ test("delivery records persist remote change ids and classify partial failure", 
   assert.match(classifyDeliveryFailure(failed.filter((item) => item.status === "failed")), /repo-b/);
   assert.equal(deliveryFinished(failed.find((item) => item.repositoryId === "r-b")), false);
 });
+
+
+test("delivery publishes every registered visual artifact even when latest checks omit evidence", async (t) => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { publishDeliveryEvidence } = await import("../src/delivery.js");
+  const dir = await mkdtemp(join(tmpdir(), "registered-proof-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const artifacts = ["empty.png", "results.png"].map((name) => ({ kind: "visual-evidence", name, path: join(dir, name) }));
+  await Promise.all(artifacts.map((item) => writeFile(item.path, "image bytes")));
+  let body = "Outcome";
+  let uploads = 0;
+  const forge = {
+    async description(_change, next) { if (next !== undefined) body = next; return body; },
+    async uploadEvidence(_change, files) { uploads++; return files.map((file) => `![${file.name}](https://example.com/${file.name})`); }
+  };
+  const checks = { status: "passed", summary: "Checks passed", evidence: [] };
+  const result = await publishDeliveryEvidence(forge, { id: 1 }, checks, [...artifacts, artifacts[0], { kind: "agent-output", path: "/not-an-image" }]);
+  assert.equal(result.count, 2);
+  assert.match(body, /empty.png/);
+  assert.match(body, /results.png/);
+  await publishDeliveryEvidence(forge, { id: 1 }, checks, artifacts);
+  assert.equal(uploads, 1);
+  body = "Outcome";
+  await assert.rejects(publishDeliveryEvidence({ ...forge, uploadEvidence: async () => [] }, { id: 1 }, checks, artifacts), /every artifact/);
+  await assert.rejects(publishDeliveryEvidence({ ...forge, description: async () => "Outcome" }, { id: 1 }, checks, artifacts), /did not retain/);
+
+});

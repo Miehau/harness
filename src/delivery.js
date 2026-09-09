@@ -276,10 +276,14 @@ export async function safeSyncLocal(cwd, base, execImpl = exec) {
 export const parseRemoteRepository = repositoryFromRemote;
 
 // Updating one marked section makes a retry after an uncertain PATCH harmless.
-export async function publishDeliveryEvidence(forge, change, checks) {
+export async function publishDeliveryEvidence(forge, change, checks = {}, artifacts = []) {
+  checks ||= {};
   if (checks?.status === "failed") throw new Error("Cannot publish failed verification as delivery proof");
-  const evidence = checks?.evidence || [];
-  if (!evidence.length) return;
+  // Delivery owns publication: capture results may be absent on resumed checks,
+  // while the run still owns durable screenshots from earlier verification.
+  const candidates = [...artifacts.filter((item) => item.kind === "visual-evidence"), ...(checks.evidence || [])];
+  const evidence = [...new Map(candidates.map((item) => [item.path, item])).values()];
+  if (!evidence.length) return { status: "not_required", count: 0 };
   const files = [];
   for (const [index, item] of evidence.entries()) {
     const media = visualEvidenceMedia(item.name || item.path);
@@ -290,12 +294,16 @@ export async function publishDeliveryEvidence(forge, change, checks) {
   const start = "<!-- harness-evidence -->";
   const end = "<!-- /harness-evidence -->";
   const body = await forge.description(change);
-  if (body.includes(`${start}\n<!-- ${digest} -->`)) return;
+  if (body.includes(`${start}\n<!-- ${digest} -->`)) return { status: "published", count: files.length, digest };
   const links = await forge.uploadEvidence(change, files);
+  if (!Array.isArray(links) || links.length !== files.length || links.some((link) => typeof link !== "string" || !link.trim())) throw new Error("Evidence upload did not return a link for every artifact");
   const proof = links.map((link, index) => [link, ...(evidence[index].assertions || []).map((assertion) => `- ${typeof assertion === "string" ? assertion : JSON.stringify(assertion)}`)].join("\n\n")).join("\n\n");
-  const section = `${start}\n<!-- ${digest} -->\n## Verification evidence\n\n${checks.summary || "Final verification evidence"}\n\n${proof}\n${end}`;
+  const section = `${start}\n<!-- ${digest} -->\n## Verification evidence\n\n${checks.summary || "Run evidence"}\n\nSaved visual artifacts from this run; earlier captures may precede the final correction.\n\n${proof}\n${end}`;
   const pattern = /<!-- harness-evidence -->[\s\S]*?<!-- \/harness-evidence -->/;
   await forge.description(change, pattern.test(body) ? body.replace(pattern, () => section) : `${body}\n\n${section}`);
+  const published = await forge.description(change);
+  if (!published.includes(section)) throw new Error("PR description did not retain the uploaded evidence section");
+  return { status: "published", count: files.length, digest };
 }
 
 export function deliveryRepositoryId(repo = {}) {

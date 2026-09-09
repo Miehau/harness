@@ -2918,9 +2918,10 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
   for (;;) {
     signal?.throwIfAborted();
     await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: "publish_evidence" }); });
-    try { await publishDeliveryEvidence(forge, change, checks); }
+    let publication;
+    try { publication = await publishDeliveryEvidence(forge, change, checks, ticketRun(store.read(), ticketId).artifacts); }
     catch (error) { throw Object.assign(error, { failureKind: "evidence-publication" }); }
-    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null }); });
+    await update((state) => { patchRunDelivery(ticketRun(state, ticketId), { repositoryId, externalActionPending: null, evidencePublication: { ...publication, checkedAt: new Date().toISOString() } }); });
     const delivery = await forge.status(change);
     if (awaitingHeadAfterPush === delivery.headSha) {
       await waitForDelivery(deliveryPollMs, signal);
@@ -2945,6 +2946,7 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
           repositoryId,
           feedbackIds: [...(record?.feedbackIds || []), ...feedback.map((item) => item.id)],
           externalActionPending: "push_feedback_revision"
+
         });
       });
       await pushTicketBranch(cwd, branch);

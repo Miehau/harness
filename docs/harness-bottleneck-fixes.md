@@ -35,3 +35,8 @@ Images are exposed by current artifact ID through `review_media`, not attached t
 The fixed UI reference is `.agent-plan/design-system.md`. UI plans reuse it when present, or gain a scoped prerequisite to identify existing patterns before implementation. Backend-only plans skip that discovery. UI write steps carry a concise `uiPlan` with reuse, hierarchy, states, interaction, proof and deviations; the existing planner validates those fields. UI workers cannot start without the reference. This repository's initial reference links to its existing styles, rendering code, UI model and journeys, explicitly noting stylesheet inconsistencies.
 
 Rollout remains deferred: implementation and tests run in an isolated worktree and do not reload the shared daemon.
+
+
+## Delivery evidence attachment
+
+PR delivery publishes the union of latest-check evidence and the run's registered visual artifacts, deduplicated by path. An empty latest-check evidence list cannot suppress saved screenshots. All returned links must be present, and the harness reads the PR description back before recording publication success. Upload or description failures keep delivery pending. Earlier run captures are explicitly identified as potentially preceding final corrections; attaching them does not certify criterion success. Publication status, count, digest and check time are retained on the merge record.
