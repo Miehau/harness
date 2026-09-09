@@ -85,3 +85,17 @@ test("normal requirements and design generate a proposal before any implementati
     assert.equal((await invoke(daemon, "GET", `/api/tickets/${id}/runs/${run.runId}/artifacts/${run.uiProposal.artifactId}/media`)).status, 400);
   }, { harness });
 });
+
+test("restart releases interrupted UI revision and replay controls", async () => {
+  await withDaemon(async (daemon, { dataDir, cwd }) => {
+    const id = await seedRun(daemon, { status: "awaiting_approval", uiProposalGenerating: true,
+      uiProposal: { revisionId: "old-direction" }, uiReplay: { status: "running" } });
+    await daemon.close({ exit: false });
+    const restored = new JsonStore(join(dataDir, "state-v3.json"), cwd);
+    await restored.init();
+    const run = restored.read().ticketRuns[id];
+    assert.equal(run.uiProposalGenerating, false);
+    assert.ok(run.uiProposal.invalidatedAt);
+    assert.equal(run.uiReplay.status, "interrupted");
+  });
+});

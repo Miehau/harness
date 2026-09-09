@@ -361,6 +361,7 @@ export function createRoutes({
       const ticketId = routeId(ticketPreview[1]);
       const input = await body(request);
       const action = input.action || "start";
+      if (action === "replay") return json(response, 200, await previews.replay(ticketId, input));
       if (action === "stop") {
         await previews.stop(ticketId);
         return json(response, 200, {

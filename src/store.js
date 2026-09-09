@@ -319,6 +319,8 @@ export class JsonStore {
         if (Object.keys(activeRuns).length) recovered = true;
         run.activeRuns = {};
         for (const preview of Object.values(run.previews || {})) Object.assign(preview, { status: "stopped", stoppedReason: "daemon_restart" });
+        if (run.uiProposalGenerating) { run.uiProposalGenerating = false; if (run.uiProposal) run.uiProposal.invalidatedAt ||= new Date().toISOString(); recovered = true; }
+        if (run.uiReplay?.status === "running") { run.uiReplay.status = "interrupted"; run.uiReplay.summary = "Daemon restarted during replay; run it again when ready."; recovered = true; }
         if (inFlightRunStatusSet.has(run.status)) {
           const previousStatus = run.status;
           const previousMergeStatus = run.merge?.status;

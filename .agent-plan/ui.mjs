@@ -108,6 +108,7 @@ async function navigate(commands, assertions) {
       if (verb === "open") {
         await click("#workspace-settings");
         await wait(() => document.querySelector("#workspace-dialog")?.open && document.querySelector("#access-policy-form")?.dataset.loaded === "true", "workspace access policy loaded");
+        await wait(() => !document.querySelector("#check-readiness")?.disabled, "workspace readiness inspection finished");
       } else if (verb === "close") {
         await click("#workspace-dialog [data-close-dialog]");
         await wait(() => !document.querySelector("#workspace-dialog")?.open, "workspace dialog closed");
@@ -141,14 +142,15 @@ async function navigate(commands, assertions) {
         const controls = [...dialog.querySelectorAll("button, input, select")].filter((element) => !element.disabled && visible(element));
         if (controls.length < 4) throw new Error("Policy controls are not keyboard-reachable");
         const reached = new Set();
-        for (let i = 0; i < controls.length + 2; i++) {
+        for (let i = 0; i < controls.length * 3 + 10; i++) {
           await press("Tab");
           reached.add(document.activeElement);
+          if (controls.every((control) => reached.has(control))) break;
         }
         const missing = controls.filter((control) => !reached.has(control));
         if (missing.length) throw new Error(`Keyboard cannot reach: ${missing.map((control) => control.id || control.textContent.trim()).join(", ")}`);
         const checkbox = document.querySelector("#access-any");
-        for (let i = 0; document.activeElement !== checkbox && i <= controls.length; i++) await press("Tab");
+        for (let i = 0; document.activeElement !== checkbox && i < controls.length * 3 + 10; i++) await press("Tab");
         const before = checkbox.checked;
         await press(" ");
         await wait(() => checkbox.checked !== before, "Space operates access checkbox");

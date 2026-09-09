@@ -3,7 +3,8 @@ import { execFile } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { loadProjectConfig } from "./project-config.js";
+import { previewChromiumPath } from "./previews.js";
+import { detectPreviewCommand, loadProjectConfig } from "./project-config.js";
 
 const exec = promisify(execFile);
 const exists = (path) => access(path).then(() => true, () => false);
@@ -54,7 +55,12 @@ export async function inspectReadiness({ cwd, vcsMode = "jj", visual = false, ph
         const valid = Boolean(config.commands[name]) && !config.commandErrors?.[name];
         add(name, valid, valid ? `${name} declared; not executed` : `${name} command missing or invalid`, `Configure commands.${name} in .agent-plan/project.json`);
       }
-      if (visual) add("preview", Boolean(config.commands.preview || config.commands.dev), "Preview capability declaration", "Configure commands.preview or commands.dev");
+      if (visual) {
+        const preview = config.commands.preview || config.commands.dev || await detectPreviewCommand(cwd);
+        add("preview", Boolean(preview), "Preview command discovered; not started", "Configure commands.preview or commands.dev");
+        try { await previewChromiumPath(); add("browser", true, "Chromium is available; no browser journey executed", "", true); }
+        catch (error) { add("browser", false, "Chromium is unavailable", error.message, true); }
+      }
       else add("browser", null, "Browser readiness applies to UI tickets only");
     }
   }

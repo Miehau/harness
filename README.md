@@ -164,3 +164,5 @@ only actual application captures can count as final visual evidence. Final revie
 shows the approved prototype beside the implementation proof.
 
 Reported model cost appears beside token usage in USD. This is the SDK-reported amount, which may differ from billing. Unknown cost is unavailable; mixed reporting shows a partial total; a reported zero remains $0.0000. Totals include failed responses and corrections and survive activity-log trimming and reload. Tool calls and model responses with recorded usage are counted separately. No budget enforcement is added.
+
+Repository settings expose the same readiness and initialization actions as `doctor` and `init`. The header shows current work or the pending decision, active workers, and last recorded activity; connectivity is labelled separately. Final visual review includes the approved proposal and journey assertions. To replay checks and journeys while a ticket is stopped, use `node src/cli.js preview replay <ticketId> <runId>` or **Replay proof checks**. Replay requires an isolated ticket workspace and may change preview data; it records diagnostics without replacing final-proof approval.

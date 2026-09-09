@@ -1,6 +1,6 @@
 import { coordinationPanel } from "/coordination.js";
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, runProgress, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
 
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -347,20 +347,26 @@ function proofGalleryHtml(review) {
       const media = url && artifact.media === "image" ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(artifact.name)}">` : url && artifact.media === "video" ? `<video controls preload="metadata" aria-label="${escapeHtml(artifact.name)}"><source src="${escapeHtml(url)}"></video>` : "";
       const preview = media && url && artifact.media === "image" ? `<a class="proof-preview" href="${escapeHtml(url)}" target="_blank" rel="noreferrer" title="Open and zoom ${escapeHtml(artifact.name)}">${media}</a>` : media;
       const actions = url ? `<span class="proof-actions"><a class="button" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open / zoom</a>${artifact.id ? `<button class="button" type="button" data-open-artifact="${escapeHtml(artifact.id)}">Default app ↗</button>` : ""}</span>` : "";
-      return `<figure class="proof-item">${preview || `<div class="proof-unavailable">Preview unavailable</div>`}<figcaption><strong>${escapeHtml(artifact.name)}</strong>${artifact.summary ? `<span>${escapeHtml(artifact.summary)}</span>` : ""}${!url ? `<small>Media URL unavailable</small>` : ""}${actions}</figcaption></figure>`;
+      return `<figure class="proof-item">${preview || `<div class="proof-unavailable">Preview unavailable</div>`}<figcaption><strong>${escapeHtml(artifact.name)}</strong>${artifact.summary ? `<span>${escapeHtml(artifact.summary)}</span>` : ""}${!url ? `<small>Media URL unavailable</small>` : ""}${actions}${artifact.assertions?.length ? `<details><summary>Journey assertions</summary><pre>${escapeHtml(JSON.stringify(artifact.assertions, null, 2))}</pre></details>` : ""}</figcaption></figure>`;
     }).join("") || `<div class="run-empty">No supported visual proof was attached.</div>`;
   return `<section class="proof-gallery" aria-label="Visual proof">${proof}</section>`;
 }
 
 function uiProposalHtml(run, editable = false) {
   const proposal = run?.uiProposal;
-  if (!proposal) return run?.plan?.uiImpact?.level === "material" ? `<p class="error-banner">A UI proposal is required before implementation.</p>` : "";
+  if (!proposal) return run?.plan?.uiImpact?.level === "material" ? `<section class="ui-proposal"><p class="error-banner">A UI proposal is required before implementation.</p>${editable ? `<form data-revise-ui="${escapeHtml(run.id)}"><label>UI direction<textarea name="feedback" required></textarea></label><button class="button" type="submit">Generate proposal</button></form>` : ""}</section>` : "";
   const artifact = run.artifacts?.find((item) => item.id === proposal.artifactId);
   if (artifact) hydrateArtifact(run, artifact);
   const body = artifact && artifactBody(artifact, run);
   const preview = body?.state === "available" ? `<iframe title="UI proposal preview" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${escapeHtml(artifactRoute(run, artifact.id, "/preview"))}" style="width:100%;height:420px;border:1px solid var(--border);background:white"></iframe>` : `<p>Loading retained proposal…</p>`;
-  const changes = editable ? `<form data-revise-ui="${escapeHtml(run.id)}" data-proposal-revision="${escapeHtml(proposal.revisionId)}"><label>Request UI changes<textarea name="feedback" rows="2" required></textarea></label><button class="button" type="submit">Revise proposal</button></form>` : "";
-  return `<section class="ui-proposal"><h3>${proposal.approvedAt ? "Approved UI direction" : "Review UI proposal"}</h3><p>${escapeHtml(proposal.summary)}</p><small>Proposal revision ${escapeHtml(proposal.revisionId)} · prototype, not implementation evidence</small>${preview}${changes}</section>`;
+  const changes = editable && run.uiProposalGenerating ? `<p role="status">Revising UI proposal…</p>` : editable ? `<form data-revise-ui="${escapeHtml(run.id)}" data-proposal-revision="${escapeHtml(proposal.revisionId)}"><label>Request UI changes<textarea name="feedback" rows="2" required></textarea></label><button class="button" type="submit">Revise proposal</button></form>` : "";
+  return `<section class="ui-proposal"><h3>${proposal.approvedAt ? "Approved UI direction" : "Review UI proposal"}</h3><p>${escapeHtml(proposal.summary)}</p><small>Proposal revision ${escapeHtml(proposal.revisionId)} · prototype, not implementation evidence</small>${proposal.invalidatedAt ? `<p class="error-banner">This direction needs a revised proposal before approval.</p>` : ""}${preview}${changes}</section>`;
+}
+
+function replayHtml(run) {
+  if (!run?.plan || !run.proofMap?.criteria?.some((criterion) => criterion.requiresVisualEvidence)) return "";
+  const result = run.uiReplay;
+  return `<section class="ui-replay"><button class="button" type="button" data-replay-ui="${escapeHtml(run.id)}" ${result?.status === "running" ? "disabled" : ""}>${result?.status === "running" ? "Replaying proof checks…" : "Replay proof checks"}</button><p>Runs verification and recorded journeys in the isolated ticket preview. Journeys may change preview data.</p>${result ? `<p role="status">${escapeHtml(result.status)} · ${escapeHtml(result.summary || "Preparing isolated preview")}</p>${(result.journeys || []).map((item) => `<details><summary>${escapeHtml(item.name)}</summary><pre>${escapeHtml(JSON.stringify(item.assertions, null, 2))}</pre></details>`).join("")}` : ""}</section>`;
 }
 
 function checkpointHtml(run) {
@@ -388,7 +394,7 @@ function checkpointHtml(run) {
     const review = finalReview(run);
     const checks = review.checks ? `<section class="final-review-summary"><span class="eyebrow">Automated checks</span><strong class="status-${escapeHtml(review.checks.status || "completed")}">${escapeHtml(review.checks.status || "completed")}</strong><p>${escapeHtml(review.checks.summary || review.checks.command || "Completed")}</p></section>` : "";
     const reviews = review.reviews.length ? `<section class="final-review-summary"><span class="eyebrow">Independent review</span>${review.reviews.map((item) => `<p><strong>${escapeHtml(item.role)}</strong> ${escapeHtml(item.summary || "Completed")}</p>`).join("")}</section>` : "";
-    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header>${uiProposalHtml(run)}${proofGalleryHtml(review)}${criterionProofHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
+    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header><div class="review-comparison">${uiProposalHtml(run)}<section><h3>Implemented result</h3>${proofGalleryHtml(review)}</section></div>${criterionProofHtml(run)}${replayHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
   }
   if (checkpoint.kind === "product_context_review") {
     return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Product-context gate</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract"><summary>Review proposed PRD and capability update</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details></div><button class="button success" type="button" data-approve-context="${escapeHtml(run.id)}">Approve & complete</button></div>`;
@@ -398,7 +404,7 @@ function checkpointHtml(run) {
   }
   const proposalRevision = run.uiProposal?.revisionId || "";
   const proposalArtifact = run.artifacts?.find((item) => item.id === run.uiProposal?.artifactId);
-  const proposalReady = run.plan?.uiImpact?.level !== "material" || (proposalArtifact && artifactBody(proposalArtifact, run)?.state === "available");
+  const proposalReady = run.plan?.uiImpact?.level !== "material" || (!run.uiProposalGenerating && !run.uiProposal?.invalidatedAt && proposalArtifact && artifactBody(proposalArtifact, run)?.state === "available");
   return `${uiProposalHtml(run, true)}<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Plan approval gate</span><strong>${escapeHtml(checkpoint.title)}</strong><p>Manual pauses at every verified batch. Auto accepts verified commits and runs the whole graph.</p></div><div class="checkpoint-actions"><button class="button" type="button" data-edit-plan="${escapeHtml(run.id)}">Edit graph JSON</button><button class="button" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-approve-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & run manually" : "Run manually"}</button><button class="button success" type="button" ${proposalReady ? "" : "disabled"} data-proposal-revision="${escapeHtml(proposalRevision)}" data-auto-ticket="${escapeHtml(run.id)}">${proposalRevision ? "Approve proposal & auto run" : "Auto run graph"}</button></div></div>`;
 }
 
@@ -413,6 +419,7 @@ function workflowCheckpointsHtml(run) {
 
 function checkpointUsesWorkspace(run) {
   return ["requirements_review", "evidence_review"].includes(run?.checkpoint?.kind)
+    || Boolean(run?.checkpoint?.kind === "awaiting_approval" && run.uiProposal)
     || Boolean(run?.clarificationHistory?.length && run.status === "clarifying");
 }
 
@@ -456,6 +463,10 @@ function renderHeader() {
   const metrics = runMetrics(run);
   const restartPoints = restartOptions(run);
   const restartable = run && !["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge", "completed"].includes(run.status) && !run.merge && !run.integration;
+  const progress = runProgress(run || {});
+  const progressHtml = run ? `<div class="work-summary ${progress.working ? "is-working" : ""}" role="status"><span class="work-indicator" aria-hidden="true"></span><div><strong>${escapeHtml(progress.title)}</strong><span>${escapeHtml(progress.detail)}</span></div><small>${progress.workers} active workers${progress.lastActivitySeconds == null ? "" : ` · last activity ${(progress.lastActivitySeconds < 60 ? `${progress.lastActivitySeconds}s` : duration(progress.lastActivitySeconds))} ago`}</small></div>` : "";
+  const impact = run?.plan?.uiImpact || run?.uiImpactProvisional;
+  const impactHtml = impact ? `<p class="ui-impact"><strong>UI impact: ${escapeHtml(impact.level)}</strong> · ${escapeHtml(impact.reason)}</p>` : "";
   const usage = run ? `<span class="usage-strip" title="${metrics.usageState === "unavailable" ? "Token usage was not recorded" : metrics.usageState === "partial" ? "Partial token usage: older events may not have been retained" : "Recorded token usage; input includes cached tokens"}"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} tool calls</span><span>${metrics.modelCalls} model calls</span><span title="SDK-reported model cost in USD; may differ from billing">${metrics.cost.usd == null ? "Cost unavailable" : `${metrics.cost.state === "partial" ? "Partial " : ""}$${metrics.cost.usd.toFixed(4)}`}</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
   const previewControls = preview?.status === "running" && preview.url
@@ -476,7 +487,7 @@ function renderHeader() {
     : "";
   const histories = runsForTicket(ticket.id);
   const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${runNoticesHtml(run)}`;
+  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
 }
 
 function openRestartDialog(target = null) {
@@ -597,14 +608,19 @@ function renderPlanTree() {
     ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
   const stageWork = stage && ["requirements", "explore", "design", "handoff"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
-  if (stage?.id === "verify") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && run.checkpoint?.kind !== "evidence_review" && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
+  if (stage?.id === "verify" && run.checkpoint?.kind !== "evidence_review") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && run.checkpoint?.kind !== "evidence_review" && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
 
   if (isArchivedRun(run)) {
     target.innerHTML = `${stageSurface}${stageWork}${workerOutputHtml(run)}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
     return;
   }
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>${stageWork}`;
+    const markup = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>${run.uiProposal ? "" : stageWork}`;
+    // Keep a reviewed prototype's browsing context through unrelated hydration.
+    const key = JSON.stringify([run.runId, run.planRevision, run.uiProposal?.invalidatedAt, run.uiProposalGenerating, markup]);
+    if (run.uiProposal && target.dataset.proposalView === key && target.querySelector(".ui-proposal iframe")) return;
+    target.dataset.proposalView = key;
+    target.innerHTML = markup;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
     if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
       lastClarificationKey = clarificationKey;
@@ -987,6 +1003,7 @@ function artifactBody(artifact, run = runFor()) {
 }
 
 function artifactPreview(artifact) {
+  if (artifact.kind === "ui-proposal") return `<p>Review the rendered proposal in the main workspace. This prototype records UI direction; it is not final implementation evidence.</p>`;
   const resource = artifactBody(artifact);
   const content = resource?.content;
   if (artifact.kind === "visual-evidence") return artifact.summary ? `<p>${escapeHtml(artifact.summary)}</p>` : `<div class="run-empty">No written summary was recorded for this evidence.</div>`;
@@ -1294,7 +1311,7 @@ function renderContext() {
   const details = (root) => [...root.querySelectorAll("details[open]")].map(disclosureKey);
   return {
     coordinationRun: runIdentity(runFor()),
-    coordinationForms: [...document.querySelectorAll("[data-coordination-form]")].map((form) => ({ kind: form.dataset.coordinationForm, conflictId: form.dataset.conflictId, revisionId: form.dataset.revisionId, fields: [...form.elements].filter((el) => el.name).map((el) => ({ name: el.name, value: el.value, checked: el.checked, selected: el.multiple ? [...el.selectedOptions].map((option) => option.value) : null, focused: el === document.activeElement })) })),
+    coordinationForms: [...document.querySelectorAll("[data-coordination-form], [data-revise-ui]")].map((form) => ({ kind: form.dataset.coordinationForm, proposalRevision: form.dataset.proposalRevision, uiRun: form.dataset.reviseUi, conflictId: form.dataset.conflictId, revisionId: form.dataset.revisionId, fields: [...form.elements].filter((el) => el.name).map((el) => ({ name: el.name, value: el.value, checked: el.checked, selected: el.multiple ? [...el.selectedOptions].map((option) => option.value) : null, focused: el === document.activeElement })) })),
     outputScroll: [...document.querySelectorAll("#plan-tree pre, #inspector pre")].map((item) => ({ top: item.scrollTop, left: item.scrollLeft })),
     planScroll: $("#plan-tree")?.scrollTop || 0,
     inspectorScroll: $("#inspector")?.scrollTop || 0,
@@ -1304,7 +1321,7 @@ function renderContext() {
 
 function restoreRenderContext(context) {
   if (context.coordinationRun === runIdentity(runFor())) for (const saved of context.coordinationForms || []) {
-    const form = [...document.querySelectorAll("[data-coordination-form]")].find((item) => item.dataset.coordinationForm === saved.kind && item.dataset.conflictId === saved.conflictId && item.dataset.revisionId === saved.revisionId);
+    const form = [...document.querySelectorAll("[data-coordination-form], [data-revise-ui]")].find((item) => item.dataset.reviseUi === saved.uiRun && item.dataset.proposalRevision === saved.proposalRevision && item.dataset.coordinationForm === saved.kind && item.dataset.conflictId === saved.conflictId && item.dataset.revisionId === saved.revisionId);
     if (!form) continue;
     for (const field of saved.fields) {
       const el = form.elements.namedItem(field.name);
@@ -1425,6 +1442,24 @@ async function hydrateWorkspacePolicy() {
     $("#access-policy-status").textContent = "";
     setAccessPolicyMessage(`${error.message} Save is disabled until the saved policy loads.`);
   }
+}
+
+let readinessLoad = 0;
+async function checkReadiness(initialize = false) {
+  const load = ++readinessLoad;
+  const result = $("#readiness-results");
+  const buttons = [$("#check-readiness"), $("#initialize-project")];
+  buttons.forEach((button) => button.disabled = true);
+  result.textContent = initialize ? "Initializing project…" : "Checking readiness…";
+  try {
+    let initialized;
+    if (initialize) initialized = await api("/api/workspace/init", { method: "POST", body: JSON.stringify({ install: $("#initialize-install").checked, verify: $("#initialize-verify").checked }) });
+    const report = await api(`/api/workspace/readiness${$("#readiness-visual").checked ? "?visual=1" : ""}`);
+    if (load !== readinessLoad) return;
+    const results = Object.entries(initialized?.results || {}).map(([name, check]) => `<p>${escapeHtml(name)}: ${escapeHtml(check.status)}${check.summary ? ` · ${escapeHtml(check.summary)}` : ""}</p>`).join("");
+    result.innerHTML = `${results}<strong>${report.ready ? "Ready for this ticket type" : "Setup needs attention"}</strong><ul>${report.checks.map((check) => `<li class="readiness-${escapeHtml(check.status)}"><strong>${escapeHtml(check.id)} · ${escapeHtml(check.status.replaceAll("_", " "))}</strong><span>${escapeHtml(check.summary)}</span>${check.action ? `<span>${escapeHtml(check.action)}</span>` : ""}<small>${check.executed ? "Inspected" : "Declared or not applicable"}</small></li>`).join("")}</ul>`;
+  } catch (error) { if (load === readinessLoad) result.textContent = `Readiness could not finish: ${error.message}`; }
+  finally { if (load === readinessLoad) buttons.forEach((button) => button.disabled = false); }
 }
 
 function render() {
@@ -1828,7 +1863,16 @@ document.addEventListener("click", async (event) => {
   if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; render(); return; }
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; rememberView(); renderInspector(); }
-  if (event.target.closest("#workspace-settings")) { $("#workspace-dialog").showModal(); void hydrateWorkspacePolicy(); }
+  const replay = event.target.closest("[data-replay-ui]");
+  if (replay) {
+    replay.disabled = true;
+    try { await api(`/api/tickets/${encodeURIComponent(replay.dataset.replayUi)}/preview`, { method: "POST", body: JSON.stringify({ action: "replay", runId: runFor().runId }) }); state = await api("/api/state"); render(); }
+    catch (error) { notify(error.message); replay.disabled = false; }
+    return;
+  }
+  if (event.target.closest("#check-readiness")) { void checkReadiness(); return; }
+  if (event.target.closest("#initialize-project")) { void checkReadiness(true); return; }
+  if (event.target.closest("#workspace-settings")) { $("#workspace-dialog").showModal(); void hydrateWorkspacePolicy(); void checkReadiness(); }
   if (event.target.closest("#reload-access-policy")) { void hydrateWorkspacePolicy(); return; }
   if (event.target.closest("#add-extra-root")) {
     if (!accessPolicyLoaded()) return;
@@ -2298,5 +2342,6 @@ try { piModels = (await api("/api/models")).models || []; }
 catch (error) { notify(error.message); }
 await refreshTickets();
 render();
+$("#readiness-visual").addEventListener("change", () => checkReadiness());
 window.addEventListener("resize", () => runFor()?.plan && renderPlanTree());
 setInterval(refreshLiveRun, 1000);

@@ -195,3 +195,37 @@ test("preview stop settlement cannot mark a replacement run stopped", async () =
 
   assert.equal(source.ticketRuns.ticket.previews["ticket:operator"].status, "running");
 });
+
+test("replay rejects stale runs and source checkout, retains diagnostic results without changing approval", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = await mkdtemp(join(tmpdir(), "replay-"));
+  const source = stateForPreview();
+  const run = source.ticketRuns.ticket;
+  source.workspace.cwd = root;
+  run.status = "awaiting_evidence_review";
+  run.checkpoint = { id: "proof-1", kind: "evidence_review" };
+  run.workspace = { cwd: root };
+  const runtime = { activeTickets: new Map(), activeMerges: new Map(), start: (_id, work) => work(new AbortController().signal),
+    containmentForExecution: () => ({}), registerContainment: async () => "run-1", settleContainment: async () => {}, finish() {},
+    runContainedRepositoryChecks: async () => ({ status: "failed", summary: "Fixture assertion failed", output: "", evidence: [], previewEvidence: [] }) };
+  const previews = { ensure: async ({ id }) => ({ id, url: "http://127.0.0.1:4777", status: "running" }), capture: async () => [], stop() {}, settleMatching: async () => {} };
+  const service = createPreviewOrchestrator({ state: { read: () => source, update: async (change) => change(source) }, runtime, previews });
+  try {
+    await assert.rejects(service.replayJourneys("ticket", { runId: "old" }), /current run ID/);
+    await assert.rejects(service.replayJourneys("ticket", { runId: "run-1" }), /isolated ticket workspace/);
+    const cwd = join(root, "ticket");
+    await mkdir(join(cwd, ".agent-plan"), { recursive: true });
+    await writeFile(join(cwd, ".agent-plan/project.json"), JSON.stringify({ commands: { "capture-proof": ["node", "capture.mjs"] } }));
+    run.workspace.cwd = cwd;
+    const result = await service.replayJourneys("ticket", { runId: "run-1" });
+    assert.equal(result.status, "failed");
+    assert.equal(run.uiReplay.status, "failed");
+    assert.equal(run.status, "awaiting_evidence_review");
+    assert.equal(run.checkpoint.id, "proof-1");
+    assert.equal(run.artifacts.some((artifact) => artifact.kind === "visual-evidence"), false);
+    runtime.activeTickets.set("ticket", {});
+    await assert.rejects(service.replayJourneys("ticket", { runId: "run-1" }), /Pause active work/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -36,6 +36,8 @@ test("UI CLI validates commands and exercises real task navigation and creation"
     const frames = decoded.filter((item) => item.videoPath === video);
     assert.ok(frames.length > 0 && frames.length <= 8);
     assert.deepEqual((await readFile(frames[0].path)).subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const { capturePage } = await import("../scripts/screenshot.mjs");
+    await runJourney({ url, commands: [["tasks", "open", id]], capture: (options) => capturePage({ ...options, eval: "location.reload()" }) });
     assert.ok(result.results[0].some((item) => item.id === id));
     assert.equal(result.results[1].selected, id);
     assert.deepEqual((await readFile(screenshot)).subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
@@ -152,7 +154,7 @@ test("material UI proposals render in a sandbox before plan approval", { timeout
       const { artifact, ...metadata } = proposal;
       draft.ticketRuns[id].uiProposal = metadata;
       draft.ticketRuns[id].artifacts.push(artifact);
-      draft.ticketRuns[id].stages.find((stage) => stage.id === "design").status = "blocked";
+      for (const stage of draft.ticketRuns[id].stages) { if (["requirements", "explore"].includes(stage.id)) stage.status = "completed"; if (stage.id === "design") stage.status = "blocked"; }
     });
     await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
     await runJourney({ url: `http://127.0.0.1:${daemon.server.address().port}`, screenshot: process.env.AGENT_PLAN_PROPOSAL_PROOF || join(dataDir, "proposal.png"),
@@ -161,15 +163,16 @@ test("material UI proposals render in a sandbox before plan approval", { timeout
         await browser.evaluate(`addEventListener('message', e => { if(e.data?.proposalReady) globalThis.proposalReady=e.data.proposalReady; if(e.data?.proposalExpanded) globalThis.proposalExpanded=true; })`);
         await options.interact(browser);
         await browser.evaluate(`(async () => {
-          for(let n=0;n<100&&!globalThis.proposalReady;n++) await new Promise(r=>setTimeout(r,50));
-          if(!globalThis.proposalReady) throw new Error('Proposal did not render');
+          for(let n=0;n<100&&!document.querySelector('.ui-proposal iframe');n++) await new Promise(r=>setTimeout(r,50));
           await new Promise(r=>setTimeout(r,500));
           const frame=document.querySelector('.ui-proposal iframe');
           if(frame.getAttribute('sandbox')!=='allow-scripts') throw new Error('Missing sandbox');
           frame.scrollIntoView({block:'center',behavior:'instant'});
+          await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const p=await new Promise((resolve,reject)=>{
-            const timer=setTimeout(()=>reject(new Error('Prototype measurement timed out')),3000);
-            const receive=e=>{if(e.source!==frame.contentWindow||!e.data?.proposalPosition)return;clearTimeout(timer);removeEventListener('message',receive);resolve(e.data.proposalPosition)};
+            const probe=setInterval(()=>frame.contentWindow.postMessage('measure','*'),50);
+            const timer=setTimeout(()=>{clearInterval(probe);reject(new Error('Prototype measurement timed out'))},3000);
+            const receive=e=>{if(e.source!==frame.contentWindow||!e.data?.proposalPosition)return;clearTimeout(timer);clearInterval(probe);removeEventListener('message',receive);resolve(e.data.proposalPosition)};
             addEventListener('message',receive);frame.contentWindow.postMessage('measure','*');
           });
           if(!frame.isConnected) throw new Error('Proposal changed before interaction');
@@ -178,7 +181,21 @@ test("material UI proposals render in a sandbox before plan approval", { timeout
           for(const type of ['mousePressed','mouseReleased']) await __agentPlanInput('Input.dispatchMouseEvent',{type,x:r.x+p.x+1,y:r.y+p.y+1,button:'left',clickCount:1});
           for(let n=0;n<100&&!globalThis.proposalExpanded;n++) await new Promise(r=>setTimeout(r,50));
           if(!globalThis.proposalExpanded) throw new Error('Proposal interaction did not execute '+JSON.stringify({p,rect:{x:r.x,y:r.y},hit:document.elementFromPoint(r.x+p.x+1,r.y+p.y+1)?.outerHTML?.slice(0,200)}));
+          await fetch('/api/tickets/${id}/select',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+          await new Promise(resolve=>setTimeout(resolve,300));
+          if(document.querySelector('.ui-proposal iframe')!==frame) throw new Error('Unchanged proposal reloaded on dashboard refresh');
+
         })()`);
       } }) });
+  });
+});
+
+test("repository readiness can initialize an empty project from the dashboard", { timeout: 30000 }, async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
+    await runJourney({ url: `http://127.0.0.1:${daemon.server.address().port}`, width: 520, height: 900,
+      screenshot: process.env.AGENT_PLAN_READINESS_PROOF || join(dataDir, "readiness.png"),
+      commands: [["workspace", "open"], ["click", "Initialize project"]],
+      assertions: [{ selector: "#readiness-results", text: "Ready for this ticket type" }] });
   });
 });

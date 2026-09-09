@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { parseWriteScopeEntry } from "./access-policy.js";
 import { combineRepositoryChecks } from "./git.js";
@@ -80,7 +81,7 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
   if (!runtime) throw new Error("Preview orchestration requires RunRuntime");
   if (!previews) throw new Error("Preview orchestration requires PreviewManager");
 
-  async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null }) {
+  async function runChecksWithPreview({ ticketId, previewId, cwd, signal, required, requiredVideo = false, stepId = null, diagnostic = false }) {
     const runId = ticketRun(state.read(), ticketId).runId;
     const config = !stepId ? await loadProjectConfig(cwd) : null;
     assertOwningRun(state, ticketId, runId, signal);
@@ -112,6 +113,7 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
           onCleanupSettled: (record) => runtime.persistPreviewCleanup(ticketId, containmentRunId, previewId, record)
         });
         assertOwningRun(state, ticketId, runId, signal);
+        if (diagnostic && !preview) throw new Error("Replay requires an isolated preview command");
         if (preview) evidence = await previews.capture(previewId, { signal });
         assertOwningRun(state, ticketId, runId, signal);
       } catch (error) {
@@ -176,7 +178,7 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
         if (run.runId !== runId) return;
         run.previews ||= {};
         if (preview) run.previews[previewId] = preview;
-        for (const [kind, items] of [["visual-evidence", checks.evidence], ["preview-diagnostic", checks.previewEvidence]]) {
+        for (const [kind, items] of [[diagnostic ? "preview-diagnostic" : "visual-evidence", checks.evidence], ["preview-diagnostic", checks.previewEvidence]]) {
           for (const item of items) {
             if (run.artifacts.some((artifact) => artifact.path === item.path)) continue;
             run.artifacts.push({
@@ -236,6 +238,34 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
       });
     }
     return combineRepositoryChecks(results);
+  }
+
+  async function replayJourneys(ticketId, input = {}) {
+    const snapshot = state.read();
+    const run = ticketRun(snapshot, ticketId);
+    if (!input.runId || input.runId !== run.runId) throw new Error("Replay requires the current run ID");
+    if (runtime.activeTickets.has(ticketId) || runtime.activeMerges.has(ticketId)) throw new Error("Pause active work before replaying journeys");
+    if (!["awaiting_evidence_review", "awaiting_step_review", "paused", "interrupted", "needs_attention"].includes(run.status)) throw new Error("Replay is available while reviewing or stopped");
+    const cwd = run.workspace?.cwd;
+    if (!cwd || await realpath(cwd) === await realpath(snapshot.workspace.cwd) || (!run.workspace.zeroState && run.workspace.sourceCwd && await realpath(cwd) === await realpath(run.workspace.sourceCwd))) throw new Error("Replay requires an isolated ticket workspace");
+    if (!(await loadProjectConfig(cwd)).commands["capture-proof"]) throw new Error("Configure capture-proof before replaying journeys");
+    if (runtime.activeTickets.has(ticketId) || runtime.activeMerges.has(ticketId)) throw new Error("Work started before replay; pause it first");
+    return runtime.start(ticketId, async (signal) => {
+      const startedAt = new Date().toISOString();
+      const save = (value) => state.update((draft) => { const current = ticketRun(draft, ticketId); if (current.runId === input.runId) current.uiReplay = { startedAt, ...value }; });
+      await save({ status: "running" });
+      try {
+        assertOwningRun(state, ticketId, input.runId, signal);
+        const checks = await runChecksWithPreview({ ticketId, previewId: `${ticketId}:replay`, cwd, signal, required: true, diagnostic: true });
+        const result = { status: checks.status, summary: checks.summary, completedAt: new Date().toISOString(), journeys: (checks.evidence || []).map(({ name, assertions }) => ({ name, assertions: assertions || [] })) };
+        await save(result);
+        return result;
+      } catch (error) { await save({ status: "failed", summary: error.message }); throw error; }
+      finally {
+        previews.stop(`${ticketId}:replay`, { trigger: "preview-stop", reason: "replay-finished" });
+        await previews.settleMatching(`${ticketId}:replay`, runtime.cleanupTimeoutMs);
+      }
+    });
   }
 
   async function startOperatorPreview(ticketId) {
@@ -324,6 +354,7 @@ export function createPreviewOrchestrator({ state, runtime, previews, address = 
 
   return {
     runChecksWithPreview,
+    replayJourneys,
     runChangedRepositoryChecks,
     startOperatorPreview,
     stopOperatorPreview,

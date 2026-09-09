@@ -644,7 +644,7 @@ const routeApi = createRoutes({
   inspection: routeInspection,
   tickets: ticketRoutes,
   workspace: workspaceService,
-  previews: { start: startOperatorPreview, stop: stopOperatorPreview },
+  previews: { start: startOperatorPreview, stop: stopOperatorPreview, replay: previewService.replayJourneys },
   steering: { submit: steeringService.submit },
   coordination: coordinationService,
   settings: settingsService

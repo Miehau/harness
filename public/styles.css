@@ -1778,3 +1778,33 @@ button:focus-visible, [role="tab"]:focus-visible, summary:focus-visible, select:
 .coordination-record small { display: block; opacity: .75; }
 .coordination-record table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
 .coordination-record td, .coordination-record th { text-align: left; vertical-align: top; padding: 8px; border: 1px solid var(--border, #ddd); }
+
+/* Workflow feedback follows real activity; reduced motion keeps it still. */
+.work-summary { display:flex; align-items:center; gap:10px; padding:12px 0 0; color:var(--muted); }
+.work-summary > div { display:grid; gap:3px; min-width:0; }
+.work-summary strong { color:var(--text); font-size:13px; }
+.work-summary span, .work-summary small { font-size:12px; }
+.work-summary small { margin-left:auto; white-space:nowrap; }
+.work-indicator { flex:none; width:8px; height:8px; border-radius:50%; background:#9ba7b7; }
+.is-working .work-indicator { background:#9285ff; animation:work-pulse 1.6s ease-in-out infinite; }
+@keyframes work-pulse { 50% { opacity:.4; box-shadow:0 0 0 5px #9285ff18; } }
+.ui-impact { font-size:12px; margin:8px 0; color:#acb7c6; }
+.ui-proposal { display:grid; gap:12px; padding:18px; margin:12px 0; border:1px solid #3e4059; border-radius:14px; background:#12141d; }
+.ui-proposal h3, .ui-proposal p { margin:0; }
+.ui-proposal small { color:#a3adbb; overflow-wrap:anywhere; }
+.ui-proposal iframe { display:block; border-radius:8px; }
+.ui-proposal form, .ui-proposal label { display:grid; gap:8px; }
+.ui-proposal textarea { width:100%; min-height:72px; }
+.ui-proposal form button { justify-self:start; }
+.review-comparison { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:18px; }
+.workspace-readiness { display:grid; gap:10px; padding:16px 0; border-bottom:1px solid #30343e; }
+.workspace-readiness label { font-size:12px; }
+.readiness-actions { display:flex; gap:8px; flex-wrap:wrap; }
+#readiness-results { font-size:12px; }
+#readiness-results ul { padding:0; list-style:none; display:grid; gap:8px; max-height:260px; overflow:auto; }
+#readiness-results li { display:grid; gap:3px; padding:8px 10px; border-left:2px solid #64748b; background:#151923; }
+#readiness-results li.readiness-ready { border-color:#78cba1; }
+#readiness-results li.readiness-action_needed { border-color:#e9b667; }
+#readiness-results small { color:#9aa6b6; }
+@media (max-width:650px) { .work-summary { flex-wrap:wrap; } .work-summary small { width:100%; margin-left:18px; } .ui-proposal { padding:12px; } }
+@media (prefers-reduced-motion:reduce) { .is-working .work-indicator { animation:none; } }

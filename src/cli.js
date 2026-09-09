@@ -37,7 +37,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
-  preview start|stop [ticketId]     Start or stop the ticket live preview
+  preview start|stop|replay [ticketId]     Start or stop the ticket live preview
   answer <ticketId> <text|--approve> Approve or answer an open question
   start <ticketId>                  Start a tracker ticket already in the queue
   wait [ticketId]                   Block until checkpoint; exit 1 on needs_attention
@@ -195,9 +195,10 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "preview") {
     const action = rest[0];
-    if (!["start", "stop"].includes(action)) throw new Error("Usage: agent-plan preview start|stop [ticketId]");
+    if (!["start", "stop", "replay"].includes(action)) throw new Error("Usage: agent-plan preview start|stop|replay [ticketId]");
+    if (action === "replay" && (!rest[1] || !rest[2])) throw new Error("Usage: agent-plan preview replay <ticketId> <runId>");
     const id = await resolveTicketId(rest[1], ctx);
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/preview", { body: { action }, env, fetchImpl });
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/preview", { body: { action, ...(action === "replay" ? { runId: rest[2] } : {}) }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }

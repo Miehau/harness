@@ -1,4 +1,4 @@
-import { assertUiProposal, requiresUiProposal } from "./ui-proposal.js";
+import { assertUiProposal, requiresUiProposal, uiPlanHash } from "./ui-proposal.js";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
@@ -335,6 +335,7 @@ export function createTicketRunner({
     return state.update((draft) => {
       const current = ticketRun(draft, ticketId);
       if (JSON.stringify(current.plan.uiImpact) !== JSON.stringify(plan.uiImpact)) (current.uiImpactHistory ||= []).push({ before: current.plan.uiImpact || null, after: plan.uiImpact || null, source: "operator", at: new Date().toISOString() });
+      if (current.uiProposal && current.uiProposal.planHash !== uiPlanHash(plan)) current.uiProposal.invalidatedAt = new Date().toISOString();
       current.plan = plan;
       current.uiReviewRequired = plan.uiImpact?.level === "material";
       current.planEditedAt = new Date().toISOString();

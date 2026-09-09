@@ -77,12 +77,14 @@ export async function capturePage({ url, out, video = null, click = null, eval: 
       return result.result?.value;
     };
     await cdp("Runtime.addBinding", { name: "__agentPlanInputBinding" });
-    await evaluate(`globalThis.__agentPlanInputPending = new Map(); globalThis.__agentPlanInputNext = 0;
+    const inputBridge = `globalThis.__agentPlanInputPending = new Map(); globalThis.__agentPlanInputNext = 0;
       globalThis.__agentPlanInput = (method, params) => new Promise((resolve, reject) => {
         const id = ++globalThis.__agentPlanInputNext;
         globalThis.__agentPlanInputPending.set(id, { resolve, reject });
         globalThis.__agentPlanInputBinding(JSON.stringify({ id, method, params }));
-      });`);
+      });`;
+    await cdp("Page.addScriptToEvaluateOnNewDocument", { source: inputBridge });
+    await evaluate(inputBridge);
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
       if (message.method !== "Runtime.bindingCalled" || message.params.name !== "__agentPlanInputBinding") return;
