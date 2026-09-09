@@ -47,8 +47,13 @@ export async function captureTicketProof({
   }
   scenarios ||= JSON.parse(await readFile(new URL("../.agent-plan/ui-scenarios.json", import.meta.url), "utf8"));
   if (!Array.isArray(scenarios)) throw new Error("UI scenarios must be an array");
+  const ids = scenarios.map((scenario) => scenario.id).filter(Boolean);
+  if (new Set(ids).size !== ids.length) throw new Error("UI journey IDs must be unique");
   const selected = criteria.map((criterion) => {
-    const matches = scenarios.filter((scenario) => scenario.criterion === criterion.text);
+    // Old approved runs retain text matching; new plans bind a stable journey ID.
+    const matches = scenarios.filter((scenario) => criterion.journeyId
+      ? scenario.id === criterion.journeyId
+      : scenario.criterionIds?.includes(criterion.id) || scenario.criterion === criterion.text);
     if (matches.length !== 1) throw new Error(`Define one UI CLI scenario for acceptance criterion: ${criterion.text}`);
     const scenario = matches[0];
     validateJourney(scenario.commands, scenario.assertions);
@@ -67,8 +72,8 @@ export async function captureTicketProof({
       Object.entries(assertion).map(([key, value]) => [key, replaceFixture(value)])
     ));
     await journey({ url, screenshot: join(evidenceDir, filename), width, height, commands, assertions, video: videoName ? join(evidenceDir, videoName) : null });
-    captures.push({ name, path: filename, width, height, criterionIds: [criterion.id], commands, assertions });
-    if (videoName) captures.push({ name, path: videoName, width, height, criterionIds: [criterion.id], commands, assertions });
+    captures.push({ name, path: filename, width, height, criterionIds: [criterion.id], journeyId: scenario.id || null, commands, assertions });
+    if (videoName) captures.push({ name, path: videoName, width, height, criterionIds: [criterion.id], journeyId: scenario.id || null, commands, assertions });
   }
   const manifest = ticketProofManifest({
     ticketId, runId, ...identity, captures, capturedAt: new Date().toISOString()

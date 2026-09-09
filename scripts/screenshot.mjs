@@ -76,6 +76,28 @@ export async function capturePage({ url, out, video = null, click = null, eval: 
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
       return result.result?.value;
     };
+    await cdp("Runtime.addBinding", { name: "__agentPlanInputBinding" });
+    await evaluate(`globalThis.__agentPlanInputPending = new Map(); globalThis.__agentPlanInputNext = 0;
+      globalThis.__agentPlanInput = (method, params) => new Promise((resolve, reject) => {
+        const id = ++globalThis.__agentPlanInputNext;
+        globalThis.__agentPlanInputPending.set(id, { resolve, reject });
+        globalThis.__agentPlanInputBinding(JSON.stringify({ id, method, params }));
+      });`);
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      if (message.method !== "Runtime.bindingCalled" || message.params.name !== "__agentPlanInputBinding") return;
+      const input = JSON.parse(message.params.payload);
+      if (!Number.isSafeInteger(input.id)) return;
+      const allowed = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"].includes(input.method);
+      Promise.resolve().then(() => {
+        if (!allowed) throw new Error("Unsupported browser input");
+        return cdp(input.method, input.params);
+      }).then(() => null, (error) => error.message).then((error) => evaluate(`{
+        const pending = globalThis.__agentPlanInputPending.get(${input.id});
+        globalThis.__agentPlanInputPending.delete(${input.id});
+        if (pending) ${error ? `pending.reject(new Error(${JSON.stringify(error)}))` : "pending.resolve()"};
+      }`)).catch(() => {});
+    });
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     if (video) await evaluate(`(async () => {
       const title = document.title;
@@ -107,7 +129,14 @@ export async function capturePage({ url, out, video = null, click = null, eval: 
       await evaluate(script);
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
-    if (interact) await interact({ evaluate });
+    if (interact) try { await interact({ evaluate }); }
+    catch (error) {
+      if (out) {
+        const failed = await cdp("Page.captureScreenshot", { format: "png", fromSurface: true });
+        await writeFile(out, Buffer.from(failed.data, "base64"));
+      }
+      throw error;
+    }
     const shot = await cdp("Page.captureScreenshot", { format: "png", fromSurface: true });
     if (out) await writeFile(out, Buffer.from(shot.data, "base64"));
     if (video) {

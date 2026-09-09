@@ -16,7 +16,8 @@ Make project startup reliable, bring frontend decisions forward, improve the tru
 ## Implementation record
 
 - R1 merged: [PR #13](https://github.com/Miehau/harness/pull/13). Read-only doctor/API and planning prerequisite checks.
-- R2: initialization and private dependency preparation implemented; validation and delivery in progress.
+- R2 merged: [PR #14](https://github.com/Miehau/harness/pull/14). Repeatable initialization and private dependency preparation.
+- J1: real browser input, stable journey mappings, and honest proof scenarios implemented; validation and delivery in progress.
 
 ## Findings behind the plan
 
