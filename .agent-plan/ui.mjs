@@ -63,7 +63,7 @@ async function navigate(commands, assertions) {
     for (const type of ["keyDown", "keyUp"]) await globalThis.__agentPlanInput("Input.dispatchKeyEvent", { type, key, code: key === " " ? "Space" : key, windowsVirtualKeyCode: codes[key], modifiers });
   };
   const clickElement = async (element) => {
-    element.scrollIntoView({ block: "center" });
+    element.scrollIntoView({ block: "center", behavior: "instant" });
     const box = element.getBoundingClientRect();
     const x = (Math.max(0, box.left) + Math.min(innerWidth, box.right)) / 2;
     const y = (Math.max(0, box.top) + Math.min(innerHeight, box.bottom)) / 2;
@@ -83,7 +83,7 @@ async function navigate(commands, assertions) {
     await press("a", /Mac/.test(navigator.platform) ? 4 : 2);
     await globalThis.__agentPlanInput("Input.insertText", { text: value });
   };
-  await wait(() => visible(document.querySelector("#free-text-open")), "dashboard loaded");
+  await wait(() => document.querySelector("#workspace-settings")?.title === "Select repository", "dashboard initialized");
   const results = [];
   for (const [commandIndex, command] of commands.entries()) {
     try {
@@ -95,7 +95,7 @@ async function navigate(commands, assertions) {
       const selector = `[data-ticket=${JSON.stringify(value)}]`;
       const title = await wait(() => document.querySelector(selector)?.querySelector("strong")?.textContent, `task ${value} exists`);
       await click(selector);
-      await wait(() => document.querySelector("#ticket-header h2")?.textContent === title, `selected task ${value} title`);
+      await wait(() => document.querySelector("#ticket-header h2")?.textContent === title && document.querySelector("#ticket-header")?.getAttribute("aria-busy") !== "true", `selected task ${value} title`);
       results.push({ selected: value, title });
     } else if (noun === "tasks" && verb === "add") {
       await click("#free-text-open");

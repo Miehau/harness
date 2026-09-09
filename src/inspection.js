@@ -1509,6 +1509,7 @@ export function publicState(state) {
     clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
   }
   for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
+  delete clone.orchestratorSubmissions;
   delete clone.projectPolicies;
   clone.accessPolicy = accessPolicy;
   if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;

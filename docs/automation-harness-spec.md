@@ -118,3 +118,7 @@ classification are recorded before plan approval. Material UI plans generate a r
 binds its revision and content to the plan; changed direction requires revision
 and renewed approval, including in auto mode. The sandboxed prototype is direction,
 not implementation proof, and appears beside actual evidence at final review.
+
+## Local conversational orchestration
+
+The operator CLI exposes structured draft submission, exact-run inspection, and checkpoint decisions through the existing daemon. Persisted workspace-scoped idempotency keys prevent duplicate intake. Drafts make no model calls until started, and dependency completion is checked at the shared start boundary. Orchestrator decisions carry exact run/status/checkpoint expectations and a recorded user or delegated authority claim. See [the orchestrator contract](orchestrator-contract.md).

@@ -9,6 +9,7 @@ const escapeHtml = (value = "") => String(value)
   .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
 let state = null;
+let renderedHeaderMarkup = null;
 let ticketSources = { configured: false, viewer: null, sources: [], tickets: [] };
 let piModels = [];
 const viewVersion = 4;
@@ -455,6 +456,7 @@ function renderHeader() {
   const ticket = selectedTicket();
   const run = runFor();
   if (!ticket) {
+    renderedHeaderMarkup = null;
     target.innerHTML = `<div class="plan-heading"><div><span class="eyebrow">No ticket selected</span><h2>Load a local fixture or choose tracker work</h2><p>Local fixtures start from an empty repository and use their authored ticket graph.</p></div></div>`;
     return;
   }
@@ -479,7 +481,7 @@ function renderHeader() {
     : "";
   const action = isArchivedRun(run)
     ? `<span class="run-pill">archived · inspection only</span>`
-    : !run
+    : !run || run.status === "draft"
     ? `<button class="button primary" data-start-ticket="${escapeHtml(ticket.id)}">Start workflow</button>`
     : `${resumeControl}${restartable && restartPoints.length ? `<button class="button" data-restart-ticket="${escapeHtml(run.id)}">Restart from…</button>` : ""}${restartable ? `<button class="button danger" data-start-fresh="${escapeHtml(run.id)}">Start fresh</button>` : ""}${["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing"].includes(run.status) ? `<button class="button" data-pause-ticket="${escapeHtml(run.id)}">Pause run</button><button class="button danger" data-cancel-ticket="${escapeHtml(run.id)}">Cancel run</button>` : ""}${run.auto ? `<span class="run-pill">auto</span>` : ""}<span class="run-pill status-${escapeHtml(run.status)}">${escapeHtml(statusLabel(run))}</span>${previewControls}${run.merge?.change?.url ? `<a class="branch-pill" href="${escapeHtml(run.merge.change.url)}" target="_blank" rel="noreferrer">remote review ↗</a>` : run.workspace?.branch?.trim() ? `<span class="branch-pill">${escapeHtml(run.workspace.branch)}</span>` : ""}`;
   const reviewAction = !isArchivedRun(run) && run?.checkpoint?.kind === "step_review"
@@ -487,7 +489,9 @@ function renderHeader() {
     : "";
   const histories = runsForTicket(ticket.id);
   const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
-  target.innerHTML = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
+  const markup = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
+  // Keep controls attached through unrelated state hydration and SSE updates.
+  if (markup !== renderedHeaderMarkup) { target.innerHTML = markup; renderedHeaderMarkup = markup; }
 }
 
 function openRestartDialog(target = null) {
@@ -1516,6 +1520,7 @@ function selectTicket(ticketId, stepId = null, persist = true) {
   if (!persist) return;
   const selection = ++latestTicketSelection;
   pendingTicketSelections++;
+  $("#ticket-header").setAttribute("aria-busy", "true");
   const request = persist
     ? api(`/api/tickets/${encodeURIComponent(ticketId)}/select`, { method: "POST", body: "{}" })
     : api("/api/state").then((next) => ({ ...next, run: next.ticketRuns?.[ticketId] }));
@@ -1539,7 +1544,7 @@ function selectTicket(ticketId, stepId = null, persist = true) {
       catch {}
       notify(error.message);
     })
-    .finally(() => { pendingTicketSelections--; });
+    .finally(() => { pendingTicketSelections--; $("#ticket-header").setAttribute("aria-busy", String(pendingTicketSelections > 0)); });
 }
 
 async function refreshTickets() {
@@ -1747,7 +1752,7 @@ document.addEventListener("click", async (event) => {
   }
   const start = event.target.closest("[data-start-ticket]");
   if (start) {
-    const ticket = ticketSources.tickets.find((item) => item.id === start.dataset.startTicket);
+    const ticket = ticketSources.tickets.find((item) => item.id === start.dataset.startTicket) || runFor(start.dataset.startTicket)?.ticket;
     try { await api(`/api/tickets/${encodeURIComponent(ticket.id)}/start`, { method: "POST", body: JSON.stringify({ ticket }) }); notify(`${ticket.identifier} requirements clarification started`); }
     catch (error) { notify(error.message); }
     return;

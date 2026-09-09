@@ -21,7 +21,8 @@ Make project startup reliable, bring frontend decisions forward, improve the tru
 - F1 merged: [PR #16](https://github.com/Miehau/harness/pull/16). Explicit UI impact and per-criterion journey contracts.
 - F2: merged in [PR #17](https://github.com/Miehau/harness/pull/17): retained proposals, revision approval, execution guards, and sandboxed review preview.
 - O1: merged in [PR #18](https://github.com/Miehau/harness/pull/18): durable reported cost, partial/unavailable states, and separate model/tool call counts.
-- O2: readiness, progress, review presentation, and isolated proof replay implemented; validation and delivery in progress.
+- O2: merged in [PR #19](https://github.com/Miehau/harness/pull/19): readiness controls, progress, stable proposal review, and isolated diagnostic proof replay.
+- A1: structured drafts, persisted idempotency, explicit decision identities, and authority audit implemented; validation and delivery in progress.
 
 ## Findings behind the plan
 

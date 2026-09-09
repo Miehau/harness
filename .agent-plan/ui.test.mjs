@@ -199,3 +199,17 @@ test("repository readiness can initialize an empty project from the dashboard", 
       assertions: [{ selector: "#readiness-results", text: "Ready for this ticket type" }] });
   });
 });
+
+test("an orchestrator draft can be started from the ordinary dashboard", { timeout: 30000 }, async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const created = await invoke(daemon, "POST", "/api/orchestrator/tickets", { body: {
+      idempotencyKey: "dashboard-draft", origin: "ui-test", title: "Shared draft", requirements: ["Inspect the project"], acceptanceCriteria: ["Requirements are reviewed"]
+    } });
+    assert.equal(created.status, 200, created.text);
+    await new Promise((resolve) => daemon.server.listen(0, "127.0.0.1", resolve));
+    try { await runJourney({ url: `http://127.0.0.1:${daemon.server.address().port}`,
+      commands: [["tasks", "open", created.json.ticketId], ["click", "Start workflow"]],
+      screenshot: process.env.AGENT_PLAN_DRAFT_PROOF || join(dataDir, "draft.png"), assertions: [{ selector: "[data-clarify]", text: "Approve requirements" }] }); } catch (error) { const run = daemon.store.read().ticketRuns[created.json.ticketId]; throw new Error(`${error.message}\n${JSON.stringify({status:run.status,error:run.lastError,checkpoint:run.checkpoint})}`); }
+    assert.equal(daemon.store.read().ticketRuns[created.json.ticketId].runId, created.json.runId);
+  });
+});

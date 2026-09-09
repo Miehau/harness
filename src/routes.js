@@ -19,6 +19,7 @@ function queryIdentity(url) {
  * boundary; routes never receive the daemon, store, or Pi harness.
  */
 export function createRoutes({
+  orchestrator,
   version,
   inspection,
   tickets,
@@ -42,6 +43,12 @@ export function createRoutes({
   }
 
   return async function routeApi(request, response, url) {
+    if (request.method === "POST" && url.pathname === "/api/orchestrator/tickets") return json(response, 200, await orchestrator.submit(await body(request)));
+    const orchestratorRun = url.pathname.match(/^\/api\/orchestrator\/tickets\/([^/]+)\/runs\/([^/]+)$/);
+    if (request.method === "GET" && orchestratorRun) return json(response, 200, orchestrator.observe(routeId(orchestratorRun[1]), routeId(orchestratorRun[2])));
+    const orchestratorAction = url.pathname.match(/^\/api\/orchestrator\/tickets\/([^/]+)\/actions$/);
+    if (request.method === "POST" && orchestratorAction) return json(response, 202, await orchestrator.act(routeId(orchestratorAction[1]), await body(request)));
+
     const coordinationRead = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination$/);
     if (request.method === "GET" && coordinationRead) return json(response, 200, coordination.read(routeId(coordinationRead[1])));
     const coordinationConflict = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination\/conflicts$/);
