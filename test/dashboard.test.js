@@ -39,6 +39,8 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
         await check('!document.querySelector("#free-text-dialog").open');
         await waitFor(() => assert.ok(clarifyEvent));
         assert.equal(daemon.store.read().ticketRuns[daemon.store.read().selectedTicketId].status, "clarifying");
+        // Public state omits cwd; preview availability must not depend on exposing it.
+        await check('Boolean(document.querySelector("[data-start-preview]"))');
         clarifyEvent({ type: "text_delta", delta: "Shaping the requested feature." });
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Shaping the requested feature.")');
         await evaluate('location.reload()');

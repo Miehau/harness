@@ -441,7 +441,7 @@ function renderHeader() {
   const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
   const previewControls = preview?.status === "running" && preview.url
     ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>${previewBusy === "stop" ? busyButton("Stopping preview", `data-stop-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-stop-preview="${escapeHtml(run.id)}">Stop preview</button>`}`
-    : run && (run.workspace?.cwd || state.workspace?.cwd)
+    : run
       ? previewBusy === "start" ? busyButton("Starting preview", `data-start-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-start-preview="${escapeHtml(run.id)}">Start preview</button>`
       : "";
   const resumeControl = canResume
