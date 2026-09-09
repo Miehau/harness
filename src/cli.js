@@ -10,6 +10,7 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
   orchestrator submit <json|@file|-> Submit an idempotent draft; does not start work
   orchestrator show <ticketId> <runId> Inspect exact run and pending decisions
+  orchestrator brief <ticketId> <runId> Conversation-ready summary and decision context
   orchestrator act <ticketId> <json|@file|-> Relay a decision with exact expected identity
   init [--install] [--verify]       Initialize the selected project; optionally install/check it
   doctor [--visual]                Inspect project readiness without running project commands
@@ -84,8 +85,19 @@ async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
   if (command === "orchestrator") {
     const [action, first, second, ...extra] = rest;
-    if (extra.length || !first || !["submit", "show", "act"].includes(action) || (action === "submit" ? second : !second)) throw new Error("Usage: orchestrator submit <json|@file|-> | show <ticketId> <runId> | act <ticketId> <json|@file|->");
-    if (action === "show") { print(stdout, await request("GET", `/api/orchestrator/tickets/${encodeURIComponent(first)}/runs/${encodeURIComponent(second)}`, { env, fetchImpl })); return 0; }
+    if (extra.length || !first || !["submit", "show", "brief", "act"].includes(action) || (action === "submit" ? second : !second)) throw new Error("Usage: orchestrator submit <json|@file|-> | show|brief <ticketId> <runId> | act <ticketId> <json|@file|->");
+    if (["show", "brief"].includes(action)) {
+      const view = await request("GET", `/api/orchestrator/tickets/${encodeURIComponent(first)}/runs/${encodeURIComponent(second)}`, { env, fetchImpl });
+      if (action === "brief") view.message = [
+        `${view.ticket?.title || view.ticketId}: ${view.status}.`,
+        view.requiredAction,
+        ...(view.checkpoint?.questions || []).map((question) => `Question: ${question}`),
+        view.uiImpact ? `UI impact: ${view.uiImpact.level}. ${view.uiImpact.reason}` : null,
+        view.uiProposal ? `UI proposal ${view.uiProposal.revisionId}: ${view.uiProposal.invalidatedAt ? "needs revision" : view.uiProposal.approvedAt ? "approved" : "awaiting review"}. ${view.uiProposal.summary || ""}` : null
+      ].filter(Boolean).join("\n");
+      print(stdout, view);
+      return 0;
+    }
     const input = action === "submit" ? first : second;
     let raw = input;
     if (input.startsWith("@")) raw = await readFile(input.slice(1), "utf8");

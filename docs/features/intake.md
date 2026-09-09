@@ -10,6 +10,8 @@
 
 **Strength:** A failing provider does not hide a healthy provider's results. Automatic mode is opt-in. Tracker questions and lifecycle changes share the same adapter boundary.
 
+Conversational intake through `orchestrator submit` creates a structured draft without model calls. Workspace-scoped idempotency survives restart; conflicting reuse is rejected. Dependency completion and the original workspace are checked when starting through either dashboard or CLI. See [the local contract](../orchestrator-contract.md).
+
 **Limit:** Blocked tickets disappear from intake rather than remaining visible with blocker explanations. Linear and Jira intake fetch at most 100 issues per request and do not paginate. Jira intake is restricted to children of the configured epic, despite some project-oriented wording in the README. Automatic admission begins all eligible candidates; no explicit admission concurrency limit appears in that loop.
 
 Evidence: [linear.js](../../src/linear.js), [jira.js](../../src/jira.js), [admission.js](../../src/admission.js), [trackers.js](../../src/trackers.js), `admitAutomaticTickets` in [server.js](../../src/server.js), [admission tests](../../test/admission.test.js).

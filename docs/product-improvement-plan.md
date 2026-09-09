@@ -1,6 +1,6 @@
 # Product improvement plan
 
-Discussion consolidated on 2026-09-09. This is an implementation backlog, not a claim that the changes below are complete. No live tickets or executions were created by writing this plan.
+Discussion consolidated on 2026-09-09. The implementation record below tracks delivery of this backlog. No live tickets or executions were created by writing this plan.
 
 ## Objective and agreed direction
 
@@ -22,11 +22,12 @@ Make project startup reliable, bring frontend decisions forward, improve the tru
 - F2: merged in [PR #17](https://github.com/Miehau/harness/pull/17): retained proposals, revision approval, execution guards, and sandboxed review preview.
 - O1: merged in [PR #18](https://github.com/Miehau/harness/pull/18): durable reported cost, partial/unavailable states, and separate model/tool call counts.
 - O2: merged in [PR #19](https://github.com/Miehau/harness/pull/19): readiness controls, progress, stable proposal review, and isolated diagnostic proof replay.
-- A1: structured drafts, persisted idempotency, explicit decision identities, and authority audit implemented; validation and delivery in progress.
+- A1: merged in [PR #20](https://github.com/Miehau/harness/pull/20): structured drafts, persisted idempotency, exact decision identities, authority audit, and dashboard draft start.
+- A2: implemented in the final delivery slice: conversation-ready brief, local agent operating recipe, and mocked end-to-end workflow including revision, restart and final local delivery.
 
 ## Findings behind the plan
 
-| Area | Current behavior | Gap |
+| Area | Behavior at assessment | Gap at assessment |
 | --- | --- | --- |
 | Initialization | Creates Git repositories/baselines and worktrees; initializes jj | Requires installed tools and Pi authentication; missing prerequisites can surface late |
 | Dependencies | Links existing node_modules into worktrees | Does not establish reproducible fresh-checkout or changed-lockfile preparation |
@@ -189,4 +190,4 @@ Final integrated demonstration:
 - Exact bot product and remote connectivity; choose after the local contract works.
 - Extra workflow stages: use conditional checkpoints within Design unless implementation demonstrates that a separate stage materially simplifies the lifecycle.
 
-Begin with R1/R2 and J1. They make setup dependable and evidence honest; F1/F2 then establish what is approved to build. Observability makes those contracts visible, and the conversational adapter consumes them.
+Delivery followed this sequence: R1/R2 and J1, then F1/F2, O1/O2, and A1/A2. Bot-specific connectivity remains deferred until a bot is selected. The integrated workflow test mocks model work and media; real browser journeys are validated separately. This does not claim a fresh-machine system-package installation or a live external-bot demonstration.
