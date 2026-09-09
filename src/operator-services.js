@@ -1,3 +1,4 @@
+import { initializeProject } from "./initialization.js";
 import { inspectReadiness } from "./readiness.js";
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
@@ -30,6 +31,7 @@ export function createWorkspaceService({
   loadLocal,
   ticketSources,
   vcsMode = "jj",
+  runtime,
 } = {}) {
   if (
     !state?.read ||
@@ -43,6 +45,15 @@ export function createWorkspaceService({
     );
   }
   return {
+    async initialize(input = {}) {
+      if (Object.keys(input).some((key) => !["install", "verify"].includes(key)) || Object.values(input).some((value) => typeof value !== "boolean")) throw new Error("Initialization accepts boolean install and verify options only");
+      if (runtime.projectSetup || runtime.activeTickets.size || runtime.activeMerges.size) throw new Error("Stop active work before project initialization");
+      runtime.projectSetup = true;
+      try {
+        const result = await initializeProject(state.read().workspace.cwd, { vcsMode, ...input });
+        return { ...result, readiness: await this.readiness() };
+      } finally { runtime.projectSetup = false; }
+    },
     readiness({ visual = false } = {}) {
       const snapshot = state.read();
       return inspectReadiness({ cwd: snapshot.workspace.cwd, vcsMode, visual,
@@ -76,6 +87,7 @@ export function createWorkspaceService({
       return policy;
     },
     async set(input) {
+      if (runtime?.projectSetup) throw new Error("Wait for project initialization before switching workspace");
       const cwd = normalize(String(input.cwd || ""));
       if (!isAbsolute(cwd) || !(await stat(cwd)).isDirectory())
         throw new Error("Workspace must be an existing absolute directory");

@@ -510,6 +510,7 @@ export function createTicketRunner({
   }
 
   async function beginTicket(ticket, { automaticAdmission = false, awaitWork = true } = {}) {
+    if (runtime.projectSetup) throw new Error("Wait for project initialization before starting work");
     if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
     const access = await snapshotWorkspaceAccess();
     await state.update((draft) => {

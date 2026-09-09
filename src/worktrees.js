@@ -46,7 +46,7 @@ export async function needsLocalWorkspaceRepair(ticket, workspace) {
   return ticket?.source === "local" && !(workspace?.cwd && await isGitRepository(workspace.cwd));
 }
 
-async function initializeRepository(cwd) {
+export async function initializeRepository(cwd) {
   const initialized = await isGitRepository(cwd);
   const entries = await readdir(cwd);
   if (!initialized) await git(cwd, ["init", "-q", "-b", "main"]);
