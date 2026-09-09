@@ -65,7 +65,9 @@ export function inspectionSummary({ worker = null, attempt = null } = {}) {
     latestAction: item.latestAction || "No activity recorded",
     blocker: item.blocker || null,
     evidence: item.evidence || { state: "not_started" },
-    nextAction: item.nextAction || worker?.nextAction || { kind: "none", label: "No action available" }
+    // An archived attempt is a record, not the current worker. Do not borrow a
+    // later worker action and present it as something this attempt still needs.
+    nextAction: item.nextAction || (!attempt || worker?.attemptIds?.at(-1) === attempt.id ? worker?.nextAction : null) || { kind: "none", label: "No action available" }
   };
 }
 

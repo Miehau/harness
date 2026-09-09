@@ -46,6 +46,7 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
         await check('Boolean(document.querySelector("[data-start-preview]"))');
         clarifyEvent({ type: "text_delta", delta: "Shaping the requested feature." });
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Shaping the requested feature.")');
+        await check('document.querySelector("#plan-tree .output-tail [data-stream-output]")?.textContent.includes("Shaping the requested feature.")');
         await evaluate('window.beforeReload = true; location.reload()');
         await check('!window.beforeReload');
         await check('document.querySelector("#plan-tree [data-stage-output]")?.textContent.includes("Shaping the requested feature.")');
@@ -120,6 +121,22 @@ test("selected implementation worker streams in the main window and survives rel
         await check('document.querySelector("#plan-tree [data-worker-output]")?.textContent.includes("Implementing the feature now. Checking the result.")');
         await check('document.querySelector("[data-attempt-output]")?.textContent.includes("Checking the result.")');
         assert.equal(await evaluate('window.retainedOutputNode === document.querySelector("[data-attempt-output]")'), true);
+        await evaluate('document.querySelector("[data-tab=activity]").click()');
+        await check('document.querySelector("#inspector .output-tail [data-stream-output]")?.textContent.includes("Checking the result.")');
+        await check('Boolean(document.querySelector("#inspector [data-expand-output]"))');
+        await evaluate('document.querySelector("#inspector .output-tail [data-stream-output]").style.maxHeight = "1px"');
+        emit({ type: "text_delta", delta: `\n${"line\n".repeat(100)}` });
+        await evaluate('const tail = document.querySelector("#inspector .output-tail [data-stream-output]"); tail.style.height = "1px"; tail.scrollTop = 0; tail.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -1 }))');
+        emit({ type: "text_delta", delta: " More streamed output." });
+        await check('document.querySelector("#inspector [data-jump-output]")?.hidden === false');
+        await evaluate('document.querySelector("#inspector [data-jump-output]").click()');
+        await check('document.querySelector("#inspector [data-jump-output]")?.hidden === true');
+        await evaluate('document.querySelector("#inspector [data-expand-output]").open = true; document.querySelector("#inspector .output-tail [data-stream-output]").scrollTop = 2');
+        emit({ type: "tool_start", tool: "read", callId: "tail-check", args: "{}" });
+        await check('document.querySelector("#inspector [data-expand-output]")?.open === true');
+        await check('document.querySelector("#inspector .output-tail [data-stream-output]")?.scrollTop > 0');
+        emit({ type: "text_delta", delta: " Expanded transcript." });
+        await check('document.querySelector("#inspector [data-stream-full]")?.textContent.includes("Expanded transcript.")');
       } });
     } finally {
       await invoke(daemon, "POST", `/api/tickets/${id}/cancel`, { body: {} });

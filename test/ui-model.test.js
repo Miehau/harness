@@ -16,9 +16,12 @@ test("resolves canonical attempt selection without replacing a retained choice",
   };
   assert.deepEqual(inspectionSelection(projection, { attemptId: "attempt:build:one" }), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:one" });
   assert.deepEqual(inspectionSelection(projection), { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" });
-  assert.deepEqual(inspectionSummary({ attempt: projection.attempts[0] }), {
+  projection.workers[0].attemptIds = ["attempt:build:one", "attempt:build:two"];
+  projection.workers[0].nextAction = { kind: "review", label: "Review latest worker result" };
+  assert.deepEqual(inspectionSummary({ worker: projection.workers[0], attempt: projection.attempts[0] }), {
     status: "failed", latestAction: "Tests failed", blocker: { type: "repository-check", summary: "Tests failed" }, evidence: { state: "incomplete" }, nextAction: { kind: "none", label: "No action available" }
   });
+  assert.deepEqual(inspectionSummary({ worker: projection.workers[0], attempt: projection.attempts[1] }).nextAction, { kind: "review", label: "Review latest worker result" });
   assert.equal(inspectionResourceLabel({ state: "not_retained" }), "Not retained");
   assert.equal(inspectionResourceLabel({ state: "truncated" }), "Truncated");
 });

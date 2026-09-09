@@ -56,6 +56,8 @@ const inspections = new Map();
 const pendingInspections = new Set();
 const attemptDetails = new Map();
 const pendingAttemptDetails = new Set();
+const outputFollowing = new Map();
+const expandedOutput = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 let accessPolicyLoadId = 0;
@@ -702,12 +704,29 @@ function loadStageOutput(run, stage) {
 }
 
 function updateStreamOutput(target, output) {
-  const following = target.scrollHeight - target.scrollTop - target.clientHeight < 40;
+  const key = target.dataset.streamKey;
+  const following = outputFollowing.get(key) ?? target.scrollHeight - target.scrollTop - target.clientHeight < 40;
   target.textContent = output;
   if (following) target.scrollTop = target.scrollHeight;
+  const full = target.parentElement?.querySelector("[data-stream-full]");
+  if (full) full.textContent = output;
+  const jump = target.parentElement?.querySelector("[data-jump-output]");
+  if (jump) jump.hidden = following;
 }
 
-function stageOutputHtml(run, stage) {
+function outputTailHtml({ key, output, active, unavailable = "", label = "model" }) {
+  const content = output || unavailable || (active ? `Waiting for ${label} output…` : "No transcript retained.");
+  const full = output || active ? `<details class="raw-output" data-expand-output="${escapeHtml(key)}" ${expandedOutput.has(key) ? "open" : ""}><summary>Expand output</summary><pre data-stream-full>${escapeHtml(output)}</pre></details>` : "";
+  return `<section class="output-tail"><header><span class="eyebrow">${active ? "Live output" : "Final output"}</span><small>Latest retained output</small></header><pre data-stage-output data-stream-output data-stream-key="${escapeHtml(key)}">${escapeHtml(content)}</pre><button class="button" type="button" data-jump-output="${escapeHtml(key)}" ${outputFollowing.get(key) === false ? "" : "hidden"}>Jump to latest</button>${full}</section>`;
+}
+
+function followOutputTails() {
+  requestAnimationFrame(() => document.querySelectorAll("[data-stream-key]").forEach((output) => {
+    if (outputFollowing.get(output.dataset.streamKey) !== false) output.scrollTop = output.scrollHeight;
+  }));
+}
+
+function stageOutputHtml(run, stage, { artifactsAfter = false } = {}) {
   const artifacts = artifactsForStage(run.artifacts, stage.id).sort((a, b) => Number(a.kind === "product-context-snapshot") - Number(b.kind === "product-context-snapshot"));
   const saved = artifacts.length ? `<section class="stage-artifacts"><span class="eyebrow">Saved artifacts · ${artifacts.length}</span>${artifactsPanel(null, artifacts)}</section>` : "";
   loadStageOutput(run, stage);
@@ -716,8 +735,9 @@ function stageOutputHtml(run, stage) {
   const active = stage.status === "active";
   const streamed = live?.runId === run.runId ? live.output : "";
   const output = (active ? streamed || retained?.content : retained?.content || streamed) || "";
-  const stream = active || output || retained?.state === "unavailable" ? `<section class="stage-output"><span class="eyebrow">${active ? "Live model output" : "Saved model output"}</span><small>Retained output · latest 100,000 characters</small><pre data-stage-output>${escapeHtml(output || (retained?.state === "unavailable" ? `Saved output unavailable: ${retained?.error || "unknown"}` : "Waiting for model output…"))}</pre></section>` : "";
-  return `${saved}${stream || `<section class="stage-output"><span class="eyebrow">Saved stage result</span><p>${escapeHtml(stage.summary || "This stage has no retained output or result.")}</p><small>Model transcript was not retained for this stage.</small></section>`}`;
+  const stream = active || output || retained?.state === "unavailable" ? outputTailHtml({ key: `${runIdentity(run)}:stage:${stage.id}`, output, active, unavailable: retained?.state === "unavailable" ? `Saved output unavailable: ${retained?.error || "unknown"}` : "" }) : "";
+  const body = stream || `<section class="stage-output"><span class="eyebrow">Saved stage result</span><p>${escapeHtml(stage.summary || "This stage has no retained output or result.")}</p><small>Model transcript was not retained for this stage.</small></section>`;
+  return artifactsAfter ? `${body}${saved}` : `${saved}${body}`;
 }
 
 function stageActivityPanel(run, stage) {
@@ -727,11 +747,16 @@ function stageActivityPanel(run, stage) {
   const milestones = stageMilestones(run, stage);
   const history = stage.id === "requirements" && !checkpointUsesWorkspace(run) ? clarificationHistoryHtml(run) : "";
   const active = stage.status === "active";
+  const stageProjection = inspectionFor(run)?.stages?.find((item) => item.stageId === stage.id);
+  const action = stageProjection?.blocker?.summary || (!["none", "wait"].includes(stageProjection?.nextAction?.kind) ? stageProjection?.nextAction?.label : "");
   const pulse = active ? heartbeatHtml(runHeartbeat({ startedAt: activity.startedAt || stage.updatedAt, lastEventAt: activity.lastEventAt || stage.updatedAt, lastEvent: activity.lastEvent || stage.summary, warning: activity.warning }, live)) : "";
   const activityTimeline = activity.events?.length ? timelineHtml(activity.events, active, activity.groups) : milestones.length ? milestoneTimelineHtml(milestones) : `<p class="run-empty">${active ? "Waiting for the next recorded action." : "No detailed activity was retained. See the saved result and artifacts."}</p>`;
-  const milestoneTimeline = milestones.length && activity.events?.length ? `<details class="stage-milestones"><summary>Workflow milestones <span>${milestones.length}</span></summary>${milestoneTimelineHtml(milestones)}</details>` : "";
-  const output = ["requirements", "explore"].includes(stage.id) ? "" : stageOutputHtml(run, stage);
-  return `<div class="stage-activity">${history}${pulse}${output}<section class="run-events"><span class="eyebrow">Saved activity · ${eventGroups(activity.events || [], activity.groups).length} groups</span><div>${activityTimeline}</div></section>${milestoneTimeline}</div>`;
+  const milestoneTimeline = milestones.length ? `<section class="stage-milestones"><span class="eyebrow">Meaningful progress</span>${milestoneTimelineHtml(milestones)}</section>` : "";
+  const output = stageOutputHtml(run, stage, { artifactsAfter: true });
+  const current = activity.lastEvent || live?.label;
+  const result = `<section class="activity-answer"><span class="eyebrow">${stageProjection?.blocker ? "Action needed" : active ? "Current status" : "Result"}</span><strong>${escapeHtml(action || (active ? current : stage.summary) || (active ? "Work is in progress." : "No saved result."))}</strong>${action && ((active ? current : stage.summary)) ? `<small>${escapeHtml((active ? current : stage.summary))}</small>` : ""}</section>`;
+  const technical = activity.events?.length ? `<details class="technical-details"><summary>Technical details · ${eventGroups(activity.events || [], activity.groups).length} activity groups</summary><div class="run-events">${activityTimeline}</div></details>` : "";
+  return `<div class="stage-activity">${history}${pulse}${result}${output}${milestoneTimeline}${technical}</div>`;
 }
 
 function rawOutputFor(run, step) {
@@ -786,11 +811,12 @@ function runPanel(step) {
   const heartbeat = heartbeatHtml(runHeartbeat(active, liveRuns.get(`${run.id}:${step.id}`)));
   const events = stepEvents(run, step);
   const rawOutput = rawOutputFor(run, step);
+  const tail = rawOutput || active ? outputTailHtml({ key: `${runIdentity(run)}:worker:${step.id}`, output: rawOutput, active: Boolean(active), label: "agent" }) : "";
   const raw = `<details class="raw-output" data-load-session-trace="${escapeHtml(step.id)}"><summary>Raw assistant output</summary><pre data-run-raw-output>${escapeHtml(formatOutput(rawOutput || (step.sessionFile ? "Open to load the full session transcript." : "No assistant text yet. Open event details below to inspect tool calls and their output.")))}</pre></details>`;
   const progress = active?.activity?.lastEvent || active?.lastEvent || (attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting");
   const purpose = step.productContext || step.acceptanceCriteria?.[0];
   const why = purpose ? `<article class="artifact"><header><span class="artifact-name">Why this worker is running</span></header><div class="artifact-body"><p>${escapeHtml(purpose)}</p></div></article>` : "";
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}${steeringPanel(run, step.id)}`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}${tail}<details class="technical-details"><summary>Technical details · saved activity</summary><div class="run-events" data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div>${raw}</details>${steeringPanel(run, step.id)}`;
 }
 
 function proofEvidenceHtml(evidence) {
@@ -1044,9 +1070,18 @@ function canonicalAttemptInspector(run, step, projection, worker, attempt) {
   const failureKind = attempt.failureKind || detail?.failureKind;
   const failurePhase = attempt.failurePhase || detail?.failurePhase;
   const provenance = [failureKind, failurePhase].filter(Boolean).join(" · ") || "not recorded";
-  const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(terminationReason)}</dd></div><div><dt>Failure provenance</dt><dd>${escapeHtml(provenance)}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : attemptDetailContent(detail, tab);
+  const live = liveRuns.get(`${run.id}:${step.id}`);
+  const liveOutput = attempt.lifecycle === "active" && live?.runId === attempt.runId ? live.output : "";
+  const savedOutput = detail?.output?.state === "available" || detail?.output?.state === "truncated" ? detail.output.content : "";
+  const outputState = detail?.output;
+  const tail = tab === "activity" ? (liveOutput || savedOutput || attempt.lifecycle === "active" ? `${outputState?.state === "truncated" ? truncatedResourceWarning(outputState, "output") : ""}${outputTailHtml({ key: `${runIdentity(run)}:attempt:${attempt.id}`, output: liveOutput || savedOutput, active: attempt.lifecycle === "active", label: "agent" })}` : resourceStateHtml(outputState || { state: "loading" }, "Output")) : "";
+  const actionable = summary.blocker?.summary || (!["none", "wait"].includes(summary.nextAction?.kind) ? summary.nextAction?.label : "");
+  const check = detail?.checks?.state === "available" || detail?.checks?.state === "truncated" ? `${detail.checks.status || "recorded"}${detail.checks.summary ? ` · ${detail.checks.summary}` : ""}` : "Checks not retained";
+  const activityEvidence = tab === "activity" ? `<section class="activity-answer"><span class="eyebrow">${summary.blocker ? "Action needed" : "Attempt evidence"}</span><strong>${escapeHtml(actionable || `Evidence ${evidence.state || "not recorded"}`)}</strong><small>${escapeHtml(`Checks: ${check}`)}</small><div><button class="button" type="button" data-tab="checks">Checks</button> <button class="button" type="button" data-tab="artifacts">Artifacts</button></div></section>` : "";
+  const content = attemptDetailContent(detail, tab);
+  const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(terminationReason)}</dd></div><div><dt>Failure provenance</dt><dd>${escapeHtml(provenance)}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : tab === "activity" ? `${activityEvidence}${tail}<details class="technical-details"><summary>Technical details · recorded activity</summary>${content}</details>` : content;
   const steering = attempt.lifecycle === "active" ? steeringPanel(run, step?.id) : "";
-  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}${steering}</div>`;
+  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">${attempt.lifecycle === "active" ? "Current status" : "Attempt result"}</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}${steering}</div>`;
 }
 
 function renderInspector() {
@@ -1263,6 +1298,7 @@ function restoreRenderContext(context) {
 function renderInspectorPreservingContext() {
   const context = renderContext();
   renderInspector();
+  followOutputTails();
   restoreRenderContext(context);
 }
 
@@ -1384,6 +1420,7 @@ function render() {
   renderInspector();
   restoreRenderContext(context);
   restoreClarificationDraft(draft);
+  followOutputTails();
 }
 
 function renderSelection() {
@@ -1392,6 +1429,7 @@ function renderSelection() {
   }
   renderPlanTree();
   renderInspector();
+  followOutputTails();
 }
 
 function selectTicket(ticketId, stepId = null, persist = true) {
@@ -1458,6 +1496,12 @@ function updateReviewQueue(formId) {
 }
 
 document.addEventListener("click", async (event) => {
+  const jump = event.target.closest("[data-jump-output]");
+  if (jump) {
+    const output = document.querySelector(`[data-stream-key="${CSS.escape(jump.dataset.jumpOutput)}"]`);
+    if (output) { outputFollowing.set(jump.dataset.jumpOutput, true); output.scrollTop = output.scrollHeight; jump.hidden = true; }
+    return;
+  }
   const closeDialog = event.target.closest("[data-close-dialog]");
   if (closeDialog) { closeDialog.closest("dialog").close(); return; }
   const addNote = event.target.closest("[data-add-note-review]");
@@ -1777,6 +1821,28 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("scroll", (event) => {
+  const output = event.target.closest?.("[data-stream-key]");
+  if (!output) return;
+  const following = output.scrollHeight - output.scrollTop - output.clientHeight < 40;
+  outputFollowing.set(output.dataset.streamKey, following);
+  const jump = output.parentElement?.querySelector("[data-jump-output]");
+  if (jump) jump.hidden = following;
+}, true);
+
+document.addEventListener("wheel", (event) => {
+  const output = event.target.closest?.("[data-stream-key]");
+  if (!output || event.deltaY >= 0) return;
+  outputFollowing.set(output.dataset.streamKey, false);
+  const jump = output.parentElement?.querySelector("[data-jump-output]");
+  if (jump) jump.hidden = false;
+}, true);
+
+document.addEventListener("toggle", (event) => {
+  const output = event.target.closest?.("[data-expand-output]");
+  if (output) { if (output.open) expandedOutput.add(output.dataset.expandOutput); else expandedOutput.delete(output.dataset.expandOutput); }
+}, true);
+
 document.addEventListener("change", (event) => {
   const history = event.target.closest("[data-run-history]");
   if (history) {
@@ -2092,6 +2158,10 @@ events.onmessage = ({ data }) => {
       if (event.type === "text_delta") {
         const retainedOutput = $("[data-attempt-output]");
         if (retainedOutput && selectedAttempt?.lifecycle === "active" && selectedAttempt.runId === event.runId) updateStreamOutput(retainedOutput, live.output.slice(-20000));
+        const tail = document.querySelector(`[data-stream-key="${CSS.escape(`${runIdentity(runFor())}:attempt:${selectedAttempt?.id || ""}`)}"]`);
+        if (tail && selectedAttempt?.lifecycle === "active" && selectedAttempt.runId === event.runId) updateStreamOutput(tail, live.output);
+        const workerTail = document.querySelector(`[data-stream-key="${CSS.escape(`${runIdentity(runFor())}:worker:${event.stepId}`)}"]`);
+        if (workerTail) updateStreamOutput(workerTail, live.output);
         return;
       }
       if (event.type === "prompt" && activeTab === "prompt") renderInspectorPreservingContext();
@@ -2119,7 +2189,7 @@ events.onmessage = ({ data }) => {
     liveStages.set(key, live);
     if (event.ticketId === state.selectedTicketId && event.stageId === selectedStageId && event.runId === runFor()?.runId) {
       if (event.type === "text_delta") {
-        for (const output of document.querySelectorAll("[data-stage-output]")) updateStreamOutput(output, live.output);
+        for (const output of document.querySelectorAll(`[data-stream-key="${CSS.escape(`${runIdentity(runFor())}:stage:${event.stageId}`)}"]`)) updateStreamOutput(output, live.output);
       } else if (event.type !== "thinking" && ["activity", "prompt"].includes(activeTab)) renderInspectorPreservingContext();
     }
   }

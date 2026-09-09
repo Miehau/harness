@@ -444,8 +444,11 @@ test("non-Git read/write extra roots appear in proof diffs and are not dropped",
       evidenceKind: "nongit"
     }]);
     assert.deepEqual(labeled.files, ["root:r-nongit:notes.txt"]);
-    assert.match(labeled.patch, /# repository r-nongit \(notes-root\)/);
-    assert.match(labeled.patch, /\+after/);
+    assert.equal("patch" in labeled, false);
+    assert.equal(labeled.error, null);
+    assert.deepEqual(labeled.fileStats.map((file) => file.path), ["root:r-nongit:notes.txt"]);
+    assert.equal(labeled.repositories[0].displayPath, "notes-root");
+    assert.ok(labeled.additions > 0 && labeled.deletions > 0);
     const roots = extraProofRoots({
       access: {
         mode: "restricted",
@@ -472,20 +475,27 @@ test("combined checks fail when B fails even if A passed", () => {
   assert.equal(combined.repositories.length, 2);
 });
 
-test("directory proof records an output limit instead of dropping the change", () => {
+test("directory proof retains binary metadata without patches and propagates snapshot limits", () => {
   const before = { files: { "huge.bin": { hash: "a", size: 1, binary: true, content: null } } };
   const after = { files: { "huge.bin": { hash: "b", size: 1, binary: true, content: null } } };
   const diff = diffFileSnapshots(before, after);
   assert.equal(diff.available, true);
   assert.deepEqual(diff.files, ["huge.bin"]);
-  const omitted = aggregateProofDiffs([{
-    available: true,
-    files: ["notes.txt"],
-    patch: "",
+  assert.deepEqual(diff.fileStats, [{ path: "huge.bin", additions: 0, deletions: 0, binary: true }]);
+  const record = {
+    ...diff,
     displayPath: "notes-root",
     repositoryId: "r-nongit",
     evidenceKind: "nongit"
+  };
+  const metadata = aggregateProofDiffs([record]);
+  assert.equal("patch" in metadata, false);
+  assert.equal(metadata.error, null);
+  assert.deepEqual(metadata.files, ["root:r-nongit:huge.bin"]);
+  const limited = aggregateProofDiffs([{
+    ...record,
+    ...diffFileSnapshots(before, { ...after, error: "output_limit: non-Git proof snapshot exceeded 2000 files" })
   }]);
-  assert.match(omitted.error, /output_limit/);
-  assert.deepEqual(omitted.files, ["root:r-nongit:notes.txt"]);
+  assert.match(limited.error, /notes-root: output_limit/);
+  assert.deepEqual(limited.files, metadata.files);
 });

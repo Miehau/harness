@@ -51,6 +51,16 @@ input:focus, select:focus, textarea:focus { border-color: #6e9fee; box-shadow: 0
 .button.danger { border-color: #633b40; color: #f0a0a0; }
 .button:disabled { opacity: .45; cursor: not-allowed; }
 .icon-button { width: 34px; height: 34px; }
+.activity-answer, .output-tail { display: grid; gap: 7px; margin-bottom: 12px; border: 1px solid #30353a; border-radius: 10px; padding: 11px; background: #15191d; }
+.activity-answer strong { line-height: 1.4; }
+.activity-answer small, .output-tail small { color: #9299a0; }
+.output-tail > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.output-tail > pre { max-height: 17em; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.output-tail > .button { justify-self: end; }
+.technical-details { margin-top: 12px; border: 1px solid #30353a; border-radius: 10px; padding: 9px; }
+.technical-details > summary { cursor: pointer; color: #aab1ba; font-size: 12px; }
+.technical-details .run-events { margin-top: 10px; }
+.stage-milestones { display: grid; gap: 8px; margin: 12px 0; }
 
 .layout { display: grid; min-height: 0; flex: 1; overflow: hidden; grid-template-columns: minmax(300px, 31%) minmax(0, 69%); }
 .ticket-layout { grid-template-columns: 340px minmax(0, 1fr); }
