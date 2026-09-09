@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { invoke, mockHarness, runAgainstDaemon, waitFor, withDaemon } from "./helpers.js";
+import { normalizePlan } from "../src/plan.js";
 import { JsonStore } from "../src/store.js";
 import { createOrchestratorService, guardOrchestratorUpdate } from "../src/orchestration.js";
 
@@ -82,4 +83,75 @@ test("draft dependencies and file-based CLI submissions use the ordinary workflo
     assert.equal((await show(daemon, result.json)).decisions.length, 0);
     assert.equal((await invoke(daemon, "POST", base, { body: { ...submission("bad"), auto: true } })).status, 400);
   });
+});
+
+test("conversation CLI follows a material ticket through revision, restart, execution and final proof", { timeout: 30000 }, async () => {
+  let evidenceRoot, captures = 0, workers = 0;
+  const results = (proofMap, artifacts) => proofMap.criteria.map((criterion) => ({
+    criterionId: criterion.id, status: "verified", explanation: { summary: "Mock independent verification" },
+    evidence: artifacts.filter((artifact) => artifact.kind === "visual-evidence" && artifact.criterionIds?.includes(criterion.id)).map(({ id }) => ({ type: "media", artifactId: id }))
+  }));
+  const harness = { ...mockHarness(),
+    exploreTicket: async () => ({ artifact: "Reuse existing components", questions: [] }),
+    lookAheadTickets: async () => ({ artifact: "No dependencies" }),
+    designTicket: async () => ({ artifact: "Panel design", plan: normalizePlan({ uiImpact: { level: "material", reason: "New panel" }, nodes: [{ id: "panel", title: "Panel", permission: "write", writeScope: "panel.txt", expectedFiles: ["panel.txt"], estimatedChangedLines: 1, requiresVisualEvidence: true, acceptanceCriteria: ["The panel has an empty state"], criterionBindings: [{ index: 0, id: "ac-empty", evidence: "screenshot", journeyId: "panel-empty" }] }] }) }),
+    proposeUi: async ({ feedback }) => ({ html: `<main><h1>${feedback ? "Compact" : "Activity"} panel</h1></main>`, summary: feedback || "Activity panel direction" }),
+    runStep: async ({ cwd }) => { workers++; await writeFile(join(cwd, "panel.txt"), "Mock panel implementation\n"); return { report: { status: "completed", summary: "Mock worker completed", artifact: "Mock panel implementation" }, output: "Mock worker", rawOutput: "", sessionFile: null }; },
+    evidenceImages: async () => [],
+    generateCommitMessage: async () => "test: mock panel workflow",
+    runRepositoryChecks: async ({ environment = {}, proofCriteria = [] }) => {
+      const path = join(evidenceRoot, `mock-capture-${++captures}.png`);
+      // This fixture tests evidence plumbing, not a real panel's appearance.
+      await writeFile(path, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1cAAAAASUVORK5CYII=", "base64"));
+      return { status: "passed", command: "mock-verify", summary: "Mock checks passed", output: "", evidence: [{ name: `mock-capture-${captures}.png`, path, mediaKind: "image", mediaType: "image/png", boundTicketId: environment.AGENT_PLAN_CAPTURE_TICKET_ID, boundRunId: environment.AGENT_PLAN_CAPTURE_RUN_ID,
+        criterionIds: JSON.parse(environment.AGENT_PLAN_CAPTURE_CRITERIA || JSON.stringify(proofCriteria)).map(({ id }) => id), commands: [["panel", "empty"]], assertions: [{ selector: "#panel", text: "No activity" }] }] };
+    },
+    verifyStep: async ({ proofMap, artifacts }) => ({ summary: "Mock step review", findings: [], criterionResults: results(proofMap, artifacts), rawOutput: "", sessionFile: null }),
+    reviewTicket: async ({ role, proofMap, artifacts }) => ({ role, summary: "Mock final review", findings: [], criterionResults: results(proofMap, artifacts) })
+  };
+  await withDaemon(async (daemon, { cwd, dataDir }) => {
+    evidenceRoot = dataDir;
+    assert.equal((await runAgainstDaemon(daemon, ["init"])).code, 0);
+    const receipt = (await runAgainstDaemon(daemon, ["orchestrator", "submit", JSON.stringify(submission("complete-conversation"))])).json;
+    const brief = async (host) => (await runAgainstDaemon(host, ["orchestrator", "brief", receipt.ticketId, receipt.runId])).json;
+    const act = async (host, action, input = {}) => {
+      const view = await brief(host);
+      return runAgainstDaemon(host, ["orchestrator", "act", receipt.ticketId, JSON.stringify(decision(view, action, input))]);
+    };
+    const until = async (host, predicate) => {
+      let view;
+      await waitFor(async () => { view = await brief(host); assert.ok(predicate(view), JSON.stringify({ status: view.status, checkpoint: view.checkpoint, proof: host.store.read().ticketRuns[receipt.ticketId].proofMap, checks: host.store.read().ticketRuns[receipt.ticketId].plan?.nodes[0].checks })); }, { timeoutMs: 12000 });
+      return view;
+    };
+    assert.match((await brief(daemon)).message, /draft/);
+    await act(daemon, "start");
+    await until(daemon, (view) => view.actions.includes("answer"));
+    await act(daemon, "answer", { answers: "" });
+    const first = await until(daemon, (view) => view.actions.includes("approve"));
+    assert.equal(workers, 0);
+    assert.ok(first.artifacts.some((artifact) => artifact.preview));
+    await act(daemon, "revise-proposal", { proposalRevision: first.uiProposal.revisionId, feedback: "Make the panel compact" });
+    const revised = await until(daemon, (view) => view.uiProposal?.revisionId !== first.uiProposal.revisionId && view.actions.includes("approve"));
+    await assert.rejects(act(daemon, "approve", { proposalRevision: first.uiProposal.revisionId }), /current UI proposal/);
+    await daemon.close({ exit: false });
+    await withDaemon(async (restored) => {
+      assert.equal((await brief(restored)).uiProposal.revisionId, revised.uiProposal.revisionId);
+      const duplicate = (await runAgainstDaemon(restored, ["orchestrator", "submit", JSON.stringify(submission("complete-conversation"))])).json;
+      assert.equal(duplicate.created, false);
+      assert.equal(duplicate.runId, receipt.runId);
+      await act(restored, "approve", { proposalRevision: revised.uiProposal.revisionId, auto: true });
+      const final = await until(restored, (view) => view.actions.includes("approve-proof"));
+      assert.equal(workers, 1);
+      assert.ok(final.artifacts.some((artifact) => artifact.media));
+      assert.equal(final.metrics.cost.state, "unavailable");
+      await act(restored, "approve-proof");
+      const completed = await until(restored, (view) => view.status === "completed");
+      assert.deepEqual(completed.actions, []);
+      assert.match(completed.message, /completed/);
+      assert.equal((await invoke(restored, "GET", `/api/tickets/${receipt.ticketId}/run`)).json.status, "completed");
+      assert.equal(await readFile(join(cwd, "panel.txt"), "utf8"), "Mock panel implementation\n");
+      assert.equal(restored.store.read().ticketRuns[receipt.ticketId].runId, receipt.runId);
+      assert.ok((await show(restored, receipt)).decisions.some((item) => item.action === "approve-proof" && item.authority.mode === "user"));
+    }, { cwd, dataDir, harness, listen: true });
+  }, { harness, listen: true });
 });
