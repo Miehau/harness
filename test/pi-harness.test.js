@@ -4,7 +4,7 @@ import { findPackageJSON } from "node:module";
 import { pathToFileURL } from "node:url";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, verificationContractFiles, verificationContractExists, PiHarness, projectCommandTool, scopedReadTools, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
 import { normalizePlan } from "../src/plan.js";
@@ -442,7 +442,7 @@ test("prefers the repository verification contract and discovers image and video
     await writeFile(join(root, ".agent-plan", "project.json"), JSON.stringify({ commands: { "capture-proof": ["node", ".agent-plan/capture.mjs"] } }));
     await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
-      import { join } from "node:path";
+      import { dirname, join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "interaction.webm"), Buffer.from("webm"));
@@ -454,7 +454,7 @@ test("prefers the repository verification contract and discovers image and video
 
     await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
-      import { join } from "node:path";
+      import { dirname, join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "page.png"), Buffer.from("png"));
     `);
@@ -467,7 +467,7 @@ test("prefers the repository verification contract and discovers image and video
 
     await writeFile(join(root, ".agent-plan", "capture.mjs"), `
       import { mkdirSync, writeFileSync } from "node:fs";
-      import { join } from "node:path";
+      import { dirname, join } from "node:path";
       mkdirSync(process.env.AGENT_PLAN_EVIDENCE_DIR, { recursive: true });
       writeFileSync(join(process.env.AGENT_PLAN_EVIDENCE_DIR, "interaction.webm"), Buffer.from("webm"));
     `);
@@ -1065,7 +1065,8 @@ test("fresh verification stops after its repository inspection budget", async ()
     session.prompt = async prompt => {
       assert.match(prompt, /Continue the interrupted verification/);
       assert.match(prompt, /Do not repeat completed reads/);
-      assert.match(prompt, /\+current/);
+      const navigation = JSON.parse(prompt.split("# Current evidence index\n")[1].split("\n\n")[0]);
+      assert.equal(await readFile(join(dirname(navigation.index), "changes.patch"), "utf8"), "+current");
       session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Inspected remaining evidence","findings":[]}' }] });
     };
     const result = await harness.verifyStep({
@@ -1183,11 +1184,13 @@ test("resumed worker sessions send a continuation prompt instead of the full ste
     session.state.messages = []; // SDK silently creates an empty session for a missing/empty file.
     const events = [];
     await assert.rejects(harness.runStep({
-      cwd: root, plan, step: plan.nodes[0], artifacts: [{ name: "prior.md", content: "Accepted interfaces" }], images: [],
+      cwd: root, plan, step: plan.nodes[0], artifacts: [{ kind: "agent-output", name: "prior.md", content: "Accepted interfaces" }], images: [],
       feedback: "Keep the correction", resumeSessionFile: join(root, "missing.jsonl"), onEvent: event => events.push(event)
     }), /required worker_report tool/);
     assert.match(prompt, /Skills requested/);
-    assert.match(prompt, /Accepted interfaces/);
+    const navigation = JSON.parse(prompt.split("# Current evidence index\n")[1].split("\n\n")[0]);
+    const index = JSON.parse(await readFile(navigation.index, "utf8"));
+    assert.match(await readFile(join(dirname(navigation.index), index.evidence[0].detail), "utf8"), /Accepted interfaces/);
     assert.match(prompt, /Keep the correction/);
     assert.ok(events.some(event => /rebuilding full step context/.test(event.label)));
 
@@ -1671,4 +1674,75 @@ test("UI workers cannot start before the design-system prerequisite exists", asy
     await assert.rejects(harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [] }), /Missing \.agent-plan\/design-system.md/);
   } finally { await rm(root, { recursive: true, force: true }); }
 
+});
+
+test("slice verification keeps large evidence out of prompts and serves its complete tail on demand", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "slice-context-budget-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const harness = new PiHarness({ dataDir: root });
+  let customTools;
+  let rendered;
+  const events = [];
+  const patch = "diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n" + "+payload\n".repeat(75000) + "+tail-sentinel\n";
+  const session = {
+    state: { messages: [] }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+    async prompt(prompt) {
+      rendered = prompt;
+      assert.ok(prompt.length < 20000, prompt.length);
+      assert.doesNotMatch(prompt, /tail-sentinel|worker-body-sentinel|design-body-sentinel/);
+      const tool = customTools.find((tool) => tool.name === "review_evidence");
+      const read = async (file, offset = 0) => JSON.parse((await tool.execute("read", { file, offset })).content[0].text);
+      await assert.rejects(read("../index.json"), /current review index/);
+      const changes = JSON.parse((await read("changes.json")).content);
+      const part = changes.repositories[0].patches[0];
+      const tail = await read(part.detail, patch.length - 15);
+      assert.equal(tail.total, patch.length);
+      assert.match(tail.content, /tail-sentinel/);
+      const index = JSON.parse((await read("index.json")).content);
+      const worker = index.evidence.find((item) => item.kind === "agent-output");
+      assert.match((await read(worker.detail)).content, /worker-body-sentinel/);
+      this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Verified","findings":[]}' }] });
+    }
+  };
+  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+  const plan = normalizePlan({ nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
+  await harness.verifyStep({ cwd: root, ticket: { id: "T" }, runId: "run", round: 1, plan, step: plan.nodes[0],
+    artifacts: [{ kind: "agent-output", stepId: "slice", content: "stale-worker" }],
+    design: "design-body-sentinel".repeat(30000), output: "worker-body-sentinel", diff: { files: ["src/a.js"], patch },
+    checks: { status: "passed", output: "check-body".repeat(10000) }, onEvent: (event) => events.push(event)
+  });
+  assert.equal(events.find((event) => event.type === "prompt").content, rendered);
+  assert.equal(events.find((event) => event.type === "context").promptCharacters, rendered.length);
+});
+
+test("resumed final fixers receive current indexed evidence instead of replaying stale handoffs", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "fixer-current-context-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const harness = new PiHarness({ dataDir: root });
+  let customTools;
+  const session = {
+    state: { messages: [{ role: "user", content: "Stale evidence" }] },
+    resourceLoader: { getSkills: () => ({ skills: [] }) },
+    setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+    async prompt(prompt) {
+      assert.match(prompt, /Continue from the existing conversation/);
+      assert.match(prompt, /This current snapshot supersedes earlier evidence/);
+      assert.doesNotMatch(prompt, /current-check-diagnostic|current-handoff/);
+      const evidence = customTools.find((tool) => tool.name === "review_evidence");
+      const read = async (file) => JSON.parse((await evidence.execute("read", { file })).content[0].text).content;
+      assert.match(await read("checks.json"), /current-check-diagnostic/);
+      assert.match(await read("constraints.md"), /Preserve the public API/);
+      const index = JSON.parse(await read("index.json"));
+      assert.match(await read(index.evidence[0].detail), /current-handoff/);
+      await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Fixed", artifact: "Cumulative result" });
+    }
+  };
+  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { open: () => ({}), create: () => ({}) } });
+  const plan = normalizePlan({ nodes: [{ id: "fix", title: "Fix", permission: "read", skills: [] }] });
+  const result = await harness.runStep({ cwd: root, ticketId: "T", runId: "run", step: plan.nodes[0], plan, artifacts: [], feedback: "Fix the current issue", resumeSessionFile: "saved.jsonl", reviewContext: {
+    plan: { nodes: [{ id: "implementation", status: "accepted" }] },
+    artifacts: [{ stepId: "implementation", kind: "agent-output", content: "current-handoff" }],
+    checks: { status: "failed", output: "current-check-diagnostic" }, operatorFeedback: "Preserve the public API"
+  } });
+  assert.equal(result.report.status, "completed");
 });

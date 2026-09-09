@@ -534,9 +534,17 @@ test("verification progress keeps open findings until an independent review reso
 
 test("token totals include active work without recounting its saved attempt", () => {
   const usage = { input: 10, output: 4, cacheRead: 8, cacheWrite: 0, calls: 3, records: 1, complete: true };
-  const run = { plan: { nodes: [{ attempts: [{ runId: "old", usage }] }] }, activeRuns: { old: { runId: "old", activity: { usage } }, current: { runId: "current", activity: { usage } } } };
+  const run = { plan: { nodes: [{ id: "one", attempts: [{ runId: "old", attemptId: "attempt-1", usage }] }] }, activeRuns: { old: { runId: "old", attemptId: "attempt-1", activity: { usage } }, current: { runId: "current", attemptId: "attempt-1", activity: { usage } } } };
   assert.equal(runMetrics(run).input, 20);
   assert.equal(runMetrics(run).calls, 6);
   assert.equal(runMetrics(run).usageState, "recorded");
   assert.equal(runMetrics({ plan: { nodes: [] } }).usageState, "unavailable");
+});
+
+test("token totals deduplicate repeated saved attempt identities", () => {
+  const usage = { input: 10, output: 4, calls: 1, records: 1, complete: true };
+  const attempt = { attemptId: "attempt-1", usage };
+  const run = { plan: { nodes: [{ id: "one", attempts: [attempt, { ...attempt }] }, { id: "two", attempts: [{ ...attempt }] }] }, activeRuns: { one: { attemptId: "attempt-1", activity: { usage } } } };
+  assert.equal(runMetrics(run).input, 20);
+  assert.equal(runMetrics(run).calls, 2);
 });

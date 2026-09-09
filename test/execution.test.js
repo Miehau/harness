@@ -954,5 +954,11 @@ test("usage totals survive event trimming, resume, attempt materialization and p
   materializeActiveAttempt(plan.nodes[0], { runId: "worker", attemptId: "attempt", activity }, { status: "verified" });
   const published = publicState({ selectedTicketId: "t", ticketRuns: { t: { id: "t", runId: "r", plan, stages: [] } }, retainedRuns: {} });
   assert.deepEqual(published.ticketRuns.t.plan.nodes[0].attempts[0].usage, { input: 133, output: 47, cacheRead: 7, cacheWrite: 3, calls: 5, records: 2, complete: true });
+});
 
+test("resuming a partial legacy usage aggregate keeps numeric totals and marks it incomplete", () => {
+  const capture = createActivityCapture({ existing: { usage: { input: 12 } }, now: () => 1 });
+  capture.onEvent({ type: "tool_start" });
+  capture.onEvent({ type: "usage", output: 3 });
+  assert.deepEqual(capture.snapshot().usage, { input: 12, output: 3, cacheRead: 0, cacheWrite: 0, calls: 1, records: 1, complete: false });
 });

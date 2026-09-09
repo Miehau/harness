@@ -355,12 +355,19 @@ export function restartOptions(run) {
 }
 
 export function runMetrics(run, now = Date.now()) {
-  if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, correctionRounds: 0, durationSeconds: 0 };
+  if (!run) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, usageState: "unavailable", correctionRounds: 0, durationSeconds: 0 };
   const steps = (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
-  const attempts = steps.flatMap((step) => step.attempts || []);
-  const completedRunIds = new Set(attempts.map((attempt) => attempt.runId).filter(Boolean));
-  const active = Object.values(run.activeRuns || {}).filter((worker) => !completedRunIds.has(worker.runId)).map((worker) => worker.activity || {});
-  const activities = [...attempts, ...(run.stages || []).map((stage) => stage.activity || {}), ...active];
+  const attemptKeys = new Set();
+  const keyFor = (item, stepId) => item.runId ? `run:${item.runId}` : item.attemptId ? `attempt:${stepId}:${item.attemptId}` : null;
+  const attempts = steps.flatMap((step) => (step.attempts || []).map((attempt) => ({ attempt, stepId: step.id })));
+  const uniqueAttempts = attempts.filter(({ attempt, stepId }) => {
+    const key = keyFor(attempt, stepId);
+    if (key && attemptKeys.has(key)) return false;
+    if (key) attemptKeys.add(key);
+    return true;
+  }).map(({ attempt }) => attempt);
+  const active = Object.entries(run.activeRuns || {}).filter(([stepId, worker]) => !attemptKeys.has(keyFor(worker, stepId))).map(([, worker]) => worker.activity || {});
+  const activities = [...uniqueAttempts, ...(run.stages || []).map((stage) => stage.activity || {}), ...active];
   const totals = activities.map((activity) => activity.usage || (activity.events || []).reduce((total, event) => {
     if (event.type === "tool_start") total.calls++;
     if (event.type === "usage") {

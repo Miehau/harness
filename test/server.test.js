@@ -1287,6 +1287,55 @@ test("paused verification survives daemon reload without repeating unchanged wor
   }
 });
 
+test("final-review fixer receives fresh canonical evidence when its session resumes", async () => {
+  const contexts = [];
+  const finding = { severity: "high", claim: "Fix the current behavior", suggestedFix: "Use the accepted requirement" };
+  const harness = {
+    ...mockHarness(),
+    evidenceImages: async () => [],
+    runStep: async ({ reviewContext }) => {
+      contexts.push(reviewContext);
+      return {
+        report: { status: "needs_input", summary: "Need operator input", request: "Continue" },
+        output: "paused", prompt: "fix", rawOutput: "", reviewNotes: [], sessionFile: "/tmp/final-fixer.jsonl"
+      };
+    }
+  };
+  await withDaemon(async (daemon, { cwd, dataDir }) => {
+    const ticket = { id: "fixer-context", identifier: "LOCAL-fixer", title: "Fix final review", description: "Keep the accepted behavior", source: "local", state: { name: "Local", type: "local" } };
+    const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+    const plan = normalizePlan({ title: "Accepted plan", nodes: [{ id: "build", title: "Build", permission: "write", status: "accepted", writeScope: "change.txt", acceptanceCriteria: ["Current behavior works"] }] });
+    await writeFile(join(workspace.cwd, "change.txt"), "current change\n");
+    const requirements = await persistArtifact(dataDir, ticket, { runId: "run-1", kind: "requirements", name: "requirements.md", content: "original evidence" });
+    const id = await seedRun(daemon, {
+      ticket, workspace, baselineTree: workspace.baselineTree, plan, status: "needs_attention",
+      artifacts: [requirements, { id: "current-shot", kind: "visual-evidence", name: "current.png", path: "/proof/current.png" }, { id: "stale-shot", kind: "visual-evidence", name: "stale.png", path: "/proof/stale.png" }],
+      reviews: [{ round: 1, actionableFindings: [finding], finalChecks: { status: "failed", output: "first diagnostic", evidence: [{ path: "/proof/current.png" }] } }],
+      checkpoint: { kind: "review_blocked", title: "Review fixer needs attention" }
+    });
+    await daemon.store.update((state) => { state.ticketRuns[id].stages.find((stage) => stage.id === "verify").baseTree = workspace.baselineTree; });
+
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} })).status, 202);
+    assert.equal(contexts.length, 1);
+    assert.match(contexts[0].diff.patch, /current change/);
+    assert.equal(contexts[0].checks.output, "first diagnostic");
+    assert.equal(contexts[0].artifacts[0].content, "original evidence");
+    assert.deepEqual(contexts[0].artifacts.filter((artifact) => artifact.kind === "visual-evidence").map((artifact) => artifact.id), ["current-shot"]);
+    assert.deepEqual(contexts[0].focusFindings, [finding]);
+
+    await writeFile(requirements.path, "resumed evidence");
+    await daemon.store.update((state) => {
+      const run = state.ticketRuns[id];
+      run.reviews[0].finalChecks.output = "resumed diagnostic";
+    });
+    assert.equal((await invoke(daemon, "POST", `/api/tickets/${id}/resume`, { body: {} })).status, 202);
+    assert.equal(contexts.length, 2);
+    assert.equal(contexts[1].checks.output, "resumed diagnostic");
+    assert.equal(contexts[1].artifacts[0].content, "resumed evidence");
+    assert.equal(contexts[1].diff.patch, contexts[0].diff.patch);
+  }, { harness });
+});
+
 test("async action requests acknowledge launch and retain later worker failures", { timeout: 10000 }, async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });

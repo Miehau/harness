@@ -1,3 +1,4 @@
+import { diffOutline } from "./git.js";
 import { flattenSteps } from "./plan.js";
 
 const relevantArtifactKinds = new Set([
@@ -54,7 +55,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
   artifacts.forEach((artifact, index) => {
     const content = artifact?.content || artifact?.summary;
     if ((!content && artifact?.kind !== "visual-evidence") || !relevantArtifactKinds.has(artifact?.kind)) return;
-    if (artifact.stepId && statuses.has(artifact.stepId) && statuses.get(artifact.stepId) !== "accepted") return;
+    if (artifact.stepId && statuses.get(artifact.stepId) !== "accepted") return;
     // Media is evidence by immutable artifact ID, not a replaceable step summary.
     const key = artifact.kind === "visual-evidence" ? `${artifact.kind}:${artifact.id || index}` : `${artifact.kind}:${artifact.stepId || "run"}`;
     latestArtifacts.set(key, { artifact, index });
@@ -126,7 +127,7 @@ export function compactReviewPacket({ ticket = {}, plan = {}, artifacts = [], di
 
 // Full detail stays in immutable run-owned files. The initial prompt never grows
 // with accumulated review history, patch size or attached image bytes.
-export async function writeReviewIndex(directory, { ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {}, proofMap = {}, focusFindings = [], operatorFeedback = "" }) {
+export async function writeReviewIndex(directory, { ticket = {}, plan = {}, artifacts = [], diff = {}, checks = {}, proofMap = {}, focusFindings = [], operatorFeedback = "", currentStepId = null }) {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
   const { createHash } = await import("node:crypto");
@@ -139,7 +140,7 @@ export async function writeReviewIndex(directory, { ticket = {}, plan = {}, arti
   for (const artifact of artifacts) {
     if (!relevantArtifactKinds.has(artifact.kind)) continue;
     const step = flattenSteps(plan).find((step) => step.id === artifact.stepId);
-    if (step && step.status !== "accepted") continue;
+    if (artifact.stepId && (!step || (step.status !== "accepted" && step.id !== currentStepId))) continue;
     latest.set(artifact.kind === "visual-evidence" ? artifact.id : `${artifact.kind}:${artifact.stepId || "run"}`, artifact);
   }
   const evidence = [...latest.values()].map((artifact, index) => ({
@@ -158,10 +159,19 @@ export async function writeReviewIndex(directory, { ticket = {}, plan = {}, arti
       expectedFiles: step.expectedFiles || [], acceptanceCriteria: step.acceptanceCriteria || []
     })
   }));
+  const repositories = (diff.repositories?.length ? diff.repositories : [{ repositoryId: "primary", ...diff }]).map((repository, repositoryIndex) => {
+    const { patch = "", ...metadata } = repository;
+    const blocks = String(patch).split(/(?=^diff --git )/m).filter(Boolean);
+    const outline = diffOutline(patch);
+    return { ...metadata, patches: blocks.map((block, index) => ({
+      file: outline[index]?.file || "Unstructured patch", hunks: outline[index]?.hunks || [], characters: block.length,
+      detail: put(`repository-${repositoryIndex + 1}-file-${index + 1}.patch`, block)
+    })) };
+  });
   const index = {
     ticket: put("ticket.json", { id: ticket.id, identifier: ticket.identifier, title: ticket.title, description: ticket.description, scope: plan.summary }),
     revision: { before: diff.before || null, after: diff.after || null, reference: diff.reference || null },
-    changes: put("changes.json", { files: diff.files || [], stat: diff.stat, repositories: diff.repositories || [], truncated: Boolean(diff.truncated), patch: put("changes.patch", diff.patch || "No textual diff") }),
+    changes: put("changes.json", { files: diff.files || [], stat: diff.stat, repositories, error: diff.error || null, truncated: Boolean(diff.truncated || repositories.some((repository) => repository.truncated)), patch: put("changes.patch", diff.patch || "No textual diff") }),
     checks: put("checks.json", checks), constraints: put("constraints.md", operatorFeedback || "No additional operator constraints."),
     criteria, findings, groups, evidence
   };
@@ -177,10 +187,10 @@ export async function writeReviewIndex(directory, { ticket = {}, plan = {}, arti
     constraints: join(root, "constraints.md"), changes: join(root, "changes.json"),
     counts: { criteria: criteria.length, unresolvedFindings: findings.length, behaviors: groups.length, evidence: evidence.length },
     // This is navigation, not a cutoff: the complete index retains every entry.
-    behaviors: groups.slice(0, 8).map((group) => ({ ...group, id: clip(group.id, 200) })), criteria: criteria.slice(0, 8).map((criterion) => ({ ...criterion, id: clip(criterion.id, 200), stepId: clip(criterion.stepId, 200) })), findings: findings.slice(0, 4),
+    behaviors: groups.slice(0, 8).map((group) => ({ ...group, id: clip(group.id, 200) })), criteria: criteria.slice(0, 8).map((criterion) => ({ ...criterion, id: clip(criterion.id, 200), stepId: clip(criterion.stepId, 200) })), findings: findings.slice(0, 4), evidence: evidence.slice(0, 6).map((artifact) => ({ ...artifact, name: clip(artifact.name, 180) })),
     more: "Read index.json for the complete inventory; detail paths are relative to its directory."
   };
-  if (JSON.stringify(summary).length > 12000) Object.assign(summary, { behaviors: [], criteria: [], findings: [] });
+  if (JSON.stringify(summary).length > 12000) Object.assign(summary, { behaviors: [], criteria: [], findings: [], evidence: [] });
   const textCharacters = JSON.stringify(summary).length;
   if (textCharacters > 12000) throw new Error("Review index metadata exceeds its 12000-character input budget");
   return { summary, root, digest, textCharacters };

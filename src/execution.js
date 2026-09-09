@@ -347,7 +347,10 @@ export function groupActivityEvents(events = []) {
 }
 
 function retainedUsage(activity = {}) {
-  if (activity.usage) return { ...activity.usage };
+  if (activity.usage) return {
+    ...Object.fromEntries(["input", "output", "cacheRead", "cacheWrite", "calls", "records"].map((key) => [key, Number(activity.usage[key]) || 0])),
+    complete: activity.usage.complete === true
+  };
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length };
   for (const event of activity.events || []) addUsage(usage, event);
   return usage;

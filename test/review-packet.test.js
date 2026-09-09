@@ -50,6 +50,7 @@ test("keeps only the latest relevant artifact for each accepted step", () => {
     { kind: "git-diff", stepId: "search", name: "diff.patch", content: "duplicate diff" },
     { kind: "agent-output", stepId: "search", name: "new.md", content: "new result" },
     { kind: "agent-output", stepId: "future", name: "future.md", content: "not accepted" },
+    { kind: "agent-output", stepId: "removed", name: "removed.md", content: "no longer planned" },
     { kind: "requirements", name: "requirements.md", content: "approved requirements" }
   ];
 
@@ -151,4 +152,32 @@ test("progressive index stays bounded while preserving every current criterion a
   const updated = await writeReviewIndex(root, { ...input, operatorFeedback: "New scope" });
   assert.notEqual(updated.digest, result.digest);
   assert.match(await readFile(join(result.root, index.constraints), "utf8"), /authoritative-constraint-sentinel/, "old reviewer snapshots remain immutable");
+});
+
+test("indexed patches retain every repository and hunk without duplicating bodies in navigation", async (t) => {
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { writeReviewIndex } = await import("../src/review-packet.js");
+  const root = await mkdtemp(join(tmpdir(), "context-patches-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = "diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-old\n+first-sentinel\n";
+  const second = "diff --git a/src/b.js b/src/b.js\n@@ -1 +1 @@\n-old\n+second-sentinel\n";
+  const result = await writeReviewIndex(root, { plan, currentStepId: "future", artifacts: [
+    { kind: "agent-output", stepId: "future", content: "current-worker-sentinel" },
+    { kind: "agent-output", stepId: "search", content: "accepted-worker-sentinel" },
+    { kind: "agent-output", stepId: "removed-step", content: "orphaned-worker-sentinel" }
+  ], diff: { files: ["src/a.js", "src/b.js"], patch: first + second, repositories: [
+    { repositoryId: "primary", patch: first + second },
+    { repositoryId: "secondary", patch: second, truncated: true }
+  ] } });
+  const changes = JSON.parse(await readFile(join(result.root, "changes.json"), "utf8"));
+  assert.equal(changes.truncated, true);
+  assert.doesNotMatch(JSON.stringify(changes), /first-sentinel|second-sentinel/);
+  assert.deepEqual(changes.repositories[0].patches.map((item) => [item.file, item.hunks.length]), [["src/a.js", 1], ["src/b.js", 1]]);
+  const restored = await Promise.all(changes.repositories[0].patches.map((item) => readFile(join(result.root, item.detail), "utf8")));
+  assert.equal(restored.join(""), first + second);
+  assert.equal(await readFile(join(result.root, changes.repositories[1].patches[0].detail), "utf8"), second);
+  const index = JSON.parse(await readFile(result.summary.index, "utf8"));
+  assert.equal(index.evidence.length, 2, "the current unaccepted worker report and accepted handoffs remain accessible");
 });

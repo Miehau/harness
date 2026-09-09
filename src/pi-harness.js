@@ -316,32 +316,22 @@ function describeConfiguredRepositories(repositories = []) {
   return `Configured repositories:\n${repositories.map((repo) => `- ${repo.id || repo.repositoryId || "primary"} (${repo.displayPath || repo.sourceCwd || repo.id || repo.repositoryId || "primary"}): ${repo.kind || repo.evidenceKind || "git"} ${repo.mode || "read/write"}`).join("\n")}\nWrite scopes use root:<repositoryId>:<relativePath> for extra roots; unqualified paths stay primary-only.\n`;
 }
 
-function formatRepositoryProof(diff = {}, checks = {}) {
-  const repos = diff.repositories || checks.repositories || [];
-  if (!repos.length) {
-    return {
-      files: (diff.files || []).join(", ") || "none",
-      diff: diff.patch || "No textual diff",
-      gate: { status: checks?.status || "unknown", command: checks?.command || null, summary: checks?.summary || "" }
-    };
-  }
-  return {
-    files: (diff.files || []).join(", ") || "none",
-    diff: repos.map((item) => `# ${item.repositoryId} (${item.displayPath})\n${item.patch || (item.files || []).join(", ") || "No textual diff"}${item.error ? `\nerror: ${item.error}` : ""}`).join("\n\n"),
-    gate: {
-      status: checks?.status || "unknown",
-      command: checks?.command || null,
-      summary: checks?.summary || "",
-      failedRepositories: checks?.failedRepositories || [],
-      repositories: (checks.repositories || []).map((item) => ({
-        repositoryId: item.repositoryId,
-        displayPath: item.displayPath,
-        status: item.status,
-        command: item.command,
-        summary: item.summary
-      }))
+function reviewEvidenceTool(lookup) {
+  return defineTool({
+    name: "review_evidence", label: "Read retained review evidence", description: "Read an indexed evidence file in bounded portions. Repository files use read instead.",
+    parameters: Type.Object({ file: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
+    async execute(_callId, { file, offset = 0, limit = 12000 }) {
+      const path = resolve(lookup.root, file);
+      if (dirname(path) !== lookup.root || !/\.(json|md|patch)$/.test(path)) throw new Error("Choose a file from the current review index");
+      const content = await readFile(path, "utf8");
+      const start = Math.max(0, Math.floor(offset));
+      return { content: [{ type: "text", text: JSON.stringify({ file, total: content.length, offset: start, content: content.slice(start, start + Math.max(1, Math.min(12000, limit))) }) }] };
     }
-  };
+  });
+}
+
+function evidenceContext(lookup) {
+  return `# Current evidence index\n${JSON.stringify(lookup.summary, null, 2)}\n\nUse review_evidence to read index.json and constraints.md, then the relevant criteria, handoffs, checks and per-file patches. Paths in the index are relative to its directory. This current snapshot supersedes earlier evidence in the conversation. Read only evidence needed for the current task; the complete inventory remains available on demand. If changes.json marks a patch truncated, inspect the affected repository files and report any unresolved evidence gap rather than assuming the omitted change is correct.`;
 }
 
 export function enrichReviewPacket(packet, { diff = {}, checks = {} } = {}) {
@@ -391,12 +381,12 @@ export function enrichReviewPacket(packet, { diff = {}, checks = {} } = {}) {
   };
 }
 
-export function stepContext({ plan, step, artifacts, proofMap, repositories = [] }) {
+export function stepContext({ plan, step, artifacts, proofMap, repositories = [], indexed = false }) {
   const stepCriteria = (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id)
     .map((criterion) => `- ${criterion.id}: ${criterion.text}`).join("\n") || "- None";
   const artifactText = artifacts.length
     ? artifacts.map((artifact) => `### ${artifact.name}${artifact.id ? ` [artifactId: ${artifact.id}]` : ""}${artifact.sourceStepTitle ? ` (from ${artifact.sourceStepTitle})` : ""}\n${artifact.sourceStepOutcome ? `Accepted outcome: ${artifact.sourceStepOutcome}\nChanged files: ${artifact.sourceStepFiles?.join(", ") || "not recorded"}\n` : ""}${artifact.kind === "visual-evidence" ? "Captured visual evidence; use its artifactId as a media locator without copying it." : artifact.content || artifact.summary || ""}`).join("\n\n")
-    : "No dependency artifacts.";
+    : indexed ? "Read the current evidence index below for dependency handoffs and approved design." : "No dependency artifacts.";
   const steps = flattenSteps(plan);
   const summarize = (items) => items.length
     ? items.map((item) => `- ${item.title}: ${item.description || "No outcome summary."}`).join("\n")
@@ -1512,12 +1502,19 @@ export class PiHarness {
     } catch {
       manager = SessionManager.create(cwd, sessionDir);
     }
+    const lookup = await writeReviewIndex(join(sessionDir, "evidence"), {
+      ticket, plan, currentStepId: step.id,
+      artifacts: [...artifacts,
+        { kind: "architecture", name: "approved-design.md", content: design },
+        { kind: "agent-output", stepId: step.id, name: "current-worker.md", content: output }],
+      diff, checks, proofMap: { ...proofMap, criteria: (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id) }, focusFindings
+    });
     const inspectionTools = verificationTools(focusFindings, images);
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
       tools: inspectionTools,
-      customTools: inspectionTools.length ? scopedReadTools(cwd, access) : [],
+      customTools: [...(inspectionTools.length ? scopedReadTools(cwd, access) : []), reviewEvidenceTool(lookup)],
       sessionManager: manager
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
@@ -1543,7 +1540,7 @@ export class PiHarness {
     });
     try {
       signal?.throwIfAborted();
-      await session.prompt(this.configuredPrompt(session, profile, `# Fresh implementation-slice verification
+      const prompt = this.configuredPrompt(session, profile, `# Fresh implementation-slice verification
 
 ${existingFile && session.state.messages.length ? "Continue the interrupted verification from the inspection evidence already in this session. Do not repeat completed reads or restart discovery. The refreshed review packet below is authoritative; inspect only unresolved criteria or changed evidence, then return your verdict." : ""}
 
@@ -1561,8 +1558,7 @@ Implementation delta IDs: ${step.deltaIds.join(", ") || "none"}
 Relevant product context:
 ${step.productContext || "No step-specific product context was assigned."}
 
-Approved design:
-${design}
+Approved design and current worker artifact are available through the evidence index.
 
 Slice: ${step.title}
 Step ID: ${step.id}
@@ -1581,15 +1577,7 @@ ${images.length ? visualProofIdentityInstruction : ""}
 Eligible captured media IDs (use these as evidence.type=media artifactId values):
 ${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifact.stepId || artifact.stepId === step.id)).map((artifact) => `- ${artifact.id}: ${artifact.name} ${JSON.stringify({ criterionIds: artifact.criterionIds, commands: artifact.commands, assertions: artifact.assertions, videoPath: artifact.videoPath })}`).join("\n") || "- None"}
 
-Worker artifact:
-${output}
-
-Changed files: ${formatRepositoryProof(diff, checks).files}
-Diff:
-${formatRepositoryProof(diff, checks).diff}${diff?.error ? `\nerror: ${diff.error}` : ""}
-
-Deterministic gate:
-${JSON.stringify(formatRepositoryProof(diff, checks).gate, null, 2)}
+${evidenceContext(lookup)}
 
 Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
 For the supplied deterministic gate and diff, use ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })} and ${JSON.stringify({ type: "diff", scope: "step", stepId: step.id })} respectively. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
@@ -1615,7 +1603,10 @@ Return ONLY JSON:
 
 ${findingRubric}
 
-Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`), { images });
+Every reported finding triggers an automatic correction round. Judge only this slice's acceptance criteria. Do not report behavior assigned exclusively to a deferred plan slice; that slice owns its implementation and verification. Report concrete defects, unmet current acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report findings supported by repository, test, diff, or attached screenshot evidence. When visual evidence is required, inspect every attached screenshot and fail missing, broken, inaccessible, or visibly unfinished states. For a non-write step, its worker artifact is the durable deliverable and an empty repository diff is expected. Require a repository file only when an acceptance criterion explicitly names it. Each suggested correction must be possible within the stated permission and write scope. Do not modify files.`);
+      onEvent?.({ type: "context", label: "Verification evidence snapshot", digest: lookup.digest, promptCharacters: prompt.length, indexCharacters: lookup.textCharacters });
+      onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
+      await session.prompt(prompt, { images });
       if (budgetError) throw budgetError;
       signal?.throwIfAborted();
       let rawOutput;
@@ -1765,17 +1756,7 @@ ${diff.patch || "No textual diff"}`;
     });
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)), cwd, tools: filesystemToolNames,
-      customTools: [...scopedReadTools(cwd, access), mediaTool, defineTool({
-        name: "review_evidence", label: "Read retained review evidence", description: "Read an indexed evidence file in bounded portions. Repository files use read instead.",
-        parameters: Type.Object({ file: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
-        async execute(_callId, { file, offset = 0, limit = 12000 }) {
-          const path = resolve(lookup.root, file);
-          if (dirname(path) !== lookup.root || !/\.(json|md|patch)$/.test(path)) throw new Error("Choose a file from the current review index");
-          const content = await readFile(path, "utf8");
-          const start = Math.max(0, Math.floor(offset));
-          return { content: [{ type: "text", text: JSON.stringify({ file, total: content.length, offset: start, content: content.slice(start, start + Math.max(1, Math.min(12000, limit))) }) }] };
-        }
-      })], sessionManager: manager
+      customTools: [...scopedReadTools(cwd, access), mediaTool, reviewEvidenceTool(lookup)], sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
     onEvent?.({ type: "phase", label: `Progressive review index: ${lookup.textCharacters} characters; ${lookup.summary.counts.criteria} criteria` });
@@ -1898,7 +1879,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
     return { sessionId: entry.session.sessionId || null, acceptedAt };
   }
 
-  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onSessionActive, onSessionInactive, onSteering, onCleanup, ticketId = "shared", runId = "legacy", attemptId = null, profile, access, repositories = [], signal, containment: suppliedContainment }) {
+  async runStep({ cwd, plan, step, artifacts, proofMap, images, forkSessionFile, resumeSessionFile, feedback, onEvent, onSessionFile, onSessionActive, onSessionInactive, onSteering, onCleanup, ticketId = "shared", runId = "legacy", attemptId = null, profile, access, repositories = [], reviewContext, signal, containment: suppliedContainment }) {
     if (step.permission === "write" && (step.requiresVisualEvidence || step.requiresVideoEvidence) && !await designSystemExists(cwd, { nodes: [step] })) {
       throw new Error(`Missing ${designSystemPath}; complete the design-system prerequisite before UI implementation.`);
     }
@@ -1928,6 +1909,9 @@ Every reported finding triggers an automatic correction round. Report concrete d
       } catch {
         manager = SessionManager.create(cwd, sessionDir);
       }
+      const lookup = artifacts.length || reviewContext ? await writeReviewIndex(join(sessionDir, "evidence"), reviewContext || {
+        plan, artifacts, proofMap, operatorFeedback: feedback || "", currentStepId: step.id
+      }) : null;
       const tools = step.permission === "write"
         ? [...filesystemToolNames, "edit", "write"]
         : step.permission === "read" ? [...filesystemToolNames] : [];
@@ -1943,7 +1927,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
         ...(await this.sessionOptions(profile)),
         cwd,
         tools,
-        customTools: [...scopedTools, workerReportTool((value) => { report = value; })],
+        customTools: [...scopedTools, ...(lookup ? [reviewEvidenceTool(lookup)] : []), workerReportTool((value) => { report = value; })],
         sessionManager: manager
       }));
       const resumed = Boolean(resumeSessionFile && session.state.messages.length);
@@ -1992,9 +1976,11 @@ ${stripFrontmatter(content).trim()}
         : resumed
           ? `Continue the interrupted work from this existing session.${resumedContext}\n\nYour final action MUST be the worker_report tool.`
           : "";
-      const prompt = resumed
+      const workerPrompt = resumed
         ? `${continuation}\n\nIn worker_report.artifact, provide a cumulative handoff for the whole step, not only the latest correction: implemented interfaces and owning files, invariants, verification results, and remaining limitations. Remove superseded claims; dependent workers do not receive your conversation history.`
-        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts, proofMap, repositories })), continuation].filter(Boolean).join("\n\n");
+        : [skillBlocks.join("\n\n"), this.configuredPrompt(session, profile, stepContext({ plan, step, artifacts: lookup ? [] : artifacts, proofMap, repositories, indexed: Boolean(lookup) })), continuation].filter(Boolean).join("\n\n");
+      const prompt = [workerPrompt, lookup && evidenceContext(lookup)].filter(Boolean).join("\n\n");
+      if (lookup) onEvent?.({ type: "context", label: "Worker evidence snapshot", digest: lookup.digest, promptCharacters: prompt.length, indexCharacters: lookup.textCharacters });
       onEvent?.({ type: "prompt", label: "Prompt rendered", content: prompt });
       // prompt() starts streaming before it resolves, so Pi—not the daemon—owns the
       // safe boundary after the current turn and any repository tool calls.

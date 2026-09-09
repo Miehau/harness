@@ -2,6 +2,21 @@
 
 The context flow is partially sound, but it is not yet possible to certify that every agent gets sufficient current evidence or that dashboard token totals are complete. This audit traced daemon call sites through Pi session creation, prompt rendering, retained artifacts, and inspection. Two gpt-5.6-luna exploratory agents independently checked review/fix routing and observability. Verification uses mocked Pi sessions; no paid model runs were launched.
 
+## Implementation follow-up
+
+The repository advanced after the original audit: final independent review already uses a progressive evidence index, and usage totals already accumulate independently of rolling event tails. This change reuses those mechanisms rather than introducing another packet format or ledger.
+
+- Slice verification now receives an evidence index instead of embedding the entire design, worker report, and raw diff. Each repository's changed files and hunk headers point to complete retained per-file patches, fetched in bounded portions. Storage-level truncation and errors remain explicit; unresolved evidence gaps must be reported.
+- Normal worker dependency bodies move behind the same index. Relevant accepted handoffs remain accessible, and a fresh index is supplied on resumes. Required skills, scope, criteria, and planner guidance remain in the prompt.
+- Final fixers receive current ticket requirements, accepted handoffs, a canonical ticket diff across configured repositories, matching deterministic diagnostics, and operator constraints. The context is rebuilt for both new and resumed sessions; stale captured media is excluded.
+- Slice-verification artifacts are hydrated before indexing, so stored artifact references resolve to actual content. Current unaccepted worker reports are included without admitting other unaccepted steps.
+- Usage hardening normalizes partial older aggregates and avoids counting duplicate saved/active records. Worker run IDs remain the primary identity: resumed executions with distinct run IDs still count even if their attempt labels match. Legacy attempt-only identities are qualified by step.
+- Worker/verifier context events retain an evidence digest and rendered prompt size. These are evidence inventories and prompt measurements, not claims to capture the exact provider request or a reconciled bill. Existing conversation history is retained; it is not retroactively shortened.
+
+Regression evidence: a synthetic verifier input containing a 675,000+ character patch and a large design document produces an initial prompt below 20,000 characters; the patch tail, current report, and repository/hunk inventory remain retrievable. This verifies reduced prompt injection, not a measured reduction in billed tokens or review defect rates.
+
+The original findings and session baseline below are retained as historical evidence.
+
 ## Context routing
 
 | Agent / time | Context actually supplied | Assessment |

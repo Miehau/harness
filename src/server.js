@@ -2404,7 +2404,7 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
             access: latest.access,
             design, diff, output: result.output, checks,
             proofMap: projectProofMap(ticketRun(store.read(), ticketId)),
-            artifacts: ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)),
+            artifacts: await hydrateArtifacts(ticketRun(store.read(), ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)), dataDir),
             runId: latest.runId, round,
             focusFindings,
             images: await harness.evidenceImages(checks.evidence),
@@ -3131,9 +3131,32 @@ async function applyFinalReviewFix({ ticketId, round, findings, sessionFile = nu
     Object.assign(setStage(run, "verify", "active", `Fixing ${findings.length} actionable review finding${findings.length === 1 ? "" : "s"} · round ${round}`), { activity: activity.snapshot() });
   });
   const beforeFix = await snapshotTree(current.workspace.cwd);
+  const review = (current.reviews || []).find((item) => item.round === round) || current.reviews?.at(-1);
+  const checks = review?.finalChecks || review?.reviews?.find((item) => item.role === "deterministic")?.checks || current.finalChecks || {};
+  const evidencePaths = new Set((checks.evidence || []).map((item) => item.path));
+  const repositories = gitRepositoriesForStep(current);
+  const beforeFixTrees = await snapshotRepositoryTrees(repositories);
+  const beforeFixProofRoots = await snapshotProofRootMap(current, null);
+  const reviewContext = {
+    ticket: current.ticket,
+    plan: current.plan,
+    artifacts: await hydrateArtifacts(current.artifacts.filter((artifact) => [
+      "requirements", "feature-brief", "product-context-snapshot", "implementation-delta", "architecture",
+      "agent-output", "step-verification", "product-context-update", "visual-evidence"
+    ].includes(artifact.kind) && (artifact.kind !== "visual-evidence" || evidencePaths.has(artifact.path))), dataDir),
+    diff: aggregateProofDiffs([
+      ...labelRepositoryDiffs(repositories, await diffRepositoryTrees(repositories, repositoryBaselines(current, repositories), beforeFixTrees)),
+      ...labeledProofRootDiffs(current, null, current.baselineProofRoots || beforeFixProofRoots, beforeFixProofRoots)
+    ]),
+    checks,
+    proofMap: projectProofMap(current),
+    focusFindings: findings,
+    operatorFeedback: restartFeedback
+  };
   const result = await runContainedWorker({
     ticketId, stepId: fixStep.id,
     cwd: current.workspace.cwd, plan: current.plan, step: fixStep, artifacts: [], proofMap: projectProofMap(current),
+    reviewContext,
     images: reviewFixImages(sessionFile, findings, reviewImages), forkSessionFile: null, resumeSessionFile: sessionFile,
     feedback: sessionFile ? finalReviewFixFeedback(findings) : "", runId: current.runId,
     profile: current.stageProfiles.implementation,
