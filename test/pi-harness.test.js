@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { findPackageJSON } from "node:module";
+import { pathToFileURL } from "node:url";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +11,10 @@ import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 
 test("Grok Build omits reasoning on the wire for fresh and cached sessions", async () => {
-  const { streamSimple } = await import("@earendil-works/pi-ai/api/openai-responses");
-  const { clampThinkingLevel } = await import("@earendil-works/pi-ai/compat");
+  // Exercise the SDK's installed dependency even when npm keeps it nested.
+  const aiPackage = pathToFileURL(findPackageJSON("@earendil-works/pi-ai", import.meta.resolve("@earendil-works/pi-coding-agent")));
+  const { streamSimple } = await import(new URL("./dist/api/openai-responses.js", aiPackage));
+  const { clampThinkingLevel } = await import(new URL("./dist/compat.js", aiPackage));
   const harness = new PiHarness({ dataDir: tmpdir() });
   const build = {
     id: "grok-build-0.1", provider: "xai", api: "openai-responses",

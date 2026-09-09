@@ -567,7 +567,7 @@ function renderPlanTree() {
   const target = $("#plan-tree");
   const run = runFor();
   const stage = run?.stages?.find((item) => item.id === (selectedStageId || (selectedStepId ? "implement" : null)));
-  const retainedProof = run?.checkpoint?.kind !== "evidence_review" && run?.finalEvidenceArtifactIds?.length
+  const retainedProof = stage?.id === "handoff" && run?.checkpoint?.kind !== "evidence_review" && run?.finalEvidenceArtifactIds?.length
     ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
   const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
