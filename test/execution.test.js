@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, beginRunCleanup, clearInactiveRuns, compactRun, completeRunCleanup, correctionPauseReason, correctionWindowRound, createActivityCapture, createTicketRun, finalReviewFixFeedback, finalReviewFixStep, finalReviewRepositoryBoundary, findingsFingerprint, groupActivityEvents, humanProofFindings, interruptedStepFeedback, liveCaptureEnvironment, markRunCancelled, markRunPaused, materializeActiveAttempt, nextCorrectionRound, nextRunnableBatch, nextRunnableStep, pendingReviewAttempt, pendingReviewFix, planApprovalPending, prepareRunResume, providerWaitCheckpoint, publicPreviewState, publicState, recoverableCleanReview, recurringReviewClusters, refreshedReviewFindings, restartReviewFixSession, resumeStage, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, rewindRun, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, verificationFocusFindings, visualEvidencePolicy } from "../src/execution.js";
 import { normalizePlan } from "../src/plan.js";
 import { initializeProofMap } from "../src/proof-map.js";
@@ -363,6 +367,42 @@ test("rewinds a step and every later step to its recorded tree", () => {
   assert.deepEqual(run.plan.nodes.map((step) => step.status), ["accepted", "ready", "ready"]);
   assert.equal(run.stages.find((stage) => stage.id === "implement").status, "pending");
   assert.equal(run.restartHistory[0].fromCheckpoint, "step_review");
+});
+
+test("rewinds per-repository live state for step:id and bare step id", () => {
+  for (const target of ["step:two", "two"]) {
+    const plan = normalizePlan({ nodes: [
+      { id: "one", title: "One", status: "accepted" },
+      { id: "two", title: "Two", status: "review_ready" }
+    ] });
+    Object.assign(plan.nodes[1], {
+      baseTree: "a-before",
+      baseTrees: { primary: "a-before", b: "b-before" },
+      vcsChange: { changeId: "old-a" },
+      repositoryVcs: { b: { changeId: "old-b-change" } },
+      repositoryDiffs: { b: { files: ["gone.txt"] } },
+      workspaceCommits: { b: "deadbeef" },
+      acceptedRepositories: { b: { commit: "cafe" } },
+      attempts: [{}]
+    });
+    const run = {
+      status: "awaiting_step_review", checkpoint: { kind: "step_review" }, activeRuns: {}, baselineTree: "base", plan,
+      stages: ["requirements", "explore", "design", "implement", "verify", "handoff"].map((id) => ({ id, status: "completed" }))
+    };
+    const audit = rewindRun(run, target, "2026-08-27T12:00:00.000Z");
+    assert.equal(audit.restoredTree, "a-before");
+    assert.deepEqual(audit.restoredTrees, { primary: "a-before", b: "b-before" });
+    assert.equal(run.plan.nodes[1].status, "ready");
+    assert.equal(run.plan.nodes[1].vcsChange, null);
+    assert.equal(run.plan.nodes[1].baseTree, undefined);
+    assert.equal(run.plan.nodes[1].baseTrees, undefined);
+    assert.equal(run.plan.nodes[1].repositoryVcs, undefined);
+    assert.equal(run.plan.nodes[1].repositoryDiffs, undefined);
+    assert.equal(run.plan.nodes[1].workspaceCommits, undefined);
+    assert.equal(run.plan.nodes[1].acceptedRepositories, undefined);
+    assert.equal(run.plan.nodes[1].attempts.length, 1);
+    assert.equal(audit.previousSteps[1].repositoryVcs.b.changeId, "old-b-change");
+  }
 });
 
 test("restarts verification without discarding accepted implementation", () => {
@@ -867,4 +907,33 @@ test("execution failures retain actionable typed diagnostics without prescribing
   assert.match(failure.nextAction, /forge access.*retain the reviewed files/i);
   assert.equal(executionFailure(new Error("Your input exceeds the context window")).kind, "provider");
   assert.equal(executionFailure({ code: "MODEL_RESPONSE_ERROR", message: "Invalid JSON" }).kind, "model-output");
+});
+
+test("createTicketRun freezes access so later Any-access policy cannot enlarge it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-run-access-"));
+  const primary = join(root, "project");
+  const extra = join(root, "shared");
+  try {
+    await mkdir(primary);
+    await mkdir(extra);
+    const access = await freezeRunAccess({
+      primaryCwd: primary,
+      policy: await normalizeProjectPolicy({
+        extraRoots: [{ path: extra, mode: "read/write" }]
+      }, { primaryCwd: primary })
+    });
+    const run = createTicketRun({ id: "freeze", identifier: "FREEZE" }, {}, { access });
+    access.mode = "any";
+    access.extraRoots.length = 0;
+    assert.equal(run.access.mode, "restricted");
+    assert.equal(run.access.extraRoots.length, 1);
+    assert.notEqual(run.access, access);
+    const later = createTicketRun({ id: "next", identifier: "NEXT" }, {}, {
+      access: await freezeRunAccess({ primaryCwd: primary, policy: { mode: "any", extraRoots: [] } })
+    });
+    assert.equal(later.access.mode, "any");
+    assert.deepEqual(later.access.extraRoots, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

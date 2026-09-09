@@ -42,12 +42,13 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 
 ## Execution and permissions
 
-- One tracker ticket maps to one worktree, one branch, and one PR/MR. Dependent tickets wait for prerequisite merges.
-- Use logical checkpoint commits while the PR is active and squash merge to one outcome-oriented main-branch commit referencing the ticket.
-- Agents may edit any repository file reasonably required by the approved ticket. Planned paths are advisory signals, not brittle hard boundaries.
+- Primary-only tickets still map to one worktree, one branch, and one PR/MR. When extra read/write Git roots are frozen on the run, each of those repositories gets an isolated worktree and an independent delivery (branch, checks, PR/MR or local integrate). The ticket completes only after every required Git repository finishes; partial failure is named per repository. Dependent tickets wait for prerequisite merges.
+- Directory access is a per-project policy stored on the daemon and snapshotted onto `run.access` at ticket-run creation. Later settings edits never enlarge that snapshot. Missing policy is restricted and primary-only.
+- Use logical checkpoint commits while each PR/MR is active and squash merge to one outcome-oriented main-branch commit referencing the ticket in that repository.
+- Agents may edit any repository file reasonably required by the approved ticket, inside the frozen allow-list. Planned paths are advisory signals, not brittle hard boundaries.
 - Routine adjacent tests, types, fixtures, configuration, and build settings are autonomous. Ask before material expansion or changing approved behavior/architecture.
-- Hard-protect credentials, secrets, writes outside the ticket worktree, and destructive production actions. Auth, billing, infrastructure, deployment configuration, migrations, and global configuration are allowed when the approved ticket requires them, with risk-appropriate review.
-- Agents receive a sandboxed shell in the ticket worktree. Normal development commands are autonomous. Destructive, privileged, external-state, and out-of-scope operations require approval.
+- Hard-protect credentials, secrets, writes outside the frozen allow-list, and destructive production actions. Auth, billing, infrastructure, deployment configuration, migrations, and global configuration are allowed when the approved ticket requires them, with risk-appropriate review.
+- File tools resolve paths with realpath and a path-segment allow-list from the frozen snapshot (restricted extra roots, or Any access when the owner opted in). Writes then apply the step writeScope relative to the matched root. Named project commands are an argv and environment allow-list, not OS filesystem isolation: subprocesses can still touch paths the file tools would deny. Plan approval discloses that limitation. Normal development commands are autonomous. Destructive, privileged, external-state, and out-of-scope operations require approval.
 - Permit read-only internet research, source inspection, and package downloads. External state-changing API calls require explicit authorization.
 - Small conventional dependencies may be added autonomously when they are the simplest fit. Ask before frameworks, infrastructure, large packages, unusual licenses, or architecture-shaping dependencies. Commit lockfiles and report every addition.
 - Do not impose token or cost budgets. Show usage, duration, calls, and correction rounds; pause on rate limits and ask when work stalls.
@@ -82,7 +83,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 ## Delivery
 
 - After final combined verification, pause at one proof-review gate before any local integration or remote merge. The packet maps automated checks and required screenshot/video evidence to the approved acceptance criteria. Automatic mode never bypasses this gate; approval resumes delivery, while requested changes invalidate the packet and return the ticket to correction.
-- Open a PR/MR and auto-merge after local verification, required remote CI, and required reviews pass. The model may require manual approval when risk or uncertainty warrants it.
+- After final proof approval, deliver each changed writable Git repository independently. Open a PR/MR (or locally integrate) and auto-merge after local verification, required remote CI, and required reviews pass. Resume retries only unfinished repositories and does not replay a succeeded PR or local integrate. Read-only Git extras, non-Git roots, and Any-access writes outside configured read/write Git roots are proof-only and never auto-delivered. The model may require manual approval when risk or uncertainty warrants it.
 - Use existing CI. If none exists, local verification is sufficient. Add or change CI only when the ticket explicitly requires it; later tickets then respect the new CI.
 - Git hosting behavior is provider-neutral at the workflow boundary, with complete GitHub and GitLab adapters. Keep the shared contract limited to features the harness uses.
 - Rebase/update automatically before delivery. Resolve clear conflicts in an isolated worktree, rerun affected checks, refresh visual evidence when behavior may change, and ask on ambiguous intent.
@@ -100,7 +101,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 
 1. Persist this specification and introduce configurable daemon policy plus provider-neutral Linear/Jira intake using local owner-only or environment credentials.
 2. Add automatic polling, project modes, just-in-time admission, dependency-aware manual multi-start, and tracker lifecycle writeback.
-3. Add repository initialization, executable project commands, environment allow-lists, and sandboxed command execution.
+3. Add repository initialization, executable project commands, environment allow-lists, and named-command argv/env enforcement without claiming a sandboxed shell.
 4. Replace direct-main integration with GitHub/GitLab PR/MR adapters, existing-CI gates, review feedback handling, squash merge, and safe local fast-forward.
 5. Add isolated preview process/port management and strengthen visual evidence workflows.
 6. Add manual retained-worktree/artifact cleanup, dashboard usage reporting, and end-to-end adapter scenario coverage.

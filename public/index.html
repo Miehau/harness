@@ -11,7 +11,7 @@
   <header class="topbar">
     <div class="brand"><span class="brand-mark">C</span><span class="brand-copy"><strong>Ticket Agent</strong><small>Workspace</small></span></div>
     <div class="topbar-actions">
-      <button id="workspace-settings" class="workspace-picker" type="button" aria-haspopup="dialog"><span>Repository</span><code id="workspace-path-display"></code></button>
+      <button id="workspace-settings" class="workspace-picker" type="button" aria-haspopup="dialog" aria-label="Repository"><span>Repository</span><code id="workspace-path-display"></code></button>
       <button id="retention-open" class="icon-button" type="button" aria-label="Retained run storage" title="Retained run storage">▣</button>
       <button id="profile-settings" class="icon-button" type="button" aria-label="Agent setup" title="Agent setup">⚙</button>
     </div>
@@ -44,11 +44,22 @@
 </div>
 
 <dialog id="workspace-dialog">
-  <form id="workspace-form" class="dialog-shell">
+  <div class="dialog-shell">
     <header><div><span class="eyebrow">Workspace</span><h2>Open repository</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></header>
-    <label class="dialog-field" for="workspace-path">Repository path<div class="directory-picker"><input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" readonly required><button id="pick-workspace" class="button" type="button">Choose…</button></div></label>
-    <footer><span></span><button class="button primary" type="submit">Open repository</button></footer>
-  </form>
+    <form id="workspace-form">
+      <label class="dialog-field" for="workspace-path">Primary repository (not removable)<div class="directory-picker"><input id="workspace-path" name="cwd" autocomplete="off" spellcheck="false" readonly required><button id="pick-workspace" class="button" type="button">Choose…</button></div></label>
+      <footer><span class="profiles-note">Opens the primary repository. Directory access is saved separately.</span><button class="button primary" type="submit">Open repository</button></footer>
+    </form>
+    <form id="access-policy-form">
+      <p id="access-mode-status" class="profiles-note" role="status">Effective mode: Restricted. File tools stay inside the primary repository and extra roots.</p>
+      <p class="profiles-note"><label for="access-any"><input id="access-any" name="anyAccess" type="checkbox" disabled> Any access — opt-in; agents may use any filesystem path. This is not a path wildcard.</label></p>
+      <div class="dialog-field">Extra roots<div id="extra-roots-list"></div><button id="add-extra-root" class="button" type="button" disabled>Add extra root</button></div>
+      <p id="extra-roots-empty" class="profiles-note">No extra roots saved. Extra roots are opt-in directories beyond the primary.</p>
+      <p id="access-policy-error" class="profiles-note error-text" role="alert"></p>
+      <p id="access-policy-status" class="profiles-note" role="status"></p>
+      <footer><button id="reload-access-policy" class="button" type="button" hidden disabled>Retry load</button><span></span><button id="save-access-policy" class="button" type="submit" disabled>Save access policy</button></footer>
+    </form>
+  </div>
 </dialog>
 
 <dialog id="tracker-dialog">

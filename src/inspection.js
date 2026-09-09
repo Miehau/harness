@@ -8,9 +8,88 @@ const failedStatuses = new Set(["failed", "needs_attention", "verification_faile
 const blockedStatuses = new Set(["blocked", "paused", "review_ready", "needs_input", "awaiting_approval"]);
 const completeStatuses = new Set(["completed", "accepted", "verified"]);
 
-function text(value, fallback = "") {
+function configuredAllowPaths(run) {
+  const extras = run?.access?.extraRoots || [];
+  const extraRepos = (run?.repositories || []).filter((repo) => (repo.id || "primary") !== "primary");
+  if (!extras.length && !extraRepos.length) return [];
+  const paths = [];
+  const add = (value) => {
+    if (value && !paths.includes(value)) paths.push(value);
+  };
+  add(run?.access?.primary?.displayPath);
+  for (const root of extras) add(root.displayPath);
+  for (const repo of run?.repositories || []) add(repo.displayPath);
+  return paths;
+}
+
+function text(value, fallback = "", allowPaths = []) {
   const line = String(value || "").split(/\r?\n/).find((item) => item.trim()) || String(fallback || "");
-  return redactText(line).trim().slice(0, 240);
+  return redactText(line, { allowPaths }).trim().slice(0, 240);
+}
+
+function identityText(value, run, fallback = "") {
+  return text(value, fallback, configuredAllowPaths(run));
+}
+
+function repositoryIdentities(run) {
+  const seen = new Set();
+  const identities = [];
+  const add = (repo) => {
+    const repositoryId = repo?.repositoryId || repo?.id || "primary";
+    if (seen.has(repositoryId)) return;
+    seen.add(repositoryId);
+    identities.push({
+      repositoryId,
+      displayPath: identityText(repo.displayPath || repo.sourceCwd || repo.path || repositoryId, run, repositoryId),
+      kind: repo.kind || repo.evidenceKind || (repositoryId === "primary" ? "primary" : "extra")
+    });
+  };
+  add({ id: "primary", displayPath: run?.access?.primary?.displayPath || run?.workspace?.displayPath || run?.workspace?.sourceCwd, kind: "primary" });
+  for (const repo of run?.repositories || []) add(repo);
+  for (const root of run?.access?.extraRoots || []) {
+    if (root.mode === "read/write") add({ id: root.id, displayPath: root.displayPath, kind: "nongit" });
+  }
+  return identities;
+}
+
+function labeledDiffRecords(run, step, attempt) {
+  return attempt?.diff?.repositories
+    || attempt?.aggregateDiff?.repositories
+    || step?.diff?.repositories
+    || [];
+}
+
+function labeledCheckRecords(attempt, step) {
+  const checks = checksFor(attempt) || step?.checks;
+  return checks?.repositories || (checks ? [{ ...checks, repositoryId: checks.repositoryId || "primary" }] : []);
+}
+
+function repositoryResourceStates(run, step, attempt) {
+  const identities = repositoryIdentities(run);
+  const diffs = labeledDiffRecords(run, step, attempt);
+  const checks = labeledCheckRecords(attempt, step);
+  const changed = new Set([
+    ...Object.entries(step?.repositoryDiffs || {}).filter(([, diff]) => (diff?.files || []).length).map(([id]) => id),
+    ...diffs.filter((diff) => (diff.files || []).length || diff.available).map((diff) => diff.repositoryId)
+  ]);
+  return identities.map((identity) => {
+    const diff = diffs.find((item) => item.repositoryId === identity.repositoryId);
+    const check = checks.find((item) => (item.repositoryId || "primary") === identity.repositoryId);
+    const diffPresent = Boolean(diff?.available || diff?.files?.length || diff?.patch);
+    const diffState = diffPresent ? "available" : changed.has(identity.repositoryId) ? "missing" : "not_recorded";
+    return {
+      ...identity,
+      diff: {
+        state: diffState,
+        fileCount: diff?.files?.length || 0,
+        error: diff?.error || null
+      },
+      checks: {
+        state: check ? "available" : changed.has(identity.repositoryId) && step?.permission === "write" ? "missing" : "not_recorded",
+        status: check?.status || null
+      }
+    };
+  });
 }
 
 function iso(...values) {
@@ -70,12 +149,15 @@ function attemptEvidence(run, step, attempt, active = false) {
   const visualPresent = visualRequired ? artifacts.some((item) => item.kind === "visual-evidence") || hasFinalVisualEvidence(run) : true;
   const visualDeferred = visualRequired && !visualPresent && step.status === "accepted"
     && run.status !== "completed" && run.stages?.find(stage => stage.id === "verify")?.status !== "completed";
+  const labeled = !active ? repositoryResourceStates(run, step, attempt) : [];
   const missing = [
     reportRequired && !reportPresent ? "report" : null,
     checksRequired && !checksPresent ? "checks" : null,
     approvalRequired && !approvalPresent ? "approval" : null,
     artifactRequired && !artifactPresent ? "artifact" : null,
-    visualRequired && !visualPresent && !visualDeferred ? "visual_evidence" : null
+    visualRequired && !visualPresent && !visualDeferred ? "visual_evidence" : null,
+    ...labeled.filter((item) => item.diff.state === "missing").map((item) => `diff:${item.repositoryId}`),
+    ...labeled.filter((item) => item.checks.state === "missing").map((item) => `checks:${item.repositoryId}`)
   ].filter(Boolean);
   return {
     state: active ? "collecting" : missing.length ? "incomplete" : "complete",
@@ -93,7 +175,7 @@ function blockerType({ run, stage, step, attempt, evidence }) {
     .filter(Boolean).join(" ").toLowerCase();
   const checks = checksFor(attempt) || run?.checkpoint?.finalChecks || run?.merge?.checks;
   if (attempt?.violations?.length || /outside (?:permission|write scope)|scope violation/.test(values)) return "scope";
-  if (checks?.status === "failed" || evidence?.missing?.includes("final_checks") || /repository check|deterministic check|\btests? failed\b|\bci failed\b/.test(values)) return "repository-check";
+  if (checks?.status === "failed" || checks?.failedRepositories?.length || evidence?.missing?.includes("final_checks") || /repository check|deterministic check|\btests? failed\b|\bci failed\b/.test(values)) return "repository-check";
   if (run?.checkpoint?.kind === "evidence_review" || evidence?.missing?.some((item) => ["visual_evidence", "handoff_artifact", "integration"].includes(item)) || /visual evidence|final proof/.test(values)) return "evidence";
   if (/preview|port bind|eaddrinuse/.test(values)) return "preview";
   if (run?.merge?.status === "failed" || /merge conflict|merge queue|rebas/.test(values)) return "merge";
@@ -103,14 +185,25 @@ function blockerType({ run, stage, step, attempt, evidence }) {
   return "review";
 }
 
+function failedCheckSummary(attempt, step) {
+  const checks = checksFor(attempt) || step?.checks;
+  const failed = checks?.failedRepositories || [];
+  if (!failed.length && checks?.status !== "failed") return "";
+  if (!failed.length) return checks.summary || "Repository check failed";
+  return `Repository check failed in ${failed.map((item) => item.displayPath || item.repositoryId).join(", ")}`;
+}
+
 function primaryBlocker({ run, stage = null, step = null, attempt = null, evidence = null }) {
   const status = attempt?.status || step?.status || stage?.status || run.status;
   const checkpointApplies = checkpointForStep(run.checkpoint, step);
   const blocked = failedStatuses.has(status) || blockedStatuses.has(status) || ["cancelled", "interrupted"].includes(status)
     || (checkpointApplies && ["needs_attention", "review_blocked", "evidence_review"].includes(run.checkpoint.kind));
   if (!blocked && evidence?.state !== "incomplete") return null;
-  const summary = text(attempt?.error || step?.lastError || (checkpointApplies && (run.checkpoint.title || run.checkpoint.prompt)) || stage?.summary || run.lastError,
-    evidence?.missing?.length ? `Missing required ${evidence.missing.join(", ")}` : "Review is required before work can continue");
+  const checkSummary = failedCheckSummary(attempt, step);
+  const failedRepos = (checksFor(attempt) || step?.checks)?.failedRepositories || [];
+  const summary = text(
+    failedRepos.length ? checkSummary : (attempt?.error || step?.lastError || checkSummary || (checkpointApplies && (run.checkpoint.title || run.checkpoint.prompt)) || stage?.summary || run.lastError),
+    evidence?.missing?.length ? `Missing required ${evidence.missing.join(", ")}` : "Review is required before work can continue", configuredAllowPaths(run));
   return {
     type: blockerType({ run, stage, step, attempt, evidence }),
     summary,
@@ -164,8 +257,16 @@ function attemptResources(run, step, attempt, active) {
     activity: availability(observedActivity > 0, active ? "not_yet_available" : "not_retained", { count: observedActivity }),
     output: availability(Boolean(attempt.report || attempt.rawOutput || attempt.activity?.rawOutput) || artifacts.some((item) => item.kind === "agent-output"), active ? "not_yet_available" : "not_retained"),
     artifacts: availability(artifacts.length > 0, active ? "not_yet_available" : "not_recorded", { count: artifacts.length }),
-    diff: availability(Boolean(diff?.available || diff?.files?.length || diff?.patch), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", { fileCount: diff?.files?.length || 0 }),
-    checks: availability(Boolean(checks), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", { status: checks?.status || null }),
+    diff: availability(Boolean(diff?.available || diff?.files?.length || diff?.patch), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", {
+      fileCount: diff?.files?.length || 0,
+      error: diff?.error || null,
+      repositories: repositoryResourceStates(run, step, attempt).map((item) => ({ repositoryId: item.repositoryId, displayPath: item.displayPath, kind: item.kind, ...item.diff }))
+    }),
+    checks: availability(Boolean(checks), step.permission === "write" ? (active ? "not_yet_available" : "not_recorded") : "not_applicable", {
+      status: checks?.status || null,
+      failedRepositories: checks?.failedRepositories || [],
+      repositories: repositoryResourceStates(run, step, attempt).map((item) => ({ repositoryId: item.repositoryId, displayPath: item.displayPath, kind: item.kind, ...item.checks }))
+    }),
     trace: availability(Boolean(attempt.sessionFile), active ? "not_yet_available" : "not_retained")
   };
 }
@@ -193,6 +294,7 @@ function projectAttempt(run, step, attempt, index, now, active = false) {
     failurePhase: text(attempt.failure?.phase || attempt.failurePhase) || null,
     evidence,
     blocker,
+    repositories: repositoryResourceStates(run, step, saved),
     resources: attemptResources(run, step, saved, active)
   };
 }
@@ -348,6 +450,7 @@ export function projectInspection(run, { now = Date.now(), revision = null } = {
     status: run.status || null,
     lifecycle: lifecycle(run.status, evidence),
     evidence,
+    repositories: repositoryIdentities(run),
     focus,
     stages,
     workers,

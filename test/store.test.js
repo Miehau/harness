@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  canonicalPrimaryPath,
+  defaultAccessPolicy,
+  normalizeProjectPolicy,
+  storedProjectPolicy,
+  writeProjectPolicy
+} from "../src/access-policy.js";
 import { compactPersistedState, JsonStore } from "../src/store.js";
 
 test("persisted audit detail stays bounded without losing prompts and event summaries", () => {
@@ -197,5 +204,74 @@ test("preserves daemon settings and ignores retired ticket capacity", async () =
     assert.deepEqual((await new JsonStore(file, root).init()).settings, { projectMode: "manual", pollIntervalSeconds: 60 });
   } finally {
     await rm(root, { recursive: true });
+  }
+});
+
+test("projectPolicies stay keyed by canonical primary and survive JsonStore re-init", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-policy-store-"));
+  const primaryA = join(root, "project-a");
+  const primaryB = join(root, "project-b");
+  const extraA = join(root, "shared-a");
+  const extraB = join(root, "shared-b");
+  const file = join(root, "state.json");
+  try {
+    await mkdir(primaryA);
+    await mkdir(primaryB);
+    await mkdir(extraA);
+    await mkdir(extraB);
+    const store = new JsonStore(file, primaryA);
+    await store.init();
+    const keyA = await canonicalPrimaryPath(primaryA);
+    const keyB = await canonicalPrimaryPath(primaryB);
+    const policyA = await normalizeProjectPolicy({
+      mode: "any",
+      extraRoots: [{ path: extraA, mode: "read-only", displayPath: "shared-a" }]
+    }, { primaryCwd: primaryA });
+    const policyB = await normalizeProjectPolicy({
+      extraRoots: [{ path: extraB, mode: "read/write" }]
+    }, { primaryCwd: primaryB });
+    await store.update((state) => {
+      writeProjectPolicy(state, keyA, policyA);
+      writeProjectPolicy(state, keyB, policyB);
+      state.workspace = { cwd: primaryB };
+    });
+    assert.equal(store.read().settings.projectMode, "manual");
+    assert.equal("extraRoots" in store.read().settings, false);
+
+    const reloaded = await new JsonStore(file, primaryB).init();
+    assert.equal(reloaded.workspace.cwd, primaryB);
+    assert.deepEqual(reloaded.settings, { projectMode: "manual", pollIntervalSeconds: 60 });
+    assert.deepEqual(Object.keys(reloaded.projectPolicies).sort(), [keyA, keyB].sort());
+    assert.equal(reloaded.projectPolicies[keyA].mode, "any");
+    assert.equal(reloaded.projectPolicies[keyA].extraRoots.length, 1);
+    assert.equal(reloaded.projectPolicies[keyA].extraRoots[0].path, await realpath(extraA));
+    assert.equal(reloaded.projectPolicies[keyA].extraRoots[0].displayPath, "shared-a");
+    assert.equal(reloaded.projectPolicies[keyB].mode, "restricted");
+    assert.equal(reloaded.projectPolicies[keyB].extraRoots.length, 1);
+    assert.equal(reloaded.projectPolicies[keyB].extraRoots[0].path, await realpath(extraB));
+    assert.deepEqual(storedProjectPolicy(reloaded, keyA).extraRoots.map((entry) => entry.path), [await realpath(extraA)]);
+    assert.notEqual(storedProjectPolicy(reloaded, keyB).extraRoots[0].path, await realpath(extraA));
+    assert.deepEqual(storedProjectPolicy(reloaded, join(root, "missing-primary")), defaultAccessPolicy());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed projectPolicies are reset on init without changing settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-policy-junk-"));
+  const file = join(root, "state.json");
+  try {
+    await writeFile(file, JSON.stringify({
+      version: 6,
+      workspace: { cwd: root },
+      settings: { projectMode: "automatic", pollIntervalSeconds: 30 },
+      projectPolicies: ["bad"],
+      ticketRuns: {}
+    }));
+    const state = await new JsonStore(file, root).init();
+    assert.deepEqual(state.projectPolicies, {});
+    assert.deepEqual(state.settings, { projectMode: "automatic", pollIntervalSeconds: 30 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

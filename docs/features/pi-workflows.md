@@ -8,11 +8,13 @@
 
 **Purpose:** Run one supervisor with per-step worker sessions, fresh/seeded/fork context policies, configurable role profiles, discovered skills and prompt artifacts. Bound workflows create typed input/approval checkpoints that block execution until continued.
 
+Every Pi session (exploration, planning, workers, reviewers, verify) wraps SDK file tools with the frozen `run.access` snapshot: realpath plus a path-segment allow-list, including search results and symlink targets. Writes then apply step `writeScope` relative to the matched root (unqualified legacy scopes stay primary-only). Extra roots are actually readable through those wrapped tools. Named `project_command` calls are argv/env allow-lists, not OS filesystem isolation; plan approval discloses that limitation.
+
 **Strength:** Model settings and prompt/session traces remain inspectable. Workflow gates are durable state, rather than instructions buried only in prose. Rate-limit exhaustion becomes an operator checkpoint.
 
 **Limit:** Pi is the only execution harness. Profiles do not imply alternate orchestrators. Skill execution and model calls require working local Pi setup.
 
-Evidence: [pi-harness.js](../../src/pi-harness.js), [profiles.js](../../src/profiles.js), [workflow.js](../../src/workflow.js), [workflow tests](../../test/workflow.test.js), [profile override tests](../../test/profile-override.test.js).
+Evidence: [pi-harness.js](../../src/pi-harness.js) (`scopedWorkerTools`), [profiles.js](../../src/profiles.js), [workflow.js](../../src/workflow.js), [workflow tests](../../test/workflow.test.js), [pi-harness tests](../../test/pi-harness.test.js), [profile override tests](../../test/profile-override.test.js).
 
 ## Find the implementation
 

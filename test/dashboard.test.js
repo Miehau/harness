@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizePlan } from "../src/plan.js";
 import { capturePage } from "../scripts/screenshot.mjs";
 import { invoke, mockHarness, seedRun, withDaemon, waitFor } from "./helpers.js";
@@ -111,4 +114,175 @@ test("selected implementation worker streams in the main window and survives rel
       await work;
     }
   }, { harness, listen: true });
+});
+
+test("workspace dialog shows saved policy, rejects invalid submit, and is keyboard operable", { timeout: 30000 }, async () => {
+  await withDaemon(async (daemon, { cwd }) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-dash-extra-"));
+    try {
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      if (!daemon.server.listening) await once(daemon.server, "listening");
+      await capturePage({
+        url: `http://127.0.0.1:${daemon.server.address().port}`,
+        interact: async ({ evaluate }) => {
+          const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
+          await check('Boolean(document.querySelector("#workspace-settings"))');
+          const published = await invoke(daemon, "GET", "/api/state");
+          assert.equal(published.json.workspace.cwd, undefined);
+          assert.equal(published.json.projectPolicies, undefined);
+          assert.ok(published.json.workspace.displayPath);
+          assert.equal(published.json.workspace.displayPath, cwd);
+          assert.equal(published.json.accessPolicy.mode, "restricted");
+          assert.equal(published.json.accessPolicy.extraRoots.length, 1);
+          assert.equal(published.json.accessPolicy.extraRoots[0].displayPath, extra);
+          assert.equal("path" in published.json.accessPolicy.extraRoots[0], false);
+
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#workspace-dialog").open');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "true"');
+          await check('document.querySelector("#workspace-path")?.value.length > 0');
+          await check('document.querySelector("#access-mode-status")?.textContent.includes("Restricted")');
+          await check(`document.querySelector(".extra-root-path")?.value === ${JSON.stringify(extra)}`);
+          await check('document.querySelector(".extra-root-mode")?.value === "read-only"');
+          await check('document.querySelector("#access-policy-form")?.textContent.includes("Any access")');
+          const extraRootWidths = await evaluate(`(() => {
+            const path = document.querySelector(".extra-root-path")?.getBoundingClientRect();
+            const mode = document.querySelector(".extra-root-mode")?.getBoundingClientRect();
+            return { path: path?.width || 0, mode: mode?.width || 0 };
+          })()`);
+          assert.ok(extraRootWidths.path > extraRootWidths.mode, `extra-root path ${extraRootWidths.path}px should outrank mode ${extraRootWidths.mode}px`);
+          assert.ok(extraRootWidths.path > 120, `extra-root path ${extraRootWidths.path}px should be readable`);
+
+          await evaluate(`document.querySelector(".extra-root-path").value = "/tmp/should-not-persist"; document.querySelector("#workspace-dialog [data-close-dialog]").click()`);
+          await check('!document.querySelector("#workspace-dialog").open');
+          const afterDismiss = await invoke(daemon, "GET", "/api/workspace/access-policy");
+          assert.equal(afterDismiss.json.extraRoots.length, 1);
+          assert.equal(afterDismiss.json.extraRoots[0].displayPath, extra);
+
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "true"');
+          await check(`document.querySelector(".extra-root-path")?.value === ${JSON.stringify(extra)}`);
+
+          await evaluate(`document.querySelector("#add-extra-root").click(); const row = [...document.querySelectorAll("[data-extra-root]")].at(-1); row.querySelector(".extra-root-path").value = "does-not-exist-agent-plan-access-policy"; row.querySelector(".extra-root-mode").value = "read-only"; document.querySelector("#save-access-policy").click()`);
+          await check('document.querySelector("#access-policy-error")?.textContent.includes("does not exist")');
+          const afterInvalid = await invoke(daemon, "GET", "/api/workspace/access-policy");
+          assert.equal(afterInvalid.json.mode, "restricted");
+          assert.equal(afterInvalid.json.extraRoots.length, 1);
+          assert.equal(afterInvalid.json.extraRoots[0].displayPath, extra);
+
+          const focused = await evaluate(`(() => {
+            const dialog = document.querySelector("#workspace-dialog");
+            const controls = [...dialog.querySelectorAll("button, input, select")].filter((el) => !el.disabled);
+            const labels = [];
+            for (const control of controls) {
+              control.focus();
+              if (document.activeElement !== control) throw new Error("Cannot focus " + (control.id || control.getAttribute("aria-label")));
+              labels.push(control.id || control.getAttribute("aria-label") || control.textContent.trim());
+            }
+            return labels;
+          })()`);
+          assert.ok(focused.includes("workspace-path"));
+          assert.ok(focused.includes("access-any"));
+          assert.ok(focused.includes("save-access-policy"));
+          assert.ok(focused.some((label) => /extra root path/i.test(label)));
+          assert.ok(focused.some((label) => /extra root mode/i.test(label)));
+          assert.match(await evaluate('document.querySelector("#access-policy-error").textContent'), /does not exist/);
+          assert.match(await evaluate('document.querySelector("#access-mode-status").textContent'), /Effective mode/);
+        }
+      });
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
+  }, { listen: true });
+});
+
+test("workspace policy does not POST while load is delayed or failed and ignores stale loads", { timeout: 30000 }, async () => {
+  await withDaemon(async (daemon) => {
+    const extra = await mkdtemp(join(tmpdir(), "agent-plan-dash-load-"));
+    try {
+      const saved = await invoke(daemon, "POST", "/api/workspace/access-policy", {
+        body: { extraRoots: [{ path: extra, mode: "read-only" }] }
+      });
+      assert.equal(saved.status, 200);
+      if (!daemon.server.listening) await once(daemon.server, "listening");
+      await capturePage({
+        url: `http://127.0.0.1:${daemon.server.address().port}`,
+        interact: async ({ evaluate }) => {
+          const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
+          await check('Boolean(document.querySelector("#workspace-settings"))');
+          await evaluate(`(() => {
+            const real = window.fetch.bind(window);
+            window.__policyTest = { posts: [], getDelayMs: 0, getFail: false, getCount: 0 };
+            window.fetch = async (url, options = {}) => {
+              const method = String(options.method || "GET").toUpperCase();
+              const href = String(url);
+              if (href.includes("/api/workspace/access-policy") && method === "POST") {
+                window.__policyTest.posts.push(String(options.body || ""));
+              }
+              if (href.includes("/api/workspace/access-policy") && method === "GET") {
+                window.__policyTest.getCount += 1;
+                const n = window.__policyTest.getCount;
+                if (window.__policyTest.getFail) throw new Error("policy load failed");
+                const delay = n === 1 ? window.__policyTest.firstDelayMs || 0 : window.__policyTest.getDelayMs;
+                if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+              }
+              return real(url, options);
+            };
+          })()`);
+
+          await evaluate("window.__policyTest.firstDelayMs = 1500; window.__policyTest.posts = [];");
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "false"');
+          assert.equal(await evaluate('document.querySelector("#save-access-policy").disabled'), true);
+          await evaluate('document.querySelector("#access-policy-form").requestSubmit()');
+          assert.deepEqual(await evaluate("window.__policyTest.posts.slice()"), []);
+          const duringLoad = await invoke(daemon, "GET", "/api/workspace/access-policy");
+          assert.equal(duringLoad.json.extraRoots.length, 1);
+          assert.equal(duringLoad.json.extraRoots[0].displayPath, extra);
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "true"');
+          await check(`document.querySelector(".extra-root-path")?.value === ${JSON.stringify(extra)}`);
+          assert.deepEqual(await evaluate("window.__policyTest.posts.slice()"), []);
+
+          await evaluate('document.querySelector("#workspace-dialog [data-close-dialog]").click()');
+          await evaluate("window.__policyTest.getFail = true; window.__policyTest.firstDelayMs = 0; window.__policyTest.getDelayMs = 0; window.__policyTest.posts = [];");
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loadState === "failed"');
+          await check('document.querySelector("#access-policy-error")?.textContent.includes("Save is disabled")');
+          assert.equal(await evaluate('document.querySelector("#save-access-policy").disabled'), true);
+          assert.equal(await evaluate('document.querySelector("#reload-access-policy").hidden'), false);
+          await evaluate('document.querySelector("#access-policy-form").requestSubmit()');
+          assert.deepEqual(await evaluate("window.__policyTest.posts.slice()"), []);
+          const afterFail = await invoke(daemon, "GET", "/api/workspace/access-policy");
+          assert.equal(afterFail.json.extraRoots.length, 1);
+          assert.equal(afterFail.json.extraRoots[0].displayPath, extra);
+
+          await evaluate("window.__policyTest.getFail = false;");
+          await evaluate('document.querySelector("#reload-access-policy").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "true"');
+          await check(`document.querySelector(".extra-root-path")?.value === ${JSON.stringify(extra)}`);
+          assert.deepEqual(await evaluate("window.__policyTest.posts.slice()"), []);
+
+          await evaluate('document.querySelector("#workspace-dialog [data-close-dialog]").click()');
+          await evaluate("window.__policyTest.firstDelayMs = 1500; window.__policyTest.getDelayMs = 0; window.__policyTest.getCount = 0; window.__policyTest.posts = [];");
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "false"');
+          await evaluate('document.querySelector("#workspace-dialog [data-close-dialog]").click()');
+          await evaluate('document.querySelector("#workspace-settings").click()');
+          await check('document.querySelector("#access-policy-form")?.dataset.loaded === "true"');
+          await evaluate('document.querySelector("#add-extra-root").click(); const row = [...document.querySelectorAll("[data-extra-root]")].at(-1); row.querySelector(".extra-root-path").value = "kept-through-stale-load";');
+          await new Promise((resolve) => setTimeout(resolve, 1800));
+          assert.equal(await evaluate('[...document.querySelectorAll(".extra-root-path")].at(-1)?.value'), "kept-through-stale-load");
+          assert.deepEqual(await evaluate("window.__policyTest.posts.slice()"), []);
+          const afterStale = await invoke(daemon, "GET", "/api/workspace/access-policy");
+          assert.equal(afterStale.json.extraRoots.length, 1);
+          assert.equal(afterStale.json.extraRoots[0].displayPath, extra);
+        }
+      });
+    } finally {
+      await rm(extra, { recursive: true, force: true });
+    }
+  }, { listen: true });
 });

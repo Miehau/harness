@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { cloneRunAccess, storedProjectPolicy } from "./access-policy.js";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
 import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
@@ -240,6 +242,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     harnessEvidencePolicy = visualEvidencePolicy,
     createdAt = new Date().toISOString(),
     cleanup,
+    access = null,
     ...rest
   } = extras;
   return {
@@ -264,6 +267,7 @@ export function createTicketRun(ticket, stageProfiles, extras = {}) {
     harnessEvidencePolicy,
     createdAt,
     cleanup: normalizeRunCleanup(cleanup),
+    access: cloneRunAccess(access, { workspace, createdAt }),
     ...rest
   };
 }
@@ -618,7 +622,7 @@ function resetStep(run, step, { archiveAttempts = false } = {}) {
     step.attemptSequence = Math.max(Number(step.attemptSequence) || 0, ...attempts.map((attempt) => Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0));
   }
   Object.assign(step, { status: "ready", artifacts: [], diff: null, vcsChange: null, sessionFile: null, supervisorReview: null, lastError: null });
-  for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "baseTree", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult"]) delete step[key];
+  for (const key of ["acceptedAt", "commit", "commitMessage", "workspace", "workspaceCommit", "workspaceCommits", "baseTree", "baseTrees", "reviewMap", "reviewNotes", "reviewNotesArtifact", "reviewBudgetResult", "repositoryVcs", "repositoryDiffs", "acceptedRepositories"]) delete step[key];
   return { archived: archiveAttempts ? attempts.length : 0, retained: archiveAttempts ? 0 : attempts.length };
 }
 
@@ -627,13 +631,17 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
   const previousStages = (run.stages || []).map(({ id, status }) => ({ id, status }));
   const previousSteps = flattenSteps(run.plan).map((step) => ({
     id: step.id, title: step.title, status: step.status, baseTree: step.baseTree || null,
-    commit: step.commit || null, vcsChange: step.vcsChange || null, attempts: step.attempts?.length || 0,
+    baseTrees: step.baseTrees ? structuredClone(step.baseTrees) : null,
+    commit: step.commit || null, vcsChange: step.vcsChange || null,
+    repositoryVcs: step.repositoryVcs ? structuredClone(step.repositoryVcs) : null,
+    attempts: step.attempts?.length || 0,
     attemptHistory: structuredClone(step.attempts || [])
   }));
   const previousStatus = run.status;
   const previousCheckpoint = run.checkpoint?.kind || null;
   let stageId;
   let restoredTree = null;
+  let restoredTrees = null;
   let resetStepIds = [];
   let discardedAttempts = 0;
   let retainedAttempts = 0;
@@ -664,6 +672,7 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     if (selectedIndex < 0) throw new Error("Restart step not found");
     const selected = steps[selectedIndex];
     restoredTree = selected.baseTree || run.baselineTree;
+    restoredTrees = selected.baseTrees ? structuredClone(selected.baseTrees) : null;
     if (!restoredTree) throw new Error("This step has no recorded code checkpoint");
     const firstIndex = selected.baseTree ? steps.findIndex((step) => step.baseTree === selected.baseTree) : selectedIndex;
     const reset = steps.slice(Math.max(0, firstIndex));
@@ -695,6 +704,7 @@ export function rewindRun(run, target, at = new Date().toISOString()) {
     previousStages,
     previousSteps,
     restoredTree,
+    restoredTrees,
     resetStepIds,
     discardedAttempts,
     retainedAttempts
@@ -1217,6 +1227,28 @@ function removePrivateLocations(value) {
   return value;
 }
 
+function ownerWorkspaceDisplayPath(workspace) {
+  if (!workspace || typeof workspace !== "object") return "";
+  return workspace.displayPath || workspace.cwd || "";
+}
+
+function publicAccessPolicy(state) {
+  const cwd = state?.workspace?.cwd;
+  const policies = state?.projectPolicies;
+  let key = cwd;
+  if (cwd && policies && typeof policies === "object" && !Array.isArray(policies) && !Object.hasOwn(policies, cwd)) {
+    try { key = realpathSync(cwd); } catch {}
+  }
+  const stored = storedProjectPolicy(state, key);
+  return {
+    mode: stored.mode === "any" ? "any" : "restricted",
+    extraRoots: stored.extraRoots.map((root) => ({
+      displayPath: root.displayPath || root.path || "",
+      mode: root.mode === "read/write" ? "read/write" : "read-only"
+    }))
+  };
+}
+
 function publicWorkflow(workflow) {
   if (!workflow) return workflow;
   return redactRecord({
@@ -1326,10 +1358,15 @@ export function publicRun(run) {
 export function publicState(state) {
   if (!state) return state;
   const clone = structuredClone(state);
+  const accessPolicy = publicAccessPolicy(state);
+  const workspaceDisplayPath = ownerWorkspaceDisplayPath(clone.workspace);
   for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
     clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
   }
   for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
+  delete clone.projectPolicies;
+  clone.accessPolicy = accessPolicy;
+  if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;
   return removePrivateLocations(clone);
 }
 

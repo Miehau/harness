@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { projectInspection } from "../src/inspection.js";
 import { initialStages, markRunCancelled } from "../src/execution.js";
+import { aggregateProofDiffs, combineRepositoryChecks, diffFileSnapshots, extraProofRoots, snapshotProofPath } from "../src/git.js";
 
 const at = (minute) => `2026-09-03T10:${String(minute).padStart(2, "0")}:00.000Z`;
 
@@ -256,4 +260,207 @@ test("run-level approval remains actionable across queued workers", () => {
 
   const started = projectInspection(run({ status: "running", plan: { nodes: [foundation, build] } }));
   assert.deepEqual(started.workers.map((worker) => worker.nextAction.kind), ["none", "start"]);
+});
+
+function twoRepoRun(extras = {}) {
+  const extraId = "r-repob";
+  const attempt = completedAttempt("attempt-1", {
+    diff: {
+      available: true,
+      files: ["one-a.txt", `root:${extraId}:one-b.txt`],
+      patch: "# repository primary (repo-a)\ndiff --git a/one-a.txt b/one-a.txt\n+from-a\n# repository r-repob (repo-b)\ndiff --git a/one-b.txt b/one-b.txt\n+from-b\n",
+      repositories: [
+        { repositoryId: "primary", displayPath: "repo-a", kind: "primary", evidenceKind: "git", available: true, files: ["one-a.txt"], patch: "+from-a" },
+        { repositoryId: extraId, displayPath: "repo-b", kind: "extra", evidenceKind: "git", available: true, files: ["one-b.txt"], patch: "+from-b" }
+      ]
+    },
+    verification: {
+      checks: {
+        status: "passed",
+        command: "verify",
+        repositories: [
+          { repositoryId: "primary", displayPath: "repo-a", status: "passed" },
+          { repositoryId: extraId, displayPath: "repo-b", status: "passed" }
+        ],
+        failedRepositories: []
+      }
+    }
+  });
+  return run({
+    access: {
+      mode: "restricted",
+      primary: { id: "primary", displayPath: "repo-a", mode: "read/write" },
+      extraRoots: [{ id: extraId, displayPath: "repo-b", mode: "read/write", path: "/tmp/repo-b" }]
+    },
+    repositories: [
+      { id: "primary", kind: "primary", displayPath: "repo-a" },
+      { id: extraId, kind: "extra", displayPath: "repo-b" }
+    ],
+    plan: { nodes: [step("build", "review_ready", { attempts: [attempt], writeScope: `one-a.txt,root:${extraId}:one-b.txt` })] },
+    artifacts: attemptArtifacts(),
+    ...extras
+  });
+}
+
+test("inspection names both repositories when a ticket changed A and B", () => {
+  const projection = projectInspection(twoRepoRun());
+  assert.deepEqual(projection.repositories.map((item) => [item.repositoryId, item.displayPath]), [
+    ["primary", "repo-a"],
+    ["r-repob", "repo-b"]
+  ]);
+  assert.equal(JSON.stringify(projection).includes("/tmp/repo-b"), false);
+  const resources = projection.attempts[0].resources;
+  assert.deepEqual(resources.diff.repositories.map((item) => [item.repositoryId, item.displayPath, item.state]), [
+    ["primary", "repo-a", "available"],
+    ["r-repob", "repo-b", "available"]
+  ]);
+  assert.deepEqual(resources.checks.repositories.map((item) => [item.displayPath, item.status]), [
+    ["repo-a", "passed"],
+    ["repo-b", "passed"]
+  ]);
+});
+
+test("inspection keeps primary-only packets as a single repository", () => {
+  const projection = projectInspection(run({
+    access: { mode: "restricted", primary: { id: "primary", displayPath: "repo-a", mode: "read/write" }, extraRoots: [] },
+    repositories: [{ id: "primary", kind: "primary", displayPath: "repo-a" }],
+    plan: { nodes: [step("build", "review_ready", { attempts: [completedAttempt()] })] },
+    artifacts: attemptArtifacts()
+  }));
+  assert.deepEqual(projection.repositories.map((item) => item.repositoryId), ["primary"]);
+  assert.equal(projection.attempts[0].resources.diff.repositories.length, 1);
+  assert.equal(projection.attempts[0].resources.diff.repositories[0].repositoryId, "primary");
+});
+
+test("inspection lists labeled absence instead of implying missing repo evidence", () => {
+  const extraId = "r-repob";
+  const attempt = completedAttempt("attempt-1", {
+    diff: {
+      available: true,
+      files: ["one-a.txt"],
+      repositories: [{ repositoryId: "primary", displayPath: "repo-a", available: true, files: ["one-a.txt"], patch: "+a" }]
+    }
+  });
+  const projection = projectInspection(run({
+    repositories: [
+      { id: "primary", kind: "primary", displayPath: "repo-a" },
+      { id: extraId, kind: "extra", displayPath: "repo-b" }
+    ],
+    plan: { nodes: [step("build", "review_ready", {
+      attempts: [attempt],
+      repositoryDiffs: { [extraId]: { files: ["one-b.txt"] } }
+    })] },
+    artifacts: attemptArtifacts()
+  }));
+  assert.equal(projection.attempts[0].resources.diff.repositories.find((item) => item.repositoryId === extraId).state, "missing");
+  assert.ok(projection.attempts[0].evidence.missing.includes(`diff:${extraId}`));
+});
+
+test("inspection attributes a check failure to the repository that failed", () => {
+  const extraId = "r-repob";
+  const attempt = completedAttempt("attempt-1", {
+    status: "verification_failed",
+    verification: {
+      checks: {
+        status: "failed",
+        command: "verify",
+        summary: "Repository checks failed in repo-b",
+        repositories: [
+          { repositoryId: "primary", displayPath: "repo-a", status: "passed" },
+          { repositoryId: extraId, displayPath: "repo-b", status: "failed" }
+        ],
+        failedRepositories: [{ repositoryId: extraId, displayPath: "repo-b", status: "failed" }]
+      }
+    }
+  });
+  const projection = projectInspection(run({
+    status: "needs_attention",
+    repositories: [
+      { id: "primary", kind: "primary", displayPath: "repo-a" },
+      { id: extraId, kind: "extra", displayPath: "repo-b" }
+    ],
+    plan: { nodes: [step("build", "needs_attention", { attempts: [attempt] })] }
+  }));
+  assert.equal(projection.workers[0].blocker.type, "repository-check");
+  assert.match(projection.workers[0].blocker.summary, /repo-b/);
+  assert.equal(projection.attempts[0].resources.checks.failedRepositories[0].repositoryId, extraId);
+});
+
+test("configured identity paths stay visible while secrets still redact", () => {
+  const projection = projectInspection(run({
+    access: {
+      mode: "restricted",
+      primary: { id: "primary", displayPath: "/Users/owner/saved-a", mode: "read/write" },
+      extraRoots: [{ id: "r-b", displayPath: "/Users/owner/saved-b", mode: "read/write", path: "/Users/owner/saved-b" }]
+    },
+    repositories: [
+      { id: "primary", displayPath: "/Users/owner/saved-a" },
+      { id: "r-b", displayPath: "/Users/owner/saved-b" }
+    ],
+    plan: { nodes: [step("build", "ready", { lastError: "token sk-secretvalue123 at /Users/person/private" })] }
+  }));
+  assert.equal(projection.repositories[0].displayPath, "/Users/owner/saved-a");
+  assert.equal(projection.repositories[1].displayPath, "/Users/owner/saved-b");
+  assert.equal(JSON.stringify(projection).includes("sk-secretvalue123"), false);
+  assert.equal(JSON.stringify(projection).includes("/Users/person/private"), false);
+});
+
+test("non-Git read/write extra roots appear in proof diffs and are not dropped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-nongit-"));
+  try {
+    await writeFile(join(root, "notes.txt"), "before\n");
+    const before = await snapshotProofPath(root);
+    await writeFile(join(root, "notes.txt"), "after\n");
+    const after = await snapshotProofPath(root);
+    const labeled = aggregateProofDiffs([{
+      ...diffFileSnapshots(before, after),
+      repositoryId: "r-nongit",
+      displayPath: "notes-root",
+      evidenceKind: "nongit"
+    }]);
+    assert.deepEqual(labeled.files, ["root:r-nongit:notes.txt"]);
+    assert.match(labeled.patch, /# repository r-nongit \(notes-root\)/);
+    assert.match(labeled.patch, /\+after/);
+    const roots = extraProofRoots({
+      access: {
+        mode: "restricted",
+        primary: { id: "primary", path: "/tmp/a", displayPath: "repo-a" },
+        extraRoots: [{ id: "r-nongit", path: root, displayPath: "notes-root", mode: "read/write" }]
+      },
+      repositories: [{ id: "primary" }]
+    });
+    assert.equal(roots[0].kind, "nongit");
+    assert.equal(roots[0].displayPath, "notes-root");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("combined checks fail when B fails even if A passed", () => {
+  const combined = combineRepositoryChecks([
+    { repositoryId: "primary", displayPath: "repo-a", status: "passed", command: "verify-a", summary: "A passed", output: "ok-a", evidence: [] },
+    { repositoryId: "r-repob", displayPath: "repo-b", status: "failed", command: "verify-b", summary: "B failed", output: "no-b", evidence: [] }
+  ]);
+  assert.equal(combined.status, "failed");
+  assert.match(combined.summary, /repo-b/);
+  assert.deepEqual(combined.failedRepositories, [{ repositoryId: "r-repob", displayPath: "repo-b", status: "failed" }]);
+  assert.equal(combined.repositories.length, 2);
+});
+
+test("directory proof records an output limit instead of dropping the change", () => {
+  const before = { files: { "huge.bin": { hash: "a", size: 1, binary: true, content: null } } };
+  const after = { files: { "huge.bin": { hash: "b", size: 1, binary: true, content: null } } };
+  const diff = diffFileSnapshots(before, after);
+  assert.equal(diff.available, true);
+  assert.deepEqual(diff.files, ["huge.bin"]);
+  const omitted = aggregateProofDiffs([{
+    available: true,
+    files: ["notes.txt"],
+    patch: "",
+    displayPath: "notes-root",
+    repositoryId: "r-nongit",
+    evidenceKind: "nongit"
+  }]);
+  assert.match(omitted.error, /output_limit/);
+  assert.deepEqual(omitted.files, ["root:r-nongit:notes.txt"]);
 });

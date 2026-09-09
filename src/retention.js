@@ -47,12 +47,33 @@ export async function retentionInventory(state, dataDir) {
   return { items, totalBytes: items.reduce((total, item) => total + item.bytes, 0) };
 }
 
-function worktreePaths(run, root) {
-  const paths = [run.workspace?.cwd];
+function repositoryWorkspaces(run) {
+  const items = [];
+  if (run.workspace) items.push(run.workspace);
+  for (const repo of run.repositories || []) items.push(repo);
   for (const node of run.plan?.nodes || []) {
-    for (const step of node.type === "group" ? node.children : [node]) paths.push(step.workspace?.cwd);
+    for (const step of node.type === "group" ? node.children : [node]) {
+      if (step.workspace) items.push(step.workspace);
+      for (const repo of step.workspace?.repositories || []) items.push(repo);
+    }
   }
-  return [...new Set(paths.filter((path) => path && within(root, path)))].sort((a, b) => b.length - a.length);
+  return items;
+}
+
+function worktreePaths(run, root) {
+  return [...new Set(repositoryWorkspaces(run).map((item) => item?.cwd).filter((path) => path && within(root, path)))].sort((a, b) => b.length - a.length);
+}
+
+function sourceCleanupTargets(run) {
+  const sources = new Map();
+  for (const item of repositoryWorkspaces(run)) {
+    if (!item?.sourceCwd) continue;
+    const entry = sources.get(item.sourceCwd) || { sourceCwd: item.sourceCwd, branches: new Set(), zeroState: false };
+    if (item.branch) entry.branches.add(item.branch);
+    if (item.zeroState) entry.zeroState = true;
+    sources.set(item.sourceCwd, entry);
+  }
+  return [...sources.values()];
 }
 
 export async function cleanupRetainedRun({ run, dataDir, previewManager, execImpl = exec, rmImpl = rm }) {
@@ -60,15 +81,16 @@ export async function cleanupRetainedRun({ run, dataDir, previewManager, execImp
   const retainedRoot = join(dataDir, "ticket-runs");
   if (!within(retainedRoot, root) || root === resolve(retainedRoot)) throw new Error("Refusing to clean a path outside retained ticket data");
   previewManager?.stopMatching(`${run.id}:`);
-  const sourceCwd = run.workspace?.sourceCwd;
-  if (sourceCwd) {
-    for (const path of worktreePaths(run, root)) {
-      await execImpl("git", ["worktree", "remove", "--force", path], { cwd: sourceCwd }).catch((error) => {
+  const paths = worktreePaths(run, root);
+  for (const source of sourceCleanupTargets(run)) {
+    for (const path of paths) {
+      await execImpl("git", ["worktree", "remove", "--force", path], { cwd: source.sourceCwd }).catch((error) => {
         if (!/not a working tree|is not a working tree|does not exist/i.test(error.stderr || error.message)) throw error;
       });
     }
-    if (run.workspace?.branch && !run.workspace?.zeroState) {
-      await execImpl("git", ["branch", "-D", run.workspace.branch], { cwd: sourceCwd }).catch((error) => {
+    if (source.zeroState) continue;
+    for (const branch of source.branches) {
+      await execImpl("git", ["branch", "-D", branch], { cwd: source.sourceCwd }).catch((error) => {
         if (!/not found|not exist|not a valid branch/i.test(error.stderr || error.message)) throw error;
       });
     }

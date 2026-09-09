@@ -87,7 +87,17 @@ export async function capturePage({ url, out, video = null, click = null, eval: 
       let size = 0;
       recorder.ondataavailable = (event) => { size += event.data.size; if (size > 20 * 1024 * 1024) recorder.stop(); chunks.push(event.data); };
       globalThis.__agentPlanRecording = { recorder, chunks, stream };
-      recorder.start(100);
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Tab recording produced no video data within 10 seconds")), 10000);
+        recorder.addEventListener("dataavailable", function ready(event) {
+          if (!event.data.size) return;
+          clearTimeout(timer);
+          recorder.removeEventListener("dataavailable", ready);
+          resolve();
+        });
+        recorder.addEventListener("error", (event) => { clearTimeout(timer); reject(event.error || new Error("Tab recording failed")); }, { once: true });
+        recorder.start(100);
+      });
     })()`);
     if (click) {
       await cdp("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(click)})?.click()` });

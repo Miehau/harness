@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubDelivery, GitLabDelivery, parseRemoteRepository, pushTicketBranch, reconcileWithRemote, safeSyncLocal, unmergedPaths } from "../src/delivery.js";
+import { GitHubDelivery, GitLabDelivery, changedGitDeliveryRepos, classifyDeliveryFailure, createDeliveryRecord, deliveryFinished, parseRemoteRepository, pushTicketBranch, reconcileWithRemote, safeSyncLocal, unmergedPaths, upsertDeliveryRecord } from "../src/delivery.js";
 
 function response(value) { return { ok: true, text: async () => JSON.stringify(value) }; }
 
@@ -187,4 +187,37 @@ test("GitLab uploads evidence as multipart data without a JSON content type", as
     return response({ markdown: "![desktop](/uploads/hash/desktop.png)" });
   } });
   assert.deepEqual(await delivery.uploadEvidence({ id: 7 }, [{ name: "desktop.png", mediaType: "image/png", bytes: Buffer.from("image") }]), ["![desktop](/uploads/hash/desktop.png)"]);
+});
+
+test("delivery records skip read-only and unchanged Git repos", () => {
+  const repos = [
+    { id: "primary", cwd: "/a", sourceCwd: "/a", mode: "read/write" },
+    { id: "r-b", cwd: "/b", sourceCwd: "/b", mode: "read/write", displayPath: "repo-b" },
+    { id: "r-ro", cwd: "/ro", sourceCwd: "/ro", mode: "read-only" }
+  ];
+  const diffs = {
+    primary: { files: ["src/a.js"] },
+    "r-b": { files: [] },
+    "r-ro": { files: ["secret.txt"] }
+  };
+  assert.deepEqual(changedGitDeliveryRepos(repos, diffs).map((repo) => repo.id), ["primary"]);
+});
+
+test("delivery records persist remote change ids and classify partial failure", () => {
+  const created = createDeliveryRecord({ id: "primary", cwd: "/a", sourceCwd: "/a", branch: "ticket" }, { status: "waiting_for_checks" });
+  const withChange = upsertDeliveryRecord([created], {
+    repositoryId: "primary",
+    change: { provider: "github", id: 7, url: "https://github.com/acme/a/pull/7" },
+    status: "integrated"
+  });
+  assert.equal(withChange[0].remoteChangeId, 7);
+  assert.equal(deliveryFinished(withChange[0]), true);
+  const failed = upsertDeliveryRecord(withChange, {
+    repositoryId: "r-b",
+    displayPath: "repo-b",
+    status: "failed",
+    error: "hosting unavailable"
+  });
+  assert.match(classifyDeliveryFailure(failed.filter((item) => item.status === "failed")), /repo-b/);
+  assert.equal(deliveryFinished(failed.find((item) => item.repositoryId === "r-b")), false);
 });

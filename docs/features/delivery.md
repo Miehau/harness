@@ -8,11 +8,13 @@
 
 **Purpose:** For tracker-backed work, reconcile with the remote target, push a ticket branch, create/reuse a GitHub PR or GitLab MR, inspect existing CI/reviews, correct actionable feedback and squash merge. Local-source runs integrate via a per-repository serialized queue. No-change runs complete without a merge. Tracker completion follows delivery; safe local fast-forward may follow remote merge.
 
+After final proof approval, each changed writable Git repository is delivered independently (`run.deliveries`: branch, checks, PR/MR or local integrate, remote change id, status). The ticket completes only when every required Git repo has finished. Resume retries unfinished repos without replaying a succeeded PR or local integrate. Partial failure is classified by `displayPath`. Read-only Git extras, non-Git roots, and Any-access writes outside configured read/write Git roots never auto-deliver. Primary-only projects still use one merge/integration record.
+
 **Strength:** Forge adapters expose a compact shared contract. Local synchronization refuses to reconcile user changes. Uncertain remote creation/merge recovery is surfaced rather than guessed.
 
 **Limit:** Forge credentials and existing repository policy determine whether delivery can proceed. This is not a deployment system. Local-source integration is intentionally a distinct path from tracker-backed PR/MR delivery.
 
-Evidence: [delivery.js](../../src/delivery.js), [merge-queue.js](../../src/merge-queue.js), delivery functions in [server.js](../../src/server.js), [delivery tests](../../test/delivery.test.js), [automation e2e tests](../../test/e2e-automation.test.js).
+Evidence: [delivery.js](../../src/delivery.js) (`changedGitDeliveryRepos`, `upsertDeliveryRecord`), [merge-queue.js](../../src/merge-queue.js), `scheduleAllDeliveries` in [server.js](../../src/server.js), [delivery tests](../../test/delivery.test.js), [automation e2e tests](../../test/e2e-automation.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
 
 ## Find the implementation
 

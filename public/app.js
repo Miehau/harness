@@ -57,6 +57,7 @@ const attemptDetails = new Map();
 const pendingAttemptDetails = new Set();
 const profileIds = ["requirements", "exploration", "architecture", "implementation", "verification", "commit", "handoff"];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+let accessPolicyLoadId = 0;
 
 function rememberView() {
   localStorage.setItem("agent-plan-view", JSON.stringify({ version: viewVersion, ticketId: state?.selectedTicketId || null, selectedStepId, selectedStageId, selectedStageKey, selectedWorkerId, selectedAttemptId, selectedRunId, activeTab }));
@@ -1273,11 +1274,105 @@ function renderInspectorPreservingContext() {
   restoreRenderContext(context);
 }
 
+function accessModeLabel(mode) {
+  return mode === "any"
+    ? "Effective mode: Any access. Agents may use any filesystem path. This is an explicit opt-in, not a path wildcard."
+    : "Effective mode: Restricted. File tools stay inside the primary repository and extra roots.";
+}
+
+function extraRootRow(root = {}, index = 0) {
+  const path = root.displayPath || root.path || "";
+  const mode = root.mode === "read/write" ? "read/write" : "read-only";
+  return `<div class="directory-picker" data-extra-root><input class="extra-root-path" value="${escapeHtml(path)}" autocomplete="off" spellcheck="false" aria-label="Extra root path ${index + 1}" aria-describedby="access-policy-error"><select class="extra-root-mode" aria-label="Extra root mode ${index + 1}"><option value="read-only"${mode === "read-only" ? " selected" : ""}>read-only</option><option value="read/write"${mode === "read/write" ? " selected" : ""}>read/write</option></select><button class="button" type="button" data-remove-extra-root aria-label="Remove extra root ${index + 1}">Remove</button></div>`;
+}
+
+function renderExtraRoots(roots = []) {
+  $("#extra-roots-list").innerHTML = roots.map((root, index) => extraRootRow(root, index)).join("");
+  $("#extra-roots-empty").hidden = roots.length > 0;
+}
+
+function relabelExtraRoots() {
+  [...document.querySelectorAll("[data-extra-root]")].forEach((row, index) => {
+    row.querySelector(".extra-root-path")?.setAttribute("aria-label", `Extra root path ${index + 1}`);
+    row.querySelector(".extra-root-mode")?.setAttribute("aria-label", `Extra root mode ${index + 1}`);
+    row.querySelector("[data-remove-extra-root]")?.setAttribute("aria-label", `Remove extra root ${index + 1}`);
+  });
+  $("#extra-roots-empty").hidden = Boolean(document.querySelector("[data-extra-root]"));
+}
+
+function syncAccessModeStatus() {
+  $("#access-mode-status").textContent = accessModeLabel($("#access-any")?.checked ? "any" : "restricted");
+}
+
+function setAccessPolicyMessage(error = "", saved = false) {
+  const err = $("#access-policy-error");
+  const status = $("#access-policy-status");
+  err.textContent = error;
+  if (error) {
+    status.textContent = "";
+    err.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  if (saved) status.textContent = `${accessModeLabel($("#access-any").checked ? "any" : "restricted")} Access policy saved.`;
+}
+
+function applyAccessPolicy(policy = { mode: "restricted", extraRoots: [] }) {
+  $("#access-any").checked = policy.mode === "any";
+  renderExtraRoots(policy.extraRoots || []);
+  syncAccessModeStatus();
+}
+
+function setAccessPolicyLoadState(loadState) {
+  const form = $("#access-policy-form");
+  if (!form) return;
+  form.dataset.loadState = loadState;
+  form.dataset.loaded = loadState === "ready" ? "true" : "false";
+  form.setAttribute("aria-busy", loadState === "loading" ? "true" : "false");
+  const editing = loadState === "ready";
+  $("#save-access-policy").disabled = !editing;
+  $("#add-extra-root").disabled = !editing;
+  $("#access-any").disabled = !editing;
+  for (const el of form.querySelectorAll(".extra-root-path, .extra-root-mode, [data-remove-extra-root]")) el.disabled = !editing;
+  const retry = $("#reload-access-policy");
+  if (retry) {
+    retry.hidden = loadState !== "failed";
+    retry.disabled = loadState !== "failed";
+  }
+}
+
+function accessPolicyLoaded() {
+  return $("#access-policy-form")?.dataset.loaded === "true";
+}
+
+async function hydrateWorkspacePolicy() {
+  const loadId = ++accessPolicyLoadId;
+  setAccessPolicyLoadState("loading");
+  setAccessPolicyMessage("");
+  $("#access-policy-status").textContent = "Loading access policy…";
+  $("#access-mode-status").textContent = "Loading the current project's access policy…";
+  $("#workspace-path").value = state?.workspace?.displayPath || $("#workspace-path").value || "";
+  $("#access-any").checked = false;
+  renderExtraRoots([]);
+  try {
+    const policy = await api("/api/workspace/access-policy");
+    if (loadId !== accessPolicyLoadId) return;
+    applyAccessPolicy(policy);
+    setAccessPolicyLoadState("ready");
+    $("#access-policy-status").textContent = "";
+  } catch (error) {
+    if (loadId !== accessPolicyLoadId) return;
+    setAccessPolicyLoadState("failed");
+    $("#access-mode-status").textContent = "Access policy did not load. Retry or reopen Repository.";
+    $("#access-policy-status").textContent = "";
+    setAccessPolicyMessage(`${error.message} Save is disabled until the saved policy loads.`);
+  }
+}
+
 function render() {
   if (!state) return;
   const context = renderContext();
   const draft = clarificationDraft();
-  $("#workspace-path").value = state.workspace?.cwd || "";
+  if (!$("#workspace-dialog")?.open) $("#workspace-path").value = state.workspace?.displayPath || "";
   // The workspace location is selected only in the explicit picker; its normal
   // dashboard control must not disclose a local filesystem path.
   $("#workspace-path-display").textContent = "Local workspace";
@@ -1651,7 +1746,22 @@ document.addEventListener("click", async (event) => {
   if (artifact) { selectedArtifactId = artifact.dataset.selectArtifact; render(); return; }
   const tab = event.target.closest("[data-tab]");
   if (tab) { activeTab = tab.dataset.tab; rememberView(); renderInspector(); }
-  if (event.target.closest("#workspace-settings")) $("#workspace-dialog").showModal();
+  if (event.target.closest("#workspace-settings")) { $("#workspace-dialog").showModal(); void hydrateWorkspacePolicy(); }
+  if (event.target.closest("#reload-access-policy")) { void hydrateWorkspacePolicy(); return; }
+  if (event.target.closest("#add-extra-root")) {
+    if (!accessPolicyLoaded()) return;
+    const list = $("#extra-roots-list");
+    list.insertAdjacentHTML("beforeend", extraRootRow({}, list.querySelectorAll("[data-extra-root]").length));
+    $("#extra-roots-empty").hidden = true;
+    list.querySelector("[data-extra-root]:last-child .extra-root-path")?.focus();
+    return;
+  }
+  if (event.target.closest("[data-remove-extra-root]")) {
+    if (!accessPolicyLoaded()) return;
+    event.target.closest("[data-extra-root]")?.remove();
+    relabelExtraRoots();
+    return;
+  }
   if (event.target.closest("#pick-workspace")) {
     try { $("#workspace-path").value = (await api("/api/workspace/pick", { method: "POST", body: "{}" })).cwd; }
     catch (error) { if (!/cancelled/i.test(error.message)) notify(error.message); }
@@ -1693,6 +1803,7 @@ document.addEventListener("change", (event) => {
     render();
     return;
   }
+  if (event.target.id === "access-any") { syncAccessModeStatus(); return; }
   const selector = event.target.closest("[data-attempt-select]");
   if (!selector) return;
   deliberateSelection = true;
@@ -1780,6 +1891,30 @@ document.addEventListener("submit", async (event) => {
     event.preventDefault();
     try { state = await api("/api/workspace", { method: "POST", body: JSON.stringify({ cwd: $("#workspace-path").value }) }); $("#workspace-dialog").close(); await refreshTickets(); }
     catch (error) { notify(error.message); }
+    return;
+  }
+  if (event.target.id === "access-policy-form") {
+    event.preventDefault();
+    if (!accessPolicyLoaded()) {
+      setAccessPolicyMessage("Access policy has not loaded yet. Retry or reopen Repository before saving.");
+      notify("Access policy has not loaded yet");
+      return;
+    }
+    const extraRoots = [...document.querySelectorAll("[data-extra-root]")].map((row) => ({
+      path: row.querySelector(".extra-root-path").value.trim(),
+      mode: row.querySelector(".extra-root-mode").value
+    })).filter((root) => root.path);
+    try {
+      const policy = await api("/api/workspace/access-policy", { method: "POST", body: JSON.stringify({ mode: $("#access-any").checked ? "any" : "restricted", extraRoots }) });
+      if (!accessPolicyLoaded()) return;
+      applyAccessPolicy(policy);
+      setAccessPolicyLoadState("ready");
+      setAccessPolicyMessage("", true);
+      notify("Access policy saved");
+    } catch (error) {
+      setAccessPolicyMessage(error.message);
+      notify(error.message);
+    }
     return;
   }
   if (event.target.id === "free-text-form") {
