@@ -1,3 +1,4 @@
+import { assertUiProposal } from "./ui-proposal.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
@@ -64,6 +65,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     signal?.throwIfAborted();
     const beforeState = state.read();
     const run = ticketRun(beforeState, ticketId);
+    assertUiProposal(run);
     const ownsRun = () => !signal?.aborted && state.read().ticketRuns?.[ticketId]?.runId === run.runId;
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
@@ -148,7 +150,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         const attemptId = reusableAttempt ? currentStep.activeAttempt.id : nextAttemptId(currentStep);
         attemptEvidence = { runId: workerRunId, attemptId, startedAt, feedback: nextFeedback || null };
         const contextArtifacts = await hydrateArtifacts([
-          ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind)),
+          ...latest.artifacts.filter((artifact) => ["feature-brief", "architecture"].includes(artifact.kind) || artifact.id === latest.uiProposal?.artifactId),
           ...dependencyArtifacts(latest.plan, currentStep)
         ], dataDir);
         if (signal?.aborted || readRun(ticketId).runId !== run.runId) return;

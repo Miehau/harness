@@ -1170,6 +1170,12 @@ export function createRouteInspectionService({
       if (!path || !media) throw new Error("Visual evidence not found");
       return { mediaType: media.mediaType, content: await readFile(path) };
     },
+    async uiProposalPreview({ ticketId, runId, artifactId }) {
+      const { run, artifact } = details.artifactForIdentity(read(), ticketId, runId, artifactId);
+      const path = artifactPathForOpen(run.artifacts, artifactId, dataDir);
+      if (!path || artifact.kind !== "ui-proposal") throw new Error("UI proposal not found");
+      return readFile(path, "utf8");
+    },
     async artifactContent({ ticketId, runId, artifactId }) {
       const { artifact } = details.artifactForIdentity(
         read(),
@@ -1534,6 +1540,8 @@ export function compactRun(run, revision = null) {
     } : null,
     status: run?.status || null,
     checkpoint: publicCheckpoint(run?.checkpoint),
+    uiProposal: run?.uiProposal || null,
+    uiImpact: run?.plan?.uiImpact || run?.uiImpactProvisional || null,
     lastError: boundedText(run?.lastError, 1000).value || null,
     workflow: publicWorkflow(run?.workflow),
     steering: run?.steering || { nextSequence: 1, records: [] },

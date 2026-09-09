@@ -45,3 +45,10 @@ IDs when wording changes; assign new IDs for new behavior. Plan editing preserve
 the existing impact classification unless an explicit replacement is supplied;
 classification changes retain an operator audit record. New panels and interaction
 changes default to material; minor cosmetic exemptions require a reason.
+
+Material UI proposal review lives inside Design. Its iframe runs in a sandbox with
+network access blocked by CSP. Approval sends the displayed revision ID; request
+changes uses the same identity. Workers/reviewers receive only the current proposal
+artifact as direction. `test/ui-proposal.test.js` covers generation, stale approval,
+execution gating and restart persistence; `.agent-plan/ui.test.mjs` renders the
+proposal and checks sandboxing. Set AGENT_PLAN_PROPOSAL_PROOF to retain its screenshot.

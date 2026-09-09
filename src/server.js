@@ -252,6 +252,7 @@ const ticketService = createTicketRunner({
   planning: {
     prepare: planningService.prepareTicket,
     continueRequirements: planningService.continueAfterRequirements,
+    reviseProposal: planningService.reviseUiProposal,
     design: planningService.designTicket
   },
   harness: {

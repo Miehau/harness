@@ -135,7 +135,7 @@ async function completeCleanReview({ ticketId, current, round, checks, diff, act
   if (current.ticket.source !== "local") {
     const currentContextArtifact = [...current.artifacts].reverse().find((artifact) => artifact.kind === "product-context-snapshot");
     const currentContext = currentContextArtifact ? (await hydrateArtifact(currentContextArtifact, dataDir)).content : "";
-    const contextArtifacts = await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind)), dataDir);
+    const contextArtifacts = await hydrateArtifacts(current.artifacts.filter((artifact) => ["requirements", "implementation-delta", "architecture", "agent-output", "step-verification"].includes(artifact.kind) || artifact.id === current.uiProposal?.artifactId), dataDir);
     handoffActivity = captureStageActivity(ticketId, "handoff", current.runId);
     contextContent = await updateProductContext({
       cwd: current.workspace.cwd, ticket: current.ticket, currentContext,
