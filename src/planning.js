@@ -1,3 +1,4 @@
+import { inspectReadiness } from "./readiness.js";
 import { randomUUID } from "node:crypto";
 import { persistArtifact, readProductContext } from "./artifacts.js";
 import { redactText, retainDurableRecord } from "./redaction.js";
@@ -63,6 +64,9 @@ export function createPlanningRunner({
         const before = state.read();
         run = ticketRun(before, ticketId);
         if (executionBlockedByWorkflow(run)) return blocked(ticketId, run.runId, signal);
+        const readiness = await inspectReadiness({ cwd: before.workspace.cwd, vcsMode, phase: "planning",
+          validateModels: () => harness.inspectModels ? harness.inspectModels(run.stageProfiles) : harness.validateProfiles?.(run.stageProfiles) });
+        if (!readiness.ready) throw new Error(`Project setup required: ${readiness.checks.filter((check) => check.status === "action_needed").map((check) => check.action).join("; ")}`);
         captured = capture(ticketId, "requirements", run.runId);
         const productContext = await readProductContext(dataDir, before.workspace.cwd);
         await state.update((draft) => {

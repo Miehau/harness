@@ -214,6 +214,13 @@ export class PiHarness {
     return stagePrompt(profile, instruction);
   }
 
+  async inspectModels(profiles) {
+    for (const profile of Object.values(profiles)) {
+      const { modelRuntime, model } = await this.sessionOptions(profile);
+      if (!modelRuntime.hasConfiguredAuth(model.provider)) throw new Error(`Configure Pi authentication for ${model.provider}`);
+    }
+  }
+
   async validateProfiles(profiles) {
     await Promise.all(Object.values(profiles).map((profile) => this.sessionOptions(profile)));
   }
