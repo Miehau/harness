@@ -95,7 +95,7 @@ async function navigate(commands, assertions) {
       const selector = `[data-ticket=${JSON.stringify(value)}]`;
       const title = await wait(() => document.querySelector(selector)?.querySelector("strong")?.textContent, `task ${value} exists`);
       await click(selector);
-      await wait(() => document.querySelector("#ticket-header h2")?.textContent === title, `selected task ${value} title`);
+      await wait(() => document.querySelector("#ticket-header h2")?.textContent === title && document.querySelector("#ticket-header")?.getAttribute("aria-busy") !== "true", `selected task ${value} title`);
       results.push({ selected: value, title });
     } else if (noun === "tasks" && verb === "add") {
       await click("#free-text-open");

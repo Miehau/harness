@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { parseModelRef } from "./profiles.js";
 import { freeTextTicket } from "../public/ui-model.js";
@@ -7,6 +8,9 @@ const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
 Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
+  orchestrator submit <json|@file|-> Submit an idempotent draft; does not start work
+  orchestrator show <ticketId> <runId> Inspect exact run and pending decisions
+  orchestrator act <ticketId> <json|@file|-> Relay a decision with exact expected identity
   init [--install] [--verify]       Initialize the selected project; optionally install/check it
   doctor [--visual]                Inspect project readiness without running project commands
   new text <prompt>                 Start a free-text ticket (New task dialog)
@@ -59,7 +63,7 @@ export async function runCli(argv, opts) {
     stdout.write(usage);
     return 0;
   }
-  const ctx = { env, fetchImpl, stdout, stderr, sleep };
+  const ctx = { env, fetchImpl, stdout, stderr, sleep, stdin: opts.stdin || process.stdin };
   if (command === "status") return statusCommand(rest, ctx);
   return handleCommand(command, rest, ctx);
 }
@@ -78,6 +82,19 @@ function revisionInput(words) {
 
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
+  if (command === "orchestrator") {
+    const [action, first, second, ...extra] = rest;
+    if (extra.length || !first || !["submit", "show", "act"].includes(action) || (action === "submit" ? second : !second)) throw new Error("Usage: orchestrator submit <json|@file|-> | show <ticketId> <runId> | act <ticketId> <json|@file|->");
+    if (action === "show") { print(stdout, await request("GET", `/api/orchestrator/tickets/${encodeURIComponent(first)}/runs/${encodeURIComponent(second)}`, { env, fetchImpl })); return 0; }
+    const input = action === "submit" ? first : second;
+    let raw = input;
+    if (input.startsWith("@")) raw = await readFile(input.slice(1), "utf8");
+    else if (input === "-") { raw = ""; for await (const chunk of ctx.stdin) { raw += chunk; if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters"); } }
+    if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters");
+    let payload; try { payload = JSON.parse(raw); } catch { throw new Error("Orchestrator input must be valid JSON"); }
+    print(stdout, await request("POST", action === "submit" ? "/api/orchestrator/tickets" : `/api/orchestrator/tickets/${encodeURIComponent(first)}/actions`, { body: payload, env, fetchImpl }));
+    return 0;
+  }
   if (command === "init") {
     if (rest.some((arg) => !["--install", "--verify"].includes(arg))) throw new Error("Usage: agent-plan init [--install] [--verify]");
     const result = await request("POST", "/api/workspace/init", { body: { install: rest.includes("--install"), verify: rest.includes("--verify") }, env, fetchImpl });

@@ -95,7 +95,7 @@ export function createPlanningRunner({
           if (!current) return;
           adopted = true;
           current.requirementsSessionFile = clarified.sessionFile;
-          if (clarified.uiImpact) current.uiImpactProvisional = clarified.uiImpact;
+          if (clarified.uiImpact && current.uiImpactProvisional?.level !== "material") current.uiImpactProvisional = clarified.uiImpact;
           current.artifacts.push(contextSnapshot, artifact);
           if (pauseIfWorkflowBlocked(current)) {
             setStage(current, "requirements", "blocked", current.checkpoint.title).activity = captured.snapshot();
@@ -158,7 +158,7 @@ export function createPlanningRunner({
             if (!current) return;
             adopted = true;
             current.requirementsSessionFile = clarified.sessionFile;
-          if (clarified.uiImpact) current.uiImpactProvisional = clarified.uiImpact;
+          if (clarified.uiImpact && current.uiImpactProvisional?.level !== "material") current.uiImpactProvisional = clarified.uiImpact;
             current.artifacts.push(artifact);
             current.status = "awaiting_requirements";
             setStage(current, "requirements", "blocked", "Review the revised requirements or answer a follow-up").activity = captured.snapshot();

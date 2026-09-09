@@ -1,3 +1,4 @@
+import { createOrchestratorService, guardOrchestratorUpdate } from "./orchestration.js";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
@@ -391,7 +392,7 @@ function captureStepActivity(ticketId, stepId, runId) {
 
 
 async function update(change, { publish: shouldPublish = true } = {}) {
-  const state = await store.update(change, { snapshot: false });
+  const state = await store.update((draft) => guardOrchestratorUpdate(draft, change), { snapshot: false });
   if (shouldPublish) publishState(state);
   return state;
 }
@@ -639,7 +640,9 @@ const ticketRoutes = {
   }
 };
 
+const orchestrator = createOrchestratorService({ state: { read: store.read.bind(store), update }, tickets: ticketService, dataDir });
 const routeApi = createRoutes({
+  orchestrator,
   version: packageMetadata.version,
   inspection: routeInspection,
   tickets: ticketRoutes,

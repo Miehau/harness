@@ -433,7 +433,7 @@ export function createTicketRunner({
     const current = readRun(ticketId);
     const step = findNode(current.plan, stepId);
     if (!step) throw new Error("This step is not ready for review");
-    if (decision === "accept" && input.auto === true) await state.update((draft) => { ticketRun(draft, ticketId).auto = true; });
+    if (decision === "accept" && input.auto === true && ["review_ready", "accepted"].includes(step.status)) await state.update((draft) => { ticketRun(draft, ticketId).auto = true; });
     if (decision === "accept" && step.status === "accepted") return { accepted: true, alreadyAccepted: true, ticketId, stepId, auto: input.auto === true };
     const stoppedExecution = decision === "changes" && current.status === "needs_attention"
       && ["execution", "verification"].includes(current.checkpoint?.source) && current.checkpoint?.stepId === stepId
@@ -522,6 +522,12 @@ export function createTicketRunner({
     if (!ticket?.id) throw new Error("Refresh the ticket sources and select a ticket first");
     const access = await snapshotWorkspaceAccess();
     await state.update((draft) => {
+      const existing = draft.ticketRuns[ticket.id];
+      if (existing?.status === "draft") {
+        if (existing.submission?.workspaceCwd !== draft.workspace.cwd) throw new Error("Open this draft's project before starting it");
+        const pending = (existing.submission?.dependencies || []).filter((id) => draft.ticketRuns[id] ? draft.ticketRuns[id].status !== "completed" : !Object.values(draft.retainedRuns || {}).some((run) => run.id === id && run.status === "completed"));
+        if (pending.length) throw new Error(`Complete dependencies before starting: ${pending.join(", ")}`);
+      }
       draft.selectedTicketId = automaticAdmission ? draft.selectedTicketId : ticket.id;
       if (!draft.ticketRuns[ticket.id] || replaceableRunStatusSet.has(draft.ticketRuns[ticket.id].status)) draft.ticketRuns[ticket.id] = newTicketRun(ticket, draft.stageProfiles, { automaticAdmission, access });
     });
@@ -895,7 +901,7 @@ export function createTicketRunner({
   }
 
   async function begin(ticketId, input = {}) {
-    const ticket = ticketById(ticketId) || input.ticket;
+    const ticket = ticketById(ticketId) || state.read().ticketRuns[ticketId]?.ticket || input.ticket;
     await beginTicket(ticket, { awaitWork: false });
   }
 
