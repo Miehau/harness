@@ -32,7 +32,7 @@ test("dashboard closes dialogs, streams clarify/explore, shows artifacts and cle
       url,
       interact: async ({ evaluate }) => {
         const check = async (expression) => waitFor(async () => assert.equal(await evaluate(expression), true, await evaluate('document.querySelector("#plan-tree")?.textContent')), { timeoutMs: 5000 });
-        await check('Boolean(document.querySelector("#free-text-open"))');
+        await check('document.querySelector("#workspace-settings")?.title === "Select repository"');
         // Empty required fields and invalid input must never block Close.
         for (const id of ["workspace", "tracker", "free-text", "local-load", "plan", "restart"]) {
           await evaluate(`document.querySelector('#${id}-dialog').showModal(); document.querySelector('#${id}-dialog [data-close-dialog]').click()`);
@@ -160,7 +160,8 @@ test("workspace dialog shows saved policy, rejects invalid submit, and is keyboa
         url: `http://127.0.0.1:${daemon.server.address().port}`,
         interact: async ({ evaluate }) => {
           const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
-          await check('Boolean(document.querySelector("#workspace-settings"))');
+          // Static HTML can arrive before the module installs its event handlers.
+          await check('document.querySelector("#workspace-settings")?.title === "Select repository"');
           const published = await invoke(daemon, "GET", "/api/state");
           assert.equal(published.json.workspace.cwd, undefined);
           assert.equal(published.json.projectPolicies, undefined);
@@ -243,7 +244,8 @@ test("workspace policy does not POST while load is delayed or failed and ignores
         url: `http://127.0.0.1:${daemon.server.address().port}`,
         interact: async ({ evaluate }) => {
           const check = (expression) => waitFor(async () => assert.equal(await evaluate(expression), true), { timeoutMs: 5000 });
-          await check('Boolean(document.querySelector("#workspace-settings"))');
+          // Static HTML can arrive before the module installs its event handlers.
+          await check('document.querySelector("#workspace-settings")?.title === "Select repository"');
           await evaluate(`(() => {
             const real = window.fetch.bind(window);
             window.__policyTest = { posts: [], getDelayMs: 0, getFail: false, getCount: 0 };
