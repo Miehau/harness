@@ -899,7 +899,7 @@ test("later final-review rounds explicitly recheck earlier findings", async () =
     assert.match(prompt, /Report an earlier finding again when it remains unresolved/);
     assert.match(prompt, /Do not start a new broad audit or expand the review horizon/);
     assert.match(prompt, /expected application, screen, data and fully loaded state/);
-    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\n")[0]);
     assert.match(await readFile(navigation.constraints, "utf8"), /AGENT_PLAN_CAPTURE_\* variables were injected/);
     assert.doesNotMatch(prompt, /AGENT_PLAN_CAPTURE_\* variables were injected/);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -952,7 +952,7 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.match(prompt, /"status": "passed"/);
     assert.match(prompt, /"summary": "Passed"/);
     assert.match(prompt, /Filenames, manifests and capture claims alone are not visual proof/);
-    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+    const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\n")[0]);
     assert.match(await readFile(navigation.constraints, "utf8"), /blank status pill and clipped mobile worker row/);
     assert.match(prompt, /criterion-exact/);
     assert.deepEqual(promptImages, []);
@@ -998,7 +998,7 @@ test("oversized durable reviewer errors get one fresh compact review", async () 
     assert.equal(prompts.length, 2);
     for (const prompt of prompts) {
       assert.match(prompt, /current-criterion/);
-      const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\nRead constraints.md")[0]);
+      const navigation = JSON.parse(prompt.split("# Progressive review index\n")[1].split("\n\n")[0]);
       assert.match(await readFile(join(navigation.index, "..", navigation.criteria[0].detail), "utf8"), /current-image/);
       assert.doesNotMatch(prompt, /legacy-sentinel|history-sentinel/);
     }
@@ -1620,6 +1620,11 @@ test("independent review loads images only through explicit current-artifact loo
         assert.deepEqual(options.images, []);
         count++;
         if (inspect) {
+          const evidenceTool = customTools.find((tool) => tool.name === "review_evidence");
+          await assert.rejects(evidenceTool.execute("call", { file: "../index.json" }), /current review index/);
+          const index = JSON.parse((await evidenceTool.execute("call", { file: "index.json", limit: 50 })).content[0].text);
+          assert.equal(index.content.length, 50);
+          assert.ok(index.total > 50);
           const tool = customTools.find((tool) => tool.name === "review_media");
           await assert.rejects(tool.execute("call", { artifactId: "stale" }), /No current review image/);
           const result = await tool.execute("call", { artifactId: "current" });

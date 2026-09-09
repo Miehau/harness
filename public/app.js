@@ -580,7 +580,7 @@ function renderPlanTree() {
     ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
   const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
   const stageWork = stage && ["requirements", "explore", "design", "handoff"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
-  if (stage?.id === "verify") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
+  if (stage?.id === "verify") { target.innerHTML = `${stageSurface}${verificationPanel(run)}${checkpointUsesWorkspace(run) && run.checkpoint?.kind !== "evidence_review" && !isArchivedRun(run) ? checkpointHtml(run) : ""}`; return; }
 
   if (isArchivedRun(run)) {
     target.innerHTML = `${stageSurface}${stageWork}${workerOutputHtml(run)}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;
