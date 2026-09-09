@@ -880,6 +880,35 @@ test("public state keeps retained audits compact", () => {
   assert.deepEqual(published.retainedRuns["old:run-old"], compactRun(retained, 4));
 });
 
+test("finding ledger resolves only after independent review and retains regressions", async () => {
+  const { reviewFindingLedger, unresolvedReviewFindings } = await import("../src/execution.js");
+  const bug = { severity: "high", category: "correctness", claim: "Submission loses its identifier", evidence: [{ file: "src/api.js", line: 4 }] };
+  const capture = { severity: "high", category: "evidence", claim: "Capture fixture failed", evidence: [] };
+  const rounds = [
+    { round: 1, reviewMode: "independent", actionableFindings: [bug] },
+    { round: 2, reviewMode: "prerequisite", actionableFindings: [capture] }
+  ];
+  assert.deepEqual(unresolvedReviewFindings(rounds), [bug, capture]);
+  rounds.push({ round: 3, reviewMode: "independent", actionableFindings: [] });
+  assert.deepEqual(unresolvedReviewFindings(rounds), []);
+  rounds.push({ round: 4, reviewMode: "independent", actionableFindings: [bug] });
+  const ledger = reviewFindingLedger(rounds);
+  assert.equal(ledger[0].status, "regressed");
+  assert.deepEqual(ledger[0].history.map(({ round, status }) => [round, status]), [[1, "open"], [3, "resolved"], [4, "regressed"]]);
+  assert.equal(ledger[1].status, "resolved");
+});
+
+test("execution failures retain actionable typed diagnostics without prescribing code edits for publication", async () => {
+  const { executionFailure } = await import("../src/execution.js");
+  const failure = executionFailure({ failureKind: "evidence-publication", message: "Forbidden", output: "Upload denied" }, { phase: "delivery" });
+  assert.equal(failure.kind, "evidence-publication");
+  assert.equal(failure.phase, "delivery");
+  assert.equal(failure.diagnostic, "Upload denied");
+  assert.match(failure.nextAction, /forge access.*retain the reviewed files/i);
+  assert.equal(executionFailure(new Error("Your input exceeds the context window")).kind, "provider");
+  assert.equal(executionFailure({ code: "MODEL_RESPONSE_ERROR", message: "Invalid JSON" }).kind, "model-output");
+});
+
 test("createTicketRun freezes access so later Any-access policy cannot enlarge it", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-plan-run-access-"));
   const primary = join(root, "project");

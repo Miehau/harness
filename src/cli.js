@@ -16,13 +16,13 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   restart <ticketId> [target] --confirm Restart fresh or from stage:<id>/step:<id>
   approve [ticketId] [--auto]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
-  revise-proof <ticketId> <feedback> Request final-proof corrections from the agent
+  revise-proof <ticketId> <feedback> [--criterion <id>] Request final-proof corrections (repeat flag for multiple criteria)
   restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
-  revise <stepId> <ticketId> <feedback> Request focused changes to a review-ready step
+  revise <stepId> <ticketId> <feedback> [--criterion <id>] Request focused changes (repeat flag for multiple criteria)
   steer <instruction> [ticketId] [--step <stepId>] Queue one focused instruction for an active worker
   waive <stepId> <ticketId> <reason> Reject a false verifier finding and return to review
-  scope-add <stepId> <ticketId> <path> <reason> Approve one audited file-scope expansion
+  scope-add <stepId> <ticketId> <path> <reason> [--max-files N --max-lines N] Approve audited scope/budget
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -51,6 +51,18 @@ export async function runCli(argv, opts) {
   const ctx = { env, fetchImpl, stdout, stderr, sleep };
   if (command === "status") return statusCommand(rest, ctx);
   return handleCommand(command, rest, ctx);
+}
+
+function revisionInput(words) {
+  const feedback = [];
+  const criterionIds = [];
+  for (let i = 0; i < words.length; i++) {
+    if (words[i] !== "--criterion") { feedback.push(words[i]); continue; }
+    const id = words[++i];
+    if (!id?.trim() || id.startsWith("--")) throw new Error("--criterion requires a criterion ID");
+    criterionIds.push(id);
+  }
+  return { feedback: feedback.join(" ").trim(), ...(criterionIds.length ? { criterionIds } : {}) };
 }
 
 async function handleCommand(command, rest, ctx) {
@@ -149,9 +161,9 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "revise") {
     const [stepId, id, ...words] = rest;
-    const feedback = words.join(" ").trim();
-    if (!stepId || !id || !feedback) throw new Error("Usage: agent-plan revise <stepId> <ticketId> <feedback>");
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/changes", { body: { feedback }, env, fetchImpl });
+    const input = revisionInput(words);
+    if (!stepId || !id || !input.feedback) throw new Error("Usage: agent-plan revise <stepId> <ticketId> <feedback> [--criterion <id>]");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/changes", { body: input, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -168,9 +180,21 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "scope-add") {
     const [stepId, id, path, ...words] = rest;
-    const reason = words.join(" ").trim();
+    const reasonWords = [];
+    const reviewBudget = {};
+    for (let i = 0; i < words.length; i++) {
+      if (words[i] === "--max-files" || words[i] === "--max-lines") {
+        const key = words[i] === "--max-files" ? "maxFiles" : "maxChangedLines";
+        const value = Number(words[++i]);
+        if (!Number.isInteger(value) || value <= 0) throw new Error("Review budget limits must be positive integers");
+        reviewBudget[key] = value;
+      } else reasonWords.push(words[i]);
+    }
+    const hasBudget = Object.keys(reviewBudget).length > 0;
+    if (hasBudget && (!reviewBudget.maxFiles || !reviewBudget.maxChangedLines)) throw new Error("Provide both --max-files and --max-lines");
+    const reason = reasonWords.join(" ").trim();
     if (!stepId || !id || !path || !reason) throw new Error("Usage: agent-plan scope-add <stepId> <ticketId> <path> <reason>");
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/scope", { body: { paths: [path], reason }, env, fetchImpl });
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/steps/" + encodeURIComponent(stepId) + "/scope", { body: { paths: [path], reason, ...(hasBudget ? { reviewBudget } : {}) }, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -227,9 +251,9 @@ async function handleCommand(command, rest, ctx) {
   }
   if (command === "revise-proof") {
     const [id, ...words] = rest;
-    const feedback = words.join(" ").trim();
-    if (!id || !feedback) throw new Error("Usage: agent-plan revise-proof <ticketId> <feedback>");
-    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: { feedback }, env, fetchImpl });
+    const input = revisionInput(words);
+    if (!id || !input.feedback) throw new Error("Usage: agent-plan revise-proof <ticketId> <feedback> [--criterion <id>]");
+    const result = await request("POST", "/api/tickets/" + encodeURIComponent(id) + "/evidence/changes", { body: input, env, fetchImpl });
     print(stdout, result);
     return 0;
   }
@@ -387,7 +411,7 @@ async function request(method, path, opts) {
   const fetchImpl = opts.fetchImpl || fetch;
   const response = await fetchImpl(baseUrl(env) + path, {
     method,
-    headers: headers(env),
+    headers: { ...headers(env), ...(method === "POST" ? { prefer: "respond-async" } : {}) },
     ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) })
   });
   const text = await response.text();

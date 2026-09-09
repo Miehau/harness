@@ -21,6 +21,10 @@ test("UI CLI validates commands and exercises real task navigation and creation"
     const url = `http://127.0.0.1:${daemon.server.address().port}`;
     const screenshot = join(dataDir, "cli-journey.png");
     const video = join(dataDir, "cli-journey.webm");
+    // A fast read-only journey must still wait for the recorder's first frame.
+    const shortVideo = join(dataDir, "short-journey.webm");
+    await runJourney({ url, video: shortVideo, commands: [["tasks", "list"]] });
+    assert.deepEqual((await readFile(shortVideo)).subarray(0, 4), Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
     const result = await runJourney({ url, screenshot, video,
       commands: [["tasks", "list"], ["tasks", "open", id], ["stage", "requirements"], ["tab", "details"]],
       assertions: [{ selector: "#ticket-header", text: daemon.store.read().ticketRuns[id].ticket.title }]

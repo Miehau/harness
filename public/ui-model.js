@@ -187,7 +187,7 @@ export function finalReview(run) {
   const review = run?.reviews?.at(-1);
   const reviews = review?.reviews || [];
   const checks = reviews.find((item) => item.role === "deterministic")?.checks;
-  const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence");
+  const proofArtifacts = run?.checkpoint?.kind === "evidence_review" && Array.isArray(run.checkpoint.media) ? run.checkpoint.media : (run?.artifacts || []).filter((artifact) => artifact.kind === "visual-evidence" && (!run.finalEvidenceArtifactIds?.length || run.finalEvidenceArtifactIds.includes(artifact.id)));
   return {
     criteria: proofMapView(run),
     proof: proofArtifacts.map((artifact) => ({
@@ -529,7 +529,7 @@ export function stageMilestones(run, stage) {
     for (const [index, review] of (run?.reviews || []).entries()) {
       const findings = review.actionableFindings || [];
       items.push({
-        title: `Review round ${index + 1} ${findings.length ? "found issues." : "passed."}`,
+        title: `Review round ${review.round || index + 1} ${findings.length ? "found issues." : "passed."}`,
         status: findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"}` : "clean",
         at: review.createdAt,
         detail: findings.length ? findingDetails(findings) : (review.reviews || []).map((item) => `**${item.role}:** ${item.summary}`).join("\n\n")
@@ -544,7 +544,12 @@ export function stageMilestones(run, stage) {
     if (stage.status === "active" && run?.status === "fixing") {
       const findings = run.reviews?.at(-1)?.actionableFindings || [];
       items.push({ title: "Focused correction in progress.", status: "fixing", at: stage.updatedAt, detail: findingDetails(findings) || "Correcting the latest actionable review findings." });
-    } else if (stage.status === "active") items.push({ title: `Review round ${(run?.reviews?.length || 0) + 1} started.`, status: "running", at: stage.updatedAt, detail: "Reviewing the combined implementation after the latest fixes." });
+    } else if (stage.status === "active") {
+      const lastReview = run?.reviews?.at(-1);
+      const lastRound = lastReview?.round || run?.reviews?.length || 0;
+      const preparingProof = lastReview && !lastReview.actionableFindings?.length && !(run?.pendingReviewAttempt?.round > lastRound);
+      items.push({ title: preparingProof ? "Preparing final proof." : `Review round ${run?.pendingReviewAttempt?.round || lastRound + 1} started.`, status: "running", at: stage.updatedAt, detail: preparingProof ? "Independent review passed; preparing the final proof and handoff." : "Reviewing the combined implementation after the latest fixes." });
+    }
     if (stage.status === "completed") items.push({ title: "Agent review completed.", status: "complete", at: stage.updatedAt, detail: stage.summary });
     return items;
   }

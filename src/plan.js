@@ -248,10 +248,22 @@ export function blockingReasons(plan, step) {
 }
 
 export function dependencyArtifacts(plan, step) {
-  return dependencySteps(plan, step).flatMap((dependency) =>
+  const dependencies = [];
+  const visited = new Set([step.id]);
+  const visit = (current) => {
+    for (const dependency of dependencySteps(plan, current)) {
+      if (visited.has(dependency.id) || dependency.status !== "accepted") continue;
+      visited.add(dependency.id);
+      visit(dependency);
+      dependencies.push(dependency);
+    }
+  };
+  visit(step);
+  return dependencies.flatMap((dependency) =>
     (dependency.artifacts || [])
       .filter((artifact) => artifact.kind !== "step-verification")
-      .map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title }))
+      .map((artifact) => ({ ...artifact, sourceStepId: dependency.id, sourceStepTitle: dependency.title,
+        sourceStepOutcome: dependency.description || dependency.title, sourceStepFiles: dependency.diff?.files || [] }))
   );
 }
 

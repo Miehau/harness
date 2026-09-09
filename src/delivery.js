@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { safeName, visualEvidenceMedia } from "./artifacts.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -31,12 +34,12 @@ class JsonApi {
   async request(path, options = {}) {
     const response = await this.fetch(`${this.baseUrl}${path}`, {
       ...options,
-      headers: { accept: "application/json", ...this.headers, ...(options.body ? { "content-type": "application/json" } : {}), ...options.headers }
+      headers: { accept: "application/json", ...this.headers, ...(options.body && !(options.body instanceof FormData) ? { "content-type": "application/json" } : {}), ...options.headers }
     });
     const text = response.text ? await response.text() : JSON.stringify(await response.json());
     let payload = null;
     try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }
-    if (!response.ok) throw new Error(payload?.message || payload?.error || `Remote forge returned ${response.status}`);
+    if (!response.ok) throw Object.assign(new Error(payload?.message || payload?.error || `Remote forge returned ${response.status}`), { status: response.status });
     return payload;
   }
 }
@@ -55,6 +58,38 @@ export class GitHubDelivery {
   async create({ branch, base, title, body }) {
     const pull = await this.api.request(`/repos/${this.repository}/pulls`, { method: "POST", body: JSON.stringify({ head: branch, base, title, body, draft: false }) });
     return { provider: "github", id: pull.number, url: pull.html_url, headSha: pull.head?.sha };
+  }
+
+  async description(change, body) {
+    const pull = await this.api.request(`/repos/${this.repository}/pulls/${change.id}`, body === undefined ? {} : { method: "PATCH", body: JSON.stringify({ body }) });
+    return pull.body || "";
+  }
+
+  async uploadEvidence(change, files) {
+    const root = `/repos/${this.repository}/git`;
+    const tree = [];
+    for (const file of files) {
+      const blob = await this.api.request(`${root}/blobs`, { method: "POST", body: JSON.stringify({ content: file.bytes.toString("base64"), encoding: "base64" }) });
+      tree.push({ path: file.name, mode: "100644", type: "blob", sha: blob.sha });
+    }
+    const snapshot = await this.api.request(`${root}/trees`, { method: "POST", body: JSON.stringify({ tree }) });
+    // Keep evidence reachable without adding binaries or workflow runs to the product branch.
+    const ref = `heads/codex/evidence/pr-${change.id}/${snapshot.sha}`;
+    let commit;
+    try { commit = (await this.api.request(`${root}/ref/${ref}`)).object; }
+    catch (error) {
+      if (error.status !== 404) throw error;
+      commit = await this.api.request(`${root}/commits`, { method: "POST", body: JSON.stringify({ message: `Evidence for PR #${change.id}\n\nWhy: Keep reviewed proof accessible after local artifact cleanup.`, tree: snapshot.sha, parents: [] }) });
+      try { await this.api.request(`${root}/refs`, { method: "POST", body: JSON.stringify({ ref: `refs/${ref}`, sha: commit.sha }) }); }
+      catch (error) {
+        if (error.status !== 422) throw error;
+        commit = (await this.api.request(`${root}/ref/${ref}`)).object;
+      }
+    }
+    return files.map((file) => {
+      const url = `${change.url.split("/pull/")[0]}/blob/${commit.sha}/${encodeURIComponent(file.name)}`;
+      return file.mediaKind === "image" ? `![${file.name}](${url}?raw=true)` : `[${file.name}](${url})`;
+    });
   }
 
   async status(change) {
@@ -118,6 +153,23 @@ export class GitLabDelivery {
       method: "POST", body: JSON.stringify({ source_branch: branch, target_branch: base, title, description: body, squash: true, remove_source_branch: false })
     });
     return { provider: "gitlab", id: request.iid, url: request.web_url, headSha: request.sha };
+  }
+
+  async description(change, description) {
+    const request = await this.api.request(`/projects/${this.project}/merge_requests/${change.id}`, description === undefined ? {} : { method: "PUT", body: JSON.stringify({ description }) });
+    return request.description || "";
+  }
+
+  async uploadEvidence(_change, files) {
+    const links = [];
+    for (const file of files) {
+      const body = new FormData();
+      body.append("file", new Blob([file.bytes], { type: file.mediaType }), file.name);
+      const uploaded = await this.api.request(`/projects/${this.project}/uploads`, { method: "POST", body });
+      if (!uploaded.markdown) throw new Error("GitLab evidence upload returned no Markdown link");
+      links.push(uploaded.markdown);
+    }
+    return links;
   }
 
   async status(change) {
@@ -222,6 +274,29 @@ export async function safeSyncLocal(cwd, base, execImpl = exec) {
 }
 
 export const parseRemoteRepository = repositoryFromRemote;
+
+// Updating one marked section makes a retry after an uncertain PATCH harmless.
+export async function publishDeliveryEvidence(forge, change, checks) {
+  if (checks?.status === "failed") throw new Error("Cannot publish failed verification as delivery proof");
+  const evidence = checks?.evidence || [];
+  if (!evidence.length) return;
+  const files = [];
+  for (const [index, item] of evidence.entries()) {
+    const media = visualEvidenceMedia(item.name || item.path);
+    if (!media) throw new Error(`Unsupported delivery evidence: ${item.name}`);
+    files.push({ name: `${index + 1}-${safeName(item.name || item.path.split("/").at(-1))}`, ...media, bytes: await readFile(item.path) });
+  }
+  const digest = createHash("sha256").update(JSON.stringify({ summary: checks.summary, assertions: evidence.map((item) => item.assertions || []), files: files.map((file) => [file.name, createHash("sha256").update(file.bytes).digest("hex")]) })).digest("hex");
+  const start = "<!-- harness-evidence -->";
+  const end = "<!-- /harness-evidence -->";
+  const body = await forge.description(change);
+  if (body.includes(`${start}\n<!-- ${digest} -->`)) return;
+  const links = await forge.uploadEvidence(change, files);
+  const proof = links.map((link, index) => [link, ...(evidence[index].assertions || []).map((assertion) => `- ${typeof assertion === "string" ? assertion : JSON.stringify(assertion)}`)].join("\n\n")).join("\n\n");
+  const section = `${start}\n<!-- ${digest} -->\n## Verification evidence\n\n${checks.summary || "Final verification evidence"}\n\n${proof}\n${end}`;
+  const pattern = /<!-- harness-evidence -->[\s\S]*?<!-- \/harness-evidence -->/;
+  await forge.description(change, pattern.test(body) ? body.replace(pattern, () => section) : `${body}\n\n${section}`);
+}
 
 export function deliveryRepositoryId(repo = {}) {
   return repo.repositoryId || repo.id || "primary";

@@ -337,6 +337,17 @@ function clarificationHistoryHtml(run) {
   }).join("")}</section>`;
 }
 
+function proofGalleryHtml(review) {
+  const proof = review.proof.map((artifact) => {
+      const url = artifact.url || artifact.mediaUrl;
+      const media = url && artifact.media === "image" ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(artifact.name)}">` : url && artifact.media === "video" ? `<video controls preload="metadata" aria-label="${escapeHtml(artifact.name)}"><source src="${escapeHtml(url)}"></video>` : "";
+      const preview = media && url && artifact.media === "image" ? `<a class="proof-preview" href="${escapeHtml(url)}" target="_blank" rel="noreferrer" title="Open and zoom ${escapeHtml(artifact.name)}">${media}</a>` : media;
+      const actions = url ? `<span class="proof-actions"><a class="button" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open / zoom</a>${artifact.id ? `<button class="button" type="button" data-open-artifact="${escapeHtml(artifact.id)}">Default app ↗</button>` : ""}</span>` : "";
+      return `<figure class="proof-item">${preview || `<div class="proof-unavailable">Preview unavailable</div>`}<figcaption><strong>${escapeHtml(artifact.name)}</strong>${artifact.summary ? `<span>${escapeHtml(artifact.summary)}</span>` : ""}${!url ? `<small>Media URL unavailable</small>` : ""}${actions}</figcaption></figure>`;
+    }).join("") || `<div class="run-empty">No supported visual proof was attached.</div>`;
+  return `<section class="proof-gallery" aria-label="Visual proof">${proof}</section>`;
+}
+
 function checkpointHtml(run) {
   const checkpoint = run?.checkpoint;
   const history = clarificationHistoryHtml(run);
@@ -360,16 +371,9 @@ function checkpointHtml(run) {
   }
   if (checkpoint.kind === "evidence_review") {
     const review = finalReview(run);
-    const proof = review.proof.map((artifact) => {
-      const url = artifact.url || artifact.mediaUrl;
-      const media = url && artifact.media === "image" ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(artifact.name)}">` : url && artifact.media === "video" ? `<video controls preload="metadata" aria-label="${escapeHtml(artifact.name)}"><source src="${escapeHtml(url)}"></video>` : "";
-      const preview = media && url && artifact.media === "image" ? `<a class="proof-preview" href="${escapeHtml(url)}" target="_blank" rel="noreferrer" title="Open and zoom ${escapeHtml(artifact.name)}">${media}</a>` : media;
-      const actions = url ? `<span class="proof-actions"><a class="button" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open / zoom</a>${artifact.id ? `<button class="button" type="button" data-open-artifact="${escapeHtml(artifact.id)}">Default app ↗</button>` : ""}</span>` : "";
-      return `<figure class="proof-item">${preview || `<div class="proof-unavailable">Preview unavailable</div>`}<figcaption><strong>${escapeHtml(artifact.name)}</strong>${artifact.summary ? `<span>${escapeHtml(artifact.summary)}</span>` : ""}${!url ? `<small>Media URL unavailable</small>` : ""}${actions}</figcaption></figure>`;
-    }).join("") || `<div class="run-empty">No supported visual proof was attached.</div>`;
     const checks = review.checks ? `<section class="final-review-summary"><span class="eyebrow">Automated checks</span><strong class="status-${escapeHtml(review.checks.status || "completed")}">${escapeHtml(review.checks.status || "completed")}</strong><p>${escapeHtml(review.checks.summary || review.checks.command || "Completed")}</p></section>` : "";
     const reviews = review.reviews.length ? `<section class="final-review-summary"><span class="eyebrow">Independent review</span>${review.reviews.map((item) => `<p><strong>${escapeHtml(item.role)}</strong> ${escapeHtml(item.summary || "Completed")}</p>`).join("")}</section>` : "";
-    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header><section class="proof-gallery" aria-label="Visual proof">${proof}</section>${criterionProofHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
+    return `<section class="final-review" aria-labelledby="final-review-title"><header><span class="eyebrow">Final proof review</span><h2 id="final-review-title">${escapeHtml(checkpoint.title || "Review proof before delivery")}</h2><p>Review the delivered experience and final verification before approving delivery.</p></header>${proofGalleryHtml(review)}${criterionProofHtml(run)}${checks || reviews ? `<div class="final-review-summaries">${checks}${reviews}</div>` : ""}<footer><details class="review-feedback"><summary>Request changes</summary><form data-request-evidence-changes="${escapeHtml(run.id)}"><textarea name="feedback" rows="3" placeholder="Describe what the proof shows should change…" required></textarea>${correctionCriterionPicker(run)}<button class="button" type="submit">Send changes</button></form></details><button class="button success" type="button" data-approve-evidence="${escapeHtml(run.id)}" ${review.criteria.eligibility.eligible ? "" : "disabled"}>Approve &amp; deliver</button></footer></section>`;
   }
   if (checkpoint.kind === "product_context_review") {
     return `<div class="checkpoint"><div class="checkpoint-icon">✓</div><div class="checkpoint-copy"><span class="eyebrow">Product-context gate</span><strong>${escapeHtml(checkpoint.title)}</strong><details class="requirements-contract"><summary>Review proposed PRD and capability update</summary><div class="artifact-body">${renderMarkdown(checkpoint.prompt || "")}</div></details></div><button class="button success" type="button" data-approve-context="${escapeHtml(run.id)}">Approve & complete</button></div>`;
@@ -438,7 +442,7 @@ function renderHeader() {
   const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
   const previewControls = preview?.status === "running" && preview.url
     ? `<a class="branch-pill" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">preview :${preview.port} ↗</a>${previewBusy === "stop" ? busyButton("Stopping preview", `data-stop-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-stop-preview="${escapeHtml(run.id)}">Stop preview</button>`}`
-    : run && (run.workspace?.cwd || state.workspace?.cwd)
+    : run
       ? previewBusy === "start" ? busyButton("Starting preview", `data-start-preview="${escapeHtml(run.id)}"`) : `<button class="button" type="button" data-start-preview="${escapeHtml(run.id)}">Start preview</button>`
       : "";
   const resumeControl = canResume
@@ -564,7 +568,9 @@ function renderPlanTree() {
   const target = $("#plan-tree");
   const run = runFor();
   const stage = run?.stages?.find((item) => item.id === (selectedStageId || (selectedStepId ? "implement" : null)));
-  const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}` : "";
+  const retainedProof = stage?.id === "handoff" && run?.checkpoint?.kind !== "evidence_review" && run?.finalEvidenceArtifactIds?.length
+    ? `<section class="final-review"><h2>Approved visual proof</h2>${proofGalleryHtml(finalReview(run))}</section>` : "";
+  const stageSurface = run ? `${stagesHtml(run)}${stage ? stageContextHtml(run, stage) : ""}${retainedProof}` : "";
   const stageWork = stage && ["requirements", "explore"].includes(stage.id) ? `<section class="stage-work-surface">${stageOutputHtml(run, stage)}</section>` : "";
   if (isArchivedRun(run)) {
     target.innerHTML = `${stageSurface}${stageWork}<div class="empty"><div><strong>Archived execution</strong>Select a workflow stage or retained attempt to inspect this read-only run.</div></div>`;

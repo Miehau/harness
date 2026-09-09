@@ -112,6 +112,19 @@ test("does not claim accepted success when an attempt or its required evidence i
   assert.equal(complete.workers[0].evidence.state, "complete");
 });
 
+test("accepted implementation stays complete while final visual proof is being produced", () => {
+  const projection = projectInspection(run({
+    status: "fixing",
+    stages: initialStages().map(stage => ({ ...stage, status: stage.id === "implement" ? "completed" : stage.id === "verify" ? "active" : "pending" })),
+    plan: { nodes: [step("build", "accepted", { acceptedAt: at(3), requiresVisualEvidence: true, attempts: [completedAttempt()] })] },
+    artifacts: attemptArtifacts()
+  }));
+  assert.equal(projection.workers[0].evidence.visualEvidence, "pending_final_verification");
+  assert.equal(projection.workers[0].lifecycle, "completed");
+  assert.equal(projection.stages.find(stage => stage.stageId === "implement").lifecycle, "completed");
+  assert.notEqual(projection.lifecycle, "completed");
+});
+
 test("run-level final proof uses current evidence without blocking every worker or stage", () => {
   const accepted = step("build", "accepted", {
     acceptedAt: at(3), requiresVisualEvidence: true, attempts: [completedAttempt()]

@@ -16,7 +16,8 @@ test("timeouts terminate the whole spawned process tree", async () => {
       writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
       setInterval(() => {}, 1000);
     `);
-    await assert.rejects(execFileTree(process.execPath, [join(root, "parent.mjs")], { timeout: 100 }), /timed out/);
+    // Allow Node to spawn its child under parallel suite load; this tests cleanup, not startup speed.
+    await assert.rejects(execFileTree(process.execPath, [join(root, "parent.mjs")], { timeout: 1000 }), /timed out/);
     const pid = Number(await readFile(pidFile, "utf8"));
     assert.throws(() => process.kill(pid, 0), (error) => error.code === "ESRCH");
   } finally {

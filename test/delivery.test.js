@@ -120,6 +120,75 @@ test("ticket branches use a lease when reconciliation rewrites history", async (
   assert.deepEqual(args, ["push", "--force-with-lease", "--set-upstream", "origin", "ticket"]);
 });
 
+test("delivery publishes real bytes, preserves PR prose, retries safely and replaces final proof", async (t) => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { publishDeliveryEvidence } = await import("../src/delivery.js");
+  const dir = await mkdtemp(join(tmpdir(), "delivery-evidence-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "desktop.png");
+  await writeFile(path, Buffer.from([137, 80, 78, 71]));
+  let body = "Original PR description";
+  let uploads = 0;
+  let failUpdate = true;
+  const forge = {
+    async description(_change, next) {
+      if (next !== undefined) {
+        if (failUpdate) { failUpdate = false; throw new Error("temporary PATCH failure"); }
+        body = next;
+      }
+      return body;
+    },
+    async uploadEvidence(_change, files) {
+      uploads++;
+      assert.deepEqual(files[0].bytes, Buffer.from([137, 80, 78, 71]));
+      return [`![desktop](https://github.com/acme/app/blob/proof-${uploads}/desktop.png?raw=true)`];
+    }
+  };
+  const checks = { status: "passed", summary: "Desktop checks passed", evidence: [{ name: "desktop.png", path }] };
+  await assert.rejects(publishDeliveryEvidence(forge, { id: 7 }, checks), /PATCH failure/);
+  await publishDeliveryEvidence(forge, { id: 7 }, checks);
+  await publishDeliveryEvidence(forge, { id: 7 }, checks);
+  assert.equal(uploads, 2);
+  assert.match(body, /^Original PR description/);
+  assert.match(body, /https:\/\/github.com\/acme\/app\/blob\/proof-2/);
+  assert.equal(body.includes(dir), false);
+  await publishDeliveryEvidence(forge, { id: 7 }, { ...checks, summary: "Updated final checks passed" });
+  assert.equal((body.match(/## Verification evidence/g) || []).length, 1);
+  assert.equal(body.includes("proof-2"), false);
+  await assert.rejects(publishDeliveryEvidence(forge, { id: 7 }, { ...checks, evidence: [{ name: "missing.png", path: join(dir, "missing.png") }] }), /ENOENT/);
+  await assert.rejects(publishDeliveryEvidence(forge, { id: 7 }, { ...checks, status: "failed" }), /failed verification/);
+});
+
+test("GitHub stores evidence on an isolated reachable branch and returns immutable image links", async () => {
+  const calls = [];
+  const delivery = new GitHubDelivery({ repository: "acme/app", token: "token", fetchImpl: async (url, input) => {
+    calls.push({ url, input });
+    if (url.includes("/git/ref/")) return { ok: false, status: 404, text: async () => '{"message":"Not Found"}' };
+    if (url.endsWith("/blobs")) return response({ sha: "blob" });
+    if (url.endsWith("/trees")) return response({ sha: "tree" });
+    if (url.endsWith("/commits")) return response({ sha: "evidence-commit" });
+    if (url.endsWith("/refs")) return response({});
+    throw new Error(url);
+  } });
+  const links = await delivery.uploadEvidence({ id: 7, url: "https://github.com/acme/app/pull/7" }, [{ name: "desktop.png", mediaKind: "image", bytes: Buffer.from("image") }]);
+  assert.equal(JSON.parse(calls[0].input.body).content, Buffer.from("image").toString("base64"));
+  assert.equal(JSON.parse(calls.find((call) => call.url.endsWith("/trees")).input.body).base_tree, undefined);
+  assert.deepEqual(JSON.parse(calls.find((call) => call.url.endsWith("/commits")).input.body).parents, []);
+  assert.equal(JSON.parse(calls.at(-1).input.body).ref, "refs/heads/codex/evidence/pr-7/tree");
+  assert.deepEqual(links, ["![desktop.png](https://github.com/acme/app/blob/evidence-commit/desktop.png?raw=true)"]);
+});
+
+test("GitLab uploads evidence as multipart data without a JSON content type", async () => {
+  const delivery = new GitLabDelivery({ project: "group/app", token: "token", fetchImpl: async (_url, input) => {
+    assert.equal(input.headers["content-type"], undefined);
+    assert.equal(await input.body.get("file").text(), "image");
+    return response({ markdown: "![desktop](/uploads/hash/desktop.png)" });
+  } });
+  assert.deepEqual(await delivery.uploadEvidence({ id: 7 }, [{ name: "desktop.png", mediaType: "image/png", bytes: Buffer.from("image") }]), ["![desktop](/uploads/hash/desktop.png)"]);
+});
+
 test("delivery records skip read-only and unchanged Git repos", () => {
   const repos = [
     { id: "primary", cwd: "/a", sourceCwd: "/a", mode: "read/write" },

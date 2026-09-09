@@ -895,6 +895,55 @@ export function refreshedReviewFindings(review = {}) {
   return humanFindings.length ? humanFindings : actionableFindings(review.reviews);
 }
 
+// Review records are the durable audit log. A prerequisite-only round cannot
+// resolve a product finding that no independent reviewer has inspected.
+export function reviewFindingLedger(reviews = []) {
+  const ledger = [];
+  for (const review of reviews) {
+    const findings = actionableFindings([{ findings: review.actionableFindings || [] }, ...(review.reviews || [])]);
+    const independent = review.reviewMode === "independent" || (!review.reviewMode && (review.reviews || []).some((item) => ["requirements", "integration", "verification"].includes(item.role)));
+    const seen = new Set();
+    for (const finding of findings) {
+      let entry = ledger.find((item) => findingsFingerprint([item.finding]) === findingsFingerprint([finding]) || similarFinding(item.finding, finding));
+      if (!entry) {
+        entry = { id: `finding-${ledger.length + 1}`, finding, status: "open", history: [] };
+        ledger.push(entry);
+      }
+      const status = entry.status === "resolved" ? "regressed" : "open";
+      entry.finding = finding;
+      entry.status = status;
+      entry.history.push({ round: review.round, status, reviewId: review.reviewId || null });
+      seen.add(entry.id);
+    }
+    if (independent) for (const entry of ledger) {
+      if (!seen.has(entry.id) && entry.status !== "resolved") {
+        entry.status = "resolved";
+        entry.history.push({ round: review.round, status: "resolved", reviewId: review.reviewId || null });
+      }
+    }
+  }
+  return ledger;
+}
+
+export function unresolvedReviewFindings(reviews = []) {
+  return reviewFindingLedger(reviews).filter((item) => item.status !== "resolved").map((item) => item.finding);
+}
+
+export function executionFailure(error, { phase = "execution", command = null } = {}) {
+  const message = redactText(String(error?.message || error?.summary || error || "Execution failed"));
+  const kind = error?.failureKind || (error?.code === "MODEL_RESPONSE_ERROR" || /(?:model output|independent-review output)/i.test(message) ? "model-output"
+    : /context (?:window|length)|provider|usage limit/i.test(message) ? "provider"
+    : /conflict|unmerged/i.test(message) ? "merge-conflict"
+    : /ETIMEDOUT|timed out|timeout/i.test(message) ? "timeout" : "execution");
+  const nextAction = kind === "evidence-publication" ? "Restore forge access and resume delivery; retain the reviewed files and local proof."
+    : kind === "visual-evidence" || kind === "capture-configuration" || kind === "capture-preflight" ? "Repair the separate capture command or fixture, then rerun checks and criterion coverage before independent review."
+    : kind === "provider" ? "Restore provider capacity or retry with a fresh bounded review session; preserve verified repository work."
+    : kind === "model-output" ? "Retry the structured report without repeating implementation."
+    : kind === "merge-conflict" ? "Resolve the persisted conflict and reverify the combined tree before delivery."
+    : "Inspect the failed command and diagnostic, correct the cause, then resume from the saved checkpoint.";
+  return { kind, phase, command: error?.command || command, message, diagnostic: redactText(String(error?.failureHighlights || error?.output || "")).slice(-8000), nextAction };
+}
+
 export function reviewScopeExpanded(previous = [], refreshed = []) {
   const before = actionableFindings([{ findings: previous }]);
   const after = actionableFindings([{ findings: refreshed }]);
@@ -970,7 +1019,8 @@ export function recurringReviewClusters(reviews = [], minRounds = 3) {
 
 export function unaddressedReviewClusters(reviews = []) {
   const corrected = new Set(reviews.flatMap((review) => review.fix?.rootCauseClusters || []));
-  return recurringReviewClusters(reviews).filter((key) => !corrected.has(key));
+  const open = new Set(recurringReviewClusters([{ actionableFindings: unresolvedReviewFindings(reviews) }], 1));
+  return recurringReviewClusters(reviews).filter((key) => open.has(key) && !corrected.has(key));
 }
 
 export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
@@ -1066,7 +1116,7 @@ export function interruptedStepFeedback(step = {}) {
 }
 
 export function verificationFocusFindings(feedback, findings = []) {
-  return feedback ? findings : [];
+  return feedback ? (findings.length ? findings : humanProofFindings(feedback)) : [];
 }
 
 export function providerWaitCheckpoint(error) {
@@ -1255,6 +1305,7 @@ export function publicRun(run) {
   if (!run) return run;
   const clone = structuredClone(run);
   clone.inspectionFocus = inspectionFocus(run);
+  clone.reviewFindings = reviewFindingLedger(run.reviews);
   clone.checkpoint = publicCheckpoint(clone.checkpoint);
   clone.workflow = publicWorkflow(clone.workflow);
   clone.lastError = boundedText(clone.lastError, 1000).value || null;
