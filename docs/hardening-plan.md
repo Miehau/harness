@@ -10,7 +10,6 @@ Use `node scripts/nav.mjs`, `node scripts/test.mjs`, and `node scripts/seed.mjs`
 - Replacing `state-v3.json` with SQLite
 - OS/email/Slack notifications
 - Direct deploy
-- `src/camera-control.js` (unrelated NVR helper)
 
 Done in-tree: PR1 (named statuses in `src/run-status.js`), PR2 (`src/http.js`), PR4 (`test/e2e-daemon.test.js`), PR5 (Pi labels). Screenshots: [evidence/](evidence/). PR3 (pipeline extract) and PR6 (jj parallel) remain.
 

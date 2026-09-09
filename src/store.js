@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { artifactPathInDataDir, persistArtifact, safeName } from "./artifacts.js";
 import { defaultStageProfiles, normalizeStageProfiles } from "./profiles.js";
 import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { ensureSteeringLedger, preserveAttemptMetadata, recoverSteeringClaims } from "./steering.js";
 import { flattenSteps } from "./plan.js";
 import { initializeRunCleanup, materializeActiveAttempt } from "./execution.js";
 
@@ -124,7 +125,7 @@ function recoverInterruptedCleanup(run, at = new Date().toISOString()) {
 
 function initialState(cwd) {
   return {
-    version: 6,
+    version: 7,
     revision: 0,
     workspace: { cwd },
     settings: normalizeSettings(),
@@ -278,8 +279,8 @@ export class JsonStore {
     let recovered = false;
     try {
       const saved = JSON.parse(await readFile(this.file, "utf8"));
-      if ([3, 4, 5, 6].includes(saved.version)) this.state = saved;
-      this.state.version = 6;
+      if ([3, 4, 5, 6, 7].includes(saved.version)) this.state = saved;
+      this.state.version = 7;
       this.state.workspace ||= { cwd: this.cwd };
       this.state.workspace.cwd ||= this.cwd;
       this.state.settings = normalizeSettings(this.state.settings);
@@ -295,6 +296,9 @@ export class JsonStore {
         if (await migrateArtifactBodies(run, dirname(this.file))) recovered = true;
         if (ensureAttemptIds(run)) recovered = true;
         run.auto ||= false;
+        ensureSteeringLedger(run);
+        preserveAttemptMetadata(run);
+        recoverSteeringClaims(run);
         const activeRuns = run.activeRuns || {};
         for (const step of flattenSteps(run.plan || { nodes: [] })) {
           if (!inFlightStepStatusSet.has(step.status)) continue;

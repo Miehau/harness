@@ -7,7 +7,6 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "camera": "node src/camera-control.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node scripts/test.mjs",

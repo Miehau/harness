@@ -161,7 +161,7 @@ For any fix, trace the complete path before editing:
 rg -n 'symbolName|/api/relevant-route' src public scripts test
 ```
 
-For a product contract read [automation-harness-spec.md](automation-harness-spec.md); for planned work read [hardening-plan.md](hardening-plan.md). For named worker commands read [.agent-plan/project.json](../.agent-plan/project.json); deterministic repository verification starts at [.agent-plan/verify.mjs](../.agent-plan/verify.mjs). Avoid launching visual capture/verification blindly while mapping: it can start browsers and child processes. `src/camera-control.js` and `npm run camera` are unrelated utilities; leave them outside the ticket-workflow investigation unless explicitly requested.
+For a product contract read [automation-harness-spec.md](automation-harness-spec.md); for planned work read [hardening-plan.md](hardening-plan.md). For named worker commands read [.agent-plan/project.json](../.agent-plan/project.json); deterministic repository verification starts at [.agent-plan/verify.mjs](../.agent-plan/verify.mjs). Avoid launching visual capture/verification blindly while mapping: it can start browsers and child processes.
 
 ## Maintaining these references
 

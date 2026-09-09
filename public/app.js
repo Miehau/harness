@@ -1,5 +1,5 @@
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = "") => String(value)
@@ -571,7 +571,7 @@ function renderPlanTree() {
     return;
   }
   if (checkpointUsesWorkspace(run)) {
-    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}</section>${stageWork}`;
+    target.innerHTML = `${stageSurface}<section class="stage-checkpoint-workspace"><span class="eyebrow">Workflow stage · ${escapeHtml(run.stages?.find((stage) => ["blocked", "active", "paused"].includes(stage.status))?.title || (run.checkpoint?.kind === "evidence_review" ? "Final proof review" : "Clarify requirements"))}</span>${checkpointHtml(run)}${steeringPanel(run)}</section>${stageWork}`;
     const clarificationKey = `${run.id}:${run.clarificationHistory?.length || 0}:${run.checkpoint?.id || run.status}`;
     if (target.querySelector(".clarification-thread") && clarificationKey !== lastClarificationKey) {
       lastClarificationKey = clarificationKey;
@@ -742,6 +742,26 @@ function correctionFindingsHtml(step) {
   }).join("")}</ol></section>`;
 }
 
+function steeringStamp(label, value) {
+  return value ? `<div><dt>${label}</dt><dd title="${escapeHtml(value)}">${escapeHtml(new Date(value).toLocaleString())}</dd></div>` : "";
+}
+
+function steeringRecordHtml(record) {
+  const item = steeringLifecycle(record);
+  const target = record.stepId ? `${record.ticketId} · run ${record.runId} · step ${record.stepId} · attempt ${record.attemptId}` : "No worker target was bound.";
+  const evidence = item.deliveryEvidence ? `<details><summary>Pi delivery evidence</summary><pre>${escapeHtml(formatOutput(JSON.stringify(item.deliveryEvidence)))}</pre></details>` : "";
+  const acknowledgment = item.acknowledgmentEvidence ? `<details><summary>Worker acknowledgment evidence</summary><pre>${escapeHtml(formatOutput(JSON.stringify(item.acknowledgmentEvidence)))}</pre></details>` : "";
+  return `<article class="steering-record steering-${escapeHtml(item.state)}"><header><span class="eyebrow">${escapeHtml(item.label)}</span><span class="run-pill">${escapeHtml(item.state)}</span></header><p class="steering-instruction">${escapeHtml(record.instruction || "No instruction recorded.")}</p><p>${escapeHtml(item.reason)}</p><dl class="steering-meta"><div><dt>Author</dt><dd>${escapeHtml(record.author || "operator")}</dd></div><div><dt>Target</dt><dd>${escapeHtml(target)}</dd></div>${steeringStamp("Submitted", item.createdAt)}${steeringStamp("Claimed", item.claimedAt)}${steeringStamp("Delivered", item.deliveredAt)}${steeringStamp("Acknowledged", item.acknowledgedAt)}</dl>${item.unacknowledged ? `<p class="steering-unacknowledged">Delivered to Pi; the worker has not acknowledged or incorporated it yet.</p>` : ""}${evidence}${acknowledgment}</article>`;
+}
+
+function steeringPanel(run, stepId = null) {
+  const selected = steeringTarget(run, stepId);
+  const records = [...(run.steering?.records || []), ...(run.steeringRejections || []).map((item) => ({ ...item, state: "rejected" }))].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  if (!selected.targetable && !records.length) return "";
+  const form = selected.targetable ? `<form class="steering-form" data-steering="${escapeHtml(run.id)}" data-steering-step="${escapeHtml(selected.target.stepId)}"><span class="eyebrow">Active worker steering</span><strong>Send one focused instruction</strong><p>${escapeHtml(selected.message)}</p><code>${escapeHtml(`${selected.target.ticketId} · run ${selected.target.runId} · step ${selected.target.stepId} · attempt ${selected.target.attemptId}`)}</code><label>Instruction<textarea name="instruction" rows="3" maxlength="4000" required placeholder="Describe one focused, in-scope correction…"></textarea></label><button class="button primary" type="submit">Queue instruction</button></form>` : `<p class="steering-unavailable">${escapeHtml(selected.reason)}</p>`;
+  return `<section class="steering-panel">${form}<section class="steering-history"><header><span class="eyebrow">Durable steering history</span><span>${records.length} record${records.length === 1 ? "" : "s"}</span></header>${records.length ? records.map(steeringRecordHtml).join("") : `<div class="run-empty">No steering instructions recorded.</div>`}</section></section>`;
+}
+
 function runPanel(step) {
   const run = runFor();
   const attempt = step.attempts?.at(-1);
@@ -753,7 +773,7 @@ function runPanel(step) {
   const progress = active?.activity?.lastEvent || active?.lastEvent || (attempt ? `${step.attempts.length} attempt${step.attempts.length === 1 ? "" : "s"}` : "waiting");
   const purpose = step.productContext || step.acceptanceCriteria?.[0];
   const why = purpose ? `<article class="artifact"><header><span class="artifact-name">Why this worker is running</span></header><div class="artifact-body"><p>${escapeHtml(purpose)}</p></div></article>` : "";
-  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}`;
+  return `${step.lastError ? `<div class="error-banner">${escapeHtml(step.lastError)}</div>` : ""}<div class="run-summary"><span class="run-state status-${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_", " "))}</span><strong>${escapeHtml(step.agentId)}</strong><span>${escapeHtml(progress)}</span></div>${heartbeat}${correctionFindingsHtml(step)}${why}<section class="run-events"><span class="eyebrow">Saved activity · grouped by focus</span><div data-run-events>${timelineHtml(events, Boolean(active), active?.activity?.groups || attempt?.activityGroups)}</div></section>${raw}${steeringPanel(run, step.id)}`;
 }
 
 function proofEvidenceHtml(evidence) {
@@ -1028,7 +1048,8 @@ function canonicalAttemptInspector(run, step, projection, worker, attempt) {
   const failurePhase = attempt.failurePhase || detail?.failurePhase;
   const provenance = [failureKind, failurePhase].filter(Boolean).join(" · ") || "not recorded";
   const panel = tab === "overview" ? `<section class="attempt-overview"><dl><div><dt>Status</dt><dd>${escapeHtml(summary.status || "not started")}</dd></div><div><dt>Latest action</dt><dd>${escapeHtml(summary.latestAction)}</dd></div><div><dt>Verification</dt><dd>${escapeHtml(evidence.state || "not started")}${evidence.missing?.length ? ` · missing ${escapeHtml(evidence.missing.join(", "))}` : ""}</dd></div><div><dt>Next action</dt><dd>${escapeHtml(summary.nextAction.label)}</dd></div><div><dt>Started</dt><dd>${escapeHtml(attempt.timing?.startedAt || "not recorded")}</dd></div><div><dt>Ended</dt><dd>${escapeHtml(attempt.timing?.completedAt || "in progress")}</dd></div><div><dt>Termination</dt><dd>${escapeHtml(terminationReason)}</dd></div><div><dt>Failure provenance</dt><dd>${escapeHtml(provenance)}</dd></div></dl>${summary.blocker ? `<section class="attempt-blocker"><span class="eyebrow">Primary blocker · ${escapeHtml(summary.blocker.type)}</span><strong>${escapeHtml(summary.blocker.summary)}</strong></section>` : ""}</section>` : attemptDetailContent(detail, tab);
-  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}</div>`;
+  const steering = attempt.lifecycle === "active" ? steeringPanel(run, step?.id) : "";
+  return `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Worker · ${escapeHtml(worker.role)} · retained attempt</span><h2>${escapeHtml(worker.title)}</h2><p>${escapeHtml(worker.purpose)}</p></div><span class="run-pill status-${escapeHtml(summary.status)}">${escapeHtml(summary.status)}</span></header><section class="attempt-selector"><label for="attempt-selector">Attempt</label><select id="attempt-selector" data-attempt-select>${attempts.map((item, index) => `<option value="${escapeHtml(item.id)}" ${item.id === attempt.id ? "selected" : ""}>Attempt ${index + 1} · ${escapeHtml(item.lifecycle)} · ${escapeHtml(item.status)}</option>`).join("")}</select></section><section class="attempt-answer"><span class="eyebrow">Current answer</span><strong>${escapeHtml(summary.latestAction)}</strong>${summary.blocker ? `<small>${escapeHtml(summary.blocker.summary)}</small>` : ""}</section>${inspectorTabs([["overview", "Overview"], ["activity", "Activity"], ["prompt", "Prompt"], ["output", "Output"], ["checks", "Checks"], ["diff", "Diff"], ["artifacts", "Artifacts"], ["trace", "Trace"]], tab)}${inspectorPanel(panel)}${steering}</div>`;
 }
 
 function renderInspector() {
@@ -1055,7 +1076,8 @@ function renderInspector() {
     const index = run.stages.findIndex((item) => item.id === stage.id) + 1;
     const stageTab = ["activity", "prompt", "artifacts", "details", "cleanup"].includes(activeTab) ? activeTab : "activity";
     if (stageTab === "prompt") loadStagePrompts(run, stage);
-    const panel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageTab === "cleanup" ? cleanupInspectorHtml(run) : stageDetailsPanel(run, stage, profile, artifacts);
+    const stagePanel = stageTab === "activity" ? stageActivityPanel(run, stage) : stageTab === "prompt" ? stagePromptPanel(run, stage) : stageTab === "artifacts" ? artifactsPanel(null, artifacts) : stageTab === "cleanup" ? cleanupInspectorHtml(run) : stageDetailsPanel(run, stage, profile, artifacts);
+    const panel = `${stagePanel}${steeringPanel(run)}`;
     target.innerHTML = `<div class="inspector-shell worker-inspector"><header class="inspector-header"><div><span class="eyebrow">Workflow stage · ${index}</span><h2>${escapeHtml(stage.title)}</h2><p>${escapeHtml(stage.summary || "Waiting to start")}</p></div><span class="run-pill status-${escapeHtml(stage.status)}">${escapeHtml(workflowStateLabel(stage.status))}</span></header>${inspectorTabs([["activity", "Activity"], ["prompt", "Prompt"], ["artifacts", "Artifacts"], ["details", "Details"], ["cleanup", "Cleanup"]], stageTab)}${inspectorPanel(panel)}<footer class="inspector-footer"><span>Run details retained locally</span><span>${escapeHtml(stage.updatedAt ? new Date(stage.updatedAt).toLocaleString() : "not started")}</span></footer></div>`;
     for (const item of target.querySelectorAll("details.run-event")) item.open = openEvents.has(item.dataset.eventKey);
     for (const item of target.querySelectorAll("details.activity-group:not(.current)")) item.open = openGroups.has(item.dataset.groupKey);
@@ -1809,6 +1831,20 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  if (event.target.dataset.steering) {
+    event.preventDefault();
+    const form = event.target;
+    const submit = form.querySelector("button[type=submit]");
+    const instruction = String(new FormData(form).get("instruction") || "").trim();
+    if (!instruction) { notify("Enter one focused instruction"); return; }
+    submit.disabled = true;
+    try {
+      await api(`/api/tickets/${encodeURIComponent(form.dataset.steering)}/steering`, { method: "POST", body: JSON.stringify({ instruction, stepId: form.dataset.steeringStep, author: "dashboard" }) });
+      state = await api("/api/state");
+      render();
+    } catch (error) { submit.disabled = false; notify(error.message); }
+    return;
+  }
   if (event.target.id === "restart-form") {
     event.preventDefault();
     const data = new FormData(event.target);

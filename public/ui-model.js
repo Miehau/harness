@@ -200,6 +200,32 @@ export function finalReview(run) {
   };
 }
 
+export function steeringTarget(run, selectedStepId = null) {
+  const terminal = new Set(["completed", "failed", "needs_attention", "cancelled"]);
+  if (!run || terminal.has(run.status)) return { targetable: false, reason: "This ticket run is terminal; start or resume it before steering." };
+  const paused = run.status === "paused";
+  if (!paused && !["running", "fixing", "verifying", "reviewing"].includes(run.status)) return { targetable: false, reason: "The ticket run has no active worker target." };
+  const steps = flattenPlanSteps(run.plan);
+  const candidates = paused
+    ? steps.filter((step) => step.status === "interrupted" && step.activeAttempt?.status === "interrupted").map((step) => ({ step, attemptId: step.activeAttempt.id }))
+    : Object.entries(run.activeRuns || {})
+      .filter(([, active]) => active?.piSessionState !== "unavailable")
+      .map(([id, active]) => ({ step: steps.find((step) => step.id === id), attemptId: active?.attemptId }))
+      .filter(({ step, attemptId }) => step && attemptId && ["running", "fixing"].includes(step.status));
+  const selected = selectedStepId ? candidates.filter(({ step }) => step.id === selectedStepId) : candidates;
+  if (selected.length !== 1) return { targetable: false, paused, reason: selected.length ? "Select one active worker before steering." : "The selected step is not active or resumable." };
+  const { step, attemptId } = selected[0];
+  return { targetable: true, paused, step, target: { ticketId: run.id, runId: run.runId, stepId: step.id, attemptId }, message: paused ? "This instruction remains queued for the saved attempt; resume is still a separate manual action." : "Pi queues this instruction after the worker's current turn and tool calls finish." };
+}
+
+export function steeringLifecycle(record = {}) {
+  const state = record.state || "rejected";
+  const eventAt = (type) => (record.events || []).find((event) => event.type === type)?.at || null;
+  const label = { queued: "Queued for Pi delivery", claimed: "Pi delivery in progress", delivered: "Delivered to Pi · awaiting acknowledgment", acknowledged: "Worker acknowledged delivery", withheld: "Withheld for clarification", failed: "Delivery failed", rejected: "Rejected before acceptance" }[state] || state;
+  const fallback = { queued: "Waiting for the bound worker attempt.", claimed: "Pi delivery is in progress.", delivered: "Pi accepted this instruction; the worker has not acknowledged it yet.", acknowledged: "The worker acknowledged this delivered instruction.", withheld: "Clarification is required before delivery.", failed: "Inspect the delivery reason and submit a new focused correction if appropriate.", rejected: "Submit one concrete, safely scoped correction to an active worker." }[state];
+  return { state, label, reason: record.reason || fallback, createdAt: record.createdAt || null, claimedAt: record.claim?.claimedAt || eventAt("claimed"), deliveredAt: record.deliveredAt || eventAt("delivered"), acknowledgedAt: record.acknowledgedAt || eventAt("acknowledged"), deliveryEvidence: record.deliveryEvidence || null, acknowledgmentEvidence: record.acknowledgmentEvidence || null, unacknowledged: state === "delivered" };
+}
+
 export function preferredStepId(plan, currentId) {
   const steps = (plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]);
   if (steps.some((step) => step.id === currentId)) return currentId;

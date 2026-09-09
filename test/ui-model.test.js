@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, stepInspectorSummary } from "../public/ui-model.js";
+import { artifactsForStage, cleanupInspectorModel, eventGroups, eventTimeline, executionGraph, finalReview, fleetLane, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSelection, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, recentActivity, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, stageDetailModel, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "../public/ui-model.js";
 
 test("resolves canonical attempt selection without replacing a retained choice", () => {
   const projection = {
@@ -51,7 +51,6 @@ test("restores deliberate inspection selection and announces only meaningful att
     selection: { stageId: "stage:implement", workerId: "worker:build", attemptId: "attempt:build:two" }, preserved: false, disappeared: true, reason: "active"
   });
 });
-
 
 test("summarizes subscription usage without imposing a budget", () => {
   const run = {
@@ -463,6 +462,27 @@ test("fleet ticket view omits findings and exposes stages plus selected agents",
   assert.equal(planGate.stateLabel, "plan gate");
   assert.equal(planGate.agentCount, 2);
   assert.equal(planGate.agents.length, 0);
+});
+
+test("steering selects only an active or paused saved attempt", () => {
+  const run = { id: "ticket", runId: "run", status: "running", plan: { nodes: [{ id: "build", status: "running" }] }, activeRuns: { build: { attemptId: "attempt" } } };
+  assert.deepEqual(steeringTarget(run).target, { ticketId: "ticket", runId: "run", stepId: "build", attemptId: "attempt" });
+  const paused = { ...run, status: "paused", activeRuns: {}, plan: { nodes: [{ id: "build", status: "interrupted", activeAttempt: { id: "attempt", status: "interrupted" } }] } };
+  assert.equal(steeringTarget(paused).paused, true);
+  assert.match(steeringTarget(paused).message, /resume is still a separate manual action/i);
+  const unavailable = { ...run, activeRuns: { build: { attemptId: "attempt", piSessionState: "unavailable" } } };
+  assert.equal(steeringTarget(unavailable).targetable, false);
+  assert.match(steeringTarget(unavailable).reason, /not active or resumable/i);
+  assert.equal(steeringTarget({ ...run, status: "completed" }).targetable, false);
+});
+
+test("steering lifecycle distinguishes unacknowledged Pi delivery", () => {
+  const delivered = steeringLifecycle({ state: "delivered", deliveredAt: "2026-09-03T10:01:00.000Z", deliveryEvidence: { session: "pi" } });
+  assert.equal(delivered.unacknowledged, true);
+  assert.match(delivered.label, /awaiting acknowledgment/);
+  assert.deepEqual(delivered.deliveryEvidence, { session: "pi" });
+  assert.equal(delivered.acknowledgmentEvidence, null);
+  assert.equal(steeringLifecycle({ state: "rejected" }).label, "Rejected before acceptance");
 });
 
 test("offers only restart points backed by durable checkpoints", () => {

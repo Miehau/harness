@@ -21,6 +21,11 @@ function runCheck({ args, env = process.env }) {
 let failed = false;
 const checkEnvironment = { ...process.env };
 delete checkEnvironment.AGENT_PLAN_EVIDENCE_DIR;
+delete checkEnvironment.AGENT_PLAN_CAPTURE_URL;
+delete checkEnvironment.AGENT_PLAN_CAPTURE_TICKET_ID;
+delete checkEnvironment.AGENT_PLAN_CAPTURE_RUN_ID;
+delete checkEnvironment.AGENT_PLAN_CAPTURE_CRITERIA;
+
 for (const check of checks) {
   process.stdout.write(`Running ${check.name}\n`);
   const result = await runCheck({ ...check, env: checkEnvironment });
