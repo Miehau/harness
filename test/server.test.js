@@ -130,20 +130,17 @@ test("missing screenshots do not hide a repository failure", () => {
   assert.match(finding.suggestedFix, /not ok 216/);
 });
 
-test("resuming a persisted visual step audits the newly available contract scope", () => {
+test("resuming a persisted visual step preserves its explicitly approved scope", () => {
   const run = { plan: normalizePlan({ nodes: [{
     id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test",
     expectedFiles: ["public/app.js"], requiresVisualEvidence: true,
     attempts: [{ completedAt: "2026-09-03T10:00:00.000Z", verification: { findings: [{ severity: "high", claim: "Missing proof" }] } }]
   }] }) };
-  assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:15:00.000Z"), [{ stepId: "visual", paths: [".agent-plan"] }]);
-  assert.equal(run.plan.nodes[0].writeScope, "public,test,.agent-plan");
-  assert.deepEqual(run.plan.nodes[0].expectedFiles, ["public/app.js", ".agent-plan"]);
-  assert.deepEqual(run.plan.nodes[0].scopeChanges[0], {
-    at: "2026-09-03T10:15:00.000Z", paths: [".agent-plan"], source: "harness",
-    reason: "Feature workers maintain the repository verification, discovery and UI CLI contract."
-  });
-  assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:20:00.000Z"), []);
+  const before = structuredClone(run.plan);
+  assert.deepEqual(auditHarnessWriteScopes(run, "2026-09-03T10:15:00.000Z"), []);
+  assert.deepEqual(run.plan, before, "workers retain only explicitly approved write authority");
+  assert.equal(run.plan.nodes[0].writeScope.includes(".agent-plan"), false);
+
 });
 
 test("repository failures send correction workers only focused highlights", () => {

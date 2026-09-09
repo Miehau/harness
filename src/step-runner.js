@@ -12,8 +12,9 @@ import { applyStepProof, projectProofMap, invalidateProof, proofGate, proofGateE
 import { setStage } from "./run-status.js";
 import { findingsFingerprint, humanProofFindings } from "./review-findings.js";
 import { acknowledgeSteering, failSteering, steeringCheckpointPending, targetMatches } from "./steering.js";
+import { coordinationBlockedSteps } from "./coordination-service.js";
 
-export function createStepRunner({ state, runtime, worker, checks, proof, artifacts, activity, steering, lifecycle }) {
+export function createStepRunner({ state, runtime, worker, checks, proof, artifacts, activity, steering, lifecycle, coordination }) {
   const { run: runContainedWorker, verifyStep, reviewWorkerReport, generateCommitMessage, evidenceImages } = worker;
   const { runChanged: runChangedRepositoryChecks, repositoryCheckReview } = checks;
   const { snapshot: persistProofSnapshot } = proof;
@@ -52,6 +53,12 @@ export function createStepRunner({ state, runtime, worker, checks, proof, artifa
 async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
   const key = `${ticketId}:${stepId}`;
   if (activeSteps.has(key)) return activeSteps.get(key);
+  const controller = new AbortController();
+  const parentSignal = signal;
+  signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+  runtime.stepControllers ||= new Map();
+  runtime.stepControllers.set(key, controller);
+  let ownedIdentity = null;
   let activeActivity = null;
   const work = (async () => {
     signal?.throwIfAborted();
@@ -60,7 +67,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
     const ownsRun = () => !signal?.aborted && state.read().ticketRuns?.[ticketId]?.runId === run.runId;
     const step = findNode(run.plan, stepId);
     const correction = Boolean(feedback);
-    if (!step || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
+    if (!step || coordinationBlockedSteps(run).has(stepId) || (!correction && blockingReasons(run.plan, step).length) || (!correction && !["ready", "interrupted", "needs_input", "awaiting_approval"].includes(step.status))) return;
     let attemptEvidence = null;
     try {
       const stepCwd = step.workspace?.cwd || run.workspace.cwd;
@@ -151,9 +158,11 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           if (signal?.aborted || current?.runId !== run.runId) return;
           const target = findNode(current.plan, stepId);
           if (!target) return;
+          if (!ownedIdentity && coordinationBlockedSteps(current).has(stepId)) return;
           const reuse = target.status === "interrupted" && target.activeAttempt?.id === attemptId && target.activeAttempt.status === "interrupted";
           target.activeAttempt = {
             ...(reuse ? target.activeAttempt : {}), id: attemptId, status: "active",
+            planRevision: current.planRevision || 1,
             startedAt: target.activeAttempt?.startedAt || startedAt, resumedAt: reuse ? startedAt : null, workerRunId
           };
           const sequence = Number(String(attemptId).match(/^attempt-(\d+)$/)?.[1]) || Number(target.attemptSequence) || 0;
@@ -161,11 +170,12 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
           target.status = pendingVerification ? "verifying" : nextFeedback ? "fixing" : "running";
           target.lastError = null;
           current.status = target.status;
-          current.activeRuns[stepId] = { runId: workerRunId, attemptId, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" };
+          current.activeRuns[stepId] = { runId: workerRunId, attemptId, planRevision: current.planRevision || 1, startedAt, lastEventAt: startedAt, lastEvent: nextFeedback ? "Starting focused fix" : "Starting Pi worker", warning: false, piSessionState: "starting" };
           setStage(current, "implement", "active", `${nextFeedback ? "Fixing" : "Implementing"} ${target.title}`);
           started = true;
         });
         if (!started) return;
+        ownedIdentity = { runId: run.runId, stepId, workerRunId, attemptId };
         const activity = captureStepActivity(ticketId, stepId, workerRunId);
         activeActivity = activity;
         const cwd = currentStep.workspace?.cwd || latest.workspace.cwd;
@@ -178,6 +188,7 @@ async function executeStep(ticketId, stepId, { feedback = "", signal } = {}) {
         });
 const result = pendingVerification?.result || await runContainedWorker({
           ticketId, stepId, attemptId, executionId: workerRunId,
+          coordination: coordination?.forWorker({ ticketId, runId: latest.runId, stepId, attemptId }),
           cwd, plan: latest.plan, step: currentStep, artifacts: contextArtifacts, proofMap: projectProofMap(latest), images: [],
           ...sessionChoice,
           feedback: nextFeedback, runId: latest.runId,
@@ -613,15 +624,38 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
     // Cancellation and shutdown await this worker promise. Flush the coalesced
     // activity write before either lifecycle path snapshots and clears activeRuns.
     await activeActivity?.flush();
-    activeSteps.delete(key);
+    if (controller.signal.aborted && !parentSignal?.aborted) await update((state) => {
+      const current = state.ticketRuns[ticketId];
+      const active = current?.activeRuns?.[stepId];
+      const target = findNode(current?.plan, stepId);
+      if (!active || !target || !ownedIdentity || !currentAttempt(current, ownedIdentity)) return;
+      materializeActiveAttempt(target, active, { status: "interrupted", reason: "coordination_pause", phase: "coordination" });
+      target.status = "interrupted";
+      if (target.activeAttempt) target.activeAttempt.status = "interrupted";
+      delete current.activeRuns[stepId];
+    });
+    if (runtime.stepControllers.get(key) === controller) runtime.stepControllers.delete(key);
+    if (activeSteps.get(key) === work) activeSteps.delete(key);
   });
   activeSteps.set(key, work);
   return work;
 }
 
-async function acceptStep(ticketId, stepId) {
+function acceptStep(ticketId, stepId) {
+  runtime.stepAcceptances ||= new Map();
+  const key = `${ticketId}:${stepId}`;
+  if (runtime.stepAcceptances.has(key)) return runtime.stepAcceptances.get(key);
+  const work = acceptStepWork(ticketId, stepId).finally(() => {
+    if (runtime.stepAcceptances.get(key) === work) runtime.stepAcceptances.delete(key);
+  });
+  runtime.stepAcceptances.set(key, work);
+  return work;
+}
+
+async function acceptStepWork(ticketId, stepId) {
   const current = readRun(ticketId);
   const step = findNode(current.plan, stepId);
+  if (coordinationBlockedSteps(current).has(stepId)) throw new Error("Resolve the coordination conflict or plan revision before accepting this step");
   if (!step || step.status !== "review_ready") throw new Error("This step is not ready for review");
   const eligibility = proofGate(current, { stepId });
   if (!eligibility.eligible) throw new Error(proofGateError(eligibility));

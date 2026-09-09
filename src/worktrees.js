@@ -337,9 +337,10 @@ export function mergeRepositoryDiff(repos, diffs) {
   return { ...primary, files: [...(primary.files || []), ...extraFiles], available: true };
 }
 
-export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree, repositories = [] }) {
+export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runId, steps, tree, repositories = [], revision = null }) {
+  const parallelDir = revision ? join("parallel", `revision-${revision}`) : "parallel";
   const primaryPairs = await createParallelForSource({
-    sourceCwd, dataDir, ticket, runId, steps, tree, subdir: "parallel"
+    sourceCwd, dataDir, ticket, runId, steps, tree, subdir: parallelDir
   });
   const extrasByStep = Object.fromEntries(steps.map((step) => [step.id, []]));
   for (const repo of repositories.filter((item) => item.id && item.id !== PRIMARY_ROOT_ID && item.cwd && item.sourceCwd)) {
@@ -347,7 +348,7 @@ export async function createParallelWorktrees({ sourceCwd, dataDir, ticket, runI
     const pairs = await createParallelForSource({
       sourceCwd: repo.sourceCwd,
       dataDir, ticket, runId, steps, tree: extraTree,
-      subdir: join("repos", safeName(repo.id), "parallel"),
+      subdir: join("repos", safeName(repo.id), parallelDir),
       dependencyCwd: repo.sourceCwd,
       gitCwd: repo.cwd
     });

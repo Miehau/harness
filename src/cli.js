@@ -23,6 +23,13 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   steer <instruction> [ticketId] [--step <stepId>] Queue one focused instruction for an active worker
   waive <stepId> <ticketId> <reason> Reject a false verifier finding and return to review
   scope-add <stepId> <ticketId> <path> <reason> [--max-files N --max-lines N] Approve audited scope/budget
+  coordination show [ticketId]      Peer messages, conflicts, decisions and revisions
+  coordination conflict <ticketId> <json> Record {summary, stepIds, proposal}
+  coordination decide <ticketId> <json> Save {summary, reason, conflictIds, stepIds}
+  coordination propose <ticketId> <json> Propose {reason, changes, conflictIds}
+  coordination resolve <ticketId> <conflictId> Ask supervisor for a resolution
+  coordination accept <ticketId> <revisionId> Accept a proposed revision
+  coordination reject <ticketId> <revisionId> <reason> Reject a proposed revision
   cancel [ticketId]
   pause [ticketId]                  Pause and persist the active checkpoint
   profile <stage> <model> <thinking> [ticketId] Override one stopped run stage profile
@@ -67,6 +74,34 @@ function revisionInput(words) {
 
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
+  if (command === "coordination") {
+    const [action = "show", explicitId, input, ...extra] = rest;
+    if (!["show", "conflict", "propose", "decide", "resolve", "accept", "reject"].includes(action) || (action !== "reject" && extra.length)) throw new Error("Usage: agent-plan coordination show|conflict|propose|resolve|accept|reject [ticketId] [input]");
+    const id = await resolveTicketId(explicitId, ctx);
+    const base = `/api/tickets/${encodeURIComponent(id)}/coordination`;
+    if (action === "show") {
+      if (input) throw new Error("Usage: agent-plan coordination show [ticketId]");
+      print(stdout, await request("GET", base, { env, fetchImpl }));
+      return 0;
+    }
+    if (!input) throw new Error(`coordination ${action} requires an input`);
+    let body = {};
+    let suffix;
+    if (["conflict", "propose", "decide"].includes(action)) {
+      try { body = JSON.parse(input); } catch { throw new Error("Coordination input must be valid JSON"); }
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Coordination input must be an object");
+      suffix = action === "conflict" ? "conflicts" : action === "decide" ? "decisions" : "revisions";
+    } else if (action === "resolve") { suffix = "resolve"; body = { conflictId: input }; }
+    else {
+      suffix = `revisions/${encodeURIComponent(input)}/${action}`;
+      if (action === "reject") {
+        body = { reason: extra.join(" ").trim() };
+        if (!body.reason) throw new Error("coordination reject requires a reason");
+      }
+    }
+    print(stdout, await request("POST", `${base}/${suffix}`, { body, env, fetchImpl }));
+    return 0;
+  }
   if (command === "new") {
     if (rest[0] !== "text") throw new Error("Usage: agent-plan new text <prompt>\n" + usage);
     const prompt = rest.slice(1).join(" ").trim();

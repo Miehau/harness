@@ -27,6 +27,8 @@ export class RunRuntime {
       cleanupTimeoutMs,
       workerAbortWaitMs,
       activeSteps: new Map(),
+      stepControllers: new Map(),
+      stepAcceptances: new Map(),
       activeTickets: new Map(),
       activeContainments: new Map(),
       activeMerges: new Set(),

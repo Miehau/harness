@@ -32,6 +32,9 @@ test("manual cleanup removes only run-owned worktrees, branch, previews, and fil
   };
   run.workspace.cwd = join(runRoot(dataDir, run), "worktree");
   run.plan.nodes[0].workspace.cwd = join(runRoot(dataDir, run), "parallel", "step");
+  const previousCwd = join(runRoot(dataDir, run), "parallel", "previous", "step");
+  const snapshotRef = "refs/agent-plan/coordination/run-1/revision-1/0";
+  run.coordination = { revisions: [{ id: "revision-1", beforeWork: [{ workspace: { cwd: previousCwd } }], workPreparation: { repositories: [{ cwd: previousCwd, ref: snapshotRef }, { cwd: "/unrelated-repo", ref: snapshotRef }] } }] };
   await mkdir(run.workspace.cwd, { recursive: true });
   try {
     await cleanupRetainedRun({
@@ -41,6 +44,8 @@ test("manual cleanup removes only run-owned worktrees, branch, previews, and fil
     });
     assert.deepEqual(previewPrefixes, ["ticket:"]);
     assert.deepEqual(calls.map((call) => call.args), [
+      ["update-ref", "-d", snapshotRef],
+      ["worktree", "remove", "--force", previousCwd],
       ["worktree", "remove", "--force", join(runRoot(dataDir, run), "parallel", "step")],
       ["worktree", "remove", "--force", run.workspace.cwd],
       ["branch", "-D", "codex/abc"]

@@ -201,7 +201,7 @@ test("existing projects get one focused verification contract before feature wor
   ] }), false);
   assert.equal(plan.nodes[0].role, "architecture");
   assert.equal(plan.nodes[0].writeScope, ".agent-plan");
-  assert.equal(plan.nodes[1].writeScope, "src,test,.agent-plan");
+  assert.equal(plan.nodes[1].writeScope, "src,test");
   assert.deepEqual(plan.nodes[1].dependsOn, [plan.nodes[0].id]);
   assert.match(plan.nodes[0].prompt, /AGENT_PLAN_EVIDENCE_DIR/);
   assert.match(plan.nodes[0].prompt, /project\.json/);
@@ -228,14 +228,14 @@ test("bootstrap detects missing discovery and UI files in an otherwise configure
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("existing verification contracts remain correctable by visual steps", () => {
+test("visual steps retain explicit scope when verification contracts already exist", () => {
   const original = normalizePlan({ nodes: [
     { id: "visual", title: "Prove the dashboard", permission: "write", writeScope: "public,test", requiresVisualEvidence: true }
   ] });
   const plan = ensureVerificationContractStep(original, true, true);
   assert.equal(plan.nodes.length, 1);
-  assert.equal(plan.nodes[0].writeScope, "public,test,.agent-plan");
-  assert.match(stepContext({ plan: original, step: original.nodes[0], artifacts: [] }), /Write scope: public,test,.agent-plan/);
+  assert.equal(plan.nodes[0].writeScope, "public,test");
+  assert.match(stepContext({ plan: original, step: original.nodes[0], artifacts: [] }), /Write scope: public,test\n/);
   assert.equal(ensureVerificationContractStep(plan, true, true), plan);
 });
 

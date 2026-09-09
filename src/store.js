@@ -7,6 +7,7 @@ import { inFlightMergeStatusSet, inFlightRunStatusSet, inFlightStepStatusSet } f
 import { ensureSteeringLedger, preserveAttemptMetadata, recoverSteeringClaims } from "./steering.js";
 import { flattenSteps } from "./plan.js";
 import { initializeRunCleanup, materializeActiveAttempt } from "./execution.js";
+import { ensureCoordination } from "./coordination.js";
 
 function ensureAttemptIds(run) {
   let changed = false;
@@ -297,6 +298,9 @@ export class JsonStore {
         if (ensureAttemptIds(run)) recovered = true;
         run.auto ||= false;
         ensureSteeringLedger(run);
+        ensureCoordination(run);
+        for (const message of run.coordination.messages) if (message.state === "queued") Object.assign(message, { state: "uncertain", reason: "Daemon restarted before delivery was recorded; this message will not be replayed automatically." });
+        for (const conflict of run.coordination.conflicts) if (["queued", "resolving"].includes(conflict.resolutionState)) Object.assign(conflict, { resolutionState: "interrupted", resolutionError: "Supervisor resolution was interrupted by daemon restart. Ask the supervisor to retry." });
         preserveAttemptMetadata(run);
         recoverSteeringClaims(run);
         const activeRuns = run.activeRuns || {};
@@ -309,6 +313,7 @@ export class JsonStore {
             phase: "daemon_recovery"
           });
           step.status = "interrupted";
+          if (step.activeAttempt?.status === "active") step.activeAttempt.status = "interrupted";
           recovered = true;
         }
         if (Object.keys(activeRuns).length) recovered = true;
