@@ -42,13 +42,16 @@ export function criterionId(stepId, index, text) {
 function criterionSnapshots(plan) {
   return flattenSteps(plan).flatMap((step) => (step.acceptanceCriteria || []).map((value, index) => {
     const text = String(value).trim();
+    const binding = step.criterionBindings?.find((item) => item.index === index);
     return text ? {
-      id: criterionId(step.id, index, text),
+      id: binding?.id || criterionId(step.id, index, text),
+      ...(binding ? { evidenceType: binding.evidence } : {}),
+      ...(binding?.journeyId ? { journeyId: binding.journeyId } : {}),
       stepId: step.id,
       stepTitle: String(step.title || ""),
       stepRequired: step.required !== false,
-      requiresVisualEvidence: step.requiresVisualEvidence || step.requiresVideoEvidence || false,
-      requiresVideoEvidence: step.requiresVideoEvidence || false,
+      requiresVisualEvidence: binding ? binding.evidence !== "check" : step.requiresVisualEvidence || step.requiresVideoEvidence || false,
+      requiresVideoEvidence: binding ? binding.evidence === "video" : step.requiresVideoEvidence || false,
       index,
       text
     } : null;
@@ -270,7 +273,7 @@ export function applyProofReports(map, reports, run, { criterionIds, reportedAt 
 export function applyIndependentProofReports(map, reports, run, { criterionIds, mediaIds = [] } = {}) {
   const assigned = map.criteria.filter((criterion) => !criterionIds || criterionIds.includes(criterion.id));
   const isInspectedImage = (criterion, artifactId) => {
-    const needsVideo = criterion.requiresVideoEvidence || stepIn(run, criterion.stepId)?.requiresVideoEvidence;
+    const needsVideo = (criterion.evidenceType ? criterion.requiresVideoEvidence : criterion.requiresVideoEvidence || stepIn(run, criterion.stepId)?.requiresVideoEvidence);
     return mediaIds.includes(artifactId) && artifactsIn(run).some((artifact) =>
       artifact.id === artifactId && artifact.mediaKind === "image" && (!needsVideo || artifact.videoPath) && artifact.criterionIds?.includes(criterion.id));
   };
@@ -278,7 +281,7 @@ export function applyIndependentProofReports(map, reports, run, { criterionIds, 
     const matches = (Array.isArray(reports) ? reports : []).filter((report) => report?.criterionId === criterion.id);
     if (!matches.length) return [{ criterionId: criterion.id, status: "blocked", explanation: { summary: "Independent reviewer omitted this criterion verdict." } }];
     return matches.map((report) => {
-      const visual = criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence;
+      const visual = (criterion.evidenceType ? criterion.requiresVisualEvidence : criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence);
       const inspected = (Array.isArray(report.evidence) ? report.evidence : []).some((item) => item?.type === "media" && isInspectedImage(criterion, item.artifactId));
       if (report.status === "verified" && visual && !inspected) return {
         criterionId: criterion.id, status: "blocked", explanation: { summary: "Visual criterion needs inspected current images (sampled recording frames for video) from a CLI journey mapped to this criterion." }
@@ -288,7 +291,7 @@ export function applyIndependentProofReports(map, reports, run, { criterionIds, 
   });
   let next = applyProofReports(map, complete, run, { criterionIds: assigned.map(({ id }) => id) });
   const missingMedia = next.criteria.filter((criterion) => assigned.some(({ id }) => id === criterion.id)
-    && (criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence)
+    && ((criterion.evidenceType ? criterion.requiresVisualEvidence : criterion.requiresVisualEvidence || stepIn(run, criterion.stepId)?.requiresVisualEvidence))
     && criterion.current.status === "verified"
     && !criterion.current.evidence.some((item) => item.type === "media" && item.validity === "valid" && isInspectedImage(criterion, item.artifactId)));
   if (missingMedia.length) next = applyProofReports(next, missingMedia.map(({ id }) => ({ criterionId: id, status: "blocked", explanation: { summary: "Inspected visual evidence is missing or stale." } })), run);

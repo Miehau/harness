@@ -1,4 +1,4 @@
-import { designSystemPath, designSystemExists, ensureDesignSystemStep, uiDesignViolations, uiPlanningInstruction } from "./design-system.js";
+import { designSystemPath, designSystemExists, ensureDesignSystemStep, uiDesignViolations, uiPlanningInstruction, prepareUiPlan, uiContractViolations } from "./design-system.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { diffOutline, normalizeReviewMap } from "./git.js";
 import { appendBounded, pushBounded } from "./activity.js";
 import { parseModelOutput } from "./model-output.js";
-import { defaultReviewBudget, flattenSteps, normalizePlan, planReviewViolations } from "./plan.js";
+import { defaultReviewBudget, flattenSteps, normalizePlan, normalizeUiImpact, planReviewViolations } from "./plan.js";
 import { loadProjectConfig, runProjectCommand } from "./project-config.js";
 import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket, writeReviewIndex } from "./review-packet.js";
@@ -317,6 +317,7 @@ export class PiHarness {
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
         artifact: String(parsed.artifact || ""),
+        ...(parsed.uiImpact ? { uiImpact: normalizeUiImpact(parsed.uiImpact) } : {}),
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
         sessionFile: session.sessionFile
       };
@@ -331,6 +332,7 @@ export class PiHarness {
       const parsed = parseModelOutput(reply, { artifact: "nonEmptyString", questions: "array" }, "Requirements output");
       return {
         artifact: String(parsed.artifact || ""),
+        ...(parsed.uiImpact ? { uiImpact: normalizeUiImpact(parsed.uiImpact) } : {}),
         questions: Array.isArray(parsed.questions) ? parsed.questions.map(String).filter(Boolean) : [],
         sessionFile: session.sessionFile
       };
@@ -359,7 +361,7 @@ export class PiHarness {
     }, `${ticket.id}:ticket-lookahead`);
   }
 
-  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, profile, access, repositories, onEvent, onSessionFile, signal }) {
+  async designTicket({ cwd, ticket, sessionFile, runId, productContext, requirements, exploration, ticketLookAhead, answers, uiImpact, profile, access, repositories, onEvent, onSessionFile, signal }) {
     return this.supervisorTurn(async () => {
       const session = await this.planningSession(cwd, sessionFile, `${ticket.id}-${runId}`, { profile, access, repositories });
       await onSessionFile?.(session.sessionFile);
@@ -371,15 +373,17 @@ export class PiHarness {
       const captureReady = Boolean((await loadProjectConfig(cwd)).commands["capture-proof"]);
       let plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists, captureReady);
       plan = ensureDesignSystemStep(plan, await designSystemExists(cwd, plan));
-      let violations = [...planReviewViolations(plan), ...uiDesignViolations(plan)];
+      plan = prepareUiPlan(plan, uiImpact);
+      let violations = [...planReviewViolations(plan), ...uiDesignViolations(plan), ...uiContractViolations(plan)];
       if (violations.length) {
         const revision = await this.visibleSupervisorPrompt(session, `Revise the complete JSON plan so every implementation step is a coherent review unit. Resolve each deterministic violation below by splitting behavior slices or adding a concrete indivisibility justification; do not merely raise a budget. Return the complete JSON plan only.\n\n${violations.map((item) => `- ${item}`).join("\n")}`, { publishText: false, onEvent, signal });
         Object.assign(parsed, parseModelOutput(revision, { title: "nonEmptyString", nodes: "nonEmptyArray", designArtifact: "nonEmptyString" }, "Revised design output"));
         plan = ensureVerificationContractStep(normalizePlan(parsed), contractExists, projectConfigExists, captureReady);
         plan = ensureDesignSystemStep(plan, await designSystemExists(cwd, plan));
-        violations = [...planReviewViolations(plan), ...uiDesignViolations(plan)];
+        plan = prepareUiPlan(plan, uiImpact);
+        violations = [...planReviewViolations(plan), ...uiDesignViolations(plan), ...uiContractViolations(plan)];
       }
-      if (violations.length) throw new Error(`Planner returned oversized review steps: ${violations.join("; ")}`);
+      if (violations.length) throw new Error(`Planner returned an invalid review plan: ${violations.join("; ")}`);
       assertAvailablePlanSkills(plan, skillNames);
       return { plan, artifact: String(parsed.designArtifact || ""), sessionFile: session.sessionFile };
     }, this.supervisorRunKey(ticket.id, runId));
