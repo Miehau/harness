@@ -327,6 +327,35 @@ export function proofEligibility(proof, { stepId = null, requiredOnly = false } 
   return { eligible: reasons.length === 0, blockingReasons: reasons };
 }
 
+export function stepCriterionIds(run, stepId) {
+  return (run.proofMap?.criteria || [])
+    .filter((criterion) => criterion.stepId === stepId)
+    .map((criterion) => criterion.id);
+}
+
+export function proofGate(run, options) {
+  const proof = projectProofMap(run);
+  // Compatibility projections make legacy proof gaps visible, but must not impose
+  // a gate that did not exist when the run reached its human review checkpoint.
+  return proof.compatibility
+    ? { eligible: true, blockingReasons: [] }
+    : proofEligibility(proof, options);
+}
+
+export function proofGateError(eligibility) {
+  return `Proof gate blocked: ${eligibility.blockingReasons.map((reason) => `${reason.criterionId}${reason.criterion ? ` (${reason.criterion})` : ""} [${reason.code}]: ${reason.message}`).join("; ")}`;
+}
+
+export function applyStepProof(run, stepId, reports, evidence = []) {
+  if (!run.proofMap) return;
+  run.proofMap = applyIndependentProofReports(run.proofMap, reports, run, {
+    criterionIds: stepCriterionIds(run, stepId),
+    mediaIds: run.artifacts
+      .filter((artifact) => evidence.some((item) => item.path === artifact.path))
+      .map(({ id }) => id)
+  });
+}
+
 /** Project stored proof, or a read-only unresolved map for legacy runs, without mutating the run. */
 function projectedResult(run, result) {
   const projected = { ...result, status: normalizedStatus(result?.status) };

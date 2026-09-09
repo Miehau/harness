@@ -14,7 +14,7 @@ Every Pi session (exploration, planning, workers, reviewers, verify) wraps SDK f
 
 **Limit:** Pi is the only execution harness. Profiles do not imply alternate orchestrators. Skill execution and model calls require working local Pi setup.
 
-Evidence: [pi-harness.js](../../src/pi-harness.js) (`scopedWorkerTools`), [profiles.js](../../src/profiles.js), [workflow.js](../../src/workflow.js), [workflow tests](../../test/workflow.test.js), [pi-harness tests](../../test/pi-harness.test.js), [profile override tests](../../test/profile-override.test.js).
+Evidence: [pi-tools.js](../../src/pi-tools.js) (`scopedWorkerTools`), [profiles.js](../../src/profiles.js), [workflow.js](../../src/workflow.js), [workflow tests](../../test/workflow.test.js), [pi-harness tests](../../test/pi-harness.test.js), [profile override tests](../../test/profile-override.test.js).
 
 ## Find the implementation
 

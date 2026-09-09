@@ -47,6 +47,37 @@ export function safeArtifactMetadata(artifact) {
   return redactRecord(metadata);
 }
 
+export function retainDurableRecord(value, limit = 16000) {
+  const retain = (item) => {
+    if (typeof item === "string") return boundedText(item, limit).value;
+    if (Array.isArray(item)) return item.map(retain);
+    if (!item || typeof item !== "object") return item;
+    return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, retain(child)]));
+  };
+  return retain(redactRecord(value));
+}
+
+export function retainChecks(checks) {
+  const retained = retainDurableRecord(checks);
+  retained.evidence = (checks.evidence || []).map((item) => ({
+    ...retainDurableRecord(item),
+    ...(typeof item?.path === "string" ? { path: item.path } : {})
+  }));
+  return retained;
+}
+
+export function retainProofFeedback(value, limit = 4000) {
+  return boundedText(redactText(value), limit).value.trim();
+}
+
+export function retainWorkflowContinuation(result) {
+  return { result: retainDurableRecord(result), sessionFile: result?.sessionFile || null };
+}
+
+export function retainReviewRecord(review) {
+  return { ...retainDurableRecord(review), sessionFile: review?.sessionFile || null };
+}
+
 export function safeReasoningSummary(value, limit = 240) {
   return boundedText(value, limit).value.replace(/[*`]/g, "").trim();
 }

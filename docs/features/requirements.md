@@ -12,7 +12,7 @@
 
 **Limit:** There is more than one human gate in a normal journey. The living product-context document currently lives under the harness data directory, not in the target repository as the automation specification proposes.
 
-Evidence: `prepareTicket`, `continueAfterRequirements`, `designTicket` in [server.js](../../src/server.js), [artifacts.js](../../src/artifacts.js), [Pi flow tests](../../test/pi-flow.test.js).
+Evidence: `prepareTicket`, `continueAfterRequirements`, `designTicket` in [planning.js](../../src/planning.js), [artifacts.js](../../src/artifacts.js), [Pi flow tests](../../test/pi-flow.test.js).
 
 ## Find the implementation
 

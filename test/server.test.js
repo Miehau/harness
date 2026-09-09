@@ -807,10 +807,13 @@ test("supervisor review replies are redacted before persistence and API projecti
 
 test("streamed worker output survives cancellation and persisted reload", async () => {
   let started;
+  let lateSessionFile;
   const running = new Promise((resolve) => { started = resolve; });
   const harness = {
     ...mockHarness(),
-    async runStep({ onEvent, signal }) {
+    async runStep({ onEvent, onSessionFile, signal }) {
+      await onSessionFile("/tmp/current-worker-session.jsonl");
+      lateSessionFile = onSessionFile;
       onEvent({ type: "text_delta", delta: "streamed output tail" });
       started();
       await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
@@ -829,6 +832,11 @@ test("streamed worker output survives cancellation and persisted reload", async 
     assert.equal(cancelled.status, 200);
     const attempt = daemon.store.read().ticketRuns[id].plan.nodes[0].attempts[0];
     assert.equal(attempt.rawOutput, "streamed output tail");
+    // This callback is representative of a late Pi session flush after the
+    // cancellation path has removed its active worker record.
+    await lateSessionFile("/tmp/stale-worker-session.jsonl");
+    const step = daemon.store.read().ticketRuns[id].plan.nodes[0];
+    assert.equal(step.sessionFile, "/tmp/current-worker-session.jsonl");
 
     const reloaded = await new JsonStore(join(dataDir, "state-v3.json"), cwd).init();
     assert.equal(reloaded.ticketRuns[id].plan.nodes[0].attempts[0].rawOutput, "streamed output tail");

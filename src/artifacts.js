@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { redactText } from "./redaction.js";
+import { boundedText, redactText } from "./redaction.js";
 
 const evidenceMediaTypes = new Map([
   [".png", { mediaType: "image/png", mediaKind: "image" }],
@@ -53,6 +53,46 @@ export async function hydrateArtifact(artifact, dataDir) {
 
 export async function hydrateArtifacts(artifacts = [], dataDir) {
   return Promise.all((artifacts || []).map((artifact) => hydrateArtifact(artifact, dataDir)));
+}
+
+// Read-only API and worker context reads use this bounded reader. The legacy
+// hydrateArtifacts above deliberately remains available for existing callers.
+export function createArtifactReader({ dataDir }) {
+  async function artifactContent(artifact, limit = 20000) {
+    if (!artifact) return null;
+    // Media stays behind the media endpoint; textual views read only a bounded prefix.
+    if (artifact.kind === "visual-evidence" || artifact.mediaType || visualEvidenceMedia(artifact.name)) return null;
+    if (typeof artifact.content === "string") {
+      const source = String(artifact.content);
+      return { content: redactText(source.slice(0, limit + 4096)), truncated: source.length > limit + 4096 };
+    }
+    const path = artifactPathForOpen([artifact], artifact.id, dataDir);
+    if (!path) return null;
+    try {
+      const handle = await open(path, "r");
+      try {
+        const size = (await handle.stat()).size;
+        const length = Math.min(size, limit + 4096);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, 0);
+        return { content: redactText(buffer.toString("utf8")), truncated: size > length };
+      } finally { await handle.close(); }
+    } catch { return null; }
+  }
+
+  async function artifactText(artifact, limit = 100000) {
+    return (await artifactContent(artifact, limit))?.content || "";
+  }
+
+  async function hydrateBoundedArtifacts(artifacts, limit = 60000) {
+    const boundedLimit = Number.isFinite(limit) ? limit : 60000;
+    return Promise.all((artifacts || []).map(async (artifact) => {
+      const content = boundedText(await artifactText(artifact, boundedLimit), boundedLimit);
+      return { ...artifact, content: content.value, ...(content.truncated ? { truncated: true } : {}) };
+    }));
+  }
+
+  return { artifactContent, artifactText, hydrateArtifacts: hydrateBoundedArtifacts };
 }
 
 export function visualEvidenceArtifacts(artifacts = []) {

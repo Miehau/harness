@@ -97,6 +97,12 @@ export function executionBlockedByWorkflow(run) {
   return workflowBlockers(run?.workflow).length > 0;
 }
 
+export function pauseIfWorkflowBlocked(run) {
+  if (!workflowBlockers(run?.workflow).length) return false;
+  applyPendingWorkflowGate(run);
+  return true;
+}
+
 export function runCheckpointFromWorkflow(checkpoint) {
   if (!checkpoint) return null;
   const kind = checkpoint.kind === "needs_input" ? "needs_input" : "awaiting_approval";

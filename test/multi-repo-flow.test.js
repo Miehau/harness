@@ -225,6 +225,20 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     assert.equal(packet.status, 200, packet.text);
     assert.equal((packet.json.repositories || []).length >= 2, true, JSON.stringify(packet.json.repositories));
 
+    // Final proof binds the exact content reviewed in each delivery repository.
+    // Restore the same bytes after each rejection so the existing partial-delivery
+    // retry below still exercises its original A-success/B-failure journey.
+    await writeFile(join(workspace.cwd, "done-a.txt"), "changed-after-proof-a\n");
+    const stalePrimary = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(stalePrimary.status, 400, stalePrimary.text);
+    assert.match(stalePrimary.json.error, /Final proof is stale: repository primary changed after review/);
+    await writeFile(join(workspace.cwd, "done-a.txt"), "from-a\n");
+    await writeFile(join(extraRepo.cwd, "done-b.txt"), "changed-after-proof-b\n");
+    const staleExtra = await invoke(daemon, "POST", `/api/tickets/${id}/evidence/approve`, { body: {} });
+    assert.equal(staleExtra.status, 400, staleExtra.text);
+    assert.match(staleExtra.json.error, new RegExp(`Final proof is stale: repository ${extraId} changed after review`));
+    await writeFile(join(extraRepo.cwd, "done-b.txt"), "from-b\n");
+
     const proof = await runAgainstDaemon(daemon, ["approve-proof", id]);
     assert.equal(proof.code, 0, proof.stderr);
     await waitForRun(daemon, id, (run) => run.status === "needs_attention" || run.status === "completed", 20_000);

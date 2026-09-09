@@ -1,19 +1,81 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { cloneRunAccess, storedProjectPolicy } from "./access-policy.js";
+import { cloneRunAccess } from "./access-policy.js";
 import { blockingReasons, flattenSteps, parentGroup } from "./plan.js";
-import { gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
+import { cleanupOutcomes, gateStepStatusSet, inFlightRunStatusSet, inFlightStepStatusSet, normalizeRunCleanup, restartableStepStatusSet, resumeRunStatusSet, runnableStepStatusSet } from "./run-status.js";
 import { initialWorkflow, workflowBlockers } from "./workflow.js";
 import { createSteeringLedger } from "./steering.js";
-import { inspectionFocus } from "./inspection.js";
-import { boundedText, redactRecord, redactText, safeArtifactMetadata, safeReasoningSummary } from "./redaction.js";
-import { projectProofMap } from "./proof-map.js";
+import { publicPreviewState, publicRun, publicState, compactRun } from "./inspection.js";
+import { appendBounded, createActivityCapture, groupActivityEvents, pushBounded, retainedUsage } from "./activity.js";
+import { actionableFindings, executionFailure, findingsFingerprint, findingsRequireVisualEvidence, humanProofFindings, recurringReviewClusters, refreshedReviewFindings, reviewFindingLedger, reviewFixImages, reviewScopeExpanded, storedFindingsFingerprint, unaddressedReviewClusters, unresolvedReviewFindings } from "./review-findings.js";
+import { boundedText, redactRecord, redactText, safeArtifactMetadata } from "./redaction.js";
 
 export const visualEvidencePolicy = "contract-only-v1";
+export { actionableFindings, appendBounded, compactRun, createActivityCapture, executionFailure, findingsFingerprint, findingsRequireVisualEvidence, groupActivityEvents, humanProofFindings, publicPreviewState, publicRun, publicState, pushBounded, recurringReviewClusters, refreshedReviewFindings, reviewFindingLedger, reviewFixImages, reviewScopeExpanded, storedFindingsFingerprint, unaddressedReviewClusters, unresolvedReviewFindings };
 export const finalReviewRepositoryBoundary = "Harness boundary: review-fixes-round-*.md files are external audit records, not product artifacts. The harness removes its legacy copies; do not create or restore them in the repository.";
+
+export function nextAttemptId(step) {
+  const current = Math.max(
+    Number(step.attemptSequence) || 0,
+    ...(step.attempts || []).map((attempt) =>
+      Number(String(attempt.attemptId || "").match(/^attempt-(\d+)$/)?.[1]) || 0)
+  );
+  return `attempt-${current + 1}`;
+}
 
 export function finalReviewFixFeedback(findings) {
   return `${finalReviewRepositoryBoundary}\n\nCanonical current findings (this list supersedes any earlier duplicated or stale finding list in the session):\n${JSON.stringify(findings, null, 2)}\n\nRe-evaluate these findings against the current harness runtime before editing. If a harness or environment correction made a finding pass without a repository change, preserve the repository and report it completed for fresh verification; do not add a synthetic fallback.`;
+}
+
+export function finalReviewSequence(run) {
+  const sequence = (value) =>
+    Number(String(value || "").match(/^final-review-(\d+)$/)?.[1]) || 0;
+  return Math.max(
+    Number(run.finalReviewSequence) || 0,
+    ...(run.reviews || []).flatMap((review) => [Number(review.round) || 0, sequence(review.reviewId)]),
+    ...Object.keys(run.finalCheckHistory || {}).map(sequence),
+    ...Object.keys(run.finalDiffHistory || {}).map(sequence),
+    0
+  );
+}
+
+export function migrateFinalProofLocators(run) {
+  const reviews = run.reviews || [];
+  let nextSequence = finalReviewSequence(run);
+  const knownIds = new Set([
+    ...Object.keys(run.finalCheckHistory || {}),
+    ...Object.keys(run.finalDiffHistory || {}),
+    ...reviews.map((review) => review.reviewId).filter(Boolean)
+  ]);
+  for (const review of reviews) {
+    const checks = review.finalChecks || review.reviews?.find((item) => item.role === "deterministic")?.checks;
+    if (!checks) continue;
+    const roundId = Number(review.round) ? `final-review-${Number(review.round)}` : null;
+    let reviewId = review.reviewId || (roundId && !knownIds.has(roundId) ? roundId : null);
+    while (!reviewId) reviewId = `final-review-${++nextSequence}`;
+    knownIds.add(reviewId);
+    review.reviewId = reviewId;
+    review.finalChecks ||= structuredClone(checks);
+    run.finalCheckHistory ||= {};
+    run.finalCheckHistory[reviewId] ||= structuredClone(review.finalChecks);
+    if (review.diff) {
+      run.finalDiffHistory ||= {};
+      run.finalDiffHistory[reviewId] ||= structuredClone(review.diff);
+    }
+    run.finalReviewHistory ||= {};
+    run.finalReviewHistory[reviewId] ||= { createdAt: review.createdAt || null };
+  }
+  run.finalReviewSequence = Math.max(nextSequence, finalReviewSequence(run));
+  if (!reviews.length || !run.proofMap?.criteria) return;
+  const reviewFor = (reportedAt) => reviews.filter((review) => review.reviewId && (!reportedAt || !review.createdAt || review.createdAt <= reportedAt)).at(-1) || reviews.find((review) => review.reviewId) || null;
+  const migrateResult = (result) => {
+    if (!result?.evidence) return;
+    const reviewId = reviewFor(result.reportedAt)?.reviewId;
+    if (reviewId) result.evidence = result.evidence.map((locator) => locator?.scope === "final" && !locator.reviewId ? { ...locator, reviewId } : locator);
+  };
+  for (const criterion of run.proofMap.criteria) {
+    migrateResult(criterion.current);
+    for (const result of criterion.history || []) migrateResult(result);
+  }
 }
 
 export const runStageDefs = [
@@ -35,7 +97,7 @@ export function localStages() {
   return stages;
 }
 
-export const cleanupOutcomes = Object.freeze(["running", "not-required", "complete", "incomplete", "unsupported"]);
+export { cleanupOutcomes, normalizeRunCleanup };
 
 function cleanupOutcome(executions) {
   const outcomes = executions.map((execution) => execution.outcome);
@@ -44,26 +106,6 @@ function cleanupOutcome(executions) {
   if (outcomes.includes("unsupported")) return "unsupported";
   if (outcomes.includes("complete")) return "complete";
   return "not-required";
-}
-
-/** Normalize durable cleanup without discarding adapter diagnostics or identity evidence. */
-export function normalizeRunCleanup(value = {}) {
-  const executions = Array.isArray(value?.executions) ? value.executions.map((execution) => {
-    const outcome = cleanupOutcomes.includes(execution?.outcome) ? execution.outcome : "incomplete";
-    return {
-      ...structuredClone(execution || {}),
-      executionId: String(execution?.executionId || "legacy-unknown"),
-      outcome,
-      triggers: Array.isArray(execution?.triggers) ? structuredClone(execution.triggers) : [],
-      diagnostics: Array.isArray(execution?.diagnostics) ? structuredClone(execution.diagnostics) : [],
-      unresolved: Array.isArray(execution?.unresolved) ? structuredClone(execution.unresolved) : []
-    };
-  }) : [];
-  return {
-    executions,
-    outcome: cleanupOutcome(executions),
-    updatedAt: value?.updatedAt || null
-  };
 }
 
 export function initializeRunCleanup(run, { legacy = false } = {}) {
@@ -289,158 +331,6 @@ export function finalReviewFixStep(round, findings, rootCauseClusters = [], rest
     status: "ready", attempts: [], artifacts: [], attachments: [], diff: null, sessionFile: null, lastError: null
   };
 }
-
-export function appendBounded(value, addition, limit) {
-  const chunk = String(addition || "");
-  if (chunk.length >= limit) return chunk.slice(-limit);
-  const current = String(value || "");
-  return `${current.slice(Math.max(0, current.length + chunk.length - limit))}${chunk}`;
-}
-
-export function pushBounded(items, item, limit) {
-  items.push(item);
-  if (items.length > limit) items.splice(0, items.length - limit);
-}
-
-function activityGroupMeta(event = {}) {
-  if (event.type === "phase") return { title: event.label || "Workflow step", note: "", focus: true };
-  if (event.type === "reasoning_summary") return { title: safeReasoningSummary(String(event.detail || "Plan next action").split(/\r?\n/).find((line) => line.trim()) || "Plan next action", 120) || "Plan next action", note: safeReasoningSummary(event.detail || "", 1000), focus: true };
-  if (event.type === "thinking") return { title: "Plan next action", note: "", focus: true };
-  if (event.type === "agent_error") return { title: "Investigate failure", note: event.label || "", focus: false };
-  const tool = event.tool || "";
-  if (["read", "grep", "find", "ls"].includes(tool)) return { title: "Explore repository", note: "", focus: false };
-  if (["edit", "write"].includes(tool)) return { title: "Change implementation", note: "", focus: false };
-  if (tool === "worker_report") return { title: "Record worker outcome", note: "", focus: false };
-  if (tool === "bash") return { title: /\b(test|check|verify)\b/i.test(event.args || "") ? "Run verification" : "Run command", note: "", focus: false };
-  return { title: "Agent activity", note: "", focus: false };
-}
-
-export function groupActivityEvents(events = []) {
-  const groups = [];
-  const openTools = new Map();
-  let current = null;
-  for (const event of events) {
-    if (["agent_start", "turn_start", "turn_end", "agent_settled", "usage"].includes(event.type)) continue;
-    let group = event.callId ? openTools.get(event.callId) : null;
-    if (!group) {
-      const meta = activityGroupMeta(event);
-      const keepFocus = current?.focus && !["phase", "reasoning_summary", "agent_error"].includes(event.type);
-      if (keepFocus) group = current;
-      else if (current?.title === meta.title && current.note === meta.note) group = current;
-      else {
-        group = { key: `group:${groups.length}:${event.at || ""}`, title: meta.title, note: meta.note, at: event.at, endedAt: event.at, focus: meta.focus, events: [], isError: false };
-        groups.push(group);
-      }
-    }
-    group.events.push(event);
-    group.endedAt = event.at || group.endedAt;
-    group.isError ||= event.type === "agent_error" || (event.type === "tool_end" && event.isError);
-    current = group;
-    if (event.type === "tool_start" && event.callId) openTools.set(event.callId, group);
-    if (event.type === "tool_end" && event.callId) openTools.delete(event.callId);
-  }
-  const activeGroups = new Set(openTools.values());
-  return groups.map((group) => {
-    const { focus, ...saved } = group;
-    return { ...saved, status: group.isError ? "failed" : activeGroups.has(group) ? "running" : "complete" };
-  });
-}
-
-function retainedUsage(activity = {}) {
-  if (activity.usage) return {
-    ...Object.fromEntries(["input", "output", "cacheRead", "cacheWrite", "calls", "records"].map((key) => [key, Number(activity.usage[key]) || 0])),
-    complete: activity.usage.complete === true
-  };
-  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, records: 0, complete: !activity.startedAt && !activity.attemptId && !(activity.events || []).length };
-  for (const event of activity.events || []) addUsage(usage, event);
-  return usage;
-}
-
-function addUsage(usage, event) {
-  if (event.type === "tool_start") usage.calls++;
-  if (event.type !== "usage") return;
-  usage.records++;
-  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
-    const value = Number(event[key]);
-    if (Number.isFinite(value) && value >= 0) usage[key] += value;
-  }
-}
-
-export function createActivityCapture({ existing = {}, persist, emit, now = Date.now, outputLimit = 100000, eventLimit = 200 }) {
-  const usage = retainedUsage(existing);
-  const startedAt = existing.startedAt || new Date(now()).toISOString();
-  const events = redactRecord((existing.events || []).slice(-eventLimit));
-  const prompts = redactRecord((existing.prompts || []).slice(-20));
-  let rawOutput = appendBounded("", redactText(existing.rawOutput), outputLimit);
-  let lastEventAt = existing.lastEventAt || startedAt;
-  let lastEvent = existing.lastEvent || "";
-  let warning = Boolean(existing.warning);
-  let completedAt = existing.completedAt;
-  let persistence;
-  let dirty = false;
-  const lastThinkingAt = new Map();
-  const current = () => ({
-    startedAt, lastEventAt, lastEvent, warning, rawOutput, usage: { ...usage }, events: events.slice(), prompts: prompts.slice(), groups: groupActivityEvents(events),
-    ...(completedAt ? { completedAt } : {})
-  });
-  const save = () => {
-    dirty = true;
-    if (persistence || !persist) return;
-    persistence = (async () => {
-      while (dirty) {
-        dirty = false;
-        await persist(current());
-      }
-    })().catch(() => {}).finally(() => {
-      persistence = null;
-      if (dirty) save();
-    });
-  };
-  return {
-    onEvent(event, actor) {
-      const timestamp = now();
-      const activityKey = actor || "stage";
-      if (event.type === "thinking" && timestamp - (lastThinkingAt.get(activityKey) || 0) < 2000) return;
-      if (event.type === "thinking") lastThinkingAt.set(activityKey, timestamp);
-      const item = redactRecord({ ...event, ...(actor ? { actor } : {}), at: new Date(timestamp).toISOString() });
-      addUsage(usage, item);
-      if (item.type === "prompt") {
-        const prompt = boundedText(item.content || item.prompt, 16000);
-        item.content = prompt.value;
-        item.truncated = Boolean(item.truncated) || prompt.truncated;
-        item.total = Math.max(prompt.total, Number(item.total) || 0);
-        delete item.prompt;
-        pushBounded(prompts, item, 20);
-        lastEventAt = item.at;
-        lastEvent = item.label || lastEvent;
-        save();
-      } else if (item.type === "text_delta") {
-        rawOutput = appendBounded(rawOutput, redactText(item.delta), outputLimit);
-        // Deltas carry the only copy of streamed output while the worker is live.
-        // Use the existing coalescing writer so abort/restart recovery sees its tail.
-        save();
-      } else {
-        pushBounded(events, item, eventLimit);
-        lastEventAt = item.at;
-        lastEvent = item.label || lastEvent;
-        warning = item.type === "agent_error" || (item.type === "tool_end" && item.isError);
-        save();
-      }
-      emit?.(["usage", "tool_start"].includes(item.type) ? { ...item, usageTotals: { ...usage } } : item);
-    },
-    snapshot() {
-      completedAt ||= new Date(now()).toISOString();
-      return current();
-    },
-    async flush() {
-      do {
-        if (dirty && !persistence) save();
-        await persistence;
-      } while (dirty || persistence);
-    }
-  };
-}
-
 const attemptEventLimit = 200;
 const attemptOutputLimit = 100000;
 
@@ -452,12 +342,7 @@ function boundedAttemptActivity(activity = {}, rawOutput = "") {
     prompts: (activity.prompts || []).slice(-20).map((item) => {
       const { prompt: legacyPrompt, ...saved } = item;
       const bounded = boundedText(saved.content || legacyPrompt, 4000);
-      return redactRecord({
-        ...saved,
-        content: bounded.value,
-        truncated: Boolean(saved.truncated) || bounded.truncated,
-        total: Math.max(bounded.total, Number(saved.total) || 0)
-      });
+      return redactRecord({ ...saved, content: bounded.value, truncated: Boolean(saved.truncated) || bounded.truncated, total: Math.max(bounded.total, Number(saved.total) || 0) });
     }),
     rawOutput: appendBounded("", redactText(activity.rawOutput || rawOutput), attemptOutputLimit)
   };
@@ -465,14 +350,11 @@ function boundedAttemptActivity(activity = {}, rawOutput = "") {
 
 export function failureDetails(error, { status, reason, phase = "execution" } = {}) {
   const message = String(error || reason || "");
-  if (!["failed", "needs_attention", "verification_failed", "cancelled", "paused", "interrupted"].includes(status)) {
-    return { kind: null, phase: null, message: null };
-  }
+  if (!["failed", "needs_attention", "verification_failed", "cancelled", "paused", "interrupted"].includes(status)) return { kind: null, phase: null, message: null };
   const kind = status === "cancelled" ? "cancellation"
     : status === "paused" || status === "interrupted" ? "interruption"
     : /provider|model request|rate limit|quota|authentication|api key|timeout/i.test(message) ? "provider"
-    : /check|test|verification/i.test(message) ? "verification"
-    : "execution";
+    : /check|test|verification/i.test(message) ? "verification" : "execution";
   return { kind, phase, message: redactText(message) || null };
 }
 
@@ -835,184 +717,11 @@ export function nextRunnableBatch(plan) {
   ) : [first];
 }
 
-const actionableSeverities = new Set(["critical", "high", "medium", "blocking", "warning"]);
-
-function similarFinding(left, right) {
-  const leftCategory = String(left.category || "general").toLowerCase();
-  const rightCategory = String(right.category || "general").toLowerCase();
-  if (leftCategory !== rightCategory && leftCategory !== "tests" && rightCategory !== "tests") return false;
-  const sharedSurfaces = (left.evidence || []).filter((leftEvidence) => (right.evidence || []).some((rightEvidence) =>
-    leftEvidence.file
-    && String(leftEvidence.file).toLowerCase() === String(rightEvidence.file || "").toLowerCase()
-    && (!leftEvidence.line || !rightEvidence.line || Math.abs(leftEvidence.line - rightEvidence.line) <= 5)
-  )).length;
-  if (!sharedSurfaces) return false;
-  const leftMechanism = `${left.claim || ""} ${left.suggestedFix || left.suggested_fix || ""}`;
-  const rightMechanism = `${right.claim || ""} ${right.suggestedFix || right.suggested_fix || ""}`;
-  const sameLocator = (value) => /\b(?:same|identical)\b/i.test(value);
-  const differentLocator = (value) => /\b(?:different|distinct|another|pre-existing)\b/i.test(value);
-  if ((sameLocator(leftMechanism) && differentLocator(rightMechanism))
-    || (differentLocator(leftMechanism) && sameLocator(rightMechanism))) return false;
-  const technicalIds = (value) => new Set(value.match(/\b[a-z][a-z0-9_]*(?:At|Id|ID)\b/g) || []);
-  const leftIds = technicalIds(leftMechanism);
-  const rightIds = technicalIds(rightMechanism);
-  if (leftIds.size && rightIds.size && ![...leftIds].some((id) => rightIds.has(id))) return false;
-  const words = (value) => new Set((String(value || "").toLowerCase().match(/[a-z]{5,}/g) || []).map((word) => {
-    if (word.length > 7 && word.endsWith("ing")) return word.slice(0, -3);
-    if (word.length > 6 && word.endsWith("ed")) return word.slice(0, -2);
-    if (word.length > 6 && word.endsWith("es")) return word.slice(0, -2);
-    if (word.length > 5 && word.endsWith("s")) return word.slice(0, -1);
-    return word;
-  }));
-  const leftWords = words(leftMechanism);
-  const rightWords = words(rightMechanism);
-  if (Math.min(leftWords.size, rightWords.size) < 4) return false;
-  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  const ratio = overlap / Math.min(leftWords.size, rightWords.size);
-  return (sharedSurfaces >= 2 && overlap >= 4 && ratio >= 0.25)
-    || (overlap >= 6 && ratio >= 0.6);
-}
-
-export function actionableFindings(reviews) {
-  const findings = reviews.flatMap((review) => review.findings || [])
-    .filter((finding) => actionableSeverities.has(String(finding.severity || "").toLowerCase()));
-  const genericGateClaim = (finding) => {
-    const claim = String(finding.claim || "");
-    return /^repository check failed:/i.test(claim)
-      || /^(?:the\s+)?(?:(?:required|canonical|supplied)\s+)?(?:verification\s+)?(?:gate|suite)\b.{0,80}\b(?:red|not green|failed|failing|reports?\s+failures?)\b/i.test(claim);
-  };
-  const hasSpecificTestFinding = findings.some((finding) =>
-    String(finding.category || "").toLowerCase() === "tests"
-    && (finding.evidence?.[0]?.file || finding.acceptanceCriterion)
-    && !genericGateClaim(finding)
-  );
-  const unique = new Map();
-  for (const finding of findings) {
-    if (hasSpecificTestFinding
-      && String(finding.category || "").toLowerCase() === "tests"
-      && genericGateClaim(finding)) continue;
-    const evidence = finding.evidence?.[0] || {};
-    const category = String(finding.category || "general").toLowerCase();
-    const criterion = String(finding.acceptanceCriterion || "").trim().toLowerCase();
-    const file = String(evidence.file || "").trim().toLowerCase();
-    let key = category === "tests" && criterion && file
-      ? `${category}:${criterion}:${file}`
-      : `${file}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
-    let previous = unique.get(key);
-    if (!previous) {
-      const similar = [...unique.entries()].find(([, item]) => similarFinding(item.finding, finding));
-      if (similar) [key, previous] = similar;
-    }
-    const evidenceFiles = new Set((finding.evidence || []).map((item) => item.file).filter(Boolean));
-    const detail = evidenceFiles.size * 100 + String(finding.claim || "").length + String(finding.suggestedFix || finding.suggested_fix || "").length;
-    if (!previous || detail > previous.detail) unique.set(key, { finding, detail });
-  }
-  return [...unique.values()].map(({ finding }) => finding);
-}
-
-export function refreshedReviewFindings(review = {}) {
-  if (!Array.isArray(review.reviews) || !review.reviews.length) return review.actionableFindings || [];
-  const humanFindings = (review.actionableFindings || [])
-    .filter((finding) => finding.category === "human-proof-review")
-    .flatMap((finding) => humanProofFindings(finding.claim));
-  return humanFindings.length ? humanFindings : actionableFindings(review.reviews);
-}
-
-// Review records are the durable audit log. A prerequisite-only round cannot
-// resolve a product finding that no independent reviewer has inspected.
-export function reviewFindingLedger(reviews = []) {
-  const ledger = [];
-  for (const review of reviews) {
-    const findings = actionableFindings([{ findings: review.actionableFindings || [] }, ...(review.reviews || [])]);
-    const independent = review.reviewMode === "independent" || (!review.reviewMode && (review.reviews || []).some((item) => ["requirements", "integration", "verification"].includes(item.role)));
-    const seen = new Set();
-    for (const finding of findings) {
-      let entry = ledger.find((item) => findingsFingerprint([item.finding]) === findingsFingerprint([finding]) || similarFinding(item.finding, finding));
-      if (!entry) {
-        entry = { id: `finding-${ledger.length + 1}`, finding, status: "open", history: [] };
-        ledger.push(entry);
-      }
-      const status = entry.status === "resolved" ? "regressed" : "open";
-      entry.finding = finding;
-      entry.status = status;
-      entry.history.push({ round: review.round, status, reviewId: review.reviewId || null });
-      seen.add(entry.id);
-    }
-    if (independent) for (const entry of ledger) {
-      if (!seen.has(entry.id) && entry.status !== "resolved") {
-        entry.status = "resolved";
-        entry.history.push({ round: review.round, status: "resolved", reviewId: review.reviewId || null });
-      }
-    }
-  }
-  return ledger;
-}
-
-export function unresolvedReviewFindings(reviews = []) {
-  return reviewFindingLedger(reviews).filter((item) => item.status !== "resolved").map((item) => item.finding);
-}
-
-export function executionFailure(error, { phase = "execution", command = null } = {}) {
-  const message = redactText(String(error?.message || error?.summary || error || "Execution failed"));
-  const kind = error?.failureKind || (error?.code === "MODEL_RESPONSE_ERROR" || /(?:model output|independent-review output)/i.test(message) ? "model-output"
-    : /context (?:window|length)|provider|usage limit/i.test(message) ? "provider"
-    : /conflict|unmerged/i.test(message) ? "merge-conflict"
-    : /ETIMEDOUT|timed out|timeout/i.test(message) ? "timeout" : "execution");
-  const nextAction = kind === "evidence-publication" ? "Restore forge access and resume delivery; retain the reviewed files and local proof."
-    : kind === "visual-evidence" || kind === "capture-configuration" || kind === "capture-preflight" ? "Repair the separate capture command or fixture, then rerun checks and criterion coverage before independent review."
-    : kind === "provider" ? "Restore provider capacity or retry with a fresh bounded review session; preserve verified repository work."
-    : kind === "model-output" ? "Retry the structured report without repeating implementation."
-    : kind === "merge-conflict" ? "Resolve the persisted conflict and reverify the combined tree before delivery."
-    : "Inspect the failed command and diagnostic, correct the cause, then resume from the saved checkpoint.";
-  return { kind, phase, command: error?.command || command, message, diagnostic: redactText(String(error?.failureHighlights || error?.output || "")).slice(-8000), nextAction };
-}
-
-export function reviewScopeExpanded(previous = [], refreshed = []) {
-  const before = actionableFindings([{ findings: previous }]);
-  const after = actionableFindings([{ findings: refreshed }]);
-  return after.some((finding) => !before.some((prior) =>
-    findingsFingerprint([prior]) === findingsFingerprint([finding]) || similarFinding(prior, finding)
-  ));
-}
-
 export const MAX_CORRECTION_ROUNDS = 12;
-
-export function findingsFingerprint(findings = []) {
-  return actionableFindings([{ findings }])
-    .map((finding) => {
-      const evidence = finding.evidence?.[0] || {};
-      const diagnostic = !evidence.file || /^repository check failed:/i.test(String(finding.claim || ""))
-        ? finding.suggestedFix || finding.suggested_fix || ""
-        : "";
-      return `${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}:${diagnostic}`.toLowerCase();
-    })
-    .sort()
-    .join("|");
-}
-
-export function storedFindingsFingerprint(findings = []) {
-  return findings
-    .map((finding) => {
-      const evidence = finding.evidence?.[0] || {};
-      return `${finding.severity || ""}:${finding.category || ""}:${evidence.file || ""}:${evidence.line || ""}:${finding.claim || ""}`.toLowerCase();
-    })
-    .sort()
-    .join("|");
-}
 
 export function pendingReviewAttempt(run, round) {
   const attempt = run?.pendingReviewAttempt;
   return Number(attempt?.round) === Number(round) && attempt?.checks && attempt?.diff ? attempt : null;
-}
-
-export function humanProofFindings(feedback) {
-  const claim = String(feedback || "").trim();
-  if (!claim) return [];
-  const numbered = [...claim.matchAll(/\(\d+\)\s+([\s\S]*?)(?=\s+\(\d+\)\s+|$)/g)].map((match) => match[1].trim());
-  return (numbered.length ? numbered : [claim]).map((item) => ({
-    severity: "blocking", category: "human-proof-review", claim: item,
-    evidence: [], suggestedFix: item, confidence: "high"
-  }));
 }
 
 export function liveCaptureEnvironment(target, ticketId, runId) {
@@ -1023,27 +732,6 @@ export function liveCaptureEnvironment(target, ticketId, runId) {
     AGENT_PLAN_CAPTURE_TICKET_ID: ticketId,
     AGENT_PLAN_CAPTURE_RUN_ID: runId
   };
-}
-
-export function recurringReviewClusters(reviews = [], minRounds = 3) {
-  const counts = new Map();
-  for (const review of reviews) {
-    const keys = new Set(actionableFindings([{ findings: review.actionableFindings || review.findings || [] }]).map((finding) => {
-      const evidence = finding.evidence?.[0] || {};
-      const surface = String(evidence.file || finding.acceptanceCriterion || "").trim().toLowerCase();
-      if (!surface) return null;
-      const location = evidence.file && evidence.line ? `${surface}:${evidence.line}` : surface;
-      return `${String(finding.category || "general").toLowerCase()}:${location}`;
-    }).filter(Boolean));
-    for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  return [...counts].filter(([, count]) => count >= minRounds).map(([key]) => key).sort();
-}
-
-export function unaddressedReviewClusters(reviews = []) {
-  const corrected = new Set(reviews.flatMap((review) => review.fix?.rootCauseClusters || []));
-  const open = new Set(recurringReviewClusters([{ actionableFindings: unresolvedReviewFindings(reviews) }], 1));
-  return recurringReviewClusters(reviews).filter((key) => open.has(key) && !corrected.has(key));
 }
 
 export function shouldPauseCorrection({ round, findings, previousFingerprint, maxRounds = MAX_CORRECTION_ROUNDS } = {}) {
@@ -1108,20 +796,12 @@ export function recoverableCleanReview(run = {}) {
   if (!review || !Array.isArray(review.actionableFindings) || review.actionableFindings.length) return null;
   const checks = review.reviews?.find((item) => item.role === "deterministic")?.checks;
   if (checks?.status !== "passed") return null;
-  return { round: Number(review.round) || run.reviews.length, checks, diff: review.diff };
-}
-
-export function findingsRequireVisualEvidence(findings = []) {
-  return findings.some((finding) => {
-    const context = [finding.category, finding.claim, finding.suggestedFix, finding.suggested_fix, ...(finding.evidence || []).map((item) => item.file)].join(" ");
-    return String(finding.category || "").toLowerCase() === "accessibility"
-      || /\b(?:screenshot|image|video|visual|layout|viewport|pixel|desktop|mobile)\b/i.test(context);
-  });
-}
-
-export function reviewFixImages(sessionFile, findings = [], images = []) {
-  if (sessionFile) return [];
-  return findingsRequireVisualEvidence(findings) ? images : [];
+  return {
+    round: Number(review.round) || run.reviews.length,
+    checks,
+    diff: review.diff,
+    ...(review.proofRevision ? { proofRevision: review.proofRevision } : {})
+  };
 }
 
 export function interruptedStepFeedback(step = {}) {
@@ -1206,232 +886,4 @@ export function workflowResumeStage(run) {
 
 export function artifactMetadata(artifact) {
   return safeArtifactMetadata(artifact);
-}
-
-function compactActivityEvent(event = {}) {
-  return redactRecord({
-    type: event.type || "activity", tool: event.tool || null, label: boundedText(event.label, 240).value,
-    ...(event.type === "usage" ? { input: event.input, output: event.output, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite } : {}),
-    at: event.at || null, isError: Boolean(event.isError), ...(event.actor ? { actor: boundedText(event.actor, 120).value } : {})
-  });
-}
-
-function publicAttempt(attempt) {
-  const clone = structuredClone(attempt);
-  clone.usage = retainedUsage(attempt);
-  for (const key of ["rawOutput", "activityGroups", "sessionFile", "prompt", "artifactRefs"]) delete clone[key];
-  if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20)
-    // Short tool-end payloads duplicate durable activity without adding a
-    // supervision signal. Keep only oversized payloads, explicitly bounded.
-    .filter((event) => event.type !== "tool_end" || String(event.output || "").length > 2000)
-    .map((event) => {
-      const compact = compactActivityEvent(event);
-      if (event.type === "tool_end" && typeof event.output === "string") {
-        const output = boundedText(event.output, 2000);
-        compact.output = output.truncated ? `${output.value}\n… output truncated for public state` : output.value;
-      }
-      return compact;
-    });
-  if (clone.report) clone.report = redactRecord({ status: clone.report.status, summary: boundedText(clone.report.summary, 240).value, request: boundedText(clone.report.request, 240).value });
-  if (typeof clone.feedback === "string" && clone.feedback.length > 1000) clone.feedback = `${clone.feedback.slice(0, 1000)}\n… feedback truncated for public state`;
-  if (clone.checks) clone.checks = publicChecks(clone.checks);
-  if (clone.verification) clone.verification = redactRecord({ summary: boundedText(clone.verification.summary, 240).value, findings: clone.verification.findings });
-  if (clone.diff) clone.diff = redactRecord({ available: clone.diff.available, files: clone.diff.files, stat: boundedText(clone.diff.stat, 1000).value });
-  if (clone.checkDiff) clone.checkDiff = redactRecord({ available: clone.checkDiff.available, files: clone.checkDiff.files, stat: boundedText(clone.checkDiff.stat, 1000).value });
-  if (clone.aggregateDiff) clone.aggregateDiff = redactRecord({ available: clone.aggregateDiff.available, files: clone.aggregateDiff.files, stat: boundedText(clone.aggregateDiff.stat, 1000).value });
-  return redactRecord(clone);
-}
-
-function removePrivateLocations(value) {
-  if (Array.isArray(value)) return value.map(removePrivateLocations);
-  if (!value || typeof value !== "object") return value;
-  for (const [key, item] of Object.entries(value)) {
-    if (["path", "cwd", "sourceCwd", "sessionFile", "requirementsSessionFile", "productContextPath", "fixturePath"].includes(key)) delete value[key];
-    else value[key] = removePrivateLocations(item);
-  }
-  return value;
-}
-
-function ownerWorkspaceDisplayPath(workspace) {
-  if (!workspace || typeof workspace !== "object") return "";
-  return workspace.displayPath || workspace.cwd || "";
-}
-
-function publicAccessPolicy(state) {
-  const cwd = state?.workspace?.cwd;
-  const policies = state?.projectPolicies;
-  let key = cwd;
-  if (cwd && policies && typeof policies === "object" && !Array.isArray(policies) && !Object.hasOwn(policies, cwd)) {
-    try { key = realpathSync(cwd); } catch {}
-  }
-  const stored = storedProjectPolicy(state, key);
-  return {
-    mode: stored.mode === "any" ? "any" : "restricted",
-    extraRoots: stored.extraRoots.map((root) => ({
-      displayPath: root.displayPath || root.path || "",
-      mode: root.mode === "read/write" ? "read/write" : "read-only"
-    }))
-  };
-}
-
-function publicWorkflow(workflow) {
-  if (!workflow) return workflow;
-  return redactRecord({
-    skillName: workflow.skillName || null,
-    status: workflow.status || "idle",
-    stages: (workflow.stages || []).map((stage) => ({ id: stage.id, status: stage.status, title: boundedText(stage.title, 240).value, summary: boundedText(stage.summary, 240).value, createdAt: stage.createdAt || null, updatedAt: stage.updatedAt || null })),
-    checkpoints: (workflow.checkpoints || []).map(publicCheckpoint)
-  });
-}
-
-function publicCheckpoint(checkpoint) {
-  if (!checkpoint) return checkpoint;
-  const { prompt, productContext, finalChecks, media, questions, ...rest } = checkpoint;
-  return redactRecord({ ...rest,
-    title: boundedText(rest.title, 240).value,
-    questions: (questions || []).map((question) => boundedText(question, 240).value),
-    ...(finalChecks ? { finalChecks: { status: finalChecks.status, command: finalChecks.command || null, summary: boundedText(finalChecks.summary, 240).value } } : {}),
-    ...(media ? { media: media.map(safeArtifactMetadata) } : {})
-  });
-}
-
-function publicEvent(event, detailed) {
-  const clone = { ...event };
-  for (const key of ["args", "output", "result", "detail"]) {
-    if (typeof clone[key] !== "string") continue;
-    if (!detailed) delete clone[key];
-    else if (clone[key].length > 2000) clone[key] = `${clone[key].slice(0, 2000)}\n… output truncated; open the saved session for full detail`;
-  }
-  return clone;
-}
-
-function publicActivity(activity, detailed = true) {
-  if (!activity) return activity;
-  const clone = { ...activity, events: (activity.events || []).map((event) => publicEvent(event, detailed)) };
-  delete clone.prompts;
-  delete clone.rawOutput;
-  delete clone.groups;
-  return clone;
-}
-
-function diffSummary(diff) {
-  if (!diff) return diff;
-  const { patch, ...summary } = diff;
-  return summary;
-}
-
-function publicChecks(checks) {
-  if (!checks) return checks;
-  const { output, ...summary } = checks;
-  return summary;
-}
-
-export function publicRun(run) {
-  if (!run) return run;
-  const clone = structuredClone(run);
-  clone.inspectionFocus = inspectionFocus(run);
-  clone.reviewFindings = reviewFindingLedger(run.reviews);
-  clone.checkpoint = publicCheckpoint(clone.checkpoint);
-  clone.workflow = publicWorkflow(clone.workflow);
-  clone.lastError = boundedText(clone.lastError, 1000).value || null;
-  if (Array.isArray(clone.artifacts)) clone.artifacts = clone.artifacts.map(artifactMetadata);
-  for (const stage of clone.stages || []) if (stage.activity) {
-    stage.activity.usage = retainedUsage(stage.activity);
-    delete stage.activity.prompts;
-    if (Array.isArray(stage.activity.events)) stage.activity.events = stage.activity.events.slice(-20).map(compactActivityEvent);
-    delete stage.activity.groups;
-    delete stage.activity.rawOutput;
-  }
-  clone.proofMap = projectProofMap(run);
-  for (const step of flattenSteps(clone.plan)) {
-    delete step.prompt;
-    delete step.productContext;
-    if (Array.isArray(step.artifacts)) step.artifacts = step.artifacts.map(artifactMetadata);
-    if (Array.isArray(step.attempts)) step.attempts = step.attempts.map(publicAttempt);
-    if (step.diff) step.diff = redactRecord({ available: step.diff.available, files: step.diff.files, stat: boundedText(step.diff.stat, 1000).value });
-    delete step.sessionFile;
-  }
-  if (Array.isArray(clone.reviews)) clone.reviews = clone.reviews.map((review) => ({
-    round: review.round, createdAt: review.createdAt, actionableFindings: redactRecord(review.actionableFindings || []),
-    diff: diffSummary(review.diff),
-    reviews: (review.reviews || []).map((item) => ({ role: item.role, summary: boundedText(item.summary, 240).value, checks: item.checks && { status: item.checks.status, command: item.checks.command || null, summary: boundedText(item.checks.summary, 240).value } })),
-    ...(review.fix ? {
-      fix: {
-        ...(review.fix.diff ? { diff: diffSummary(review.fix.diff) } : {}),
-        ...(review.fix.artifact ? (() => {
-          const { bodySummary, path, content, ...artifact } = review.fix.artifact;
-          return { artifact: redactRecord(artifact) };
-        })() : {})
-      }
-    } : {})
-  }));
-  if (clone.deliveredDiff) clone.deliveredDiff = redactRecord({ available: clone.deliveredDiff.available, files: clone.deliveredDiff.files, stat: boundedText(clone.deliveredDiff.stat, 1000).value });
-  if (clone.integration?.diff) clone.integration.diff = redactRecord({ available: clone.integration.diff.available, files: clone.integration.diff.files, stat: boundedText(clone.integration.diff.stat, 1000).value });
-  for (const stage of clone.stages || []) if (stage.diff) stage.diff = redactRecord({ available: stage.diff.available, files: stage.diff.files, stat: boundedText(stage.diff.stat, 1000).value });
-  for (const active of Object.values(clone.activeRuns || {})) {
-    delete active.prompt;
-    delete active.sessionFile;
-    if (active.activity) {
-      active.activity.usage = retainedUsage(active.activity);
-      delete active.activity.prompts;
-      if (Array.isArray(active.activity.events)) active.activity.events = active.activity.events.slice(-20).map(compactActivityEvent);
-      delete active.activity.groups;
-      delete active.activity.rawOutput;
-    }
-  }
-  return redactRecord(removePrivateLocations(clone));
-}
-
-export function publicState(state) {
-  if (!state) return state;
-  const clone = structuredClone(state);
-  const accessPolicy = publicAccessPolicy(state);
-  const workspaceDisplayPath = ownerWorkspaceDisplayPath(clone.workspace);
-  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
-    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
-  }
-  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
-  delete clone.projectPolicies;
-  clone.accessPolicy = accessPolicy;
-  if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;
-  return removePrivateLocations(clone);
-}
-
-export function publicPreviewState(state, ticketId) {
-  const run = state?.ticketRuns?.[ticketId];
-  return publicState({
-    version: state?.version,
-    revision: state?.revision,
-    workspace: state?.workspace,
-    settings: state?.settings,
-    stageProfiles: state?.stageProfiles,
-    selectedTicketId: ticketId,
-    ticketRuns: run ? { [ticketId]: run } : {},
-    retainedRuns: {},
-    notice: state?.notice || null
-  });
-}
-
-export function compactRun(run, revision = null) {
-  return {
-    id: run?.id || null,
-    runId: run?.runId || null,
-    ticket: run?.ticket ? {
-      id: run.ticket.id,
-      identifier: run.ticket.identifier,
-      title: run.ticket.title,
-      source: run.ticket.source || null,
-      provider: run.ticket.provider || null,
-      state: run.ticket.state ? { id: run.ticket.state.id, name: run.ticket.state.name, type: run.ticket.state.type } : null
-    } : null,
-    status: run?.status || null,
-    checkpoint: publicCheckpoint(run?.checkpoint),
-    lastError: boundedText(run?.lastError, 1000).value || null,
-    workflow: publicWorkflow(run?.workflow),
-    steering: run?.steering || { nextSequence: 1, records: [] },
-    steeringRejections: run?.steeringRejections || [],
-    proofMap: projectProofMap(run),
-    cleanup: normalizeRunCleanup(run?.cleanup),
-    revision
-  };
 }

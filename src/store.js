@@ -349,19 +349,23 @@ export class JsonStore {
 
   async update(change, { snapshot = true } = {}) {
     const work = this.queue.then(async () => {
-      await change(this.state);
-      this.state.revision = (this.state.revision || 0) + 1;
-      await this.save();
+      // A failed callback or atomic rename must leave the in-memory view on
+      // the last durable revision.  Callers receive a mutable draft only.
+      const draft = structuredClone(this.state);
+      await change(draft);
+      draft.revision = (draft.revision || 0) + 1;
+      await this.save(draft);
+      this.state = draft;
       return snapshot ? this.read() : this.state;
     });
     this.queue = work.catch(() => {});
     return work;
   }
 
-  async save() {
-    compactPersistedState(this.state, dirname(this.file));
+  async save(state = this.state) {
+    compactPersistedState(state, dirname(this.file));
     const temporary = `${this.file}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
     await rename(temporary, this.file);
   }
 }

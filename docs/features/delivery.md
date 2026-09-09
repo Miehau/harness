@@ -14,7 +14,7 @@ After final proof approval, each changed writable Git repository is delivered in
 
 **Limit:** Forge credentials and existing repository policy determine whether delivery can proceed. This is not a deployment system. Local-source integration is intentionally a distinct path from tracker-backed PR/MR delivery.
 
-Evidence: [delivery.js](../../src/delivery.js) (`changedGitDeliveryRepos`, `upsertDeliveryRecord`), [merge-queue.js](../../src/merge-queue.js), `scheduleAllDeliveries` in [server.js](../../src/server.js), [delivery tests](../../test/delivery.test.js), [automation e2e tests](../../test/e2e-automation.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
+Evidence: [delivery.js](../../src/delivery.js) (`changedGitDeliveryRepos`, `upsertDeliveryRecord`), [merge-queue.js](../../src/merge-queue.js), `scheduleAllDeliveries` in [delivery-runner.js](../../src/delivery-runner.js), [delivery tests](../../test/delivery.test.js), [automation e2e tests](../../test/e2e-automation.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
 
 ## Find the implementation
 

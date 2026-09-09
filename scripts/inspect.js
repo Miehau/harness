@@ -60,10 +60,10 @@ export function parseRoutes(source) {
     seen.add(key);
     routes.push({ method, path });
   };
-  for (const match of source.matchAll(/if \(request\.method === "(GET|POST)" && url\.pathname === "(\/api\/[^"]+)"\)/g)) {
+  for (const match of source.matchAll(/if\s*\(\s*request\.method\s*===\s*"(GET|POST)"\s*&&\s*url\.pathname\s*===\s*"(\/api\/[^"]+)"\s*\)/g)) {
     add(match[1], match[2]);
   }
-  for (const match of source.matchAll(/if \(request\.method === "(GET|POST)" && (\w+)\)/g)) {
+  for (const match of source.matchAll(/if\s*\(\s*request\.method\s*===\s*"(GET|POST)"\s*&&\s*(\w+)\s*\)/g)) {
     const path = vars.get(match[2]);
     if (path) add(match[1], path);
   }
@@ -89,8 +89,9 @@ export function parseCli(source) {
 }
 
 export async function inspectApp(root = repoRoot) {
-  const [server, html, cli, pkg, execution] = await Promise.all([
+  const [server, routes, html, cli, pkg, execution] = await Promise.all([
     readFile(join(root, "src/server.js"), "utf8"),
+    readFile(join(root, "src/routes.js"), "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error)),
     readFile(join(root, "public/index.html"), "utf8"),
     readFile(join(root, "src/cli.js"), "utf8"),
     readFile(join(root, "package.json"), "utf8"),
@@ -103,7 +104,9 @@ export async function inspectApp(root = repoRoot) {
   const stageIds = [...stageBlock.matchAll(/\["([a-z]+)"/g)].map((match) => match[1]);
   return {
     package: JSON.parse(pkg),
-    routes: parseRoutes(server),
+    // Routes move independently of composition. Read both live owners while
+    // retaining synthetic fixtures that only provide server.js.
+    routes: parseRoutes(`${server}\n${routes}`),
     ui: parseUi(html),
     cli: parseCli(cli),
     stages: stageIds,

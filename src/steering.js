@@ -1,7 +1,38 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { findNode, flattenSteps } from "./plan.js";
-import { terminalRunStatusSet } from "./run-status.js";
+import { setStage, terminalRunStatusSet } from "./run-status.js";
+
+export function steeringResponse(record, { reason = null, nextCondition = null } = {}) {
+  const target = record && { ticketId: record.ticketId, runId: record.runId, stepId: record.stepId, attemptId: record.attemptId };
+  const state = record?.state || "rejected";
+  const defaults = {
+    queued: "The bound worker must be active before Pi delivery can begin.",
+    claimed: "Wait for the current Pi delivery claim to settle or expire.",
+    withheld: "Answer the steering checkpoint before changing scope or authority.",
+    failed: "Inspect the delivery audit and submit a new focused correction if appropriate.",
+    delivered: "The worker can acknowledge the delivered correction in its report."
+  };
+  return { steerId: record?.id || null, target: target || null, state, reason: reason || record?.reason || null, nextCondition: nextCondition || defaults[state] || "No further steering action is required." };
+}
+
+export function appendSteeringRejection(run, input, outcome) {
+  run.steeringRejections ||= [];
+  run.steeringRejections.push({
+    id: `steer-rejection-${randomUUID()}`,
+    instruction: String(input.instruction ?? input.text ?? "").trim(),
+    author: String(input.author || "operator").trim() || "operator",
+    code: outcome.code || outcome.validation?.code || "rejected",
+    reason: outcome.reason || outcome.validation?.reason || "The steering request was rejected.",
+    createdAt: new Date().toISOString()
+  });
+  if (run.steeringRejections.length > 50) run.steeringRejections.splice(0, run.steeringRejections.length - 50);
+  return run.steeringRejections.at(-1);
+}
+
+export function steeringCheckpointPending(run) {
+  return run?.status === "awaiting_input" && run.checkpoint?.source === "steering" && run.checkpoint.kind === "needs_input";
+}
 
 export const STEER_MAX_LENGTH = 4000;
 export const STEER_MAX_CLAIM_ATTEMPTS = 3;
@@ -256,6 +287,187 @@ export function targetMatches(run, record) {
   return !terminalRunStatusSet.has(run.status)
     && ["running", "fixing"].includes(step?.status)
     && activeAttemptForStep(step, active)?.id === record.attemptId;
+}
+
+export function createSteeringService({
+  readState,
+  update,
+  runtime,
+  harness,
+  mirrorCheckpoint = async () => {}
+}) {
+  const runFor = (ticketId) => {
+    const run = readState().ticketRuns?.[ticketId];
+    if (!run) throw new Error("Ticket run not found");
+    return run;
+  };
+  const keyFor = (target) => `${target.ticketId}\0${target.runId}\0${target.stepId}\0${target.attemptId}`;
+  const clearDrain = (target) => {
+    const key = keyFor(target);
+    const timer = runtime.steeringDrainTimers.get(key);
+    if (timer) clearTimeout(timer);
+    runtime.steeringDrainTimers.delete(key);
+  };
+
+  async function deliver(ticketId, steerId) {
+    if (typeof harness.steer !== "function") return runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+    let claim = null;
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      const record = run?.steering?.records?.find((item) => item.id === steerId);
+      if (record?.state === "queued") claim = claimNextSteering(run, record);
+    });
+    if (!claim) return runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+    let deliverable = false;
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      if (!targetMatches(run, claim)) return failSteering(run, claim.id, { code: "target_replaced", reason: "The bound worker attempt changed before Pi accepted this correction." });
+      deliverable = true;
+    });
+    if (!deliverable) return runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+    try {
+      const evidence = await harness.steer({
+        ticketId: claim.ticketId,
+        runId: claim.runId,
+        stepId: claim.stepId,
+        attemptId: claim.attemptId,
+        steerId: claim.id,
+        instruction: `[agent-plan-steer:${claim.id}]\n${claim.instruction}`
+      });
+      let delivered = null;
+      await update((state) => {
+        const run = state.ticketRuns[ticketId];
+        if (!targetMatches(run, claim)) {
+          failSteering(run, claim.id, { code: "target_replaced", reason: "The bound worker attempt changed before Pi accepted this correction." });
+          return;
+        }
+        if (run.activeRuns?.[claim.stepId]?.piSessionState !== "active") {
+          failSteering(run, claim.id, { code: "target_replaced", reason: "The bound Pi worker session ended before this correction could be recorded as delivered." });
+          return;
+        }
+        delivered = markSteeringDelivered(run, claim.id, claim.claim.claimId, { evidence: evidence || { queuedBy: "pi" } });
+      });
+      if (delivered) await drain(ticketId, claim);
+      return delivered || runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+    } catch (error) {
+      if (error?.code === "steering_session_unavailable") {
+        let requeued = null;
+        await update((state) => {
+          const run = state.ticketRuns[ticketId];
+          if (run.activeRuns?.[claim.stepId]?.piSessionState === "starting" && targetMatches(run, claim)) requeued = releaseSteeringClaim(run, claim.id, claim.claim.claimId, { reason: error.message });
+        });
+        return requeued || runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+      }
+      schedule(ticketId, claim);
+      return runFor(ticketId).steering.records.find((record) => record.id === steerId) || null;
+    }
+  }
+
+  async function drain(ticketId, target) {
+    let next = null;
+    await update((state) => {
+      const run = state.ticketRuns[ticketId];
+      recoverSteeringClaims(run);
+      next = run.steering.records.find((record) => record.state === "queued" && record.runId === target.runId && record.stepId === target.stepId && record.attemptId === target.attemptId);
+    });
+    if (next) await deliver(ticketId, next.id);
+    schedule(ticketId, target);
+  }
+
+  function schedule(ticketId, target) {
+    clearDrain(target);
+    const run = readState().ticketRuns?.[ticketId];
+    const active = run?.activeRuns?.[target.stepId];
+    if (active?.piSessionState !== "active" || !targetMatches(run, target)) return;
+    const claim = run.steering?.records
+      ?.filter((record) =>
+        record.state === "claimed"
+        && record.runId === target.runId
+        && record.stepId === target.stepId
+        && record.attemptId === target.attemptId
+      )
+      .sort((left, right) => left.sequence - right.sequence)[0];
+    const expiresAt = Date.parse(claim?.claim?.expiresAt || "");
+    if (!Number.isFinite(expiresAt)) return;
+    const key = keyFor(target);
+    const timer = setTimeout(() => {
+      runtime.steeringDrainTimers.delete(key);
+      (async () => {
+        const current = readState().ticketRuns?.[ticketId];
+        if (!targetMatches(current, target) || current.activeRuns?.[target.stepId]?.piSessionState !== "active") {
+          await update((state) => {
+            const run = state.ticketRuns[ticketId];
+            for (const record of run?.steering?.records || []) {
+              if (record.state !== "claimed"
+                || record.runId !== target.runId
+                || record.stepId !== target.stepId
+                || record.attemptId !== target.attemptId) continue;
+              failSteering(run, record.id, {
+                code: "target_replaced",
+                reason: "The bound worker attempt ended or was replaced before the delivery claim expired."
+              });
+            }
+          });
+          return;
+        }
+        await drain(ticketId, target);
+      })().catch(() => {});
+    }, Math.max(0, expiresAt - Date.now()) + 1);
+    timer.unref?.();
+    runtime.steeringDrainTimers.set(key, timer);
+  }
+
+  async function submit(ticketId, input) {
+    let outcome;
+    await update((state) => {
+      const run = state.ticketRuns?.[ticketId];
+      if (!run) throw new Error("Ticket run not found");
+      outcome = submitSteering(run, input, {
+        author: input.author || "operator",
+        stepId: String(input.stepId || "").trim() || null
+      });
+      if (!outcome.record) appendSteeringRejection(run, input, outcome);
+      if (outcome.escalated) {
+        run.status = "awaiting_input";
+        run.checkpoint = {
+          id: randomUUID(),
+          kind: "needs_input",
+          title: "Steering requires clarification",
+          prompt: outcome.validation.reason + "\n\nInstruction:\n" + outcome.record.instruction,
+          questions: [outcome.validation.reason],
+          stepId: outcome.record.stepId,
+          source: "steering",
+          steerId: outcome.record.id,
+          createdAt: new Date().toISOString()
+        };
+        setStage(run, "implement", "blocked", outcome.validation.reason);
+      }
+    });
+    if (!outcome.record) {
+      return steeringResponse(null, {
+        reason: outcome.reason || outcome.validation?.reason,
+        nextCondition: outcome.terminal
+          ? "Start a new run or resume a non-terminal run before submitting steering."
+          : outcome.code === "worker_unavailable"
+            ? "Wait for the worker outcome or resume its interrupted attempt before submitting steering."
+            : "Submit one concrete, safely scoped correction to an active worker."
+      });
+    }
+    if (outcome.escalated) {
+      await mirrorCheckpoint(ticketId);
+      return steeringResponse(outcome.record);
+    }
+    let record = outcome.record;
+    if (!outcome.paused) {
+      await deliver(ticketId, outcome.record.id);
+      record = runFor(ticketId).steering.records.find((item) => item.id === outcome.record.id) || outcome.record;
+    }
+    return steeringResponse(record, outcome.paused
+      ? { nextCondition: "Resume this paused run manually; the correction remains queued for its saved attempt." }
+      : {});
+  }
+
+  return { clearDrain, schedule, drain, deliver, submit };
 }
 
 export function recoverSteeringClaims(run, { now = Date.now() } = {}) {

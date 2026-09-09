@@ -496,3 +496,26 @@ export function combineRepositoryChecks(results = []) {
     failedRepositories
   };
 }
+
+export async function snapshotProofRootMap(run, step) {
+  const snapshots = {};
+  for (const root of extraProofRoots(run, step)) snapshots[root.id] = await snapshotProofPath(root.path);
+  return snapshots;
+}
+
+export function labeledProofRootDiffs(run, step, before, after) {
+  return extraProofRoots(run, step).map((root) => labelDiff(
+    diffFileSnapshots(before?.[root.id], after?.[root.id]),
+    root,
+    { evidenceKind: root.kind === "external" ? "external" : "nongit" }
+  ));
+}
+
+export function repositoryBaselines(run, repos) {
+  const trees = {};
+  for (const repo of repos || []) {
+    const id = repo.id || "primary";
+    trees[id] = repo.baselineTree || (id === "primary" ? run.baselineTree : null);
+  }
+  return trees;
+}

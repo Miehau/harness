@@ -1,11 +1,43 @@
-import { dependencySteps, flattenSteps } from "./plan.js";
-import { redactText } from "./redaction.js";
-import { inFlightRunStatusSet, inFlightStepStatusSet } from "./run-status.js";
+import { realpathSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
+import { promisify } from "node:util";
+import { storedProjectPolicy } from "./access-policy.js";
+import { artifactPathForOpen, visualEvidenceMedia } from "./artifacts.js";
+import { retainedUsage } from "./activity.js";
+import { dependencySteps, findNode, flattenSteps } from "./plan.js";
+import { dashboardModelProviders } from "./profiles.js";
+import { enrichReviewPacket } from "./pi-prompts.js";
+import { projectProofMap } from "./proof-map.js";
+import {
+  boundedText,
+  redactRecord,
+  redactText,
+  safeArtifactMetadata,
+} from "./redaction.js";
+import { compactReviewPacket } from "./review-packet.js";
+import { reviewFindingLedger } from "./review-findings.js";
+import {
+  inFlightRunStatusSet,
+  inFlightStepStatusSet,
+  normalizeRunCleanup,
+} from "./run-status.js";
 
 export const inspectionVersion = 1;
+const runFile = promisify(execFile);
 
-const failedStatuses = new Set(["failed", "needs_attention", "verification_failed"]);
-const blockedStatuses = new Set(["blocked", "paused", "review_ready", "needs_input", "awaiting_approval"]);
+const failedStatuses = new Set([
+  "failed",
+  "needs_attention",
+  "verification_failed",
+]);
+const blockedStatuses = new Set([
+  "blocked",
+  "paused",
+  "review_ready",
+  "needs_input",
+  "awaiting_approval",
+]);
 const completeStatuses = new Set(["completed", "accepted", "verified"]);
 
 function configuredAllowPaths(run) {
@@ -466,4 +498,1080 @@ export function projectInspection(run, { now = Date.now(), revision = null } = {
 export function inspectionFocus(run, options) {
   const projection = projectInspection(run, options);
   return projection ? { version: projection.version, ...projection.focus } : null;
+}
+
+export function createInspectionService({ artifactContent, sessionTrace }) {
+  if (typeof artifactContent !== "function")
+    throw new TypeError("artifactContent is required");
+  if (typeof sessionTrace !== "function")
+    throw new TypeError("sessionTrace is required");
+
+  function runForIdentity(state, ticketId, runId) {
+    const current = state.ticketRuns?.[ticketId];
+    if (current?.runId === runId) return current;
+    const retained = Object.values(state.retainedRuns || {}).find(
+      (run) => run.id === ticketId && run.runId === runId,
+    );
+    if (retained) return retained;
+    throw new Error("Run not found");
+  }
+
+  function artifactForIdentity(state, ticketId, runId, artifactId) {
+    const run = runId
+      ? runForIdentity(state, ticketId, runId)
+      : state.ticketRuns?.[ticketId];
+    if (!run) throw new Error("Ticket run not found");
+    const artifact = (run.artifacts || []).find(
+      (item) => item.id === artifactId,
+    );
+    if (!artifact) throw new Error("Artifact not found");
+    return { run, artifact };
+  }
+
+  function inspectionHistories(state, ticketId) {
+    const current = state.ticketRuns?.[ticketId];
+    const histories = [
+      ...(current ? [{ run: current, archived: false }] : []),
+      ...Object.values(state.retainedRuns || {})
+        .filter((run) => run.id === ticketId)
+        .map((run) => ({ run, archived: true })),
+    ];
+    if (!histories.length) throw new Error("Ticket run not found");
+    return histories
+      .sort(
+        (left, right) =>
+          Number(left.archived) - Number(right.archived) ||
+          String(right.run.createdAt || "").localeCompare(
+            String(left.run.createdAt || ""),
+          ) ||
+          String(right.run.runId || "").localeCompare(
+            String(left.run.runId || ""),
+          ),
+      )
+      .map(({ run, archived }) => ({
+        ...compactRun(run, state.revision),
+        archived,
+        createdAt: run.createdAt || null,
+        completedAt: run.completedAt || null,
+        attemptCount: flattenSteps(run.plan).reduce(
+          (count, step) => count + (step.attempts?.length || 0),
+          0,
+        ),
+      }));
+  }
+
+  async function promptsForStage(run, stage) {
+    const prompts = [];
+    const seen = new Set();
+    let retainedTraces = 0;
+    let availableTraces = 0;
+    const add = ({ prompt, content, at, actor, title, status }) => {
+      const value = boundedText(prompt || content || "", 16000).value.trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      prompts.push({
+        prompt: value,
+        at: at || null,
+        title: title || actor || stage.title,
+        status: status || stage.status,
+      });
+    };
+    for (const prompt of stage.activity?.prompts || []) add(prompt);
+    const trace = async (
+      sessionFile,
+      meta = {},
+      bounds = {},
+      tolerateUnavailable = false,
+    ) => {
+      if (!sessionFile) return;
+      retainedTraces++;
+      try {
+        const saved = await sessionTrace(sessionFile, bounds);
+        availableTraces++;
+        for (const prompt of saved.prompts ||
+          (saved.prompt ? [{ prompt: saved.prompt }] : []))
+          add({ ...prompt, ...meta });
+      } catch (error) {
+        // Persisted review handles can outlive their local session files.
+        if (!tolerateUnavailable) throw error;
+      }
+    };
+    const bounds = {
+      after: stage.activity?.startedAt,
+      before: stage.activity?.completedAt,
+    };
+    if (stage.id === "requirements")
+      await trace(run.requirementsSessionFile, {}, bounds);
+    if (["explore", "design"].includes(stage.id))
+      await trace(run.sessionFile, {}, bounds);
+    if (stage.id === "implement") {
+      for (const step of flattenSteps(run.plan).filter(
+        (item) => (item.stageId || "implement") === stage.id,
+      )) {
+        await trace(step.sessionFile, {
+          title: step.title,
+          status: step.status,
+        });
+      }
+    }
+    if (stage.id === "verify") {
+      for (const review of run.reviews || [])
+        for (const item of review.reviews || []) {
+          await trace(
+            item.sessionFile,
+            {
+              title: `${item.role} review · round ${review.round}`,
+              status: "completed",
+            },
+            bounds,
+            true,
+          );
+        }
+    }
+    return {
+      prompts: prompts.sort((left, right) =>
+        String(left.at || "").localeCompare(String(right.at || "")),
+      ),
+      trace: {
+        state: !retainedTraces
+          ? "not_retained"
+          : availableTraces
+            ? availableTraces === retainedTraces
+              ? "available"
+              : "partially_available"
+            : "unavailable",
+        retained: retainedTraces,
+        available: availableTraces,
+      },
+    };
+  }
+
+  function fallback(artifact) {
+    return artifact ? { artifact: safeArtifactMetadata(artifact) } : {};
+  }
+
+  function textDetail(saved, limit, unavailable, artifact = null) {
+    const content = typeof saved === "string" ? saved : saved?.content;
+    if (content == null || content === "")
+      return { state: unavailable, ...fallback(artifact) };
+    const bounded = boundedText(content, limit);
+    const truncated = bounded.truncated || Boolean(saved?.truncated);
+    const total = Math.max(bounded.total, Number(saved?.total) || 0);
+    return {
+      state: truncated ? "truncated" : "available",
+      content: bounded.value,
+      returned: bounded.value.length,
+      total,
+      ...(truncated ? fallback(artifact) : {}),
+    };
+  }
+
+  function detailActivityEvent(event = {}) {
+    const item = redactRecord({
+      type: event.type || "activity",
+      tool: event.tool || null,
+      callId: event.callId || null,
+      label: boundedText(event.label, 240).value,
+      at: event.at || null,
+      actor: boundedText(event.actor, 120).value || null,
+      isError: Boolean(event.isError),
+    });
+    if (item.type === "thinking") return item;
+    if (item.type === "usage")
+      return {
+        ...item,
+        ...Object.fromEntries(
+          ["input", "output", "cacheRead", "cacheWrite"].map((key) => [
+            key,
+            Number(event[key]) || 0,
+          ]),
+        ),
+      };
+    if (event.type === "reasoning_summary")
+      return { ...item, detail: boundedText(event.detail, 1000).value };
+    for (const key of ["args", "detail", "result"])
+      if (event[key] != null) item[key] = boundedText(event[key], 2000).value;
+    return item;
+  }
+
+  async function attemptDetails(run, step, attempt, { active = false } = {}) {
+    const artifacts = (run.artifacts || []).filter(
+      (artifact) =>
+        artifact.stepId === step.id && artifact.attemptId === attempt.attemptId,
+    );
+    const byKind = (kind) =>
+      artifacts.find((artifact) => artifact.kind === kind) || null;
+    const promptArtifact = byKind("agent-prompt");
+    const outputArtifact = byKind("agent-output");
+    const diffArtifact = byKind("git-attempt-diff") || byKind("git-diff");
+    const verificationArtifact = byKind("step-verification");
+    const savedPrompt = (content, truncated = false, total = 0) =>
+      content
+        ? {
+            content: redactText(content),
+            truncated: Boolean(truncated),
+            total: Number(total) || 0,
+          }
+        : null;
+    const lastPrompt =
+      attempt.prompts?.at(-1) || attempt.activity?.prompts?.at(-1);
+    const prompt =
+      (await artifactContent(promptArtifact, 16000)) ||
+      savedPrompt(
+        typeof attempt.prompt === "string"
+          ? attempt.prompt
+          : attempt.prompt?.content,
+        attempt.promptTruncated ?? attempt.prompt?.truncated,
+        attempt.promptTotal ?? attempt.prompt?.total,
+      ) ||
+      savedPrompt(
+        lastPrompt?.content || lastPrompt?.prompt,
+        lastPrompt?.truncated,
+        lastPrompt?.total,
+      );
+    let activity = attempt.events || attempt.activity?.events || [];
+    const rawOutput = redactText(
+      attempt.rawOutput || attempt.activity?.rawOutput || "",
+    );
+    let output = (await artifactContent(outputArtifact, 20000)) || rawOutput;
+    const artifactItems = await Promise.all(
+      artifacts.map(async (artifact) => {
+        const content = await artifactContent(artifact, 12000);
+        return {
+          ...safeArtifactMetadata(artifact),
+          ...textDetail(content, 12000, "not_retained", artifact),
+        };
+      }),
+    );
+    const traceFile = attempt.sessionFile || null;
+    let trace = null;
+    if (traceFile) {
+      try {
+        trace = redactRecord(
+          await sessionTrace(traceFile, {
+            after: attempt.startedAt,
+            before: attempt.completedAt,
+          }),
+        );
+      } catch {
+        trace = null;
+      }
+    }
+    output ||=
+      trace?.rawOutput ||
+      (attempt.report
+        ? redactText(JSON.stringify(attempt.report, null, 2))
+        : "");
+    if (!activity.length) activity = trace?.events || [];
+    const activityItems = activity.slice(-100).map(detailActivityEvent);
+    const traceOutput = trace && boundedText(trace.rawOutput || "", 20000);
+    const tracePrompts = trace?.prompts || [];
+    const traceEvents = trace?.events || [];
+    const traceContent = trace && {
+      prompts: tracePrompts.slice(-20).map((item) => ({
+        prompt: boundedText(item.prompt, 4000).value,
+        at: item.at || null,
+      })),
+      events: traceEvents.slice(-100).map(detailActivityEvent),
+      rawOutput: traceOutput.value,
+    };
+    const traceTruncated = Boolean(
+      traceContent &&
+      (traceOutput.truncated ||
+        tracePrompts.length > 20 ||
+        traceEvents.length > 100),
+    );
+    const traceState = traceContent
+      ? traceTruncated
+        ? "truncated"
+        : "available"
+      : "unavailable";
+    const diff = redactRecord(
+      run.attemptDiffHistory?.[step.id]?.[attempt.attemptId] ||
+        attempt.diff ||
+        {},
+    );
+    const checks = redactRecord(
+      attempt.verification?.checks || attempt.checks || {},
+    );
+    const checkOutput = boundedText(checks.output || "", 16000);
+    const terminationReason =
+      boundedText(
+        redactText(
+          attempt.termination?.reason || attempt.terminationReason || "",
+        ),
+        240,
+      ).value || null;
+    const terminationAt =
+      attempt.termination?.at || attempt.completedAt || null;
+    const failureKind =
+      boundedText(
+        redactText(attempt.failure?.kind || attempt.failureKind || ""),
+        120,
+      ).value || null;
+    const failurePhase =
+      boundedText(
+        redactText(attempt.failure?.phase || attempt.failurePhase || ""),
+        120,
+      ).value || null;
+    const failureMessage =
+      boundedText(
+        redactText(attempt.failure?.message || attempt.error || ""),
+        1000,
+      ).value || null;
+    return {
+      ticketId: run.id,
+      runId: run.runId,
+      stepId: step.id,
+      attemptId: attempt.attemptId,
+      terminationReason,
+      termination:
+        terminationReason || terminationAt
+          ? { reason: terminationReason, at: terminationAt }
+          : null,
+      failureKind,
+      failurePhase,
+      failure:
+        failureKind || failurePhase || failureMessage
+          ? { kind: failureKind, phase: failurePhase, message: failureMessage }
+          : null,
+      prompt: textDetail(
+        prompt,
+        16000,
+        active ? "not_yet_available" : "not_retained",
+        promptArtifact,
+      ),
+      activity: {
+        state:
+          Math.max(activity.length, Number(attempt.eventsTotal) || 0) > 100
+            ? "truncated"
+            : activity.length
+              ? "available"
+              : active
+                ? "not_yet_available"
+                : "not_retained",
+        items: activityItems,
+        returned: activityItems.length,
+        total: Math.max(activity.length, Number(attempt.eventsTotal) || 0),
+      },
+      output: textDetail(
+        output,
+        20000,
+        active
+          ? "not_yet_available"
+          : outputArtifact
+            ? "unavailable"
+            : "not_retained",
+        outputArtifact,
+      ),
+      artifacts: {
+        state: artifactItems.length ? "available" : "not_retained",
+        items: artifactItems,
+        count: artifactItems.length,
+      },
+      diff: diff.patch
+        ? {
+            state: boundedText(diff.patch, 20000).state,
+            files: diff.files || [],
+            stat: diff.stat || "",
+            content: boundedText(diff.patch, 20000).value,
+            ...(diff.patch.length > 20000 ? fallback(diffArtifact) : {}),
+          }
+        : {
+            state: diffArtifact ? "unavailable" : "not_retained",
+            ...fallback(diffArtifact),
+          },
+      checks: Object.keys(checks).length
+        ? {
+            state: checkOutput.state,
+            status: checks.status || null,
+            command: checks.command || null,
+            summary: checks.summary || "",
+            output: checkOutput.value,
+            returned: checkOutput.value.length,
+            total: checkOutput.total,
+            ...(checkOutput.truncated ? fallback(verificationArtifact) : {}),
+          }
+        : { state: "not_retained" },
+      trace: traceContent
+        ? {
+            state: traceState,
+            content: traceContent,
+            returned: {
+              prompts: traceContent.prompts.length,
+              events: traceContent.events.length,
+              output: traceOutput.value.length,
+            },
+            total: {
+              prompts: tracePrompts.length,
+              events: traceEvents.length,
+              output: traceOutput.total,
+            },
+          }
+        : { state: traceFile ? "unavailable" : "not_retained" },
+    };
+  }
+
+  return {
+    artifactForIdentity,
+    attemptDetails,
+    detailActivityEvent,
+    inspectionHistories,
+    promptsForStage,
+    runForIdentity,
+    textDetail,
+  };
+}
+
+function ticketRun(state, ticketId) {
+  const run = state.ticketRuns?.[ticketId];
+  if (!run) throw new Error("Ticket run not found");
+  return run;
+}
+
+function archivedAttempt(run, stepId, attemptId) {
+  return (
+    [...(run.archivedAttempts || [])]
+      .reverse()
+      .find(
+        (attempt) =>
+          attempt.stepId === stepId && attempt.attemptId === attemptId,
+      ) || null
+  );
+}
+
+function checkOutput(
+  run,
+  { scope = "step", stepId = null, attemptId = null, reviewId = null } = {},
+) {
+  if (scope === "final")
+    return reviewId
+      ? run.finalCheckHistory?.[reviewId] ||
+          run.reviews?.find(
+            (review) =>
+              review.reviewId === reviewId ||
+              `final-review-${review.round}` === reviewId,
+          )?.finalChecks ||
+          null
+      : run.finalChecks ||
+          run.checkpoint?.finalChecks ||
+          run.reviews
+            ?.at(-1)
+            ?.reviews?.find((review) => review.role === "deterministic")
+            ?.checks ||
+          null;
+  if (!stepId) throw new Error("Step check output requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId)
+      throw new Error("Attempt check output requires an attempt ID");
+    const attempt =
+      (step.attempts || []).find((item) => item.attemptId === attemptId) ||
+      archivedAttempt(run, stepId, attemptId);
+    return attempt?.verification?.checks || attempt?.checks || null;
+  }
+  if (scope !== "step") throw new Error("Unknown check-output scope");
+  return (
+    [...(step.attempts || [])]
+      .reverse()
+      .map((attempt) => attempt.verification?.checks || attempt.checks)
+      .find(Boolean) ||
+    step.checks ||
+    null
+  );
+}
+
+function diffOutput(
+  run,
+  { scope = "step", stepId = null, attemptId = null, reviewId = null } = {},
+) {
+  const withPatch = (diff) =>
+    !diff || typeof diff.patch === "string"
+      ? diff
+      : {
+          ...diff,
+          patch: (diff.repositories || [])
+            .map((item) => item.patch)
+            .filter(Boolean)
+            .join("\n"),
+        };
+  if (scope === "final")
+    return reviewId
+      ? withPatch(
+          run.finalDiffHistory?.[reviewId] ||
+            run.reviews?.find(
+              (review) =>
+                review.reviewId === reviewId ||
+                `final-review-${review.round}` === reviewId,
+            )?.diff ||
+            null,
+        )
+      : withPatch(
+          run.deliveredDiff ||
+            run.integration?.diff ||
+            run.reviews?.at(-1)?.diff ||
+            null,
+        );
+  if (!stepId) throw new Error("Step diff requires a step ID");
+  const step = findNode(run.plan, stepId);
+  if (!step) throw new Error("Step not found");
+  if (scope === "attempt") {
+    if (!attemptId) throw new Error("Attempt diff requires an attempt ID");
+    return withPatch(
+      run.attemptDiffHistory?.[stepId]?.[attemptId] ||
+        (
+          (step.attempts || []).find((item) => item.attemptId === attemptId) ||
+          archivedAttempt(run, stepId, attemptId)
+        )?.diff ||
+        null,
+    );
+  }
+  if (scope !== "step") throw new Error("Unknown diff scope");
+  return withPatch(step.diff || null);
+}
+
+export function createRouteInspectionService({
+  state,
+  details,
+  artifactContent,
+  harness,
+  dataDir,
+  trackers,
+  events,
+  openImpl = runFile,
+} = {}) {
+  if (
+    !state?.read ||
+    !details ||
+    typeof artifactContent !== "function" ||
+    !harness
+  )
+    throw new TypeError(
+      "Route inspection requires state, details, artifact reads, and harness",
+    );
+  const read = state.read;
+  const current = (ticketId) => ticketRun(read(), ticketId);
+  const identity = (ticketId, runId = null) =>
+    runId ? details.runForIdentity(read(), ticketId, runId) : current(ticketId);
+
+  return {
+    state: () => publicState(read()),
+    ticketRun(ticketId, { detail = false } = {}) {
+      const snapshot = read();
+      const run = ticketRun(snapshot, ticketId);
+      return detail ? publicRun(run) : compactRun(run, snapshot.revision);
+    },
+    checkOutput(ticketId, options) {
+      const checks = checkOutput(current(ticketId), options);
+      if (!checks) throw new Error("Check output not found");
+      return checks;
+    },
+    diffOutput(ticketId, options) {
+      const diff = diffOutput(current(ticketId), options);
+      if (!diff) throw new Error("Diff not found");
+      return diff;
+    },
+    reviewPacket(ticketId) {
+      const run = current(ticketId);
+      const latest = run.reviews?.at(-1);
+      const checks =
+        latest?.reviews?.find((review) => review.role === "deterministic")
+          ?.checks ||
+        run.finalChecks ||
+        {};
+      const diff =
+        [
+          run.deliveredDiff,
+          latest?.diff,
+          ...flattenSteps(run.plan).flatMap((step) => [
+            step.diff,
+            ...[...(step.attempts || [])]
+              .reverse()
+              .map((attempt) => attempt.diff),
+          ]),
+        ].find(
+          (item) =>
+            item &&
+            (item.patch || item.repositories?.length || item.files?.length),
+        ) || {};
+      return enrichReviewPacket(
+        compactReviewPacket({
+          ticket: run.ticket,
+          plan: run.plan,
+          artifacts: run.artifacts,
+          diff,
+          checks,
+          proofMap: projectProofMap(run),
+        }),
+        { diff, checks },
+      );
+    },
+    ticketInspection(ticketId) {
+      const snapshot = read();
+      return projectInspection(ticketRun(snapshot, ticketId), {
+        revision: snapshot.revision,
+      });
+    },
+    runHistories(ticketId) {
+      const snapshot = read();
+      return {
+        ticketId,
+        revision: snapshot.revision,
+        runs: details.inspectionHistories(snapshot, ticketId),
+      };
+    },
+    runInspection(ticketId, runId) {
+      const snapshot = read();
+      return projectInspection(
+        details.runForIdentity(snapshot, ticketId, runId),
+        { revision: snapshot.revision },
+      );
+    },
+    async models() {
+      const catalog = await harness.models();
+      const models = catalog.filter((model) =>
+        dashboardModelProviders.includes(model.provider),
+      );
+      const selected = models.length ? models : catalog;
+      const providers = [
+        ...new Set(selected.map((model) => model.provider).filter(Boolean)),
+      ];
+      return {
+        models: selected,
+        ...(providers.length === 1
+          ? { provider: providers[0] }
+          : providers.length
+            ? { providers }
+            : {}),
+      };
+    },
+    async skills(ticketId = read().selectedTicketId) {
+      const snapshot = read();
+      const run = ticketId ? snapshot.ticketRuns?.[ticketId] : null;
+      return {
+        skills: await harness.listSkills({
+          cwd: run?.workspace?.cwd || snapshot.workspace.cwd,
+          sessionFile: run?.sessionFile || null,
+          sessionKey: run ? `${run.ticket.id}-${run.runId}` : undefined,
+          access: run?.access || null,
+        }),
+        skillName: run?.workflow?.skillName || null,
+      };
+    },
+    async ticketSkills(ticketId) {
+      const run = current(ticketId);
+      const snapshot = read();
+      return {
+        skills: await harness.listSkills({
+          cwd: run.workspace?.cwd || snapshot.workspace.cwd,
+          sessionFile: run.sessionFile || null,
+          sessionKey: `${run.ticket.id}-${run.runId}`,
+          access: run.access || null,
+        }),
+        skillName: run.workflow?.skillName || null,
+      };
+    },
+    async openArtifact({ ticketId, runId, artifactId }) {
+      if (process.platform !== "darwin")
+        throw new Error(
+          "Opening artifacts in their default application currently requires macOS",
+        );
+      const { run } = details.artifactForIdentity(
+        read(),
+        ticketId,
+        runId,
+        artifactId,
+      );
+      const path = artifactPathForOpen(run.artifacts, artifactId, dataDir);
+      if (!(path && (await stat(path).catch(() => null))?.isFile()))
+        throw new Error("Artifact file not found");
+      await openImpl("open", [path]);
+    },
+    async attemptDetail({ ticketId, runId, stepId, attemptId }) {
+      const run = details.runForIdentity(read(), ticketId, runId);
+      const step = findNode(run.plan, stepId);
+      const retained = step?.attempts?.find(
+        (item, index) =>
+          (item.attemptId || `attempt-${index + 1}`) === attemptId,
+      );
+      const active = run.activeRuns?.[step?.id];
+      const activeAttempt =
+        active &&
+        (active.attemptId || `active-${active.runId || step.id}`) === attemptId
+          ? { ...active, attemptId }
+          : null;
+      const attempt = retained
+        ? { ...retained, attemptId: retained.attemptId || attemptId }
+        : archivedAttempt(run, step?.id, attemptId) || activeAttempt;
+      if (!attempt) throw new Error("Attempt not found");
+      return details.attemptDetails(run, step, attempt, {
+        active: Boolean(activeAttempt),
+      });
+    },
+    async artifactMedia({ ticketId, runId, artifactId }) {
+      const { run, artifact } = details.artifactForIdentity(
+        read(),
+        ticketId,
+        runId,
+        artifactId,
+      );
+      const path = artifactPathForOpen(run.artifacts, artifactId, dataDir);
+      const media =
+        artifact.kind === "visual-evidence" &&
+        visualEvidenceMedia(artifact.name || path);
+      if (!path || !media) throw new Error("Visual evidence not found");
+      return { mediaType: media.mediaType, content: await readFile(path) };
+    },
+    async artifactContent({ ticketId, runId, artifactId }) {
+      const { artifact } = details.artifactForIdentity(
+        read(),
+        ticketId,
+        runId,
+        artifactId,
+      );
+      return {
+        artifact: safeArtifactMetadata(artifact),
+        ...details.textDetail(
+          await artifactContent(artifact, 20000),
+          20000,
+          "not_retained",
+          artifact,
+        ),
+      };
+    },
+    artifact({ ticketId, runId, artifactId }) {
+      return safeArtifactMetadata(
+        details.artifactForIdentity(read(), ticketId, runId, artifactId)
+          .artifact,
+      );
+    },
+    async sessionTrace(ticketId, stepId) {
+      const step = findNode(current(ticketId).plan, stepId);
+      if (!step) throw new Error("Step not found");
+      const trace = redactRecord(await harness.sessionTrace(step.sessionFile));
+      const output = boundedText(trace.rawOutput || "", 20000);
+      return {
+        state: output.state,
+        content: {
+          prompts: (trace.prompts || []).slice(-20).map((item) => ({
+            prompt: boundedText(item.prompt, 4000).value,
+            at: item.at || null,
+          })),
+          events: (trace.events || [])
+            .slice(-100)
+            .map(details.detailActivityEvent),
+          rawOutput: output.value,
+        },
+      };
+    },
+    steering(ticketId) {
+      const run = current(ticketId);
+      return {
+        records: run.steering?.records || [],
+        rejections: run.steeringRejections || [],
+      };
+    },
+    stageOutput(ticketId, runId, stageId) {
+      const stage = identity(ticketId, runId).stages.find(
+        (item) => item.id === stageId,
+      );
+      if (!stage) throw new Error("Stage not found");
+      const output = redactText(stage.activity?.rawOutput || "");
+      return {
+        state: output ? "available" : "not_retained",
+        content: output.slice(-100000),
+        retainedTail: true,
+      };
+    },
+    stagePrompts({ ticketId, runId, stageId }) {
+      const run = identity(ticketId, runId);
+      const stage = run.stages.find((item) => item.id === stageId);
+      if (!stage) throw new Error("Stage not found");
+      return details.promptsForStage(run, stage);
+    },
+    operatorPreview(ticketId) {
+      return current(ticketId).previews?.[`${ticketId}:operator`] || null;
+    },
+    ticketSources: () => trackers.refresh(),
+    events: (request, response) =>
+      events.subscribe(request, response, publicState(read())),
+  };
+}
+
+function compactActivityEvent(event = {}) {
+  return redactRecord({
+    type: event.type || "activity", tool: event.tool || null, label: boundedText(event.label, 240).value,
+    ...(event.type === "usage" ? { input: event.input, output: event.output, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite } : {}),
+    at: event.at || null, isError: Boolean(event.isError), ...(event.actor ? { actor: boundedText(event.actor, 120).value } : {})
+  });
+}
+
+function publicAttempt(attempt) {
+  const clone = structuredClone(attempt);
+  clone.usage = retainedUsage(attempt);
+  for (const key of ["rawOutput", "activityGroups", "sessionFile", "prompt", "artifactRefs"]) delete clone[key];
+  if (Array.isArray(clone.events)) clone.events = clone.events.slice(-20)
+    // Short tool-end payloads duplicate durable activity without adding a
+    // supervision signal. Keep only oversized payloads, explicitly bounded.
+    .filter((event) => event.type !== "tool_end" || String(event.output || "").length > 2000)
+    .map((event) => {
+      const compact = compactActivityEvent(event);
+      if (event.type === "tool_end" && typeof event.output === "string") {
+        const output = boundedText(event.output, 2000);
+        compact.output = output.truncated ? `${output.value}\n… output truncated for public state` : output.value;
+      }
+      return compact;
+    });
+  if (clone.report) clone.report = redactRecord({ status: clone.report.status, summary: boundedText(clone.report.summary, 240).value, request: boundedText(clone.report.request, 240).value });
+  if (typeof clone.feedback === "string" && clone.feedback.length > 1000) clone.feedback = `${clone.feedback.slice(0, 1000)}\n… feedback truncated for public state`;
+  if (clone.checks) clone.checks = publicChecks(clone.checks);
+  if (clone.verification) clone.verification = redactRecord({ summary: boundedText(clone.verification.summary, 240).value, findings: clone.verification.findings });
+  if (clone.diff) clone.diff = redactRecord({ available: clone.diff.available, files: clone.diff.files, stat: boundedText(clone.diff.stat, 1000).value });
+  if (clone.checkDiff) clone.checkDiff = redactRecord({ available: clone.checkDiff.available, files: clone.checkDiff.files, stat: boundedText(clone.checkDiff.stat, 1000).value });
+  if (clone.aggregateDiff) clone.aggregateDiff = redactRecord({ available: clone.aggregateDiff.available, files: clone.aggregateDiff.files, stat: boundedText(clone.aggregateDiff.stat, 1000).value });
+  return redactRecord(clone);
+}
+
+function removePrivateLocations(value) {
+  if (Array.isArray(value)) return value.map(removePrivateLocations);
+  if (!value || typeof value !== "object") return value;
+  for (const [key, item] of Object.entries(value)) {
+    if (["path", "cwd", "sourceCwd", "sessionFile", "requirementsSessionFile", "productContextPath", "fixturePath"].includes(key)) delete value[key];
+    else value[key] = removePrivateLocations(item);
+  }
+  return value;
+}
+
+function ownerWorkspaceDisplayPath(workspace) {
+  if (!workspace || typeof workspace !== "object") return "";
+  return workspace.displayPath || workspace.cwd || "";
+}
+
+function publicAccessPolicy(state) {
+  const cwd = state?.workspace?.cwd;
+  const policies = state?.projectPolicies;
+  let key = cwd;
+  if (cwd && policies && typeof policies === "object" && !Array.isArray(policies) && !Object.hasOwn(policies, cwd)) {
+    try { key = realpathSync(cwd); } catch {}
+  }
+  const stored = storedProjectPolicy(state, key);
+  return {
+    mode: stored.mode === "any" ? "any" : "restricted",
+    extraRoots: stored.extraRoots.map((root) => ({
+      displayPath: root.displayPath || root.path || "",
+      mode: root.mode === "read/write" ? "read/write" : "read-only"
+    }))
+  };
+}
+
+function publicWorkflow(workflow) {
+  if (!workflow) return workflow;
+  return redactRecord({
+    skillName: workflow.skillName || null,
+    status: workflow.status || "idle",
+    stages: (workflow.stages || []).map((stage) => ({ id: stage.id, status: stage.status, title: boundedText(stage.title, 240).value, summary: boundedText(stage.summary, 240).value, createdAt: stage.createdAt || null, updatedAt: stage.updatedAt || null })),
+    checkpoints: (workflow.checkpoints || []).map(publicCheckpoint)
+  });
+}
+
+function publicCheckpoint(checkpoint) {
+  if (!checkpoint) return checkpoint;
+  const { prompt, productContext, finalChecks, media, questions, ...rest } = checkpoint;
+  return redactRecord({ ...rest,
+    title: boundedText(rest.title, 240).value,
+    questions: (questions || []).map((question) => boundedText(question, 240).value),
+    ...(finalChecks ? { finalChecks: { status: finalChecks.status, command: finalChecks.command || null, summary: boundedText(finalChecks.summary, 240).value } } : {}),
+    ...(media ? { media: media.map(safeArtifactMetadata) } : {})
+  });
+}
+
+function publicEvent(event, detailed) {
+  const clone = { ...event };
+  for (const key of ["args", "output", "result", "detail"]) {
+    if (typeof clone[key] !== "string") continue;
+    if (!detailed) delete clone[key];
+    else if (clone[key].length > 2000) clone[key] = `${clone[key].slice(0, 2000)}\n… output truncated; open the saved session for full detail`;
+  }
+  return clone;
+}
+
+function publicActivity(activity, detailed = true) {
+  if (!activity) return activity;
+  const clone = { ...activity, events: (activity.events || []).map((event) => publicEvent(event, detailed)) };
+  delete clone.prompts;
+  delete clone.rawOutput;
+  delete clone.groups;
+  return clone;
+}
+
+function diffSummary(diff) {
+  if (!diff) return diff;
+  const { patch, ...summary } = diff;
+  return summary;
+}
+
+function publicChecks(checks) {
+  if (!checks) return checks;
+  const { output, ...summary } = checks;
+  return summary;
+}
+
+export function publicRun(run) {
+  if (!run) return run;
+  const clone = structuredClone(run);
+  clone.inspectionFocus = inspectionFocus(run);
+  clone.reviewFindings = reviewFindingLedger(run.reviews);
+  clone.checkpoint = publicCheckpoint(clone.checkpoint);
+  clone.workflow = publicWorkflow(clone.workflow);
+  clone.lastError = boundedText(clone.lastError, 1000).value || null;
+  if (Array.isArray(clone.artifacts))
+    clone.artifacts = clone.artifacts.map(safeArtifactMetadata);
+  for (const stage of clone.stages || [])
+    if (stage.activity) {
+      stage.activity.usage = retainedUsage(stage.activity);
+      delete stage.activity.prompts;
+      if (Array.isArray(stage.activity.events))
+        stage.activity.events = stage.activity.events
+          .slice(-20)
+          .map(compactActivityEvent);
+      delete stage.activity.groups;
+      delete stage.activity.rawOutput;
+    }
+  clone.proofMap = projectProofMap(run);
+  for (const step of flattenSteps(clone.plan)) {
+    delete step.prompt;
+    delete step.productContext;
+    if (Array.isArray(step.artifacts))
+      step.artifacts = step.artifacts.map(safeArtifactMetadata);
+    if (Array.isArray(step.attempts))
+      step.attempts = step.attempts.map(publicAttempt);
+    if (step.diff)
+      step.diff = redactRecord({
+        available: step.diff.available,
+        files: step.diff.files,
+        stat: boundedText(step.diff.stat, 1000).value,
+      });
+    delete step.sessionFile;
+  }
+  if (Array.isArray(clone.reviews))
+    clone.reviews = clone.reviews.map((review) => ({
+      round: review.round,
+      createdAt: review.createdAt,
+      actionableFindings: redactRecord(review.actionableFindings || []),
+      diff: diffSummary(review.diff),
+      reviews: (review.reviews || []).map((item) => ({
+        role: item.role,
+        summary: boundedText(item.summary, 240).value,
+        checks: item.checks && {
+          status: item.checks.status,
+          command: item.checks.command || null,
+          summary: boundedText(item.checks.summary, 240).value,
+        },
+      })),
+      ...(review.fix
+        ? {
+            fix: {
+              ...(review.fix.diff
+                ? { diff: diffSummary(review.fix.diff) }
+                : {}),
+              ...(review.fix.artifact
+                ? (() => {
+                    const { bodySummary, path, content, ...artifact } =
+                      review.fix.artifact;
+                    return { artifact: redactRecord(artifact) };
+                  })()
+                : {}),
+            },
+          }
+        : {}),
+    }));
+  if (clone.deliveredDiff)
+    clone.deliveredDiff = redactRecord({
+      available: clone.deliveredDiff.available,
+      files: clone.deliveredDiff.files,
+      stat: boundedText(clone.deliveredDiff.stat, 1000).value,
+    });
+  if (clone.integration?.diff)
+    clone.integration.diff = redactRecord({
+      available: clone.integration.diff.available,
+      files: clone.integration.diff.files,
+      stat: boundedText(clone.integration.diff.stat, 1000).value,
+    });
+  for (const stage of clone.stages || [])
+    if (stage.diff)
+      stage.diff = redactRecord({
+        available: stage.diff.available,
+        files: stage.diff.files,
+        stat: boundedText(stage.diff.stat, 1000).value,
+      });
+  for (const active of Object.values(clone.activeRuns || {})) {
+    delete active.prompt;
+    delete active.sessionFile;
+    if (active.activity) {
+      active.activity.usage = retainedUsage(active.activity);
+      delete active.activity.prompts;
+      if (Array.isArray(active.activity.events))
+        active.activity.events = active.activity.events
+          .slice(-20)
+          .map(compactActivityEvent);
+      delete active.activity.groups;
+      delete active.activity.rawOutput;
+    }
+  }
+  return redactRecord(removePrivateLocations(clone));
+}
+
+export function publicState(state) {
+  if (!state) return state;
+  const clone = structuredClone(state);
+  const accessPolicy = publicAccessPolicy(state);
+  const workspaceDisplayPath = ownerWorkspaceDisplayPath(clone.workspace);
+  for (const [id, run] of Object.entries(clone.ticketRuns || {})) {
+    clone.ticketRuns[id] = id === clone.selectedTicketId ? publicRun(run) : compactRun(run, clone.revision);
+  }
+  for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
+  delete clone.projectPolicies;
+  clone.accessPolicy = accessPolicy;
+  if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;
+  return removePrivateLocations(clone);
+}
+
+export function publicPreviewState(state, ticketId) {
+  const run = state?.ticketRuns?.[ticketId];
+  return publicState({
+    version: state?.version,
+    revision: state?.revision,
+    workspace: state?.workspace,
+    settings: state?.settings,
+    stageProfiles: state?.stageProfiles,
+    selectedTicketId: ticketId,
+    ticketRuns: run ? { [ticketId]: run } : {},
+    retainedRuns: {},
+    notice: state?.notice || null
+  });
+}
+
+export function compactRun(run, revision = null) {
+  return {
+    id: run?.id || null,
+    runId: run?.runId || null,
+    ticket: run?.ticket ? {
+      id: run.ticket.id,
+      identifier: run.ticket.identifier,
+      title: run.ticket.title,
+      source: run.ticket.source || null,
+      provider: run.ticket.provider || null,
+      state: run.ticket.state ? { id: run.ticket.state.id, name: run.ticket.state.name, type: run.ticket.state.type } : null
+    } : null,
+    status: run?.status || null,
+    checkpoint: publicCheckpoint(run?.checkpoint),
+    lastError: boundedText(run?.lastError, 1000).value || null,
+    workflow: publicWorkflow(run?.workflow),
+    steering: run?.steering || { nextSequence: 1, records: [] },
+    steeringRejections: run?.steeringRejections || [],
+    proofMap: projectProofMap(run),
+    cleanup: normalizeRunCleanup(run?.cleanup),
+    revision
+  };
 }

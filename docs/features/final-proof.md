@@ -8,11 +8,11 @@
 
 **Purpose:** Present combined checks, criteria and media before local integration or remote delivery. Approve resumes handoff; concrete requested changes invalidate proof and trigger another correction pass.
 
-**Strength:** Automatic step execution never bypasses this human gate. Proof eligibility and required media are enforced server-side, rather than only by disabled UI buttons.
+**Strength:** Automatic step execution never bypasses this human gate. Proof eligibility and required media are enforced server-side. New final reviews bind checks and evidence to each repository's tree and writable non-Git content; changes during review or before approval require fresh proof. Historical runs without revision bindings retain their existing approval contract.
 
 **Limit:** Approval applies before delivery reconciliation; the implementation reruns checks during integration, but agents should inspect any new resulting evidence rather than assume the original packet describes every later tree.
 
-Evidence: `completeCleanReview`, `finishHandoff` and evidence routes in [server.js](../../src/server.js), [server proof-gate tests](../../test/server.test.js), [proof e2e tests](../../test/e2e-proof.test.js).
+Evidence: `completeCleanReview` in [final-review.js](../../src/final-review.js), `finishHandoff` in [ticket-runner.js](../../src/ticket-runner.js), [proof-revision.js](../../src/proof-revision.js), [server proof-gate tests](../../test/server.test.js), [proof e2e tests](../../test/e2e-proof.test.js), [review lifecycle tests](../../test/final-review-lifecycle.test.js).
 
 ## Find the implementation
 

@@ -14,7 +14,7 @@ Each frozen read/write Git extra root gets an isolated run/step worktree. `run.w
 
 **Limit:** Jujutsu is the default and executes dependency-ready siblings serially. Parallel Git work can still conflict at acceptance. Command execution intentionally has no arbitrary shell-string tool. Repository bootstrap is a verification/configuration step inside a plan, not a separate initialization ticket merged before all feature work.
 
-Evidence: [worktrees.js](../../src/worktrees.js) (`ensureTicketWorktree`, `gitRepositoriesForStep`, `mapConfiguredPath`), [git.js](../../src/git.js), [jj.js](../../src/jj.js), `advanceTicket` / `acceptStep` in [server.js](../../src/server.js), [worktree tests](../../test/worktrees.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
+Evidence: [worktrees.js](../../src/worktrees.js) (`ensureTicketWorktree`, `gitRepositoriesForStep`, `mapConfiguredPath`), [git.js](../../src/git.js), [jj.js](../../src/jj.js), `advanceTicket` in [ticket-runner.js](../../src/ticket-runner.js) and `acceptStep` in [step-runner.js](../../src/step-runner.js), [worktree tests](../../test/worktrees.test.js), [multi-repo flow](../../test/multi-repo-flow.test.js).
 
 ## Find the implementation
 

@@ -275,3 +275,32 @@ test("malformed projectPolicies are reset on init without changing settings", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("failed mutations never leak into the live JsonStore revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-plan-store-atomic-"));
+  const file = join(root, "state.json");
+  try {
+    const store = new JsonStore(file, root);
+    await store.init();
+    await store.update((state) => { state.baseline = "durable"; });
+    const baseline = store.read();
+    await assert.rejects(store.update((state) => {
+      state.rejectedCallback = "callback-failure";
+      throw new Error("callback failed");
+    }), /callback failed/);
+    assert.deepEqual(store.read(), baseline);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), baseline);
+
+    const save = store.save.bind(store);
+    store.save = async () => { throw new Error("save failed"); };
+    await assert.rejects(store.update((state) => { state.rejectedSave = "save-failure"; }), /save failed/);
+    assert.deepEqual(store.read(), baseline);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), baseline);
+    store.save = save;
+    await store.update((state) => { state.next = "durable"; });
+    const after = store.read();
+    assert.equal(after.rejectedCallback, undefined);
+    assert.equal(after.rejectedSave, undefined);
+    assert.equal(after.next, "durable");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

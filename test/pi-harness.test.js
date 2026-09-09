@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { freezeRunAccess, normalizeProjectPolicy } from "../src/access-policy.js";
 import { ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, verificationContractFiles, verificationContractExists, PiHarness, projectCommandTool, scopedReadTools, scopedWorkerTools, stepContext, transientRepositoryCheckFailure, verificationTools } from "../src/pi-harness.js";
+import { runRepositoryChecks } from "../src/repository-checks.js";
 import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
@@ -296,6 +297,15 @@ test("requires the canonical verification script even when npm test exists", asy
   } finally {
     await rm(root, { recursive: true });
   }
+});
+
+test("standalone repository checks use the managed default runner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "repository-check-default-"));
+  try {
+    await mkdir(join(root, ".agent-plan"));
+    await writeFile(join(root, ".agent-plan", "verify.mjs"), "console.log('passed');");
+    assert.equal((await runRepositoryChecks({ cwd: root, dataDir: root })).status, "passed");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("retries one transient filesystem cleanup race without spending a correction round", async () => {

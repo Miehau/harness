@@ -10,9 +10,9 @@
 
 **Strength:** Deterministic failure is not replaced by model opinion. Each assigned AC needs an explicit independent verdict; worker reports remain proposals. The requirements reviewer reconfirms all ACs at final review, and another reviewer’s failure cannot be overridden by a success. Visual criteria need fresh, inspected images mapped to their CLI journey (recording frames when video is required). Focused findings, retained rounds and restartable fixer sessions make failed work diagnosable.
 
-**Limit:** `MAX_CORRECTION_ROUNDS = 12` imposes an attempt ceiling even if progress continues; this differs from the no-fixed-retry-count specification. Large orchestration and route handling remain concentrated in `server.js`, increasing the cost of safely changing this lifecycle.
+**Limit:** `MAX_CORRECTION_ROUNDS = 12` imposes an attempt ceiling even if progress continues; this differs from the no-fixed-retry-count specification.
 
-Evidence: `finalReviewLoop` / `executeStep` in [server.js](../../src/server.js), `shouldPauseCorrection` in [execution.js](../../src/execution.js), [verification contract tests](../../test/verification-contract.test.js), [execution tests](../../test/execution.test.js).
+Evidence: [final-review.js](../../src/final-review.js), [step-runner.js](../../src/step-runner.js), [repository-checks.js](../../src/repository-checks.js), `shouldPauseCorrection` in [execution.js](../../src/execution.js), [verification contract tests](../../test/verification-contract.test.js), [execution tests](../../test/execution.test.js). See the [current module responsibilities](../refactor-architecture.md).
 
 The setup step generates or repairs the [discovery/CLI contract](../../.agent-plan/feature-map.md). Feature workers maintain its affected map leaves, commands, assertions and tests. Reviewers compare the verification script with repository test/build configuration.
 

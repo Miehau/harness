@@ -4,6 +4,7 @@ import {
   acknowledgeSteering,
   beginStepAttempt,
   claimNextSteering,
+  createSteeringService,
   markSteeringDelivered,
   preserveAttemptMetadata,
   recoverSteeringClaims,
@@ -70,6 +71,60 @@ test("same-attempt claims are FIFO and delivery remains distinct from acknowledg
   acknowledgeSteering(run, first.id, { now: 1080, evidence: { report: "worker_report" } });
   assert.equal(first.state, "acknowledged");
   assert.notEqual(first.deliveredAt, first.acknowledgedAt);
+});
+
+test("steering service delivers queued records in FIFO order", async () => {
+  const run = fixture();
+  const first = submitSteering(run, "Change src/steering.js to preserve FIFO order.", { idFactory: ids("first") }).record;
+  const second = submitSteering(run, "Update src/steering.js with the claim guard.", { idFactory: ids("second") }).record;
+  run.activeRuns.ledger.piSessionState = "active";
+  const state = { ticketRuns: { [run.id]: run } };
+  const delivered = [];
+  const service = createSteeringService({
+    readState: () => structuredClone(state),
+    update: async (change) => change(state),
+    runtime: { steeringDrainTimers: new Map() },
+    harness: { async steer(input) { delivered.push(input.steerId); return { session: "pi" }; } }
+  });
+  await service.deliver(run.id, first.id);
+  assert.deepEqual(delivered, [first.id, second.id]);
+  assert.equal(run.steering.records[0].state, "delivered");
+  assert.equal(run.steering.records[1].state, "delivered");
+});
+
+test("steering service submits and delivers through its own lifecycle boundary", async () => {
+  const run = fixture();
+  const state = { ticketRuns: { [run.id]: run } };
+  const service = createSteeringService({
+    readState: () => structuredClone(state),
+    update: async (change) => change(state),
+    runtime: { steeringDrainTimers: new Map() },
+    harness: {}
+  });
+
+  const response = await service.submit(run.id, {
+    instruction: "Change src/steering.js to preserve FIFO order."
+  });
+
+  assert.equal(response.state, "queued");
+  assert.equal(run.steering.records.length, 1);
+  assert.equal(run.steering.records[0].author, "operator");
+});
+
+test("steering service requeues an unavailable starting session without consuming the claim", async () => {
+  const run = fixture();
+  const record = submitSteering(run, "Change src/steering.js to preserve FIFO order.", { idFactory: ids("retry") }).record;
+  run.activeRuns.ledger.piSessionState = "starting";
+  const state = { ticketRuns: { [run.id]: run } };
+  const service = createSteeringService({
+    readState: () => structuredClone(state),
+    update: async (change) => change(state),
+    runtime: { steeringDrainTimers: new Map() },
+    harness: { async steer() { throw Object.assign(new Error("not ready"), { code: "steering_session_unavailable" }); } }
+  });
+  await service.deliver(run.id, record.id);
+  assert.equal(run.steering.records[0].state, "queued");
+  assert.equal(run.steering.records[0].claim.attempts, 0);
 });
 
 test("expired claims retry with a bound and visibly fail when exhausted", () => {

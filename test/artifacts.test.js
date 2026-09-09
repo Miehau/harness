@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPathForOpen, cleanupLegacyReviewArtifacts, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
+import { artifactPathForOpen, cleanupLegacyReviewArtifacts, createArtifactReader, hydrateArtifact, hydrateArtifacts, persistArtifact, persistProductContext, readProductContext, safeName, visualEvidenceComment, visualEvidenceHandoffSection, visualEvidenceMedia } from "../src/artifacts.js";
 
 test("persists ticket artifacts outside session storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "ticket-artifact-"));
@@ -42,6 +42,21 @@ test("hydrates compact artifact metadata only from app storage", async () => {
   assert.equal((await hydrateArtifact(compact, root)).content, "full result");
   assert.equal((await hydrateArtifacts([compact], root))[0].content, "full result");
   await assert.rejects(hydrateArtifact({ id: "unsafe", name: "unsafe.md", path: join(tmpdir(), "unsafe.md"), bodyStored: true }, root), /outside the data directory/);
+});
+
+test("bounded artifact reader redacts and never follows an external artifact path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ticket-bounded-reader-"));
+  const reader = createArtifactReader({ dataDir: root });
+  const stored = await persistArtifact(root, { identifier: "MM-42" }, {
+    name: "result.md", content: `api_key=secret_abcdefgh ${"x".repeat(5000)}`, runId: "run-7"
+  });
+  const content = await reader.artifactContent(stored, 20);
+  assert.equal(content.truncated, true);
+  assert.equal(content.content.includes("secret_abcdefgh"), false);
+  const hydrated = await reader.hydrateArtifacts([stored], 20);
+  assert.equal(hydrated[0].content.length, 20);
+  assert.equal(hydrated[0].truncated, true);
+  assert.equal(await reader.artifactContent({ id: "unsafe", path: join(tmpdir(), "secret.md"), bodyStored: true }), null);
 });
 
 test("safeName constrains directory components", () => {

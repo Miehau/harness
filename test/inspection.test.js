@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectInspection } from "../src/inspection.js";
+import { createInspectionService, projectInspection } from "../src/inspection.js";
+import { createArtifactReader } from "../src/artifacts.js";
 import { initialStages, markRunCancelled } from "../src/execution.js";
 import { aggregateProofDiffs, combineRepositoryChecks, diffFileSnapshots, extraProofRoots, snapshotProofPath } from "../src/git.js";
 
@@ -40,6 +41,30 @@ function attemptArtifacts(stepId = "build", attemptId = "attempt-1", visual = fa
     ...(visual ? [{ id: "shot", stepId, attemptId, stageId: "verify", kind: "visual-evidence", name: "desktop.png" }] : [])
   ];
 }
+
+test("inspection service keeps run identity, details, and prompt reads bounded", async () => {
+  const current = run({
+    createdAt: at(2),
+    stages: [{ id: "design", title: "Design", status: "completed", activity: { startedAt: at(1), completedAt: at(2) } }],
+    sessionFile: "/private/design.jsonl",
+    plan: { nodes: [step("build", "verified", { attempts: [{ attemptId: "attempt-1", status: "verified", report: { summary: "api_key=secret_abcdefgh" } }] })] },
+    artifacts: [{ id: "output", stepId: "build", attemptId: "attempt-1", kind: "agent-output", content: "api_key=secret_abcdefgh" }]
+  });
+  const archived = run({ runId: "run-0", createdAt: at(0), status: "completed" });
+  const reader = createArtifactReader({ dataDir: "/safe" });
+  const service = createInspectionService({
+    artifactContent: reader.artifactContent,
+    sessionTrace: async (file, bounds) => ({ prompts: [{ prompt: `Prompt from ${file}`, at: at(1) }], bounds })
+  });
+  const state = { revision: 7, ticketRuns: { "ticket-1": current }, retainedRuns: { old: archived } };
+  assert.deepEqual(service.inspectionHistories(state, "ticket-1").map((item) => [item.runId, item.archived]), [["run-1", false], ["run-0", true]]);
+  assert.throws(() => service.artifactForIdentity(state, "ticket-1", "run-0", "missing"), /Artifact not found/);
+  const detail = await service.attemptDetails(current, current.plan.nodes[0], current.plan.nodes[0].attempts[0]);
+  assert.equal(detail.output.content.includes("secret_abcdefgh"), false);
+  const prompts = await service.promptsForStage(current, current.stages[0]);
+  assert.equal(prompts.prompts[0].prompt, "Prompt from [path]");
+  assert.deepEqual(prompts.trace, { state: "available", retained: 1, available: 1 });
+});
 
 test("projects every workflow stage and parallel worker with stable selectable identities", () => {
   const stages = initialStages().map((stage, index) => ({ ...stage, status: index < 3 ? "completed" : index === 3 ? "active" : "pending", updatedAt: at(index) }));

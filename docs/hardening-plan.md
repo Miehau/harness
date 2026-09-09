@@ -1,5 +1,11 @@
 # Hardening plan
 
+The current architecture refactor follows [refactor-architecture.md](refactor-architecture.md).
+It expands the earlier pipeline-extraction proposal below into explicit planning,
+step execution, final review, delivery, and ticket coordination responsibilities.
+The earlier PR list is retained as historical context; use the current document
+for the refactor's ownership and validation requirements.
+
 Follow-up work from the repo analysis. Product boundaries in [automation-harness-spec.md](automation-harness-spec.md) stay: Pi-only, localhost daemon, JSON store until measured need, no extra notifiers.
 
 Use `node scripts/nav.mjs`, `node scripts/test.mjs`, and `node scripts/seed.mjs` while doing this. They read current source and `JsonStore` instead of a parallel inventory.

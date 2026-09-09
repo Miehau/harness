@@ -39,6 +39,9 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.routes.some((route) => route.method === "GET" && route.path === "/api/health"));
   assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/tickets/:id/approve"));
   assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/tickets/:id/steps/:id/:decision"));
+  assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/retention/cleanup"));
+  assert.ok(app.routes.some((route) => route.method === "GET" && route.path === "/api/workspace/access-policy"));
+  assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/workspace/access-policy"));
   assert.ok(app.ui.dialogs.includes("workspace-dialog"));
   assert.ok(app.cli.includes("wait"));
   assert.ok(app.cli.includes("select"));
@@ -49,7 +52,10 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.deepEqual(app.stages, ["requirements", "explore", "design", "implement", "verify", "handoff"]);
   const html = await readFile(join(repoRoot, "public/index.html"), "utf8");
   const dashboard = await readFile(join(repoRoot, "public/app.js"), "utf8");
-  const server = await readFile(join(repoRoot, "src/server.js"), "utf8");
+  const [inspection, delivery] = await Promise.all([
+    readFile(join(repoRoot, "src/inspection.js"), "utf8"),
+    readFile(join(repoRoot, "src/delivery-runner.js"), "utf8"),
+  ]);
   assert.equal(html.includes("Provider: openai-codex"), false);
   assert.match(dashboard, /Open \/ zoom/);
   assert.match(dashboard, /run-history/);
@@ -57,10 +63,10 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.match(dashboard, /Starting preview/);
   assert.match(dashboard, /Default app/);
   assert.doesNotMatch(dashboard, /Zed/);
-  assert.match(server, /runFile\("open", \[path\]\)/);
-  assert.doesNotMatch(server, /runFile\("open", \["-a", "Zed"/);
-  assert.match(server, /\["requirements", "feature-brief", "architecture"\]/);
-  assert.match(server, /cwd, plan: current\.plan, step, artifacts, proofMap: projectProofMap\(current\), images: \[\]/);
+  assert.match(inspection, /openImpl\("open", \[path\]\)/);
+  assert.doesNotMatch(inspection, /openImpl\("open", \["-a", "Zed"/);
+  assert.match(delivery, /\["requirements", "feature-brief", "architecture"\]/);
+  assert.match(delivery, /cwd, plan: current\.plan, step, artifacts, proofMap: projectProofMap\(current\), images: \[\]/);
 });
 
 test("nav CLI prints a map and json", async () => {

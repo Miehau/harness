@@ -12,7 +12,7 @@
 
 **Limit:** Groups cannot nest. Write scopes are actively enforced and expansions need a stopped-step approval, unlike the specification's advisory-path model. Generated-plan normalization is more permissive than edited-plan validation; see [audit C01 / B05](audit.md).
 
-Evidence: [plan.js](../../src/plan.js), [plan tests](../../test/plan.test.js), plan routes in [server.js](../../src/server.js).
+Evidence: [plan.js](../../src/plan.js), [plan tests](../../test/plan.test.js), plan commands in [ticket-runner.js](../../src/ticket-runner.js) and request handling in [routes.js](../../src/routes.js).
 
 ## Find the implementation
 
