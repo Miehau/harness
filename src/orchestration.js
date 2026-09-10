@@ -9,6 +9,7 @@ import { boundedText, redactRecord } from "./redaction.js";
 import { freeTextTicket } from "../public/ui-model.js";
 
 const CHECKPOINT_PROMPT_LIMIT = 4000;
+const CHECKPOINT_QUESTION_LIMIT = 4000;
 
 function orchestratorCheckpoint(run, compactCheckpoint) {
   if (!compactCheckpoint) return compactCheckpoint;
@@ -18,6 +19,11 @@ function orchestratorCheckpoint(run, compactCheckpoint) {
     checkpoint.prompt = prompt.value;
     checkpoint.promptTruncated = prompt.truncated;
     checkpoint.promptTotal = prompt.total;
+  }
+  if (Array.isArray(run.checkpoint?.questions) && run.checkpoint.questions.length) {
+    const questions = run.checkpoint.questions.map((question) => boundedText(String(question), CHECKPOINT_QUESTION_LIMIT));
+    checkpoint.questions = questions.map((question) => question.value);
+    checkpoint.questionsTruncated = questions.some((question) => question.truncated);
   }
   return checkpoint;
 }

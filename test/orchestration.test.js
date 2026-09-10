@@ -99,6 +99,28 @@ test("orchestrator checkpoint prompt is redacted and truncated without changing 
   }, { harness: { ...mockHarness(), clarifyRequirements: async () => ({ artifact, questions: ["Should empty state reuse the shell chrome?"] }) } });
 });
 
+test("orchestrator questions keep more than the dashboard 240-character compact cap", async () => {
+  const question = `${"Should the empty state reuse the existing shell chrome, including the filter row and the saved-view picker? ".repeat(4)}${"x".repeat(50)}`;
+  const huge = `Why ${"y".repeat(4100)}`;
+  assert.ok(question.length > 240);
+  assert.ok(question.length < 4000);
+  await withDaemon(async (daemon) => {
+    const receipt = (await invoke(daemon, "POST", base, { body: submission("long-question") })).json;
+    const view = await show(daemon, receipt);
+    await invoke(daemon, "POST", `${base}/${view.ticketId}/actions`, { body: decision(view, "start") });
+    await waitFor(async () => assert.equal((await show(daemon, receipt)).status, "awaiting_requirements"), { timeoutMs: 5000 });
+    const current = await show(daemon, receipt);
+    assert.equal(current.checkpoint.questions[0], question);
+    assert.equal(current.checkpoint.questions[1].length, 4000);
+    assert.equal(current.checkpoint.questionsTruncated, true);
+    const compact = (await invoke(daemon, "GET", `/api/tickets/${current.ticketId}/run`)).json;
+    assert.equal(compact.checkpoint.questions[0].length, 240);
+    assert.notEqual(compact.checkpoint.questions[0], question);
+    const brief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", current.ticketId, current.runId])).json;
+    assert.match(brief.message, /saved-view picker/);
+  }, { harness: { ...mockHarness(), clarifyRequirements: async () => ({ artifact: "Requirements", questions: [question, huge] }) } });
+});
+
 test("brief includes lastError for needs_attention and failed even when a checkpoint title exists", async () => {
   await withDaemon(async (daemon) => {
     const stalled = await seedRun(daemon, {
