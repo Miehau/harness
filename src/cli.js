@@ -92,6 +92,7 @@ async function handleCommand(command, rest, ctx) {
         `${view.ticket?.title || view.ticketId}: ${view.status}.`,
         view.requiredAction,
         ...(view.checkpoint?.questions || []).map((question) => `Question: ${question}`),
+        view.checkpoint?.prompt ? `${view.checkpoint.promptTruncated ? "Prompt (truncated):\n" : "Prompt:\n"}${view.checkpoint.prompt}` : null,
         view.uiImpact ? `UI impact: ${view.uiImpact.level}. ${view.uiImpact.reason}` : null,
         view.uiProposal ? `UI proposal ${view.uiProposal.revisionId}: ${view.uiProposal.invalidatedAt ? "needs revision" : view.uiProposal.approvedAt ? "approved" : "awaiting review"}. ${view.uiProposal.summary || ""}` : null
       ].filter(Boolean).join("\n");

@@ -4,8 +4,22 @@ import { freezeRunAccess, readProjectPolicy } from "./access-policy.js";
 import { createTicketRun } from "./execution.js";
 import { compactRun } from "./inspection.js";
 import { normalizeUiImpact } from "./plan.js";
-import { redactRecord } from "./redaction.js";
+import { boundedText, redactRecord } from "./redaction.js";
 import { freeTextTicket } from "../public/ui-model.js";
+
+const CHECKPOINT_PROMPT_LIMIT = 4000;
+
+function orchestratorCheckpoint(run, compactCheckpoint) {
+  if (!compactCheckpoint) return compactCheckpoint;
+  const checkpoint = { ...compactCheckpoint };
+  if (typeof run.checkpoint?.prompt === "string" && run.checkpoint.prompt) {
+    const prompt = boundedText(run.checkpoint.prompt, CHECKPOINT_PROMPT_LIMIT);
+    checkpoint.prompt = prompt.value;
+    checkpoint.promptTruncated = prompt.truncated;
+    checkpoint.promptTotal = prompt.total;
+  }
+  return checkpoint;
+}
 
 const actionScope = new AsyncLocalStorage();
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -51,7 +65,7 @@ export function createOrchestratorService({ state, tickets, dataDir }) {
       : kind === "evidence_review" ? ["approve-proof", "revise-proof"] : kind === "awaiting_approval" ? ["approve", ...(run.plan?.uiImpact?.level === "material" ? ["revise-proposal"] : [])]
       : run.status === "awaiting_step_review" ? ["accept", "revise-step"] : ["paused", "interrupted", "needs_attention", "failed"].includes(run.status) ? ["resume", ...(run.plan?.uiImpact?.level === "material" ? ["revise-proposal"] : [])] : [];
     return { version: 1, ticketId, runId, archived, status: run.status, expected: { runId, status: run.status, checkpointId: run.checkpoint?.id || null },
-      ticket: compact.ticket, checkpoint: compact.checkpoint, uiImpact: compact.uiImpact, uiProposal: compact.uiProposal, metrics: compact.metrics,
+      ticket: compact.ticket, checkpoint: orchestratorCheckpoint(run, compact.checkpoint), uiImpact: compact.uiImpact, uiProposal: compact.uiProposal, metrics: compact.metrics,
       requiredAction: compact.checkpoint?.title || (run.status === "draft" ? "Start this draft when instructed" : compact.lastError || null), actions,
       decisions: (run.orchestratorDecisions || []).slice(-20),
       artifacts: (run.artifacts || []).filter((artifact, index, all) => index >= all.length - 30 || artifact.id === run.uiProposal?.artifactId || run.checkpoint?.evidenceArtifactIds?.includes(artifact.id)).map(({ id, name, kind }) => ({ id, name, kind, content: `${base}/artifacts/${encodeURIComponent(id)}/content`, ...(kind === "ui-proposal" ? { preview: `${base}/artifacts/${encodeURIComponent(id)}/preview` } : kind === "visual-evidence" ? { media: `${base}/artifacts/${encodeURIComponent(id)}/media` } : {}) })) };

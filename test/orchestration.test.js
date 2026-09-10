@@ -53,6 +53,12 @@ test("CLI decisions target exact runs, audit authority and reject stale checkpoi
     assert.equal(current.decisions[0].action, "start");
     assert.equal(current.decisions[0].authority.mode, "user");
     assert.equal(current.uiImpact.level, "material");
+    assert.equal(current.checkpoint.prompt, "Requirements");
+    assert.equal(current.checkpoint.promptTruncated, false);
+    assert.equal(current.checkpoint.promptTotal, "Requirements".length);
+    assert.equal((await invoke(daemon, "GET", `/api/tickets/${current.ticketId}/run`)).json.checkpoint.prompt, undefined);
+    const brief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", current.ticketId, current.runId])).json;
+    assert.match(brief.message, /Prompt:\nRequirements/);
     const stale = await invoke(daemon, "POST", `${base}/${view.ticketId}/actions`, { body: decision(view, "answer", { answers: "" }) });
     assert.equal(stale.status, 400);
     assert.match(stale.text, /Stale run or checkpoint/);
@@ -69,6 +75,27 @@ test("CLI decisions target exact runs, audit authority and reject stale checkpoi
     await assert.rejects(service.act(view.ticketId, decision(current, "answer", { answers: "" })), /Stale run or checkpoint/);
     assert.notEqual(run.status, "wrongly-mutated");
   }, { harness: { ...mockHarness(), clarifyRequirements: async () => ({ artifact: "Requirements", questions: [], uiImpact: { level: "none", reason: "Fixture attempts downgrade" } }) } });
+});
+
+test("orchestrator checkpoint prompt is redacted and truncated without changing dashboard compact runs", async () => {
+  const secret = "Bearer ghp_abcdefghijklmnopqrstuvwxyz012345";
+  const artifact = `${secret}\n${"Decide whether the panel should reuse the existing shell. ".repeat(80)}`;
+  await withDaemon(async (daemon) => {
+    const receipt = (await invoke(daemon, "POST", base, { body: submission("prompt-bound") })).json;
+    const view = await show(daemon, receipt);
+    await invoke(daemon, "POST", `${base}/${view.ticketId}/actions`, { body: decision(view, "start") });
+    await waitFor(async () => assert.equal((await show(daemon, receipt)).status, "awaiting_requirements"), { timeoutMs: 5000 });
+    const current = await show(daemon, receipt);
+    assert.equal(current.checkpoint.promptTruncated, true);
+    assert.ok(current.checkpoint.promptTotal > current.checkpoint.prompt.length);
+    assert.equal(current.checkpoint.prompt.length, 4000);
+    assert.match(current.checkpoint.prompt, /Decide whether the panel should reuse the existing shell/);
+    assert.doesNotMatch(current.checkpoint.prompt, /ghp_/);
+    assert.match(current.checkpoint.prompt, /\[redacted\]/);
+    assert.equal((await invoke(daemon, "GET", `/api/tickets/${current.ticketId}/run`)).json.checkpoint.prompt, undefined);
+    const brief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", current.ticketId, current.runId])).json;
+    assert.match(brief.message, /Prompt \(truncated\):/);
+  }, { harness: { ...mockHarness(), clarifyRequirements: async () => ({ artifact, questions: ["Should empty state reuse the shell chrome?"] }) } });
 });
 
 test("draft dependencies and file-based CLI submissions use the ordinary workflow boundary", async () => {
