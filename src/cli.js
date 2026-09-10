@@ -93,6 +93,8 @@ async function handleCommand(command, rest, ctx) {
         view.requiredAction,
         ...(view.checkpoint?.questions || []).map((question) => `Question: ${question}`),
         view.checkpoint?.prompt ? `${view.checkpoint.promptTruncated ? "Prompt (truncated):\n" : "Prompt:\n"}${view.checkpoint.prompt}` : null,
+        view.proof ? `Proof: ${view.proof.eligible ? "eligible" : "not eligible"}${view.proof.blockingReasons?.length ? `. ${view.proof.blockingReasons.join("; ")}` : ""}` : null,
+        ...(view.proof?.criteria || []).map((criterion) => `Criterion ${criterion.id}: ${criterion.status}${criterion.mediaIds?.length ? ` media=${criterion.mediaIds.join(",")}` : ""}. ${criterion.text}`),
         view.uiImpact ? `UI impact: ${view.uiImpact.level}. ${view.uiImpact.reason}` : null,
         view.uiProposal ? `UI proposal ${view.uiProposal.revisionId}: ${view.uiProposal.invalidatedAt ? "needs revision" : view.uiProposal.approvedAt ? "approved" : "awaiting review"}. ${view.uiProposal.summary || ""}` : null
       ].filter(Boolean).join("\n");

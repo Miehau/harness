@@ -26,6 +26,7 @@ test("concurrent submissions persist one draft and preserve idempotency through 
     assert.equal(results.filter((result) => result.json.created).length, 1);
     const receipt = results[0].json;
     assert.equal((await show(daemon, receipt)).status, "draft");
+    assert.equal((await show(daemon, receipt)).proof, null);
     assert.equal(modelCalls, 0);
     assert.equal(daemon.store.read().selectedTicketId, null);
     const conflict = await invoke(daemon, "POST", base, { body: { ...submission(), title: "Other panel" } });
@@ -171,6 +172,13 @@ test("conversation CLI follows a material ticket through revision, restart, exec
       assert.equal(workers, 1);
       assert.ok(final.artifacts.some((artifact) => artifact.media));
       assert.equal(final.metrics.cost.state, "unavailable");
+      const empty = final.proof?.criteria.find((criterion) => criterion.id === "ac-empty");
+      assert.equal(empty?.status, "verified");
+      assert.equal(empty?.evidenceValidity, "valid");
+      assert.ok(empty?.mediaIds.length);
+      assert.equal(final.proof.eligible, true);
+      assert.match(final.message, /Criterion ac-empty: verified/);
+      assert.match(final.message, /Proof: eligible/);
       await act(restored, "approve-proof");
       const completed = await until(restored, (view) => view.status === "completed");
       assert.deepEqual(completed.actions, []);

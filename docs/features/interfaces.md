@@ -10,7 +10,7 @@
 
 Inspection, CLI `list timeline`, review packets, diffs, and checks name each configured repository by saved `displayPath` or stable id, including non-Git read/write extras and Any-access external writes. Canonical supervision includes per-repo identity and partial delivery. Secrets and non-configured paths still redact; owner-saved configured roots stay visible in identity fields. CLI `access show|set` matches the workspace access-policy API.
 
-The conversational adapter uses `orchestrator submit`, `show`, `brief` and `act`. Draft intake is idempotent; decisions carry exact run/checkpoint identities and an authority record. `brief` adds readable status, questions and the bounded checkpoint prompt while retaining proposal links and reported usage metrics. See [the operating recipe](../orchestrator-contract.md) and [mock end-to-end check](../../test/orchestration.test.js). A named external bot is not configured.
+The conversational adapter uses `orchestrator submit`, `show`, `brief` and `act`. Draft intake is idempotent; decisions carry exact run/checkpoint identities and an authority record. `brief` adds readable status, questions, the bounded checkpoint prompt and compact proof criteria while retaining proposal links and reported usage metrics. See [the operating recipe](../orchestrator-contract.md) and [mock end-to-end check](../../test/orchestration.test.js). A named external bot is not configured.
 
 **Strength:** API and UI actions share a daemon path; compact summaries avoid shipping artifact bodies with every update. CLI automation can reproduce UI actions without mutating state files directly.
 
