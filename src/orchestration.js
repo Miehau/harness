@@ -88,7 +88,7 @@ export function createOrchestratorService({ state, tickets, dataDir }) {
       : run.status === "awaiting_step_review" ? ["accept", "revise-step"] : ["paused", "interrupted", "needs_attention", "failed"].includes(run.status) ? ["resume", ...(run.plan?.uiImpact?.level === "material" ? ["revise-proposal"] : [])] : [];
     return { version: 1, ticketId, runId, archived, status: run.status, expected: { runId, status: run.status, checkpointId: run.checkpoint?.id || null },
       ticket: compact.ticket, checkpoint: orchestratorCheckpoint(run, compact.checkpoint), uiImpact: compact.uiImpact, uiProposal: compact.uiProposal, metrics: compact.metrics,
-      proof: orchestratorProof(run),
+      proof: orchestratorProof(run), lastError: compact.lastError || null,
       requiredAction: compact.checkpoint?.title || (run.status === "draft" ? "Start this draft when instructed" : compact.lastError || null), actions,
       decisions: (run.orchestratorDecisions || []).slice(-20),
       artifacts: (run.artifacts || []).filter((artifact, index, all) => index >= all.length - 30 || artifact.id === run.uiProposal?.artifactId || run.checkpoint?.evidenceArtifactIds?.includes(artifact.id)).map(({ id, name, kind }) => ({ id, name, kind, content: `${base}/artifacts/${encodeURIComponent(id)}/content`, ...(kind === "ui-proposal" ? { preview: `${base}/artifacts/${encodeURIComponent(id)}/preview` } : kind === "visual-evidence" ? { media: `${base}/artifacts/${encodeURIComponent(id)}/media` } : {}) })) };

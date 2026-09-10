@@ -91,6 +91,7 @@ async function handleCommand(command, rest, ctx) {
       if (action === "brief") view.message = [
         `${view.ticket?.title || view.ticketId}: ${view.status}.`,
         view.requiredAction,
+        ["needs_attention", "failed"].includes(view.status) && view.lastError ? `Error: ${view.lastError}` : null,
         ...(view.checkpoint?.questions || []).map((question) => `Question: ${question}`),
         view.checkpoint?.prompt ? `${view.checkpoint.promptTruncated ? "Prompt (truncated):\n" : "Prompt:\n"}${view.checkpoint.prompt}` : null,
         view.proof ? `Proof: ${view.proof.eligible ? "eligible" : "not eligible"}${view.proof.blockingReasons?.length ? `. ${view.proof.blockingReasons.join("; ")}` : ""}` : null,

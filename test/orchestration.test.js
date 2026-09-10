@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
-import { invoke, mockHarness, runAgainstDaemon, waitFor, withDaemon } from "./helpers.js";
+import { invoke, mockHarness, runAgainstDaemon, seedRun, waitFor, withDaemon } from "./helpers.js";
 import { normalizePlan } from "../src/plan.js";
 import { JsonStore } from "../src/store.js";
 import { createOrchestratorService, guardOrchestratorUpdate } from "../src/orchestration.js";
@@ -97,6 +97,37 @@ test("orchestrator checkpoint prompt is redacted and truncated without changing 
     const brief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", current.ticketId, current.runId])).json;
     assert.match(brief.message, /Prompt \(truncated\):/);
   }, { harness: { ...mockHarness(), clarifyRequirements: async () => ({ artifact, questions: ["Should empty state reuse the shell chrome?"] }) } });
+});
+
+test("brief includes lastError for needs_attention and failed even when a checkpoint title exists", async () => {
+  await withDaemon(async (daemon) => {
+    const stalled = await seedRun(daemon, {
+      status: "needs_attention",
+      lastError: "Paused after 8 correction rounds without a passing verification.",
+      checkpoint: { id: "seed-stalled", kind: "needs_attention", title: "Correction stalled" }
+    });
+    const stalledRun = daemon.store.read().ticketRuns[stalled];
+    const stalledView = await show(daemon, { ticketId: stalled, runId: stalledRun.runId });
+    assert.equal(stalledView.status, "needs_attention");
+    assert.equal(stalledView.requiredAction, "Correction stalled");
+    assert.match(stalledView.lastError, /8 correction rounds/);
+    const stalledBrief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", stalled, stalledRun.runId])).json;
+    assert.match(stalledBrief.message, /Correction stalled/);
+    assert.match(stalledBrief.message, /Error: Paused after 8 correction rounds/);
+
+    const failed = await seedRun(daemon, {
+      ticket: { id: "ticket-failed", identifier: "T-FAIL", title: "Broken slice", source: "local" },
+      status: "failed",
+      lastError: "Pi rate limit while verifying the slice.",
+      checkpoint: null
+    });
+    const failedRun = daemon.store.read().ticketRuns[failed];
+    const failedView = await show(daemon, { ticketId: failed, runId: failedRun.runId });
+    assert.equal(failedView.status, "failed");
+    assert.match(failedView.lastError, /Pi rate limit/);
+    const failedBrief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", failed, failedRun.runId])).json;
+    assert.match(failedBrief.message, /Error: Pi rate limit while verifying the slice/);
+  });
 });
 
 test("draft dependencies and file-based CLI submissions use the ordinary workflow boundary", async () => {
