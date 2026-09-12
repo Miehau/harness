@@ -10,8 +10,7 @@ Create an operator-owned JSON file outside project directories, for example `~/.
 {
   "projects": [
     {
-      "cwd": "/absolute/path/to/project",
-      "token": "REPLACE_WITH_A_RANDOM_BOT_TOKEN_AT_LEAST_32_CHARACTERS",
+      "cwd": "/Users/michalmlak/Projects/agent-plan-workspace",
       "webhook": {
         "url": "https://your-receiver.example.invalid/events",
         "authorization": "Bearer REPLACE_WITH_RECEIVER_TOKEN",
@@ -22,9 +21,13 @@ Create an operator-owned JSON file outside project directories, for example `~/.
 }
 ```
 
-The URL is a placeholder, not a GrokBot API definition. Obtain the receiving route and supported payload from its operator. `token` is the bot's inbound Agent Plan credential; `authorization` authenticates outgoing webhook calls. They serve different directions. Bot tokens must be unique, 32–256 URL-safe letters/digits/dot/underscore/tilde/hyphen, and different from the owner API token. Project paths must exist; linked/aliased paths resolve to the canonical project directory. Omit `webhook` for inspection/delegation access without notifications. Each project has at most one destination.
+This example is notification-only: no owner or bot token is required when the daemon binds to loopback. The `cwd` selects the repository being managed; change it when switching projects. With no `webhook` yet, a project entry containing only `cwd` is valid and sends nothing.
 
-Start the daemon with `AGENT_PLAN_SUPERVISOR_CONFIG` set to that absolute private file and `AGENT_PLAN_API_TOKEN` set to a separate owner credential. Keep credentials in the service's private environment. Invalid configuration fails startup without printing values. Configuration is loaded at startup; restart to change/revoke bot credentials or destinations. No config means no external requests. The daemon remains bound to localhost by default.
+The URL is a placeholder, not a GrokBot API definition. Obtain the receiving route and supported payload from its operator. Optional `token` enables the bot's inbound Agent Plan access; `authorization` authenticates outgoing webhook calls. They serve different directions. Bot tokens must be unique, 32–256 URL-safe letters/digits/dot/underscore/tilde/hyphen, and different from the owner API token. Project paths must exist; linked/aliased paths resolve to the canonical project directory. Omit `webhook` for inspection/delegation access without notifications. Each project has at most one destination.
+
+Start the daemon with `AGENT_PLAN_SUPERVISOR_CONFIG` set to that absolute private file and keep the default localhost binding. `AGENT_PLAN_API_TOKEN` is optional for local notification-only use. It is required if you add a bot `token` or bind a configured supervisor daemon beyond loopback. Keep credentials in the service's private environment. Invalid configuration fails startup without printing values. Configuration is loaded at startup; restart to change/revoke bot credentials or destinations. No config means no external requests. The daemon remains bound to localhost by default.
+
+For two-way access, add a random `token` to the project entry and set a separate owner `AGENT_PLAN_API_TOKEN` on the daemon. Without owner authentication, a caller could omit its bot token and use unrestricted operator routes, so this combination is rejected.
 
 In the bot's CLI process, set `AGENT_PLAN_API_TOKEN` to its **bot** token and `AGENT_PLAN_URL` to the reachable local daemon address. Do not give it the owner's token: that token retains full operator powers. The bot token permits only project-scoped orchestrator reads, exact-run artifact content/media/preview reads, and delegated orchestrator actions. It cannot access state/SSE, credentials, settings, other projects, ticket submission, or ordinary mutation routes. A remote bot needs a separately configured private bridge/tunnel; this change does not expose a public daemon.
 

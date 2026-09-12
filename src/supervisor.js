@@ -18,10 +18,10 @@ function fields(value, allowed) {
 }
 
 // Private configuration is operator-owned; never return its contents through inspection.
-export async function loadSupervisorConfig(file, ownerToken) {
+export async function loadSupervisorConfig(file, ownerToken, host = "127.0.0.1") {
   if (!file) return [];
   try {
-    if (!isAbsolute(file) || !ownerToken) throw new Error();
+    if (!isAbsolute(file) || (!ownerToken && !["127.0.0.1", "::1", "localhost"].includes(host))) throw new Error();
     const info = await stat(file);
     if (!info.isFile() || info.size > 65536 || (info.mode & 0o077)) throw new Error();
     const configPath = await realpath(file);
@@ -31,11 +31,12 @@ export async function loadSupervisorConfig(file, ownerToken) {
     const projects = [];
     for (const raw of config.projects) {
       fields(raw, ["cwd", "token", "webhook"]);
-      if (typeof raw.cwd !== "string" || !isAbsolute(raw.cwd) || typeof raw.token !== "string" || !/^[A-Za-z0-9._~-]{32,256}$/.test(raw.token) || raw.token === ownerToken) throw new Error();
+      if (typeof raw.cwd !== "string" || !isAbsolute(raw.cwd)) throw new Error();
+      if (raw.token !== undefined && (!ownerToken || typeof raw.token !== "string" || !/^[A-Za-z0-9._~-]{32,256}$/.test(raw.token) || raw.token === ownerToken)) throw new Error();
       const cwd = await realpath(raw.cwd);
       if (!(await stat(cwd)).isDirectory() || configPath.startsWith(cwd + sep)) throw new Error();
       const projectId = projectIdentity(cwd);
-      if (projects.some((item) => item.projectId === projectId || item.token === raw.token)) throw new Error();
+      if (projects.some((item) => item.projectId === projectId || (raw.token !== undefined && item.token === raw.token))) throw new Error();
       let webhook = null;
       if (raw.webhook !== undefined) {
         fields(raw.webhook, ["url", "authorization", "deduplicates"]);
@@ -48,7 +49,7 @@ export async function loadSupervisorConfig(file, ownerToken) {
     }
     return projects;
   } catch {
-    throw new Error("Invalid supervisor config: use an absolute private JSON file (mode 600), unique project paths/tokens, HTTPS Bearer destinations, and a separate owner API token");
+    throw new Error("Invalid supervisor config: use an absolute private JSON file (mode 600), unique project paths/tokens, HTTPS Bearer destinations, and an owner API token for bot access or non-loopback binding");
   }
 }
 

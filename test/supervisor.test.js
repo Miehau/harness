@@ -355,3 +355,24 @@ test("old unresolved failures remain in digests and archived provider waits offe
     assert.deepEqual(view.runs.find((run) => run.runId === "old-run").delegatedActions, []);
   }, { webhook: false });
 });
+
+test("local outbound-only configuration needs no owner or bot token but cannot enable unprotected bot access", async () => {
+  const sent = [];
+  await fixture(async (daemon, { file, config, opts }) => {
+    await daemon.close();
+    delete config.projects[0].token;
+    await writeFile(file, JSON.stringify(config));
+    assert.equal((await loadSupervisorConfig(file, "")).length, 1);
+    assert.equal((await loadSupervisorConfig(file, "", "::1")).length, 1);
+    await assert.rejects(loadSupervisorConfig(file, "", "0.0.0.0"), /owner API token/);
+    await withDaemon(async (local) => {
+      await seed(local);
+      await local.supervisor.flush();
+      assert.equal(sent.length, 1);
+      assert.equal((await invoke(local, "GET", "/api/state")).status, 200);
+    }, { ...opts, apiToken: "" });
+    config.projects[0].token = token;
+    await writeFile(file, JSON.stringify(config));
+    await assert.rejects(loadSupervisorConfig(file, ""), /owner API token/);
+  }, { transport: async (_url, options) => { sent.push(JSON.parse(options.body)); return { status: 204 }; } });
+});

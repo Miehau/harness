@@ -105,7 +105,7 @@ export async function createDaemon(options = {}) {
   const shutdownTimeoutMs = Math.max(1, Number(options.shutdownTimeoutMs) || 5_000);
   const listen = Boolean(options.listen);
   const useLock = options.lock !== false;
-  const supervisorProjects = await loadSupervisorConfig(options.supervisorConfig ?? process.env.AGENT_PLAN_SUPERVISOR_CONFIG, apiToken);
+  const supervisorProjects = await loadSupervisorConfig(options.supervisorConfig ?? process.env.AGENT_PLAN_SUPERVISOR_CONFIG, apiToken, host);
   const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
   const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd, { beforeSave: (draft) => captureSupervisorEvents(draft, supervisorProjects) });
   await store.init();
