@@ -32,6 +32,7 @@ export class RunRuntime {
       activeTickets: new Map(),
       activeContainments: new Map(),
       activeMerges: new Set(),
+      deliveryPromises: new Set(),
       mergeQueues: new Map(),
       steeringDrainTimers: new Map(),
     });
@@ -350,13 +351,13 @@ export class RunRuntime {
     this.activeTickets.set(ticketId, { controller, promise });
     return promise;
   }
-  async waitForWorkerAbort(promise) {
+  async waitForWorkerAbort(promise, timeoutMs = this.workerAbortWaitMs) {
     let timer;
     try {
       await Promise.race([
         promise.catch(() => {}),
         new Promise((resolve) => {
-          timer = setTimeout(resolve, this.workerAbortWaitMs);
+          timer = setTimeout(resolve, timeoutMs);
         }),
       ]);
     } finally {

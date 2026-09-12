@@ -23,4 +23,4 @@ These remain separate backlog work, outside the recent batch:
 
 ## Verification
 
-Full repository suite: 691 passed, 6 skipped, no failures. Syntax checks passed. A subsequent focused retention regression verifies retry after an already-removed coordination worktree (5 retention tests passed). Tests use mock models and forge/tracker adapters; browser tests use isolated local servers.
+Full repository suite after reconciling the new supervisor changes from main: 711 passed, 6 skipped, no failures. Syntax checks passed. Subsequent focused checks cover shutdown waiting for owned delivery/cleanup (88 passed) and retry after an already-removed coordination worktree (5 retention tests passed). Tests use mock models and forge/tracker adapters; browser tests use isolated local servers.

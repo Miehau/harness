@@ -698,6 +698,7 @@ async function close({ exit = false } = {}) {
     closeSseClients(clients);
     for (const active of [...activeTickets.values()]) active.controller.abort(new Error("Daemon shutting down"));
     await Promise.all([
+      ...[...runtime.deliveryPromises].map((promise) => runtime.waitForWorkerAbort(promise, lifecycleCleanupTimeoutMs)),
       ...[...activeTickets.values()].map((active) => runtime.waitForWorkerAbort(active.promise)),
       ...[...new Set([...activeContainments.values()].map((entry) => entry.ticketId))].map((ticketId) => runtime.cleanupTicketContainments(ticketId, "daemon-shutdown"))
     ]);

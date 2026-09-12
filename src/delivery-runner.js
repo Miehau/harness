@@ -578,7 +578,11 @@ async function scheduleAllDeliveries(ticketId, { diff, contextContent = null, si
     });
     await mirrorExecutionBlocker(ticketId, error);
     throw error;
-  }).finally(() => activeMerges.delete(ticketId));
+  }).finally(() => {
+    activeMerges.delete(ticketId);
+    runtime.deliveryPromises.delete(promise);
+  });
+  (runtime.deliveryPromises ||= new Set()).add(promise);
   return { position: 1, promise };
 }
   return { scheduleAllDeliveries };

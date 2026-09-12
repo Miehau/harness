@@ -2552,9 +2552,13 @@ test("mocked hosting delivers A once, records B failure, and retries only B afte
       ...mockHarness(),
       runRepositoryChecks: async () => ({ status: "passed", command: "verify", summary: "passed", output: "", evidence: [] })
     };
+    let releaseCompletion;
     const trackers = {
       async comment() { return { id: "c1" }; },
-      async transition() { return { type: "completed" }; }
+      async transition() {
+        await new Promise((resolve) => { releaseCompletion = resolve; });
+        return { type: "completed" };
+      }
     };
     const daemonOptions = {
       cwd: primary, dataDir, listen: false, lock: false, vcsMode: "git", harness, trackers, deliveryPollMs: 5,
@@ -2612,9 +2616,16 @@ test("mocked hosting delivers A once, records B failure, and retries only B afte
     daemon = await createDaemon(daemonOptions);
     const resumed = await invoke(daemon, "POST", `/api/tickets/${id}/resume`);
     assert.equal(resumed.status, 202, resumed.text);
-    await waitForRun(daemon, id, (run) => run.status === "completed" || (run.status === "needs_attention" && run.lastError !== stored.lastError), 20_000);
+    await waitForRun(daemon, id, () => Boolean(releaseCompletion), 20_000);
+    let closed = false;
+    const closing = daemon.close({ exit: false }).then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false, "shutdown must wait for the owned delivery");
+    releaseCompletion();
+    await closing;
     stored = daemon.store.read().ticketRuns[id];
     assert.equal(stored.status, "completed", stored.lastError);
+    assert.equal(stored.retentionCleanup.status, "completed");
     assert.equal(forgeA.creates.length, 1);
     assert.equal(forgeA.merges.length, 1);
     assert.equal(forgeB.creates.length, 1);
