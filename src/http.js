@@ -49,15 +49,15 @@ export function authorizeApi(request, response, url, apiToken) {
   return false;
 }
 
-export function createHandleRequest({ publicDir, apiToken, host, port, api }) {
+export function createHandleRequest({ publicDir, apiToken, host, port, api, authorizeSupervisor = () => false }) {
   return async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     try {
-      if (url.pathname.startsWith("/api/") && !authorizeApi(request, response, url, apiToken)) return;
+      if (url.pathname.startsWith("/api/") && !authorizeSupervisor(request, url) && !authorizeApi(request, response, url, apiToken)) return;
       if (url.pathname.startsWith("/api/")) await api(request, response, url);
       else await staticFile(response, url.pathname, publicDir);
     } catch (error) {
-      if (!response.headersSent) json(response, 400, { error: error.message });
+      if (!response.headersSent) json(response, error.status === 403 ? 403 : 400, { error: error.message });
       else response.end();
     }
   };

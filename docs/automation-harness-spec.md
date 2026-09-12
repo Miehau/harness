@@ -30,7 +30,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 - The user approves the complete graph once. Execution is autonomous afterward.
 - Minor replanning is automatic. Ask before product-behavior changes, UI direction, architecture, migrations, security decisions, material scope expansion, destructive operations, or any uncertain intent.
 - The dashboard is the primary question surface. Mirror questions, answers, blockers, plan links, evidence, PR/MR links, and lifecycle state to Linear/Jira. The first valid answer resumes the run.
-- Notifications remain in the dashboard; do not add OS, email, Slack, or webhook notifications.
+- Notifications remain available in the dashboard. An explicitly configured external supervisor may receive project-scoped HTTPS events; delivery is optional, durable, and independent of ticket execution. No OS, email, or Slack notifier is added. See `docs/grokbot-supervisor.md`.
 
 ## Repository initialization
 
@@ -122,3 +122,5 @@ not implementation proof, and appears beside actual evidence at final review.
 ## Local conversational orchestration
 
 The operator CLI exposes structured draft submission, exact-run inspection, and checkpoint decisions through the existing daemon. Persisted workspace-scoped idempotency keys prevent duplicate intake. Drafts make no model calls until started, and dependency completion is checked at the shared start boundary. Orchestrator decisions carry exact run/status/checkpoint expectations and a recorded user or delegated authority claim. `orchestrator brief` adds a conversation-ready status message while retaining exact identities, questions, proposal metadata, artifact links and usage metrics. The local adapter recipe relays user decisions; its end-to-end test mocks model work and evidence without posting external messages. See [the orchestrator contract](orchestrator-contract.md).
+
+External supervisors use separate project-scoped credentials, never the owner token. Delegation is disabled by default; the owner can grant bounded execution-provider resumes. Exact identity, current policy, and consumed request receipts are enforced inside serialized writes. Approval-required actions remain with the owner. Digest scheduling and human message presentation belong to the external supervisor.

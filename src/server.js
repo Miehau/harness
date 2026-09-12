@@ -1,4 +1,5 @@
 import { cleanupMergedRun } from "./retention.js";
+import { captureSupervisorEvents, createSupervisor, loadSupervisorConfig } from "./supervisor.js";
 import { createOrchestratorService, guardOrchestratorUpdate } from "./orchestration.js";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -105,8 +106,9 @@ export async function createDaemon(options = {}) {
   const shutdownTimeoutMs = Math.max(1, Number(options.shutdownTimeoutMs) || 5_000);
   const listen = Boolean(options.listen);
   const useLock = options.lock !== false;
+  const supervisorProjects = await loadSupervisorConfig(options.supervisorConfig ?? process.env.AGENT_PLAN_SUPERVISOR_CONFIG, apiToken, host);
   const daemonLock = useLock ? await acquireDaemonLock(join(dataDir, "daemon.lock")) : { async release() {} };
-  const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd);
+  const store = new JsonStore(join(dataDir, "state-v3.json"), initialCwd, { beforeSave: (draft) => captureSupervisorEvents(draft, supervisorProjects) });
   await store.init();
   // Stored runs predate proofStorageRoot. Migrate them once so evidence adoption
   // and every later projection use the daemon's canonical storage boundary.
@@ -646,9 +648,11 @@ const ticketRoutes = {
   }
 };
 
+const supervisor = createSupervisor({ store, projects: supervisorProjects, fetchImpl: options.supervisorFetch, timeoutMs: options.supervisorTimeoutMs });
 const orchestrator = createOrchestratorService({ state: { read: store.read.bind(store), update }, tickets: ticketService, dataDir });
 const routeApi = createRoutes({
   orchestrator,
+  supervisor,
   version: packageMetadata.version,
   inspection: routeInspection,
   tickets: ticketRoutes,
@@ -659,7 +663,7 @@ const routeApi = createRoutes({
   settings: settingsService
 });
 
-const handleRequest = createHandleRequest({ publicDir, apiToken, host, port, api });
+const handleRequest = createHandleRequest({ publicDir, apiToken, host, port, api, authorizeSupervisor: supervisor.authorize });
 const server = createServer(handleRequest);
 const sseHeartbeat = setInterval(() => {
   for (const client of clients) writeSse(client, ":\n\n");
@@ -686,6 +690,7 @@ async function close({ exit = false } = {}) {
   if (closePromise) return closePromise;
   closed = true;
   closePromise = (async () => {
+    await supervisor.close();
     clearInterval(pollTimer);
     clearInterval(sseHeartbeat);
     runtime.clearSteeringTimers();
@@ -709,6 +714,7 @@ async function close({ exit = false } = {}) {
 for (const run of Object.values(store.read().ticketRuns)) {
   if (["pending", "failed"].includes(run.retentionCleanup?.status)) await cleanupMergedRun({ state: { read: store.read.bind(store), update }, ticketId: run.id, dataDir, stopPreviews: stopTicketPreviews });
 }
+await supervisor.start();
 
 if (listen) {
   scheduleTrackerPolling();
@@ -723,7 +729,7 @@ if (listen) {
 }
 server.once("close", () => daemonLock.release().catch(() => {}));
 
-return { handleRequest, api, close, store, server, harness, previews, host, port, dataDir };
+return { handleRequest, api, close, store, server, harness, previews, supervisor, host, port, dataDir };
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
