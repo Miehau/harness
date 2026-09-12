@@ -452,7 +452,12 @@ async function trackerAction(ticketId, key, action) {
   const run = ticketRun(store.read(), ticketId);
   if (!trackerBacked(run.ticket)) return null;
   if (run.trackerEvents?.[key]) return run.trackerEvents[key].result;
-  const result = await action(run.ticket);
+  let result;
+  try { result = await action(run.ticket); }
+  catch (error) {
+    await update((state) => { ticketRun(state, ticketId).trackerSyncError = `Could not sync ${key}: ${redactText(error.message)}`; });
+    throw error;
+  }
   await update((state) => {
     const current = ticketRun(state, ticketId);
     current.trackerEvents ||= {};

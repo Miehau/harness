@@ -318,7 +318,6 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
         openedAt: new Date().toISOString(), externalActionPending: null
       });
     });
-    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackerComment(ticket, `Remote review opened: ${change.url}`));
     await update((state) => {
       const run = state.ticketRuns[ticketId];
       run.status = "waiting_for_checks";
@@ -327,6 +326,7 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
   }
 
   if (change) {
+    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackerComment(ticket, `Remote review opened: ${change.url}`));
     const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd });
     if (!status.trim()) {
       const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd });
