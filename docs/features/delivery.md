@@ -33,3 +33,5 @@ Follow its named symbols into source, then read callers and the focused tests. L
 - For tracker adapter behavior, read [F02 — Ticket intake](intake.md).
 
 Snapshot: 2026-09-06, `9703dde` plus uncommitted work. [Audit evidence and provenance](audit.md) are optional; verify current source before relying on historical findings.
+
+GitHub inline comments request agent correction only when they begin with `fix:` (case-insensitive, leading whitespace allowed). Other inline comments are informational; blocking reviews still prevent merge. GitLab feedback is unchanged. Squash merges bind to the inspected remote head SHA; a changed-head rejection triggers fresh CI and review inspection.

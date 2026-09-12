@@ -155,6 +155,25 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     });
     const extraId = access.extraRoots[0].id;
     const forgeA = fakeForge("repo-a");
+    const mergeA = forgeA.merge;
+    const inspectedHeads = [];
+    let headChanged = false;
+    forgeA.status = async () => {
+      const headSha = headChanged ? "new-head" : "old-head";
+      const checks = headChanged && inspectedHeads.at(-1) !== "new-head" ? "pending" : "passed";
+      inspectedHeads.push(headSha);
+      return { headSha, feedback: [], checks, mergeable: true, mergeState: "clean", merged: false };
+    };
+    forgeA.merge = async (change) => {
+      if (!headChanged) {
+        assert.equal(change.headSha, "old-head");
+        headChanged = true;
+        throw Object.assign(new Error("SHA does not match"), { status: 409 });
+      }
+      assert.equal(change.headSha, "new-head");
+      assert.deepEqual(inspectedHeads, ["old-head", "new-head", "new-head"]);
+      return mergeA(change);
+    };
     const forgeB = fakeForge("repo-b", { failCreate: () => failB });
     const harness = lifecycleHarness({
       writeFiles({ repositories }) {

@@ -103,9 +103,10 @@ export class GitHubDelivery {
     ]);
     const latestReviews = new Map();
     for (const review of reviews || []) latestReviews.set(review.user?.login || String(review.id), review);
+    const reviewBlocked = [...latestReviews.values()].some((review) => review.state === "CHANGES_REQUESTED");
     const feedback = [
       ...[...latestReviews.values()].filter((review) => review.state === "CHANGES_REQUESTED" && review.body).map((review) => ({ id: `review:${review.id}`, body: review.body, author: review.user?.login })),
-      ...(comments || []).filter((comment) => comment.body).map((comment) => ({ id: `comment:${comment.id}`, body: comment.body, path: comment.path, line: comment.line || comment.original_line, author: comment.user?.login }))
+      ...(comments || []).filter((comment) => /^\s*fix:/i.test(comment.body || "")).map((comment) => ({ id: `comment:${comment.id}`, body: comment.body, path: comment.path, line: comment.line || comment.original_line, author: comment.user?.login }))
     ];
     const checkRuns = checks?.check_runs || [];
     const failedChecks = checkRuns.filter((check) => check.status === "completed" && !["success", "neutral", "skipped"].includes(check.conclusion));
@@ -121,16 +122,17 @@ export class GitHubDelivery {
       headSha: pull.head.sha,
       feedback: [...feedback, ...checkFeedback],
       checks: failed ? "failed" : pending ? "pending" : "passed",
-      mergeable: !pull.draft && pull.mergeable === true,
-      ready: !pull.draft && pull.mergeable === true && !failed && !pending && !feedback.length,
+      mergeable: !pull.draft && pull.mergeable === true && !reviewBlocked,
+      ready: !pull.draft && pull.mergeable === true && !reviewBlocked && !failed && !pending && !feedback.length,
       mergeState: pull.mergeable_state,
       merged: Boolean(pull.merged)
     };
   }
 
   async merge(change, title) {
+    if (!change.headSha) throw new Error("A checked remote head SHA is required to merge");
     const result = await this.api.request(`/repos/${this.repository}/pulls/${change.id}/merge`, {
-      method: "PUT", body: JSON.stringify({ merge_method: "squash", commit_title: title })
+      method: "PUT", body: JSON.stringify({ merge_method: "squash", commit_title: title, sha: change.headSha })
     });
     if (!result.merged) throw new Error(result.message || "GitHub did not merge the pull request");
     return { commit: result.sha };
@@ -194,8 +196,9 @@ export class GitLabDelivery {
   }
 
   async merge(change) {
+    if (!change.headSha) throw new Error("A checked remote head SHA is required to merge");
     const result = await this.api.request(`/projects/${this.project}/merge_requests/${change.id}/merge`, {
-      method: "PUT", body: JSON.stringify({ squash: true, should_remove_source_branch: false })
+      method: "PUT", body: JSON.stringify({ squash: true, should_remove_source_branch: false, sha: change.headSha })
     });
     if (result.state !== "merged") throw new Error(result.message || "GitLab did not merge the merge request");
     return { commit: result.merge_commit_sha || result.squash_commit_sha };

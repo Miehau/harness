@@ -26,6 +26,21 @@ test("GitHub waits for checks and feedback then squash-merges", async () => {
   assert.equal((await delivery.status(change)).ready, true);
   assert.equal((await delivery.merge(change, "Ticket")).commit, "merged");
   assert.equal(JSON.parse(calls.at(-1).input.body).merge_method, "squash");
+  assert.equal(JSON.parse(calls.at(-1).input.body).sha, "abc");
+});
+
+test("both forge merge adapters require and send the checked SHA", async () => {
+  for (const Adapter of [GitHubDelivery, GitLabDelivery]) {
+    let payload;
+    const forge = new Adapter({ repository: "acme/app", project: "acme/app", token: "token", fetchImpl: async (_url, input) => {
+      payload = JSON.parse(input.body);
+      return response({ merged: true, state: "merged", sha: "merged", squash_commit_sha: "merged" });
+    } });
+    await assert.rejects(forge.merge({ id: 1 }), /checked remote head SHA/);
+    assert.equal(payload, undefined);
+    await forge.merge({ id: 1, headSha: "checked-revision" });
+    assert.equal(payload.sha, "checked-revision");
+  }
 });
 
 test("GitHub exposes failed check logs as actionable feedback", async () => {
@@ -249,4 +264,30 @@ test("delivery publishes every registered visual artifact even when latest check
   await assert.rejects(publishDeliveryEvidence({ ...forge, uploadEvidence: async () => [] }, { id: 1 }, checks, artifacts), /every artifact/);
   await assert.rejects(publishDeliveryEvidence({ ...forge, description: async () => "Outcome" }, { id: 1 }, checks, artifacts), /did not retain/);
 
+});
+
+test("GitHub inline correction is explicit and blocking reviews remain authoritative", async () => {
+  let reviews = [];
+  let comments = [
+    { id: 1, body: 'Looks good' }, { id: 2, body: 'We can fix: this later' },
+    { id: 3, body: '  FiX: Handle an empty response', path: 'src/app.js', line: 12 }
+  ];
+  const forge = new GitHubDelivery({ repository: 'acme/app', token: 'token', fetchImpl: async (url) => {
+    if (url.endsWith('/reviews')) return response(reviews);
+    if (url.endsWith('/comments')) return response(comments);
+    if (url.endsWith('/check-runs')) return response({ check_runs: [] });
+    if (url.endsWith('/status')) return response({ statuses: [] });
+    return response({ head: { sha: 'abc' }, mergeable: true, mergeable_state: 'clean' });
+  } });
+  let status = await forge.status({ id: 1 });
+  assert.deepEqual(status.feedback.map(({ id, body, path, line }) => ({ id, body, path, line })), [
+    { id: 'comment:3', body: '  FiX: Handle an empty response', path: 'src/app.js', line: 12 }
+  ]);
+  comments = comments.slice(0, 2);
+  assert.equal((await forge.status({ id: 1 })).ready, true);
+  reviews = [{ id: 4, state: 'CHANGES_REQUESTED', body: '', user: { login: 'reviewer' } }];
+  status = await forge.status({ id: 1 });
+  assert.deepEqual(status.feedback, []);
+  assert.equal(status.mergeable, false);
+  assert.equal(status.ready, false);
 });

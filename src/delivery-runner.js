@@ -388,7 +388,14 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
     const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
     if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
       await update((state) => { patchRunDelivery(state.ticketRuns[ticketId], { repositoryId, externalActionPending: "squash_merge" }); });
-      mergeResult = await forge.merge({ ...change, headSha: delivery.headSha }, `${current.ticket.identifier}: ${current.ticket.title}`);
+      try {
+        mergeResult = await forge.merge({ ...change, headSha: delivery.headSha }, `${current.ticket.identifier}: ${current.ticket.title}`);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        await update((state) => { patchRunDelivery(state.ticketRuns[ticketId], { repositoryId, externalActionPending: null }); });
+        await waitForDelivery(deliveryPollMs, signal);
+        continue;
+      }
       break;
     }
     if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
