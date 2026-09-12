@@ -19,7 +19,7 @@ The integration is optional. Without a configured receiver or while GrokBot is u
 
 ## Slice 1: alerts and daily-digest input
 
-Configure one receiver per project, disabled by default. Store its HTTPS endpoint and authorization privately, outside run state, prompts, logs, and Git. Use the existing credential/configuration patterns where suitable. Validate configuration, redact output, bound requests, and do not follow redirects. No recipient discovery or multi-bot fan-out initially.
+Configure one harness-wide receiver, disabled by default, with optional per-project destination overrides. Notification setup does not depend on the harness installation path or require edits when switching managed projects. Store its HTTPS endpoint and authorization privately, outside run state, prompts, logs, and Git. Use the existing credential/configuration patterns where suitable. Validate configuration, redact output, bound requests, and do not follow redirects. No recipient discovery or multi-bot fan-out initially.
 
 Persist a notification in the same serialized write that creates a relevant state transition. Send after commit, outside the store lock. Cover startup recovery as well as ordinary mutations; SSE publishing is not the event source.
 

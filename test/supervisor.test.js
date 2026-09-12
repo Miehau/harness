@@ -376,3 +376,27 @@ test("local outbound-only configuration needs no owner or bot token but cannot e
     await assert.rejects(loadSupervisorConfig(file, ""), /owner API token/);
   }, { transport: async (_url, options) => { sent.push(JSON.parse(options.body)); return { status: 204 }; } });
 });
+
+test("harness webhook delivers across projects without extending project bot access", async () => {
+  const sent = [];
+  await fixture(async (daemon, { file, config, opts, root, projectId }) => {
+    await daemon.close();
+    config.webhook = config.projects[0].webhook;
+    delete config.projects[0].webhook;
+    await writeFile(file, JSON.stringify(config));
+    const other = join(root, "other");
+    await mkdir(other);
+    await withDaemon(async (local) => {
+      await seed(local);
+      const id = await seed(local, { ticket: { id: "other", title: "Other", source: "local" }, access: { primary: { path: other } }, submission: { workspaceCwd: other } });
+      await local.supervisor.flush();
+      assert.deepEqual(new Set(sent.map(x => x.projectId)), new Set([projectId, projectIdentity(other)]));
+      assert.equal(local.supervisor.notifications(projectIdentity(other)).configured, true);
+      const run = local.store.read().ticketRuns[id];
+      assert.equal((await call(local, "GET", `${rootPath}/tickets/${id}/runs/${run.runId}`)).status, 403);
+      assert.equal((await call(local, "GET", `${rootPath}/overview`)).json.runs.length, 1);
+    }, opts);
+    await writeFile(file, JSON.stringify({ webhook: config.webhook }));
+    assert.equal((await loadSupervisorConfig(file, "")).length, 1);
+  }, { transport: async (_url, options) => { sent.push(JSON.parse(options.body)); return { status: 204 }; } });
+});

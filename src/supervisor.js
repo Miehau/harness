@@ -26,16 +26,18 @@ export async function loadSupervisorConfig(file, ownerToken, host = "127.0.0.1")
     if (!info.isFile() || info.size > 65536 || (info.mode & 0o077)) throw new Error();
     const configPath = await realpath(file);
     const config = JSON.parse(await readFile(file, "utf8"));
-    fields(config, ["projects"]);
-    if (!Array.isArray(config.projects) || !config.projects.length || config.projects.length > 32) throw new Error();
+    fields(config, ["projects", "webhook"]);
+    if (config.projects === undefined) config.projects = [];
+    if (!Array.isArray(config.projects) || config.projects.length > 32) throw new Error();
     const projects = [];
-    for (const raw of config.projects) {
+    for (const raw of [...config.projects, ...(config.webhook === undefined ? [] : [{ webhook: config.webhook }])]) {
+      const global = !config.projects.includes(raw);
       fields(raw, ["cwd", "token", "webhook"]);
-      if (typeof raw.cwd !== "string" || !isAbsolute(raw.cwd)) throw new Error();
+      if (!global && (typeof raw.cwd !== "string" || !isAbsolute(raw.cwd))) throw new Error();
       if (raw.token !== undefined && (!ownerToken || typeof raw.token !== "string" || !/^[A-Za-z0-9._~-]{32,256}$/.test(raw.token) || raw.token === ownerToken)) throw new Error();
-      const cwd = await realpath(raw.cwd);
-      if (!(await stat(cwd)).isDirectory() || configPath.startsWith(cwd + sep)) throw new Error();
-      const projectId = projectIdentity(cwd);
+      const cwd = global ? null : await realpath(raw.cwd);
+      if (!global && (!(await stat(cwd)).isDirectory() || configPath.startsWith(cwd + sep))) throw new Error();
+      const projectId = global ? null : projectIdentity(cwd);
       if (projects.some((item) => item.projectId === projectId || (raw.token !== undefined && item.token === raw.token))) throw new Error();
       let webhook = null;
       if (raw.webhook !== undefined) {
@@ -52,6 +54,8 @@ export async function loadSupervisorConfig(file, ownerToken, host = "127.0.0.1")
     throw new Error("Invalid supervisor config: use an absolute private JSON file (mode 600), unique project paths/tokens, HTTPS Bearer destinations, and an owner API token for bot access or non-loopback binding");
   }
 }
+
+const notificationConfig = (projects, projectId) => projects.find((item) => item.projectId === projectId && item.webhook) || projects.find((item) => item.projectId === null) || projects.find((item) => item.projectId === projectId);
 
 const decisionKinds = new Set(["requirements_review", "technical_input", "needs_input", "awaiting_approval", "step_review", "evidence_review"]);
 export function supervisorEventKind(run) {
@@ -70,7 +74,7 @@ export function captureSupervisorEvents(draft, projects, at = new Date().toISOSt
     const current = signature(run);
     const previous = run.supervisorObservation;
     const projectId = runProject(run);
-    const config = projects.find((item) => item.projectId === projectId);
+    const config = notificationConfig(projects, projectId);
     const destination = config?.destination || null;
     if (previous?.signature === current && previous.destination === destination) continue;
     run.supervisorObservation = { signature: current, destination, at: previous?.signature === current ? previous.at : !previous && ["completed", "failed", "cancelled"].includes(run.status) ? run.completedAt || run.createdAt || at : at, sequence: (previous?.sequence || 0) + 1 };
@@ -86,7 +90,7 @@ export function captureSupervisorEvents(draft, projects, at = new Date().toISOSt
   }
   for (const event of draft.supervisorEvents || []) {
     if (!unresolved(event)) continue;
-    const config = projects.find((item) => item.projectId === event.projectId);
+    const config = notificationConfig(projects, event.projectId);
     const run = draft.ticketRuns[event.ticketId];
     if (config?.destination !== event.destination) Object.assign(event, { delivery: "discarded", reason: "destination_changed", settledAt: at });
     else if (event.kind !== "completed" && (!run || run.runId !== event.runId || signature(run) !== event.signature)) Object.assign(event, { delivery: "superseded", settledAt: at });
@@ -178,7 +182,7 @@ export function createSupervisor({ store, projects = [], fetchImpl = fetch, time
     const offset = Number(params.get("offset") || 0);
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Use a nonnegative notification offset");
     const events = (state.supervisorEvents || []).filter((item) => item.projectId === projectId).sort((a, b) => Number(unresolved(b)) - Number(unresolved(a)));
-    return { configured: Boolean(projects.find((item) => item.projectId === projectId)?.webhook), deliveryError,
+    return { configured: Boolean(notificationConfig(projects, projectId)?.webhook), deliveryError,
       unresolved: events.filter(unresolved).length, total: events.length, truncated: events.length > 100, nextOffset: offset + 100 < events.length ? offset + 100 : null,
       historyPrunedAt: state.supervisorHistoryPrunedAt || null,
       events: events.slice(offset, offset + 100).map(({ signature: _s, destination: _d, ...event }) => event) };
@@ -208,7 +212,7 @@ export function createSupervisor({ store, projects = [], fetchImpl = fetch, time
       let claimed;
       await store.update((draft) => {
         const event = draft.supervisorEvents?.find((item) => item.eventId === candidate.eventId);
-        const config = projects.find((item) => item.projectId === event?.projectId);
+        const config = notificationConfig(projects, event?.projectId);
         if (!event || !config?.webhook || config.destination !== event.destination || event.delivery !== "pending" || Date.parse(event.nextAttemptAt) > Date.now()) return;
         event.delivery = "attempting";
         event.attempts++;
@@ -253,8 +257,8 @@ export function createSupervisor({ store, projects = [], fetchImpl = fetch, time
   async function start() {
     await store.update((draft) => {
       for (const event of draft.supervisorEvents || []) if (event.delivery === "attempting") {
-        const config = projects.find((item) => item.projectId === event.projectId && item.destination === event.destination);
-        Object.assign(event, { delivery: config?.webhook?.deduplicates && event.attempts < 3 ? "pending" : "unknown", nextAttemptAt: new Date().toISOString() });
+        const config = notificationConfig(projects, event.projectId);
+        Object.assign(event, { delivery: config?.destination === event.destination && config?.webhook?.deduplicates && event.attempts < 3 ? "pending" : "unknown", nextAttemptAt: new Date().toISOString() });
       }
     });
     if (projects.some((item) => item.webhook)) { timer = setInterval(flush, 1000); timer.unref(); }

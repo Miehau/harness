@@ -43,7 +43,7 @@ node src/cli.js orchestrator notifications
 node src/cli.js orchestrator policy
 ```
 
-Local outbound notifications need only the receiver URL and Bearer credential; owner/bot tokens are required only for scoped two-way bot access (or owner authentication for a non-loopback binding).
+A single harness webhook receives events from every managed project, without changing paths when switching projects. Local outbound notifications need only the receiver URL and Bearer credential; owner/bot tokens are required only for scoped two-way bot access (or owner authentication for a non-loopback binding).
 
 See [supervisor setup and decision policy](docs/grokbot-supervisor.md) for private configuration, bot credentials, event payloads, retries, and digest scheduling. The real GrokBot receiver and daily routine must be configured separately; no live connection or messages are enabled by installation.
 
