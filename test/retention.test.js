@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
-import { cleanupRetainedRun, retentionInventory, runRoot } from "../src/retention.js";
+import { cleanupMergedRun, cleanupRetainedRun, retentionInventory, runRoot } from "../src/retention.js";
 
 test("retention inventory reports archived and active disk usage", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "agent-retention-"));
@@ -85,4 +85,33 @@ test("cleanup removes extra-root worktrees and branches without touching user so
     assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(extraSource, "keep.txt"), "utf8")), "user-source\n");
     assert.equal(await import("node:fs/promises").then(({ stat }) => stat(runRoot(dataDir, run)).then(() => true, () => false)), false);
   } finally { await rm(dataDir, { recursive: true }); }
+});
+
+
+test("post-merge cleanup is durable, retryable, and never wipes unmerged runs", async () => {
+  const run = { id: "ticket", runId: "run", status: "awaiting_evidence_review", deliveries: [{ status: "integrated", change: { url: "https://forge/pr/1" } }] };
+  const data = { ticketRuns: { ticket: run } };
+  const state = { read: () => structuredClone(data), update: async (fn) => fn(data) };
+  let attempts = 0;
+  const cleanup = async () => {
+    assert.equal(run.retentionCleanup.status, "pending");
+    if (++attempts === 1) throw new Error("disk temporarily unavailable");
+    return { root: "/run-owned", runId: "run" };
+  };
+  const input = { state, ticketId: "ticket", dataDir: "/unused", cleanup };
+  assert.equal(await cleanupMergedRun(input), null);
+  run.status = "completed";
+  assert.equal((await cleanupMergedRun(input)).status, "failed");
+  assert.equal(run.status, "completed");
+  assert.equal((await cleanupMergedRun(input)).status, "completed");
+  assert.equal((await cleanupMergedRun(input)).removed.root, "/run-owned");
+  assert.equal(attempts, 2);
+  delete run.retentionCleanup;
+  run.deliveries.push({ status: "failed" });
+  assert.equal(await cleanupMergedRun(input), null);
+  assert.equal(attempts, 2);
+  run.deliveries.pop();
+  run.retentionCleanup = { status: "retained" };
+  assert.equal((await cleanupMergedRun(input)).status, "retained");
+  assert.equal(attempts, 2);
 });

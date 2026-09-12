@@ -13,6 +13,7 @@ import { executionFailure, reviewFixConstraints } from "./execution.js";
 import { projectProofMap } from "./proof-map.js";
 import { assertProofRevision } from "./proof-revision.js";
 import { repositoryCheckError } from "./repository-checks.js";
+import { cleanupMergedRun } from "./retention.js";
 import { setStage } from "./run-status.js";
 
 const runFile = promisify(execFile);
@@ -240,10 +241,13 @@ async function finalizeSuccessfulDelivery(ticketId, { diff, contextContent, acti
     run.failure = null;
     run.lastError = null;
     run.completedAt = integratedAt;
+    if (remoteUrl) run.retentionCleanup = { status: process.env.AGENT_PLAN_KEEP_MERGED_RUNS === "1" ? "retained" : "pending", runId: run.runId, requestedAt: integratedAt };
     const stage = setStage(run, "handoff", "completed", remoteUrl ? `Merged via ${remoteUrl}` : `Merged into ${primary.sourceCwd}`);
     if (activity) stage.activity = activity.snapshot();
   });
-  await stopTicketPreviews(ticketId, "run_completed");
+  try { await stopTicketPreviews(ticketId, "run_completed"); }
+  catch (error) { await update((draft) => { draft.ticketRuns[ticketId].previewCleanupError = redactText(error.message); }); }
+  await cleanupMergedRun({ state, ticketId, dataDir, stopPreviews: stopTicketPreviews });
   return { commit: primary.commit, change: primary.change, sync: primary.sync, deliveries };
 }
 

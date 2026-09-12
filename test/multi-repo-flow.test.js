@@ -304,6 +304,10 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     assert.equal(forgeB.creates.length, 1);
     assert.equal(forgeB.merges.length, 1);
     assert.equal((stored.deliveries || []).find((item) => item.repositoryId === extraId)?.status, "integrated");
+    await waitForRun(daemon, id, () => daemon.store.read().ticketRuns[id].retentionCleanup?.status === "completed");
+    await assert.rejects(readFile(join(workspace.cwd, "done-a.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(join(extraRepo.cwd, "done-b.txt")), { code: "ENOENT" });
+    assert.equal(daemon.store.read().ticketRuns[id].status, "completed");
   } finally {
     try { await daemon?.close({ exit: false }); } catch {}
     try { await daemon?.store?.queue; } catch {}

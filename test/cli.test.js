@@ -720,3 +720,15 @@ test("timeline and review packet name both repositories when A and B changed", a
     assert.deepEqual(packet.json.changes.files, ["one-a.txt", `root:${extraId}:one-b.txt`]);
   });
 });
+
+test("retention CLI uses the dashboard inventory and cleanup routes", async () => {
+  await withDaemon(async (daemon) => {
+    const id = await seedRun(daemon, { status: "completed" });
+    const listed = await runAgainstDaemon(daemon, ["retention", "list"]);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.equal(listed.json.items[0].ticketId, id);
+    const cleaned = await runAgainstDaemon(daemon, ["retention", "cleanup", id]);
+    assert.equal(cleaned.code, 0, cleaned.stderr);
+    assert.equal(daemon.store.read().ticketRuns[id], undefined);
+  });
+});

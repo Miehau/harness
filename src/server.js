@@ -1,3 +1,4 @@
+import { cleanupMergedRun } from "./retention.js";
 import { createOrchestratorService, guardOrchestratorUpdate } from "./orchestration.js";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -703,6 +704,10 @@ async function close({ exit = false } = {}) {
     if (exit) process.exit(0);
   })();
   return closePromise;
+}
+
+for (const run of Object.values(store.read().ticketRuns)) {
+  if (["pending", "failed"].includes(run.retentionCleanup?.status)) await cleanupMergedRun({ state: { read: store.read.bind(store), update }, ticketId: run.id, dataDir, stopPreviews: stopTicketPreviews });
 }
 
 if (listen) {
