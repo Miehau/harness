@@ -14,7 +14,7 @@
 
 Evidence: [final-review.js](../../src/final-review.js), [step-runner.js](../../src/step-runner.js), [repository-checks.js](../../src/repository-checks.js), `shouldPauseCorrection` in [execution.js](../../src/execution.js), [verification contract tests](../../test/verification-contract.test.js), [execution tests](../../test/execution.test.js). See the [current module responsibilities](../refactor-architecture.md).
 
-The setup step generates or repairs the [discovery/CLI contract](../../.agent-plan/feature-map.md). Feature workers maintain its affected map leaves, commands, assertions and tests. Reviewers compare the verification script with repository test/build configuration.
+The setup step generates or repairs the [discovery/CLI contract](../../.agent-plan/feature-map.md). Feature workers maintain its affected map leaves, commands, assertions and tests before implementation handoff, and report updated paths or why no map change is needed. Missing documentation scope requires input. Step review checks that rationale against the diff; final review checks the combined ticket diff and reports stale or missing affected documentation. Reviewers compare the verification script with repository test/build configuration.
 
 ## Find the implementation
 

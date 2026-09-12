@@ -627,7 +627,7 @@ ${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifa
 
 ${evidenceContext(lookup)}
 
-Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
+Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Verify the worker’s feature-map update or no-change rationale against the actual diff; report stale or missing affected documentation as a review finding. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
 For the supplied deterministic gate, use ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })}. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
 
 Return ONLY JSON:
@@ -808,7 +808,7 @@ ${diff.patch || "No textual diff"}`;
     });
     session.setSessionName(`review:${role}:round-${round}`);
     onEvent?.({ type: "phase", label: `Progressive review index: ${lookup.textCharacters} characters; ${lookup.summary.counts.criteria} criteria` });
-    const outputContract = `The requirements reviewer must return an explicit criterionResults verdict for EVERY approved criterion ID, even on correction rounds. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate.
+    const outputContract = `The requirements reviewer must return an explicit criterionResults verdict for EVERY approved criterion ID, even on correction rounds. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate for the combined ticket diff; report stale or missing affected documentation as a review finding.
 
 Return ONLY JSON:
 {
