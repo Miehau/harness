@@ -1510,6 +1510,8 @@ export function publicState(state) {
   }
   for (const [id, run] of Object.entries(clone.retainedRuns || {})) clone.retainedRuns[id] = compactRun(run, clone.revision);
   delete clone.orchestratorSubmissions;
+  delete clone.supervisorEvents;
+  delete clone.supervisorPolicies;
   delete clone.projectPolicies;
   clone.accessPolicy = accessPolicy;
   if (clone.workspace && typeof clone.workspace === "object") clone.workspace.displayPath = workspaceDisplayPath;

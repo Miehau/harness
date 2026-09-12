@@ -268,7 +268,8 @@ export function normalizeSettings(value = {}) {
 }
 
 export class JsonStore {
-  constructor(file, cwd) {
+  constructor(file, cwd, { beforeSave = () => {} } = {}) {
+    this.beforeSave = beforeSave;
     this.file = file;
     this.cwd = cwd;
     this.state = initialState(cwd);
@@ -370,6 +371,7 @@ export class JsonStore {
   }
 
   async save(state = this.state) {
+    this.beforeSave(state);
     compactPersistedState(state, dirname(this.file));
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
