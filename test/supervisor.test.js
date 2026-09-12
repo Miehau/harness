@@ -13,14 +13,14 @@ const owner = "owner-test-" + "a".repeat(32);
 const rootPath = "/api/orchestrator";
 const checkpoint = (id = "question-1") => ({ id, kind: "requirements_review", title: "Approve requirements", createdAt: new Date().toISOString() });
 const providerCheckpoint = () => ({ id: "provider-1", kind: "provider_wait", source: "execution", createdAt: new Date(Date.now() - 120000).toISOString() });
-async function fixture(fn, { deduplicates = false, transport = async () => ({ status: 204 }), webhook = true } = {}) {
+async function fixture(fn, { deduplicates = false, transport = async () => ({ status: 204 }), webhook = true, timeoutMs = 5000 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "supervisor-test-")));
   const cwd = join(root, "project");
   await mkdir(cwd);
   const file = join(root, "private.json");
   const config = { projects: [{ cwd, token, ...(webhook ? { webhook: { url: "https://receiver.example.invalid/events", authorization: "Bearer synthetic-private-value", deduplicates } } : {}) }] };
   await writeFile(file, JSON.stringify(config), { mode: 0o600 });
-  const opts = { cwd, dataDir: join(root, "data"), apiToken: owner, supervisorConfig: file, supervisorFetch: transport, supervisorTimeoutMs: 30 };
+  const opts = { cwd, dataDir: join(root, "data"), apiToken: owner, supervisorConfig: file, supervisorFetch: transport, supervisorTimeoutMs: timeoutMs };
   try { await withDaemon((daemon) => fn(daemon, { root, cwd, file, config, opts, projectId: projectIdentity(cwd) }), opts); }
   finally { await rm(root, { recursive: true, force: true }); }
 }
@@ -155,7 +155,7 @@ test("timeouts release the sender and store; redirects are failed and never retr
     assert.equal(events(daemon)[0].delivery, "unknown");
     await daemon.store.update((draft) => { draft.notice = "store remains usable"; });
     assert.equal(daemon.store.read().notice, "store remains usable");
-  }, { transport: () => new Promise(() => {}) });
+  }, { timeoutMs: 30, transport: () => new Promise(() => {}) });
   await fixture(async (daemon) => {
     await seed(daemon);
     await daemon.supervisor.flush();
