@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inspectApp, repoRoot } from "../scripts/inspect.js";
+import { inspectApp, parseCli, repoRoot } from "../scripts/inspect.js";
 import { runNav } from "../scripts/nav.mjs";
 import { captureObservability } from "../scripts/capture-observability.mjs";
 import { captureFinalProof, captureLiveViewport, cdpConnection, finalProofIdentity, readinessExpression } from "../scripts/capture-final-proof.mjs";
@@ -44,6 +44,8 @@ test("nav reads API, UI, CLI, and stages from source", async () => {
   assert.ok(app.routes.some((route) => route.method === "POST" && route.path === "/api/workspace/access-policy"));
   assert.ok(app.ui.dialogs.includes("workspace-dialog"));
   assert.ok(app.cli.includes("wait"));
+  for (const command of ["list", "backlog", "timeline"]) assert.ok(app.cli.includes(command));
+  assert.deepEqual(parseCli('if (command === "list" || command === "backlog" || command === "timeline") {} const what = command === "list" ? rest[0] : command;'), ["list", "backlog", "timeline"]);
   assert.ok(app.cli.includes("select"));
   assert.ok(app.cli.includes("approve-proof"));
   assert.ok(app.cli.includes("scope-add"));
