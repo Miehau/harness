@@ -155,6 +155,25 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     });
     const extraId = access.extraRoots[0].id;
     const forgeA = fakeForge("repo-a");
+    const mergeA = forgeA.merge;
+    const inspectedHeads = [];
+    let headChanged = false;
+    forgeA.status = async () => {
+      const headSha = headChanged ? "new-head" : "old-head";
+      const checks = headChanged && inspectedHeads.at(-1) !== "new-head" ? "pending" : "passed";
+      inspectedHeads.push(headSha);
+      return { headSha, feedback: [], checks, mergeable: true, mergeState: "clean", merged: false };
+    };
+    forgeA.merge = async (change) => {
+      if (!headChanged) {
+        assert.equal(change.headSha, "old-head");
+        headChanged = true;
+        throw Object.assign(new Error("SHA does not match"), { status: 409 });
+      }
+      assert.equal(change.headSha, "new-head");
+      assert.deepEqual(inspectedHeads, ["old-head", "new-head", "new-head"]);
+      return mergeA(change);
+    };
     const forgeB = fakeForge("repo-b", { failCreate: () => failB });
     const harness = lifecycleHarness({
       writeFiles({ repositories }) {
@@ -165,8 +184,16 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
         ].filter(Boolean);
       }
     });
+    let failTracker = true;
+    let remoteLinkPosts = 0;
     const trackers = {
-      async comment() { return { id: "c1" }; },
+      async comment(_ticket, body) {
+        if (body.startsWith("Remote review opened:")) {
+          remoteLinkPosts++;
+          if (failTracker) throw new Error("tracker outage after creation");
+        }
+        return { id: "c1" };
+      },
       async transition() { return { type: "completed" }; }
     };
     const daemonOptions = {
@@ -240,6 +267,23 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     await waitForRun(daemon, id, (run) => run.status === "needs_attention" || run.status === "completed", 20_000);
     let stored = daemon.store.read().ticketRuns[id];
     assert.equal(stored.status, "needs_attention", stored.lastError);
+    assert.match(stored.lastError, /tracker outage after creation/);
+    assert.equal(forgeA.creates.length, 1);
+    assert.equal(forgeA.merges.length, 0);
+    const savedChange = stored.deliveries.find((item) => item.repositoryId === "primary").change;
+    assert.equal(savedChange.url, "https://github.com/acme/repo-a/pull/1");
+    assert.equal(stored.deliveries[0].externalActionPending, null);
+    await daemon.close({ exit: false });
+    await daemon.store.queue;
+    failTracker = false;
+    daemon = await createDaemon(daemonOptions);
+    assert.deepEqual(daemon.store.read().ticketRuns[id].deliveries[0].change, savedChange);
+    const retryTracker = await runAgainstDaemon(daemon, ["resume", id]);
+    assert.equal(retryTracker.code, 0, retryTracker.stderr);
+    await waitForRun(daemon, id, (run) => run.status === "needs_attention" && /hosting failed/.test(run.lastError || "") && daemon.store.read().ticketRuns[id].deliveries.find((item) => item.repositoryId === "primary")?.status === "integrated", 20_000);
+    stored = daemon.store.read().ticketRuns[id];
+    assert.equal(remoteLinkPosts, 2);
+    assert.ok(stored.trackerEvents["remote_change:primary"]);
     assert.equal(forgeA.creates.length, 1);
     assert.equal(forgeA.merges.length, 1);
     assert.equal(forgeB.creates.length, 0);
@@ -260,6 +304,10 @@ test("one ticket changes A and B through mapped tools, proof, partial delivery, 
     assert.equal(forgeB.creates.length, 1);
     assert.equal(forgeB.merges.length, 1);
     assert.equal((stored.deliveries || []).find((item) => item.repositoryId === extraId)?.status, "integrated");
+    await waitForRun(daemon, id, () => daemon.store.read().ticketRuns[id].retentionCleanup?.status === "completed");
+    await assert.rejects(readFile(join(workspace.cwd, "done-a.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(join(extraRepo.cwd, "done-b.txt")), { code: "ENOENT" });
+    assert.equal(daemon.store.read().ticketRuns[id].status, "completed");
   } finally {
     try { await daemon?.close({ exit: false }); } catch {}
     try { await daemon?.store?.queue; } catch {}

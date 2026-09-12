@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readdir, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { flattenSteps } from "./plan.js";
 import { safeName } from "./artifacts.js";
 
 const exec = promisify(execFile);
@@ -84,10 +85,14 @@ export async function cleanupRetainedRun({ run, dataDir, previewManager, execImp
   const root = runRoot(dataDir, run);
   const retainedRoot = join(dataDir, "ticket-runs");
   if (!within(retainedRoot, root) || root === resolve(retainedRoot)) throw new Error("Refusing to clean a path outside retained ticket data");
-  previewManager?.stopMatching(`${run.id}:`);
+  await previewManager?.stopMatching(`${run.id}:`);
   for (const revision of run.coordination?.revisions || []) for (const record of revision.workPreparation?.repositories || []) {
     const prefix = `refs/agent-plan/coordination/${safeName(run.runId)}/${safeName(revision.id)}/`;
-    if (record.cwd && within(root, record.cwd) && record.ref?.startsWith(prefix)) await execImpl("git", ["update-ref", "-d", record.ref], { cwd: record.cwd });
+    if (record.cwd && within(root, record.cwd) && record.ref?.startsWith(prefix)) {
+      await execImpl("git", ["update-ref", "-d", record.ref], { cwd: record.cwd }).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
   }
   const paths = worktreePaths(run, root);
   for (const source of sourceCleanupTargets(run)) {
@@ -104,5 +109,35 @@ export async function cleanupRetainedRun({ run, dataDir, previewManager, execImp
     }
   }
   await rmImpl(root, { recursive: true, force: true });
-  return { ticketId: run.id, runId: run.runId, root };
+  const sessionRoot = join(dataDir, "pi-sessions", "tickets");
+  const key = (value) => String(value).replace(/[^a-z0-9._-]+/gi, "-");
+  const sessions = [join(sessionRoot, key(run.ticket?.id || run.id), safeName(run.runId)),
+    ...["", "-requirements", "-ticket-lookahead", "-ui-proposal", ...flattenSteps(run.plan).map((step) => `-${step.id}-review-map`)]
+      .map((suffix) => join(sessionRoot, key(`${run.ticket?.id || run.id}-${run.runId}${suffix}`)))];
+  for (const path of sessions) {
+    if (!within(sessionRoot, path) || path === sessionRoot) throw new Error("Refusing to clean sessions outside run-owned data");
+    await rmImpl(path, { recursive: true, force: true });
+  }
+  return { ticketId: run.id, runId: run.runId, root, sessions };
+}
+
+// Keep the run record and remote links; remove only its local resource bodies.
+export async function cleanupMergedRun({ state, ticketId, dataDir, stopPreviews = async () => {}, cleanup = cleanupRetainedRun }) {
+  const run = state.read().ticketRuns[ticketId];
+  if (run?.status !== "completed" || !run.deliveries?.length || run.deliveries.some((item) => item.status !== "integrated" || !item.change?.url)) return null;
+  if (run.retentionCleanup?.status === "completed" || run.retentionCleanup?.status === "retained") return run.retentionCleanup;
+  const record = { status: "pending", runId: run.runId, requestedAt: run.retentionCleanup?.requestedAt || new Date().toISOString() };
+  const save = (patch) => state.update((draft) => {
+    const current = draft.ticketRuns[ticketId];
+    if (current?.runId === run.runId) current.retentionCleanup = { ...record, ...patch };
+  });
+  await save({});
+  try {
+    await stopPreviews(ticketId, "merged_cleanup");
+    const removed = await cleanup({ run, dataDir });
+    await save({ status: "completed", completedAt: new Date().toISOString(), removed });
+  } catch (error) {
+    await save({ status: "failed", error: String(error.message), failedAt: new Date().toISOString() });
+  }
+  return state.read().ticketRuns[ticketId]?.retentionCleanup;
 }

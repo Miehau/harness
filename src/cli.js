@@ -28,6 +28,8 @@ Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
   proposal revise <ticketId> <revisionId> <feedback> Revise UI direction
   approve [ticketId] [--auto] [--proposal revisionId]       Run manually, or auto-run the graph
   approve-proof [ticketId]          Approve final proof and continue delivery
+  retention list                     Inspect retained disk usage without deleting
+  retention cleanup <ticketId...>     Remove the named inactive runs and their local resources
   revise-proof <ticketId> <feedback> [--criterion <id>] Request final-proof corrections (repeat flag for multiple criteria)
   restart-fixer <ticketId> <reason> Abandon a contaminated final-review fixer session
   accept <stepId> [ticketId] [--auto] Accept a step; --auto runs later slices automatically
@@ -94,6 +96,14 @@ async function orchestratorInput(input, ctx) {
 
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
+  if (command === "retention") {
+    let result;
+    if (!rest.length || (rest[0] === "list" && rest.length === 1)) result = await request("GET", "/api/retention", { env, fetchImpl });
+    else if (rest[0] === "cleanup" && rest.length > 1) result = await request("POST", "/api/retention/cleanup", { env, fetchImpl, body: { ticketIds: rest.slice(1), confirmed: true } });
+    else throw new Error("Usage: agent-plan retention list | cleanup <ticketId...>");
+    print(stdout, result);
+    return 0;
+  }
   if (command === "orchestrator") {
     const [action, first, second, ...extra] = rest;
     if (["overview", "notifications", "policy"].includes(action)) {

@@ -59,7 +59,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 - Tracker credentials may come from the daemon environment or the dashboard's owner-only local credential file. Project credentials come only from the daemon environment or explicitly allow-listed ignored local development files. Never persist credentials in harness run state, commits, diffs, prompts, logs, or evidence.
 - Every active UI worktree receives its own local preview and unique ports for each service. Persist assignments when practical, detect collisions, and never kill unrelated processes.
 - The dashboard shows preview URLs and health. Stop preview processes and release ports when a run completes or is discarded.
-- Retain the completed ticket worktree and local branch until manual cleanup.
+- Retain local-only worktrees until manual cleanup. After successful remote delivery, automatically clean run-owned worktrees, local branches, evidence, and sessions; retain the run summary and remote links. `AGENT_PLAN_KEEP_MERGED_RUNS=1` opts new completions out for debugging.
 - UI delivery includes final screenshots and, when acceptance depends on interaction, video evidence. If visual direction is new or ambiguous, present a mock or wireframe for approval before implementation.
 - Remote delivery publishes final verification media and assertions into the PR/MR description before merge. Publishing failures block delivery; retries replace the same evidence section. GitHub retains media on isolated `codex/evidence/` branches with immutable links; GitLab uses project uploads. Historical captures and preview diagnostics are excluded.
 - Visual acceptance requires `commands.capture-proof` as an argv array in `.agent-plan/project.json`; planning establishes missing capture capability before feature work. A declared `commands.test-capture-proof` runs the same fixture inputs and state-transition preflight before browser capture. The harness runs it after passing deterministic checks for visual verification and final delivery, supplies the current capture identity, criteria and evidence directory, and blocks delivery on failed or missing proof. This keeps plain `node .agent-plan/verify.mjs` independent of screenshot capture.
@@ -94,7 +94,7 @@ This document is the implementation contract for evolving Agent Plan Workspace. 
 ## Persistence and recovery
 
 - Keep the existing structured-file and artifact-directory design. Use atomic writes and a single-daemon lock; add SQLite only after measured need.
-- Retain complete run artifacts indefinitely by default. Manual cleanup works by run, ticket, project, and age and shows disk usage before confirmation.
+- Retain incomplete and local-only run artifacts until manual cleanup. Remote-merged runs use a durable post-merge cleanup record, resumed after restart if interrupted. Manual cleanup works by run, ticket, project, and age and shows disk usage before confirmation.
 - After restart, crash, or machine sleep, recover state but leave interrupted runs paused. Show the latest checkpoint, worktree and preview status, and any uncertain external actions. Resume only after user confirmation and avoid duplicating tracker, PR, or merge actions.
 
 ## Incremental delivery order

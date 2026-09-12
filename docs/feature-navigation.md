@@ -24,7 +24,7 @@ node src/cli.js --help
 git status --short
 ```
 
-Use `node scripts/nav.mjs routes`, `ui`, `cli`, `modules`, or `stages` to narrow the live inventory. Its source parser is a locator, not a complete API schema: it normalizes every captured ID to `:id`, only recognizes particular route expressions, lists static HTML IDs rather than dynamic inspector controls, and currently omits `list`, `backlog`, and `timeline` CLI branches. CLI `--help` plus [src/cli.js](../src/cli.js) resolves those omissions. `test --map` means matching test filenames, not measured coverage; `http.js` is exercised indirectly by daemon tests.
+Use `node scripts/nav.mjs routes`, `ui`, `cli`, `modules`, or `stages` to narrow the live inventory. Its source parser is a locator, not a complete API schema: it normalizes every captured ID to `:id`, only recognizes particular route expressions, lists static HTML IDs rather than dynamic inspector controls, and discovers literal CLI command comparisons, including compound branches and aliases. CLI `--help` plus [src/cli.js](../src/cli.js) supplies subcommands and argument syntax. `test --map` means matching test filenames, not measured coverage; `http.js` is exercised indirectly by daemon tests.
 
 The application is one dashboard at `/`, not a router with a page per feature. Select a ticket, then a stage or step in the graph, then an inspector tab. Selection is persisted locally; there are no dedicated feature deep links.
 

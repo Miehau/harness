@@ -111,6 +111,7 @@ export function createOrchestratorService({ state, tickets, dataDir }) {
     return { version: 1, ticketId, runId, archived, status: run.status, expected: { runId, status: run.status, checkpointId: run.checkpoint?.id || null },
       ticket: compact.ticket, checkpoint: orchestratorCheckpoint(run, compact.checkpoint), uiImpact: compact.uiImpact, uiProposal: compact.uiProposal, metrics: compact.metrics,
       proof, lastError: compact.lastError || null,
+      retentionCleanup: run.retentionCleanup ? { status: run.retentionCleanup.status, completedAt: run.retentionCleanup.completedAt || null, error: run.retentionCleanup.error || null } : null,
       delegatedActions, delegation: supervisorPolicy(snapshot, supervisorProject || runProject(run)),
       requiredAction: compact.checkpoint?.title || (run.status === "draft" ? "Start this draft when instructed" : compact.lastError || null), actions: supervisorProject ? delegatedActions : actions,
       decisions: (run.orchestratorDecisions || []).slice(-20),

@@ -168,11 +168,7 @@ export function normalizePlan(raw) {
   });
   if (!nodes.length) throw new Error("Plan needs at least one step");
 
-  const known = new Set(flattenSteps({ nodes }).map((step) => step.id));
-  for (const node of nodes) if (node.type === "group") known.add(node.id);
-  for (const step of flattenSteps({ nodes })) {
-    step.dependsOn = step.dependsOn.filter((id) => id !== step.id && known.has(id));
-  }
+  validatePlanDependencies({ nodes });
 
   const criterionIds = flattenSteps({ nodes }).flatMap((step) => (step.criterionBindings || []).map((binding) => binding.id));
   if (new Set(criterionIds).size !== criterionIds.length) throw new Error("Criterion IDs must be unique across the plan");
@@ -199,17 +195,17 @@ export function normalizeEditedPlan(raw) {
   const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
   if (duplicate) throw new Error(`Plan contains duplicate id “${duplicate}”`);
 
-  const known = new Set(ids);
-  for (const node of rawNodes(raw)) {
-    if (node?.type === "group" || Array.isArray(node?.children)) continue;
-    const id = String(node?.id || "").trim();
-    for (const dependency of strings(node?.dependsOn)) {
-      if (dependency === id) throw new Error(`Step “${id}” cannot depend on itself`);
-      if (!known.has(dependency)) throw new Error(`Step “${id || node?.title || "untitled"}” has unknown dependency “${dependency}”`);
+  return normalizePlan(raw);
+}
+
+function validatePlanDependencies(plan) {
+  const known = new Set(rawNodes(plan).map((node) => node.id));
+  for (const step of flattenSteps(plan)) {
+    for (const dependency of step.dependsOn) {
+      if (dependency === step.id) throw new Error(`Step “${step.id}” cannot depend on itself`);
+      if (!known.has(dependency)) throw new Error(`Step “${step.id}” has unknown dependency “${dependency}”`);
     }
   }
-
-  const plan = normalizePlan(raw);
   const groups = new Map(plan.nodes.filter((node) => node.type === "group").map((group) => [group.id, group.children.map((step) => step.id)]));
   const edges = new Map(flattenSteps(plan).map((step) => [step.id, step.dependsOn.flatMap((id) => groups.get(id) || [id])]));
   const visiting = new Set();

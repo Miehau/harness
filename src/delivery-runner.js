@@ -13,6 +13,7 @@ import { executionFailure, reviewFixConstraints } from "./execution.js";
 import { projectProofMap } from "./proof-map.js";
 import { assertProofRevision } from "./proof-revision.js";
 import { repositoryCheckError } from "./repository-checks.js";
+import { cleanupMergedRun } from "./retention.js";
 import { setStage } from "./run-status.js";
 
 const runFile = promisify(execFile);
@@ -240,10 +241,13 @@ async function finalizeSuccessfulDelivery(ticketId, { diff, contextContent, acti
     run.failure = null;
     run.lastError = null;
     run.completedAt = integratedAt;
+    if (remoteUrl) run.retentionCleanup = { status: process.env.AGENT_PLAN_KEEP_MERGED_RUNS === "1" ? "retained" : "pending", runId: run.runId, requestedAt: integratedAt };
     const stage = setStage(run, "handoff", "completed", remoteUrl ? `Merged via ${remoteUrl}` : `Merged into ${primary.sourceCwd}`);
     if (activity) stage.activity = activity.snapshot();
   });
-  await stopTicketPreviews(ticketId, "run_completed");
+  try { await stopTicketPreviews(ticketId, "run_completed"); }
+  catch (error) { await update((draft) => { draft.ticketRuns[ticketId].previewCleanupError = redactText(error.message); }); }
+  await cleanupMergedRun({ state, ticketId, dataDir, stopPreviews: stopTicketPreviews });
   return { commit: primary.commit, change: primary.change, sync: primary.sync, deliveries };
 }
 
@@ -318,7 +322,6 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
         openedAt: new Date().toISOString(), externalActionPending: null
       });
     });
-    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackerComment(ticket, `Remote review opened: ${change.url}`));
     await update((state) => {
       const run = state.ticketRuns[ticketId];
       run.status = "waiting_for_checks";
@@ -327,6 +330,7 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
   }
 
   if (change) {
+    await trackerAction(ticketId, `remote_change:${repositoryId}`, (ticket) => trackerComment(ticket, `Remote review opened: ${change.url}`));
     const { stdout: status = "" } = await runFile("git", ["status", "--porcelain"], { cwd });
     if (!status.trim()) {
       const { stdout: before = "" } = await runFile("git", ["rev-parse", "HEAD"], { cwd });
@@ -388,7 +392,14 @@ async function deliverRemoteRepository(ticketId, repo, { diff, signal, activity,
     const unresolvedReview = delivery.feedback.some((item) => item.id.startsWith("review:"));
     if (delivery.mergeable && delivery.checks === "passed" && !unresolvedReview) {
       await update((state) => { patchRunDelivery(state.ticketRuns[ticketId], { repositoryId, externalActionPending: "squash_merge" }); });
-      mergeResult = await forge.merge({ ...change, headSha: delivery.headSha }, `${current.ticket.identifier}: ${current.ticket.title}`);
+      try {
+        mergeResult = await forge.merge({ ...change, headSha: delivery.headSha }, `${current.ticket.identifier}: ${current.ticket.title}`);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        await update((state) => { patchRunDelivery(state.ticketRuns[ticketId], { repositoryId, externalActionPending: null }); });
+        await waitForDelivery(deliveryPollMs, signal);
+        continue;
+      }
       break;
     }
     if (!delivery.mergeable && delivery.headSha !== lastRebaseHead && /(behind|dirty|conflict|rebase)/i.test(delivery.mergeState || "")) {
@@ -567,7 +578,11 @@ async function scheduleAllDeliveries(ticketId, { diff, contextContent = null, si
     });
     await mirrorExecutionBlocker(ticketId, error);
     throw error;
-  }).finally(() => activeMerges.delete(ticketId));
+  }).finally(() => {
+    activeMerges.delete(ticketId);
+    runtime.deliveryPromises.delete(promise);
+  });
+  (runtime.deliveryPromises ||= new Set()).add(promise);
   return { position: 1, promise };
 }
   return { scheduleAllDeliveries };

@@ -162,3 +162,14 @@ test("edited plans reject unknown dependencies, duplicate ids, and cycles", () =
     { id: "b", title: "B", dependsOn: ["a"] }
   ] }), /dependency cycle/);
 });
+
+test("generated and edited plans reject invalid dependencies before discarding edges", () => {
+  for (const normalize of [normalizePlan, normalizeEditedPlan]) {
+    assert.throws(() => normalize({ nodes: [{ id: 'a', dependsOn: ['missing'] }] }), /a.*unknown dependency.*missing/);
+    assert.throws(() => normalize({ nodes: [{ id: 'a', dependsOn: ['a'] }] }), /a.*depend on itself/);
+    assert.throws(() => normalize({ nodes: [{ id: 'a', dependsOn: ['b'] }, { id: 'b', dependsOn: ['a'] }] }), /dependency cycle/);
+    assert.throws(() => normalize({ nodes: [{ id: 'group', children: [{ id: 'a', dependsOn: ['group'] }] }] }), /dependency cycle/);
+    const valid = normalize({ nodes: [{ id: 'group', children: [{ id: 'a' }] }, { id: 'b', dependsOn: ['group'] }] });
+    assert.deepEqual(valid.nodes[1].dependsOn, ['group']);
+  }
+});

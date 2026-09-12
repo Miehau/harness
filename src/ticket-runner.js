@@ -7,7 +7,7 @@ import { diffTrees, restoreTree, reviewNoteFeedback } from "./git.js";
 import { flattenSteps, findNode, normalizeEditedPlan, planReviewViolations } from "./plan.js";
 import { actionableFindings, archiveRun, auditVisualEvidencePolicy, createTicketRun, executionFailure, localStages, markRunCancelled, markRunPaused, nextRunnableBatch, planApprovalPending, prepareRunResume, providerWaitCheckpoint, restartReviewFixSession, resumeStage, rewindRun, supervisorReviewCheckpoint, workflowResumeStage } from "./execution.js";
 import { applyPendingWorkflowGate, applyWorkflowContinuation, bindWorkflowSkill, executionBlockedByWorkflow, initialWorkflow, isWorkflowRunCheckpoint, pauseIfWorkflowBlocked, runCheckpointFromWorkflow } from "./workflow.js";
-import { earlyFailureStatusSet, normalizeRunCleanup, replaceableRunStatusSet, setStage, terminalRunStatusSet } from "./run-status.js";
+import { earlyFailureStatusSet, gateStepStatusSet, inFlightStepStatusSet, normalizeRunCleanup, replaceableRunStatusSet, setStage, terminalRunStatusSet } from "./run-status.js";
 import { prepareJjForGit } from "./jj.js";
 import { createParallelWorktrees, gitRepositoriesForStep, needsLocalWorkspaceRepair, repairZeroStateWorkspace, restoreRepositoryTrees } from "./worktrees.js";
 import { snapshotTree } from "./git.js";
@@ -235,7 +235,18 @@ export function createTicketRunner({
       }
       return runFinalReview(ticketId, signal);
     }
-    return { kind: "idle" };
+    if (flattenSteps(run.plan).some((step) => gateStepStatusSet.has(step.status) || inFlightStepStatusSet.has(step.status)) || Object.keys(run.activeRuns || {}).length || run.checkpoint || terminalRunStatusSet.has(run.status)) return { kind: "idle" };
+    const reason = `Plan cannot progress. Unfinished steps: ${flattenSteps(run.plan).filter((step) => step.status !== "accepted").map((step) => `${step.id} (${step.status}; dependencies: ${step.dependsOn.join(", ") || "none"})`).join("; ")}`;
+    await state.update((draft) => {
+      const current = ticketRun(draft, ticketId);
+      if (current.runId !== ownerRunId || signal?.aborted) return;
+      current.status = "needs_attention";
+      current.lastError = reason;
+      current.checkpoint = { id: randomUUID(), kind: "needs_attention", source: "implementation", title: "Plan cannot progress", prompt: reason, createdAt: new Date().toISOString() };
+      setStage(current, "implement", "blocked", reason);
+    });
+    await mirrorCheckpoint(ticketId);
+    return { kind: "blocked" };
   }
 
   function runTicket(ticketId) {
