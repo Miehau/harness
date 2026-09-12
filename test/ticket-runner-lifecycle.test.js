@@ -183,3 +183,18 @@ test("late workflow continuation cannot update a replacement run", async () => {
   assert.equal(replacement.workflow.lastReview, undefined);
   assert.equal(replacement.status, "awaiting_approval");
 });
+
+test("stalled graphs surface attention while active work and input gates remain waiting", async () => {
+  for (const status of ['draft', 'running', 'verifying', 'needs_input', 'awaiting_approval', 'review_ready']) {
+    const run = {
+      id: 'ticket-1', runId: 'run-1', ticket: { id: 'ticket-1', source: 'linear' },
+      workspace: { cwd: '/unused', vcs: 'git' }, status: 'running', stages: stages(),
+      plan: { nodes: [{ id: 'a', type: 'step', status, dependsOn: [] }] }, activeRuns: {}
+    };
+    const state = { ticketRuns: { 'ticket-1': run } };
+    const { runner } = commandRunner(state);
+    await runner.advanceTicket('ticket-1', new AbortController().signal);
+    assert.equal(run.status, status === 'draft' ? 'needs_attention' : 'running');
+    if (status === 'draft') assert.match(run.checkpoint.prompt, /a \(draft/);
+  }
+});
