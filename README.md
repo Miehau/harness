@@ -31,6 +31,20 @@ A local-first visual workspace for shaping Linear, Jira, and local development t
 - Local JSON persistence under `~/.agent-plan-workspace`.
 - Prompt-free local fixtures loaded from `feature.md` and `plan.json` into a fresh zero-state repository.
 
+## GrokBot / external supervisor
+
+Optional project-scoped webhooks announce decision checkpoints, failures, provider-capacity pauses, and completion. Delivery is persisted across restarts; requests are bounded, and automatic retries require a receiver that deduplicates event IDs. Normal operation continues without a connected bot.
+
+`orchestrator overview` supplies daily-digest input; `orchestrator brief` supplies exact-run context. A separate bot credential permits inspection and, only when the owner enables it, up to three provider-capacity resumes per run. Approval gates and explicit user pauses remain owner-controlled. The bot cannot bypass restrictions through ordinary operator routes or a claimed user authority.
+
+```sh
+node src/cli.js orchestrator overview
+node src/cli.js orchestrator notifications
+node src/cli.js orchestrator policy
+```
+
+See [supervisor setup and decision policy](docs/grokbot-supervisor.md) for private configuration, bot credentials, event payloads, retries, and digest scheduling. The real GrokBot receiver and daily routine must be configured separately; no live connection or messages are enabled by installation.
+
 ## Run
 
 Requires Node.js 22.19 or later and an authenticated Pi installation. The local dependency uses Pi SDK 0.84 or later to include current dependency security fixes.

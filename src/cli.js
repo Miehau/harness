@@ -8,6 +8,9 @@ const DEFAULT_URL = "http://127.0.0.1:4317";
 export const usage = `agent-plan <command>
 Talks to 127.0.0.1:4317. AGENT_PLAN_URL / AGENT_PLAN_API_TOKEN supported.
 
+  orchestrator overview [json]      Project digest input ({since,until,offset,limit})
+  orchestrator notifications [json] Delivery receipts; owner may {eventId,discard}
+  orchestrator policy [json]        Delegation; owner may {expectedRevision,maxProviderResumes}
   orchestrator submit <json|@file|-> Submit an idempotent draft; does not start work
   orchestrator show <ticketId> <runId> Inspect exact run and pending decisions
   orchestrator brief <ticketId> <runId> Conversation-ready summary and decision context
@@ -81,10 +84,28 @@ function revisionInput(words) {
   return { feedback: feedback.join(" ").trim(), ...(criterionIds.length ? { criterionIds } : {}) };
 }
 
+async function orchestratorInput(input, ctx) {
+  let raw = input;
+  if (input.startsWith("@")) raw = await readFile(input.slice(1), "utf8");
+  else if (input === "-") { raw = ""; for await (const chunk of ctx.stdin) { raw += chunk; if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters"); } }
+  if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters");
+  try { return JSON.parse(raw); } catch { throw new Error("Orchestrator input must be valid JSON"); }
+}
+
 async function handleCommand(command, rest, ctx) {
   const { env, fetchImpl, stdout, stderr, sleep } = ctx;
   if (command === "orchestrator") {
     const [action, first, second, ...extra] = rest;
+    if (["overview", "notifications", "policy"].includes(action)) {
+      if (second || extra.length) throw new Error("Use orchestrator overview|notifications|policy [json|@file|-]");
+      const input = first ? await orchestratorInput(first, ctx) : null;
+      if (first && (!input || typeof input !== "object" || Array.isArray(input))) throw new Error("Orchestrator options must be a JSON object");
+      if (action === "overview" && input && (Array.isArray(input) || typeof input !== "object" || Object.keys(input).some((key) => !["since", "until", "offset", "limit"].includes(key)))) throw new Error("Overview accepts since, until, offset, limit");
+      const readQuery = action === "overview" || (action === "notifications" && input && Object.keys(input).length === 1 && Object.hasOwn(input, "offset"));
+      const query = readQuery && input ? `?${new URLSearchParams(input)}` : "";
+      print(stdout, await request(input && !readQuery ? "POST" : "GET", `/api/orchestrator/${action}${query}`, { env, fetchImpl, ...(input && !readQuery ? { body: input } : {}) }));
+      return 0;
+    }
     if (extra.length || !first || !["submit", "show", "brief", "act"].includes(action) || (action === "submit" ? second : !second)) throw new Error("Usage: orchestrator submit <json|@file|-> | show|brief <ticketId> <runId> | act <ticketId> <json|@file|->");
     if (["show", "brief"].includes(action)) {
       const view = await request("GET", `/api/orchestrator/tickets/${encodeURIComponent(first)}/runs/${encodeURIComponent(second)}`, { env, fetchImpl });
@@ -103,11 +124,7 @@ async function handleCommand(command, rest, ctx) {
       return 0;
     }
     const input = action === "submit" ? first : second;
-    let raw = input;
-    if (input.startsWith("@")) raw = await readFile(input.slice(1), "utf8");
-    else if (input === "-") { raw = ""; for await (const chunk of ctx.stdin) { raw += chunk; if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters"); } }
-    if (raw.length > 100000) throw new Error("Orchestrator input exceeds 100000 characters");
-    let payload; try { payload = JSON.parse(raw); } catch { throw new Error("Orchestrator input must be valid JSON"); }
+    const payload = await orchestratorInput(input, ctx);
     print(stdout, await request("POST", action === "submit" ? "/api/orchestrator/tickets" : `/api/orchestrator/tickets/${encodeURIComponent(first)}/actions`, { body: payload, env, fetchImpl }));
     return 0;
   }

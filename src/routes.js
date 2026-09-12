@@ -20,6 +20,7 @@ function queryIdentity(url) {
  */
 export function createRoutes({
   orchestrator,
+  supervisor,
   version,
   inspection,
   tickets,
@@ -43,11 +44,16 @@ export function createRoutes({
   }
 
   return async function routeApi(request, response, url) {
+    if (request.method === "GET" && url.pathname === "/api/orchestrator/overview") return json(response, 200, supervisor.overview(supervisor.projectFor(request), url.searchParams));
+    if (request.method === "GET" && url.pathname === "/api/orchestrator/notifications") return json(response, 200, supervisor.notifications(supervisor.projectFor(request), url.searchParams));
+    if (request.method === "POST" && url.pathname === "/api/orchestrator/notifications") return json(response, 200, await supervisor.retry(supervisor.projectFor(request), await body(request)));
+    if (request.method === "GET" && url.pathname === "/api/orchestrator/policy") return json(response, 200, supervisor.policy(supervisor.projectFor(request)));
+    if (request.method === "POST" && url.pathname === "/api/orchestrator/policy") return json(response, 200, await supervisor.setPolicy(supervisor.projectFor(request), await body(request)));
     if (request.method === "POST" && url.pathname === "/api/orchestrator/tickets") return json(response, 200, await orchestrator.submit(await body(request)));
     const orchestratorRun = url.pathname.match(/^\/api\/orchestrator\/tickets\/([^/]+)\/runs\/([^/]+)$/);
-    if (request.method === "GET" && orchestratorRun) return json(response, 200, orchestrator.observe(routeId(orchestratorRun[1]), routeId(orchestratorRun[2])));
+    if (request.method === "GET" && orchestratorRun) return json(response, 200, orchestrator.observe(routeId(orchestratorRun[1]), routeId(orchestratorRun[2]), request.supervisorProject));
     const orchestratorAction = url.pathname.match(/^\/api\/orchestrator\/tickets\/([^/]+)\/actions$/);
-    if (request.method === "POST" && orchestratorAction) return json(response, 202, await orchestrator.act(routeId(orchestratorAction[1]), await body(request)));
+    if (request.method === "POST" && orchestratorAction) return json(response, 202, await orchestrator.act(routeId(orchestratorAction[1]), await body(request), request.supervisorProject));
 
     const coordinationRead = url.pathname.match(/^\/api\/tickets\/([^/]+)\/coordination$/);
     if (request.method === "GET" && coordinationRead) return json(response, 200, coordination.read(routeId(coordinationRead[1])));

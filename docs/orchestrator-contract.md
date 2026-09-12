@@ -71,3 +71,7 @@ Use an argument array to invoke `node` with the absolute path to `src/cli.js`; s
 `test/orchestration.test.js` exercises this recipe against a real daemon with mocked planning, workers, review and media. It covers fresh initialization, draft submission, requirements approval, proposal revision, rejection of an old revision, restart/reconnect, duplicate submission, automatic execution, final-proof approval and completion. Its tiny PNG is a plumbing fixture, not evidence that a real panel works. The project browser suite separately exercises real UI input and assertions.
 
 Before claiming a named bot is connected, verify its local process invocation, environment/token handling, durable ID storage, and authenticated proposal/media viewing. No particular bot, remote gateway or notification service is configured by this change.
+
+## Optional external supervisor
+
+See [supervisor setup](grokbot-supervisor.md) for project-scoped bot credentials, durable events, `overview`, `notifications`, and `policy`. Owner-token authority claims above retain their original behavior. Bot credentials enforce delegated recovery and cannot claim user approval or use ordinary mutation routes. Bot actions require a stable `requestId`; owner actions may also supply one for replay protection. Receipts record consumption, not successful completion.
