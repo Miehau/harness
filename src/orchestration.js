@@ -4,7 +4,6 @@ import { freezeRunAccess, readProjectPolicy } from "./access-policy.js";
 import { createTicketRun } from "./execution.js";
 import { compactRun } from "./inspection.js";
 import { normalizeUiImpact } from "./plan.js";
-import { projectProofMap } from "./proof-map.js";
 import { boundedText, redactRecord } from "./redaction.js";
 import { freeTextTicket } from "../public/ui-model.js";
 
@@ -28,8 +27,7 @@ function orchestratorCheckpoint(run, compactCheckpoint) {
   return checkpoint;
 }
 
-function orchestratorProof(run) {
-  const map = projectProofMap(run);
+function orchestratorProof(map) {
   const criteria = (map?.criteria || []).map((criterion) => {
     const evidence = Array.isArray(criterion.current?.evidence) ? criterion.current.evidence : [];
     return {
@@ -44,7 +42,7 @@ function orchestratorProof(run) {
   if (!criteria.length) return null;
   return {
     eligible: Boolean(map.eligibility?.eligible),
-    blockingReasons: (map.eligibility?.blockingReasons || []).map((reason) => boundedText(reason, 240).value),
+    blockingReasons: (map.eligibility?.blockingReasons || []).map((reason) => boundedText(`${reason.criterionId} [${reason.code}]: ${reason.message}`, 240).value),
     criteria
   };
 }
@@ -86,6 +84,8 @@ export function createOrchestratorService({ state, tickets, dataDir }) {
       : Object.values(snapshot.retainedRuns || {}).find((item) => item.id === ticketId && item.runId === runId);
     if (!run) throw new Error("Requested ticket run is not retained");
     const compact = compactRun(run);
+    const proof = orchestratorProof(compact.proofMap);
+    const proofMediaIds = new Set(proof?.criteria.flatMap((criterion) => criterion.mediaIds));
     const archived = snapshot.ticketRuns[ticketId]?.runId !== runId;
     const base = `/api/tickets/${encodeURIComponent(ticketId)}/runs/${encodeURIComponent(runId)}`;
     const kind = run.checkpoint?.kind;
@@ -94,10 +94,10 @@ export function createOrchestratorService({ state, tickets, dataDir }) {
       : run.status === "awaiting_step_review" ? ["accept", "revise-step"] : ["paused", "interrupted", "needs_attention", "failed"].includes(run.status) ? ["resume", ...(run.plan?.uiImpact?.level === "material" ? ["revise-proposal"] : [])] : [];
     return { version: 1, ticketId, runId, archived, status: run.status, expected: { runId, status: run.status, checkpointId: run.checkpoint?.id || null },
       ticket: compact.ticket, checkpoint: orchestratorCheckpoint(run, compact.checkpoint), uiImpact: compact.uiImpact, uiProposal: compact.uiProposal, metrics: compact.metrics,
-      proof: orchestratorProof(run), lastError: compact.lastError || null,
+      proof, lastError: compact.lastError || null,
       requiredAction: compact.checkpoint?.title || (run.status === "draft" ? "Start this draft when instructed" : compact.lastError || null), actions,
       decisions: (run.orchestratorDecisions || []).slice(-20),
-      artifacts: (run.artifacts || []).filter((artifact, index, all) => index >= all.length - 30 || artifact.id === run.uiProposal?.artifactId || run.checkpoint?.evidenceArtifactIds?.includes(artifact.id)).map(({ id, name, kind }) => ({ id, name, kind, content: `${base}/artifacts/${encodeURIComponent(id)}/content`, ...(kind === "ui-proposal" ? { preview: `${base}/artifacts/${encodeURIComponent(id)}/preview` } : kind === "visual-evidence" ? { media: `${base}/artifacts/${encodeURIComponent(id)}/media` } : {}) })) };
+      artifacts: (run.artifacts || []).filter((artifact, index, all) => index >= all.length - 30 || proofMediaIds.has(artifact.id) || artifact.id === run.uiProposal?.artifactId || run.checkpoint?.evidenceArtifactIds?.includes(artifact.id)).map(({ id, name, kind }) => ({ id, name, kind, content: `${base}/artifacts/${encodeURIComponent(id)}/content`, ...(kind === "ui-proposal" ? { preview: `${base}/artifacts/${encodeURIComponent(id)}/preview` } : kind === "visual-evidence" ? { media: `${base}/artifacts/${encodeURIComponent(id)}/media` } : {}) })) };
   }
 
   async function submit(input) {

@@ -152,6 +152,38 @@ test("brief includes lastError for needs_attention and failed even when a checkp
   });
 });
 
+test("proof briefs explain blockers and stale evidence and retain older linked media", async () => {
+  await withDaemon(async (daemon, { dataDir }) => {
+    const path = join(dataDir, "older-proof.png");
+    await writeFile(path, "fixture");
+    const ticketId = await seedRun(daemon, {
+      status: "needs_attention",
+      proofStorageRoot: dataDir,
+      artifacts: [
+        { id: "older-media", name: "older-proof.png", kind: "visual-evidence", path },
+        ...Array.from({ length: 31 }, (_, index) => ({ id: `log-${index}`, name: "log", kind: "agent-output" }))
+      ],
+      proofMap: { version: 1, criteria: [
+        { id: "ac-failed", text: "Empty state", current: { status: "failed", evidenceValidity: "missing", explanation: { summary: "Empty state crashes. token=abcdefghijk" }, evidence: [] }, history: [] },
+        { id: "ac-stale", text: "Panel layout", current: { status: "verified", evidenceValidity: "stale", evidence: [{ type: "media", artifactId: "older-media" }] }, history: [] }
+      ] }
+    });
+    const runId = daemon.store.read().ticketRuns[ticketId].runId;
+    const view = await show(daemon, { ticketId, runId });
+    assert.equal(view.proof.eligible, false);
+    assert.deepEqual(view.proof.blockingReasons, [
+      "ac-failed [status_failed]: Empty state crashes. [redacted]",
+      "ac-stale [evidence_stale]: Criterion evidence is not currently valid."
+    ]);
+    assert.deepEqual(view.proof.criteria[1].mediaIds, ["older-media"]);
+    assert.ok(view.artifacts.find((artifact) => artifact.id === "older-media")?.media);
+    const brief = (await runAgainstDaemon(daemon, ["orchestrator", "brief", ticketId, runId])).json;
+    assert.match(brief.message, /ac-failed \[status_failed\]: Empty state crashes/);
+    assert.match(brief.message, /Criterion ac-stale: verified \(evidence: stale\)/);
+    assert.doesNotMatch(brief.message, /\[object Object\]|abcdefghijk/);
+  });
+});
+
 test("draft dependencies and file-based CLI submissions use the ordinary workflow boundary", async () => {
   await withDaemon(async (daemon, { dataDir }) => {
     const file = join(dataDir, "submission.json");
