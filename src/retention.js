@@ -88,7 +88,11 @@ export async function cleanupRetainedRun({ run, dataDir, previewManager, execImp
   await previewManager?.stopMatching(`${run.id}:`);
   for (const revision of run.coordination?.revisions || []) for (const record of revision.workPreparation?.repositories || []) {
     const prefix = `refs/agent-plan/coordination/${safeName(run.runId)}/${safeName(revision.id)}/`;
-    if (record.cwd && within(root, record.cwd) && record.ref?.startsWith(prefix)) await execImpl("git", ["update-ref", "-d", record.ref], { cwd: record.cwd });
+    if (record.cwd && within(root, record.cwd) && record.ref?.startsWith(prefix)) {
+      await execImpl("git", ["update-ref", "-d", record.ref], { cwd: record.cwd }).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
   }
   const paths = worktreePaths(run, root);
   for (const source of sourceCleanupTargets(run)) {

@@ -115,3 +115,10 @@ test("post-merge cleanup is durable, retryable, and never wipes unmerged runs", 
   assert.equal((await cleanupMergedRun(input)).status, "retained");
   assert.equal(attempts, 2);
 });
+
+test("cleanup resumes after a prior pass removed a coordination worktree", async () => {
+  const run = { id: "ticket", runId: "run-1", ticket: { identifier: "ABC-1" }, coordination: { revisions: [{ id: "revision-1", workPreparation: { repositories: [{ cwd: "/data/ticket-runs/ABC-1/runs/run-1/previous", ref: "refs/agent-plan/coordination/run-1/revision-1/0" }] } }] } };
+  const removed = [];
+  await cleanupRetainedRun({ run, dataDir: "/data", execImpl: async () => { throw Object.assign(new Error("missing cwd"), { code: "ENOENT" }); }, rmImpl: async (path) => removed.push(path) });
+  assert.ok(removed.includes(runRoot("/data", run)));
+});
