@@ -8,6 +8,7 @@ const relevantArtifactKinds = new Set([
   "architecture",
   "agent-output",
   "step-verification",
+  "verification-source",
   "product-context-update",
   "visual-evidence"
 ]);
@@ -36,6 +37,7 @@ function compactProofMap(proofMap) {
       id: criterion.id,
       stepId: criterion.stepId,
       stepTitle: criterion.stepTitle || "",
+      scope: criterion.scope || "final",
       stepRequired: criterion.stepRequired !== false,
       index: criterion.index,
       text: criterion.text,
@@ -132,14 +134,16 @@ export async function writeReviewIndex(directory, { ticket = {}, plan = {}, arti
   const files = new Map();
   const put = (name, value) => { files.set(name, typeof value === "string" ? value : JSON.stringify(value, null, 2)); return name; };
   const criteria = (proofMap?.criteria || []).map(({ history, ...criterion }, index) => ({
-    id: criterion.id, stepId: criterion.stepId, title: clip(criterion.text, 180), detail: put(`criterion-${index + 1}.json`, criterion)
+    id: criterion.id, stepId: criterion.stepId, scope: criterion.scope || "final", title: clip(criterion.text, 180), detail: put(`criterion-${index + 1}.json`, criterion)
   }));
   const latest = new Map();
+  const citedArtifacts = new Set((proofMap?.criteria || []).flatMap((criterion) => (criterion.current?.evidence || []).map((item) => item.artifactId)));
   for (const artifact of artifacts) {
     if (!relevantArtifactKinds.has(artifact.kind)) continue;
+    if (artifact.kind === "verification-source" && !citedArtifacts.has(artifact.id)) continue;
     const step = flattenSteps(plan).find((step) => step.id === artifact.stepId);
     if (artifact.stepId && (!step || (step.status !== "accepted" && step.id !== currentStepId))) continue;
-    latest.set(artifact.kind === "visual-evidence" ? artifact.id : `${artifact.kind}:${artifact.stepId || "run"}`, artifact);
+    latest.set(["visual-evidence", "verification-source"].includes(artifact.kind) ? artifact.id : `${artifact.kind}:${artifact.stepId || "run"}`, artifact);
   }
   const evidence = [...latest.values()].map((artifact, index) => ({
     id: artifact.id, kind: artifact.kind, stepId: artifact.stepId, name: artifact.name,

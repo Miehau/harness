@@ -180,7 +180,7 @@ export function proofMapView(run, { stepId = null, requiredOnly = false } = {}) 
         }))
       };
     });
-  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: proof.compatibility ? { eligible: true, blockingReasons: [] } : projectedEligibility(criteria) };
+  return { compatibility: Boolean(proof.compatibility), approvedAt: proof.approvedAt || null, criteria, eligibility: proof.compatibility ? { eligible: true, blockingReasons: [] } : projectedEligibility(stepId ? criteria : criteria.filter((criterion) => criterion.scope !== "step")) };
 }
 
 export function finalReview(run) {
@@ -804,7 +804,7 @@ export function verificationProgress(run) {
   };
 }
 
-export function runProgress(run = {}, now = Date.now()) {
+export function runProgress(run = {}, now = Date.now(), health = {}) {
   const status = run.status || "draft";
   const providerWait = run.checkpoint?.kind === "provider_wait" || status === "waiting_for_provider";
   const labels = { preparing: "Preparing workspace", clarifying: "Shaping requirements", exploring: "Exploring repository", planning: "Designing the solution", running: "Implementing", fixing: "Correcting findings", verifying: "Running checks", reviewing: "Reviewing results", paused: "Paused", interrupted: "Interrupted", failed: "Failed", needs_attention: "Needs attention", completed: "Completed", cancelled: "Cancelled", awaiting_approval: "Review the plan and UI direction", awaiting_requirements: "Review requirements", awaiting_step_review: "Review the completed step", awaiting_evidence_review: "Review final proof" };
@@ -813,7 +813,26 @@ export function runProgress(run = {}, now = Date.now()) {
   const replaying = run.uiReplay?.status === "running";
   const proposing = run.uiProposalGenerating === true;
   const working = replaying || proposing || !providerWait && !run.checkpoint && ["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "addressing_feedback"].includes(status);
-  return { working, title: replaying ? "Replaying proof checks" : proposing ? "Revising UI proposal" : providerWait ? "Waiting for provider" : labels[status] || status.replaceAll("_", " "),
-    detail: replaying ? "Checking the isolated ticket preview" : proposing ? "Preparing revised direction for your review" : run.checkpoint?.title || run.lastError || activity?.lastEvent || (working ? "Waiting for the next activity event" : ""), workers: workers.length,
-    lastActivitySeconds: activity?.lastEventAt ? Math.max(0, Math.floor((now-Date.parse(activity.lastEventAt))/1000)) : null };
+  const lastActivitySeconds = activity?.lastEventAt ? Math.max(0, Math.floor((now - Date.parse(activity.lastEventAt)) / 1000)) : null;
+  const pendingTools = new Map();
+  for (const event of activity?.events || []) {
+    if (event.type === "tool_start") pendingTools.set(event.callId, event.tool);
+    if (event.type === "tool_end") pendingTools.delete(event.callId);
+  }
+  const evidenceError = /proof gate blocked|independent-review output|verification evidence/i.test(run.lastError || run.checkpoint?.title || "");
+  const reviewStep = run.checkpoint?.stepId ? (run.plan?.nodes || []).flatMap((node) => node.type === "group" ? node.children : [node]).find((step) => step.id === run.checkpoint.stepId) : null;
+  const reviewReason = reviewStep?.reviewBudgetResult?.exceeded ? reviewStep.reviewBudgetResult.reasons?.join("; ") : "";
+  const phase = health.responsive === false ? "daemon_unresponsive" : evidenceError ? "evidence_error"
+    : providerWait ? "provider" : run.checkpoint ? "approval" : working ? pendingTools.size ? "tool" : "model" : "idle";
+  const phaseTitle = { daemon_unresponsive: "Daemon is not responding", evidence_error: "Review evidence needs repair", tool: `Running ${[...pendingTools.values()].at(-1)}` }[phase];
+  const nextAction = phase === "daemon_unresponsive" ? "Check daemon health; the saved task is not marked failed."
+    : evidenceError ? "Repair the review report or citations; keep implementation intact."
+    : providerWait ? "Wait for provider availability; the saved work is retained."
+    : run.checkpoint?.kind === "step_review" ? "Review this step and accept it to continue."
+    : run.checkpoint?.kind === "evidence_review" ? "Review final proof and approve integration."
+    : run.checkpoint ? "Answer the checkpoint to continue."
+    : working ? "No action needed while events continue." : "";
+  return { working, phase, nextAction, title: phaseTitle || (replaying ? "Replaying proof checks" : proposing ? "Revising UI proposal" : providerWait ? "Waiting for provider" : labels[status] || status.replaceAll("_", " ")),
+    detail: replaying ? "Checking the isolated ticket preview" : proposing ? "Preparing revised direction for your review" : [run.checkpoint?.title, reviewReason].filter(Boolean).join(" · ") || run.lastError || activity?.lastEvent || (working ? "Waiting for the next activity event" : ""), workers: workers.length,
+    lastActivitySeconds };
 }

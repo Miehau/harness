@@ -39,6 +39,21 @@ function strings(value) {
   return [];
 }
 
+export function normalizeReviewPolicy(value) {
+  if (!value || !["small", "standard"].includes(value.mode) || !String(value.reason || "").trim()) throw new Error("Review policy needs small or standard mode and a reason");
+  if (value.mode === "small" && (!Array.isArray(value.risks) || value.risks.length)) throw new Error("Small review requires an explicit empty risk list");
+  return { mode: value.mode, reason: String(value.reason).trim(), risks: strings(value.risks) };
+}
+
+export function finalReviewRoles(plan, diff = {}) {
+  const policy = plan?.reviewPolicy;
+  const small = policy?.mode === "small" && policy.risks?.length === 0 && policy.reason
+    && diff.available !== false && (diff.files || []).length > 0 && diff.files.length <= 8
+    && Number.isFinite(diff.changedLines) && diff.changedLines <= 400
+    && (diff.repositories || []).length <= 1;
+  return small ? ["requirements"] : ["requirements", "integration", "verification"];
+}
+
 export function normalizeUiImpact(value) {
   if (!value || !["none", "minor", "material"].includes(value.level)) throw new Error("UI impact must be none, minor, or material");
   const reason = String(value.reason || "").trim().slice(0, 1000);
@@ -55,7 +70,8 @@ function normalizeCriterionBindings(value, criteria) {
     if (!/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(binding.id || "")) throw new Error("Criterion bindings require stable IDs");
     if (!["check", "screenshot", "video"].includes(binding.evidence)) throw new Error("Criterion evidence must be check, screenshot, or video");
     if (binding.evidence !== "check" && !/^[a-z0-9][a-z0-9_-]{0,99}$/i.test(binding.journeyId || "")) throw new Error("Visual criteria require a stable journeyId");
-    return { index: binding.index, id: binding.id, evidence: binding.evidence, ...(binding.evidence !== "check" ? { journeyId: binding.journeyId } : {}) };
+    if (binding.scope !== undefined && !["step", "final"].includes(binding.scope)) throw new Error("Criterion scope must be step or final");
+    return { index: binding.index, id: binding.id, evidence: binding.evidence, ...(binding.scope ? { scope: binding.scope } : {}), ...(binding.evidence !== "check" ? { journeyId: binding.journeyId } : {}) };
   });
 }
 
@@ -173,6 +189,7 @@ export function normalizePlan(raw) {
   const criterionIds = flattenSteps({ nodes }).flatMap((step) => (step.criterionBindings || []).map((binding) => binding.id));
   if (new Set(criterionIds).size !== criterionIds.length) throw new Error("Criterion IDs must be unique across the plan");
   return {
+    ...(raw.reviewPolicy !== undefined ? { reviewPolicy: normalizeReviewPolicy(raw.reviewPolicy) } : {}),
     ...(raw.uiImpact !== undefined ? { uiImpact: normalizeUiImpact(raw.uiImpact) } : {}),
     id: String(raw.id || `plan-${randomUUID().slice(0, 8)}`),
     title: String(raw.title || "Untitled plan").trim(),

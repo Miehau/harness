@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { createCoordinationService, coordinationBlockedSteps } from "../src/coordination-service.js";
+import { createCoordinationService, coordinationBlockedSteps, settleCoordinationStatus } from "../src/coordination-service.js";
 import { normalizePlan } from "../src/plan.js";
 import { JsonStore } from "../src/store.js";
 import { invoke, mockHarness, seedRun, withDaemon, waitFor } from "./helpers.js";
+
+test("coordination settlement preserves active peers and unrelated gates", () => {
+  for (const extra of [
+    { activeRuns: { peer: { runId: "peer-run" } } },
+    { plan: { nodes: [{ id: "peer", status: "verifying" }] } },
+    { checkpoint: { source: "verification", title: "Review evidence" } },
+    { status: "cancelled" },
+    { status: "awaiting_step_review" }
+  ]) {
+    const run = { status: "fixing", plan: { nodes: [] }, activeRuns: {}, ...extra };
+    const before = structuredClone(run);
+    settleCoordinationStatus(run);
+    assert.deepEqual(run, before);
+  }
+});
 
 async function activeFixture(daemon, harness = {}, runtime = {}) {
   const plan = normalizePlan({ nodes: [

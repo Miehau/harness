@@ -12,6 +12,46 @@ import { normalizePlan } from "../src/plan.js";
 import { defaultStageProfiles } from "../src/profiles.js";
 import { PROCESS_OWNERSHIP_ENV, ProcessContainment, createExecutionOwnership } from "../src/process-containment.js";
 import { runProjectCommand } from "../src/project-config.js";
+import { resolveEvidence } from "../src/proof-map.js";
+
+test("verifier reads retain immutable, redacted, run-owned source evidence behind access checks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-source-proof-"));
+  try {
+    const cwd = join(root, "project");
+    const dataDir = join(root, "data");
+    await mkdir(cwd);
+    await writeFile(join(cwd, "package.json"), '{"devDependencies":{"playwright":"1"},"token":"secret_abcdefgh"}');
+    await writeFile(join(root, "outside.txt"), "not permitted");
+    const harness = new PiHarness({ dataDir });
+    const artifacts = [];
+    let read;
+    const session = {
+      state: { messages: [] }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
+      async prompt() {
+        await assert.rejects(read.execute("outside", { path: "../outside.txt" }));
+        assert.equal(artifacts.length, 0);
+        const first = await read.execute("first", { path: "package.json" });
+        assert.ok(first.content.at(-1).text.includes(artifacts[0].id));
+        await writeFile(join(cwd, "package.json"), '{"devDependencies":{"playwright":"2"}}');
+        await read.execute("second", { path: "package.json" });
+        this.state.messages.push({ role: "assistant", content: [{ type: "text", text: JSON.stringify({ summary: "Inspected sources", findings: [], criterionResults: [] }) }] });
+      }
+    };
+    harness.sdk = async () => ({ createAgentSession: async ({ customTools }) => { read = customTools.find((tool) => tool.name === "read"); return { session }; }, SessionManager: { create: () => ({}) } });
+    const plan = normalizePlan({ nodes: [{ id: "deps", title: "Dependencies", permission: "read" }] });
+    await harness.verifyStep({ cwd, ticket: { id: "ticket" }, plan, step: plan.nodes[0], runId: "run", attemptId: "attempt-2", round: 1, diff: { files: [] }, checks: { status: "passed" }, onEvidence: async (artifact) => { artifacts.push(artifact); } });
+    assert.equal(artifacts.length, 2);
+    assert.notEqual(artifacts[0].id, artifacts[1].id);
+    const firstBody = await readFile(artifacts[0].path, "utf8");
+    assert.match(firstBody, /playwright/);
+    assert.doesNotMatch(firstBody, /secret_abcdefgh/);
+    assert.notEqual(firstBody, await readFile(artifacts[1].path, "utf8"));
+    for (const artifact of artifacts) {
+      assert.equal(artifact.attemptId, "attempt-2");
+      assert.equal(resolveEvidence({ artifacts, proofStorageRoot: dataDir }, { type: "artifact", artifactId: artifact.id }).valid, true);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("Grok Build omits reasoning on the wire for fresh and cached sessions", async () => {
   // Exercise the SDK's installed dependency even when npm keeps it nested.
@@ -618,7 +658,7 @@ test("worker project commands share execution ownership and cleanup on exit", as
       }
     };
     harness.sdk = async () => ({
-      createAgentSession: async (options) => { customTools = options.customTools; return { session }; },
+      createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; },
       SessionManager: { create: () => ({}) }
     });
     const plan = normalizePlan({ title: "Owned command", nodes: [{ id: "owned", title: "Owned", permission: "write", writeScope: "src", skills: [] }] });
@@ -644,7 +684,7 @@ test("worker uses a daemon-supplied containment rather than replacing its owners
       setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
       async prompt() { await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Done", artifact: "ok" }); }
     };
-    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; }, SessionManager: { create: () => ({}) } });
     const plan = normalizePlan({ title: "Supplied containment", nodes: [{ id: "owned", title: "Owned", permission: "read", skills: [] }] });
     const result = await harness.runStep({ cwd: root, plan, step: plan.nodes[0], artifacts: [], images: [], containment });
     assert.equal(result.cleanup.executionId, "persisted-worker");
@@ -739,7 +779,7 @@ test("workers cannot complete without the terminating worker report", async () =
       dispose() {}
     };
     harness.sdk = async () => ({
-      createAgentSession: async (options) => { customTools = options.customTools; return { session }; },
+      createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; },
       SessionManager: { create: () => ({}) }
     });
     const plan = normalizePlan({ title: "Read", nodes: [{ id: "inspect", title: "Inspect", permission: "read" }] });
@@ -762,6 +802,7 @@ test("fresh verification receives the completed deterministic gate", async () =>
   try {
     const harness = new PiHarness({ dataDir: root });
     let prompt;
+    const sessionDirs = [];
     const session = {
       state: { messages: [] },
       setSessionName() {},
@@ -774,7 +815,7 @@ test("fresh verification receives the completed deterministic gate", async () =>
     };
     harness.sdk = async () => ({
       createAgentSession: async () => ({ session }),
-      SessionManager: { create: () => ({}) }
+      SessionManager: { create: (_cwd, directory) => { sessionDirs.push(directory); return {}; } }
     });
     const plan = normalizePlan({ title: "Verify", nodes: [
       { id: "slice", title: "Slice", permission: "write", writeScope: "src" },
@@ -795,6 +836,8 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.match(prompt, /Step ID: slice/);
     assert.ok(prompt.includes(JSON.stringify({ type: "check", scope: "step", stepId: "slice" })));
     assert.doesNotMatch(prompt, /"type":"diff"/);
+    assert.doesNotMatch(prompt, /check \| artifact \| media \| diff/);
+    assert.match(prompt, /Diffs are inspection context, not supported proof locators/);
     assert.doesNotMatch(prompt, /10 tests passed/);
     assert.match(prompt, /Report only critical, high, or medium findings/);
     assert.match(prompt, /Keep inspection inside the current working directory/);
@@ -809,6 +852,13 @@ test("fresh verification receives the completed deterministic gate", async () =>
     assert.match(prompt, /This is a correction verification/);
     assert.match(prompt, /Write guard is bypassed/);
     assert.match(prompt, /Do not start a new broad audit/);
+    for (const attemptId of ["attempt-2", "attempt-3"]) {
+      await harness.verifyStep({ ...input, attemptId });
+      assert.ok(prompt.includes(JSON.stringify({ type: "check", scope: "attempt", stepId: "slice", attemptId })));
+      assert.match(prompt, /do not copy them as evidence/);
+      assert.ok(sessionDirs.at(-1).includes(`/${attemptId}/round-1`));
+    }
+    assert.notEqual(sessionDirs.at(-1), sessionDirs.at(-2));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -952,9 +1002,9 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     const result = await harness.reviewTicket(input);
     assert.equal(result.summary, "Resumed");
     assert.equal(prompts.length, 2);
-    assert.match(prompts[1], /Independent-review output.summary must be non empty string/);
-    assert.match(prompts[1], /without changing your evidence-backed verdicts or dropping unresolved findings/);
-    assert.match(prompts[1], /do not repeat repository inspection/);
+    assert.match(prompts[1], /Independent-review output: summary must be non-empty/);
+    assert.match(prompts[1], /Preserve evidence-backed verdicts and all unresolved findings/);
+    assert.match(prompts[1], /do not repeat completed repository inspection/);
     prompt = prompts[0];
     assert.equal(opened[0][0], sessionFile);
     assert.match(prompt, /Continue the interrupted independent review/);
@@ -967,6 +1017,7 @@ test("an interrupted independent reviewer resumes its durable session", async ()
     assert.match(prompt, /criterion-exact/);
     assert.deepEqual(promptImages, []);
     session.state.messages = [];
+    input.operatorFeedback += " Updated constraints.";
     const events = [];
     await harness.reviewTicket({ ...input, onEvent: (event) => events.push(event) });
     assert.match(prompts.at(-1), /# Independent integration review/);
@@ -977,6 +1028,7 @@ test("an interrupted independent reviewer resumes its durable session", async ()
       createAgentSession: async () => ({ session }),
       SessionManager: { create: () => ({}), open: () => { session.state.messages = []; throw new Error("Unreadable session"); } }
     });
+    input.operatorFeedback += " Second update.";
     await harness.reviewTicket(input);
     assert.match(prompts.at(-1), /# Progressive review index/);
 
@@ -984,7 +1036,8 @@ test("an interrupted independent reviewer resumes its durable session", async ()
       prompts.push(value);
       session.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"assessment":"Still invalid","findings":[]}' }] });
     };
-    await assert.rejects(harness.reviewTicket(input), /Independent-review output.summary must be non empty string/);
+    input.operatorFeedback += " Third update.";
+    await assert.rejects(harness.reviewTicket(input), /Independent-review output: summary must be non-empty/);
     assert.equal(prompts.length, 6, "invalid output gets only one repair attempt per invocation");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1008,7 +1061,7 @@ test("oversized durable reviewer errors get one fresh compact review", async () 
             prompts.push(value);
             message = alwaysFail || prompts.length === 1
               ? { role: "assistant", stopReason: "error", errorMessage: "Your input exceeds the context window of this model", content: [] }
-              : { role: "assistant", content: [{ type: "text", text: '{"summary":"Current evidence reviewed","findings":[]}' }] };
+              : { role: "assistant", content: [{ type: "text", text: '{"summary":"Current evidence reviewed","findings":[],"criterionResults":[{"criterionId":"current-criterion","status":"blocked","evidence":[]}]}' }] };
           }
         } };
       }
@@ -1028,6 +1081,7 @@ test("oversized durable reviewer errors get one fresh compact review", async () 
     }
     assert.equal(disposed, 2);
     alwaysFail = true;
+    input.operatorFeedback = "New constraints invalidate cached review";
     await assert.rejects(harness.reviewTicket(input), /exceeds the context window/);
     assert.equal(prompts.length, 4, "fresh context retry is bounded");
     assert.equal(disposed, 4);
@@ -1647,6 +1701,7 @@ test("independent review loads images only through explicit current-artifact loo
     const session = {
       state: { messages: [] }, setSessionName() {}, subscribe() { return () => {}; }, dispose() {},
       async prompt(_prompt, options) {
+        assert.match(_prompt, /artifactId.*required for artifact or media evidence/);
         assert.deepEqual(options.images, []);
         count++;
         if (inspect) {
@@ -1663,7 +1718,7 @@ test("independent review loads images only through explicit current-artifact loo
         this.state.messages.push({ role: "assistant", content: [{ type: "text", text: JSON.stringify({ summary: "Reviewed", findings: [], criterionResults: [{ criterionId: "criterion", status: "verified", evidence: [{ type: "media", artifactId: "current" }] }] }) }] });
       }
     };
-    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+    harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; }, SessionManager: { create: () => ({}) } });
     const input = { cwd: root, ticket: { id: "T" }, plan: normalizePlan({ nodes: [{ id: "ui", title: "UI" }] }), artifacts: [{ id: "current", name: "screen.png", kind: "visual-evidence", path: "/proof/screen.png" }], checks: { status: "passed", evidence: [{ path: "/proof/screen.png", mediaKind: "image" }] }, images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }], role: "requirements", round: 1, runId: "run" };
     const result = await harness.reviewTicket(input);
     assert.deepEqual(result.inputMetrics.inspectedMediaIds, ["current"]);
@@ -1671,7 +1726,7 @@ test("independent review loads images only through explicit current-artifact loo
     inspect = false;
     await harness.reviewTicket(input); // Same immutable packet retains prior inspection.
     await assert.rejects(harness.reviewTicket({ ...input, round: 2 }), /uninspected media/);
-    assert.equal(count, 4, "uninspected media gets one report repair, then fails closed");
+    assert.equal(count, 3, "cached success skips inspection; uninspected media gets one repair, then fails closed");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1710,7 +1765,7 @@ test("slice verification keeps large evidence out of prompts and indexes changed
       this.state.messages.push({ role: "assistant", content: [{ type: "text", text: '{"summary":"Verified","findings":[]}' }] });
     }
   };
-  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { create: () => ({}) } });
+  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; }, SessionManager: { create: () => ({}) } });
   const plan = normalizePlan({ nodes: [{ id: "slice", title: "Slice", permission: "write", writeScope: "src" }] });
   await harness.verifyStep({ cwd: root, ticket: { id: "T" }, runId: "run", round: 1, plan, step: plan.nodes[0],
     artifacts: [{ kind: "agent-output", stepId: "slice", content: "stale-worker" }],
@@ -1743,7 +1798,7 @@ test("resumed final fixers receive current indexed evidence instead of replaying
       await customTools.find((tool) => tool.name === "worker_report").execute("report", { status: "completed", summary: "Fixed", artifact: "Cumulative result" });
     }
   };
-  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; return { session }; }, SessionManager: { open: () => ({}), create: () => ({}) } });
+  harness.sdk = async () => ({ createAgentSession: async (options) => { customTools = options.customTools; for (const tool of customTools) assert.ok(options.tools.includes(tool.name), `Registered tool ${tool.name} must be allowed by the Pi SDK`); return { session }; }, SessionManager: { open: () => ({}), create: () => ({}) } });
   const plan = normalizePlan({ nodes: [{ id: "fix", title: "Fix", permission: "read", skills: [] }] });
   const result = await harness.runStep({ cwd: root, ticketId: "T", runId: "run", step: plan.nodes[0], plan, artifacts: [], feedback: "Fix the current issue", resumeSessionFile: "saved.jsonl", reviewContext: {
     plan: { nodes: [{ id: "implementation", status: "accepted" }] },

@@ -5,10 +5,26 @@ import { prepareRevisionWork } from "./coordination-workspaces.js";
 import { ensureCoordination, coordinationBlockedStepIds, proposePlanRevision, acceptPlanRevision, rejectPlanRevision, reportConflict, recordCoordinationDecision } from "./coordination.js";
 import { redactRecord, redactText } from "./redaction.js";
 import { publicCoordination } from "./inspection.js";
+import { inFlightStepStatusSet, setStage } from "./run-status.js";
 
 export function coordinationBlockedSteps(run) {
   if (run?.coordination?.applyingRevisionId) return new Set(flattenSteps(run.plan).map((step) => step.id));
   return new Set(coordinationBlockedStepIds(run || {}));
+}
+
+export function settleCoordinationStatus(run) {
+  if (Object.keys(run.activeRuns || {}).length || flattenSteps(run.plan).some((step) => inFlightStepStatusSet.has(step.status))) return;
+  if (run.checkpoint && run.checkpoint.source !== "coordination") return;
+  if (!["running", "fixing", "verifying"].includes(run.status) && run.checkpoint?.source !== "coordination") return;
+  const blocked = coordinationBlockedSteps(run).size > 0;
+  run.status = blocked ? "needs_attention" : "paused";
+  run.checkpoint = blocked ? {
+    id: randomUUID(), kind: "needs_attention", source: "coordination",
+    title: "Resolve work coordination",
+    prompt: "Review the open conflicts and proposed plan revisions, then resume execution.",
+    createdAt: new Date().toISOString()
+  } : null;
+  setStage(run, "implement", blocked ? "blocked" : "paused", blocked ? "Waiting for a coordination decision" : "Coordination resolved. Resume execution when ready.");
 }
 
 function bounded(value, label, limit = 4000) {
@@ -138,6 +154,7 @@ export function createCoordinationService({ readState, update, runtime, harness,
         editable(run);
         result = acceptPlanRevision(run, id, { author: "operator" });
         delete run.coordination.applyingRevisionId;
+        settleCoordinationStatus(run);
       });
       return result;
     } catch (error) {
@@ -153,14 +170,14 @@ export function createCoordinationService({ readState, update, runtime, harness,
   }
   async function reject(ticketId, id, input = {}) {
     let result;
-    await update((state) => { const run = state.ticketRuns[ticketId]; editable(run); assertNotApplying(run); result = rejectPlanRevision(run, id, { ...input, author: "operator" }); });
+    await update((state) => { const run = state.ticketRuns[ticketId]; editable(run); assertNotApplying(run); result = rejectPlanRevision(run, id, { ...input, author: "operator" }); settleCoordinationStatus(run); });
     return result;
   }
   async function decide(ticketId, input) {
     const ownerRunId = runFor(ticketId).runId;
     let result;
     await settleAffected(ticketId, coordinationBlockedSteps(runFor(ticketId)));
-    await update((state) => { const run = state.ticketRuns[ticketId]; if (run.runId !== ownerRunId) throw new Error("The ticket run changed"); editable(run); assertNotApplying(run); result = recordCoordinationDecision(run, { ...redactRecord(input), author: "operator" }); });
+    await update((state) => { const run = state.ticketRuns[ticketId]; if (run.runId !== ownerRunId) throw new Error("The ticket run changed"); editable(run); assertNotApplying(run); result = recordCoordinationDecision(run, { ...redactRecord(input), author: "operator" }); settleCoordinationStatus(run); });
     return result;
   }
   const resolving = new Map();

@@ -22,6 +22,7 @@ export function createRoutes({
   orchestrator,
   supervisor,
   version,
+  health = () => ({}),
   inspection,
   tickets,
   workspace,
@@ -76,7 +77,7 @@ export function createRoutes({
       return json(response, 200, await workspace.readiness({ visual: url.searchParams.get("visual") === "1" }));
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return json(response, 200, { ok: true, version });
+      return json(response, 200, { ok: true, version, ...health() });
     }
     if (request.method === "GET" && url.pathname === "/api/state") {
       return json(response, 200, await inspection.state());

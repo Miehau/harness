@@ -53,6 +53,28 @@ test("dependency changes install privately and invalidate the manifest fingerpri
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("empty-repository checks defer npm setup until the product manifest exists", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "bootstrap-deps-"));
+  try {
+    await initializeProject(cwd, { vcsMode: "git" });
+    for (const command of ["install", "ci"]) {
+      const config = { commands: { install: ["npm", command], check: ["node", "--version"] } };
+      await writeFile(join(cwd, ".agent-plan/project.json"), JSON.stringify(config));
+      const calls = [];
+      const execImpl = async (file, args) => { calls.push([file, ...args]); return { stdout: "ok", stderr: "" }; };
+      assert.equal((await runProjectCommand(cwd, "check", { execImpl })).status, "passed");
+      assert.deepEqual(calls, [["node", "--version"]]);
+      await assert.rejects(runProjectCommand(cwd, "install", { execImpl }), /Create package.json/);
+      assert.equal(calls.length, 1, "explicit installation fails before launching or deleting dependencies");
+      await writeFile(join(cwd, "package.json"), '{"private":true}');
+      assert.equal((await dependencyState(cwd, config)).required, true);
+      await runProjectCommand(cwd, "check", { execImpl });
+      assert.deepEqual(calls.slice(1), [["npm", command], ["node", "--version"]]);
+      await rm(join(cwd, "package.json"));
+    }
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test("init CLI and API establish the selected workspace and preserve reruns", async () => {
   await withDaemon(async (daemon) => {
     const result = await runAgainstDaemon(daemon, ["init"]);

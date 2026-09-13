@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { acceptJjChange, beginJjChange, initializeJjWorkspace, prepareJjForGit, snapshotJjChange } from "../src/jj.js";
-import { createZeroStateWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
+import { commitWorkspace, createZeroStateWorkspace, ensureTicketWorktree } from "../src/worktrees.js";
 
 const exec = promisify(execFile);
 const hasJj = await exec("jj", ["--version"]).then(() => true, () => false);
@@ -37,5 +37,14 @@ test("keeps a stable jj change id while revisions evolve and exports the accepte
     const status = (await exec("git", ["status", "--porcelain"], { cwd: workspace.cwd })).stdout;
     assert.equal(head, accepted.commitId);
     assert.equal(status, "");
+
+    // Mixed runs accept isolated steps through Git on detached HEAD while the
+    // jj bookmark still points to the earlier sequential step.
+    await exec("git", ["switch", "--detach"], { cwd: workspace.cwd });
+    await writeFile(join(workspace.cwd, "package.json"), '{"private":true}\n');
+    const isolatedCommit = await commitWorkspace(workspace.cwd, "feat: accepted isolated step");
+    await prepareJjForGit(workspace.cwd, workspace.branch);
+    assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd: workspace.cwd })).stdout.trim(), isolatedCommit);
+    assert.equal((await exec("git", ["status", "--porcelain"], { cwd: workspace.cwd })).stdout, "");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

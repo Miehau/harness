@@ -428,7 +428,6 @@ dialog::backdrop { background: rgb(0 0 0 / .68); }
 .run-history p { margin: 0; padding: 2px 9px 6px; line-height: 1.35; }
 .run-history p + p { padding-top: 0; }
 .run-history strong { color: #f0d09a; }
-.run-notices .cleanup-advisory { margin-top: 0; padding: 6px 9px; }
 .button.busy { display: inline-flex; gap: 7px; align-items: center; pointer-events: none; }
 .button-spinner { width: 11px; height: 11px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: button-spin .55s linear infinite; }
 @keyframes button-spin { to { transform: rotate(360deg); } }
@@ -1190,10 +1189,6 @@ dialog::backdrop { background: rgb(2 3 8 / .75); backdrop-filter: blur(6px); }
 .worker-inspector > .tab-panel { min-height: 0; padding: 20px; }
 
 .worker-overview { display: grid; gap: 18px; }
-.cleanup-advisory { display: grid; gap: 5px; margin-top: 12px; border: 1px solid rgb(220 148 47 / .52); border-left: 4px solid #e6a45d; border-radius: 10px; padding: 11px 13px; background: rgb(132 85 20 / .2); }
-.cleanup-advisory .eyebrow { color: #f0b05d; }
-.cleanup-advisory strong { color: #f4d2a3; font-size: 13px; }
-.cleanup-advisory p { color: #d5b98f; font-size: 12px; line-height: 1.45; }
 .attention-summary { display: grid; gap: 8px; border: 1px solid rgb(220 148 47 / .32); border-radius: 10px; padding: 14px; background: rgb(132 85 20 / .16); }
 .attention-summary .eyebrow { color: #f0b05d; }
 .attention-summary strong { color: #f0d7b1; font-size: 13px; line-height: 1.45; }

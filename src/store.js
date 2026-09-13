@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+import { archiveHistoryOutput } from "./history-output.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -353,13 +355,15 @@ export class JsonStore {
     return this.read();
   }
 
-  read() { return structuredClone(this.state); }
+  read(select = (state) => state) { return structuredClone(select(this.state)); }
 
   async update(change, { snapshot = true } = {}) {
     const work = this.queue.then(async () => {
       // A failed callback or atomic rename must leave the in-memory view on
       // the last durable revision.  Callers receive a mutable draft only.
+      const cloneStarted = performance.now();
       const draft = structuredClone(this.state);
+      this.metrics = { ...this.metrics, cloneMs: performance.now() - cloneStarted };
       await change(draft);
       draft.revision = (draft.revision || 0) + 1;
       await this.save(draft);
@@ -372,9 +376,13 @@ export class JsonStore {
 
   async save(state = this.state) {
     this.beforeSave(state);
+    await archiveHistoryOutput(state, dirname(this.file));
     compactPersistedState(state, dirname(this.file));
     const temporary = `${this.file}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    const serializeStarted = performance.now();
+    const serialized = `${JSON.stringify(state)}\n`;
+    this.metrics = { ...this.metrics, serializeMs: performance.now() - serializeStarted, bytes: Buffer.byteLength(serialized) };
+    await writeFile(temporary, serialized, "utf8");
     await rename(temporary, this.file);
   }
 }

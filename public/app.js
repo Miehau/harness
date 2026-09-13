@@ -1,6 +1,6 @@
 import { coordinationPanel } from "/coordination.js";
 import { renderMarkdown } from "/markdown.js";
-import { artifactsForStage, cleanupInspectorModel, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, runProgress, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
+import { artifactsForStage, eventGroups, executionGraph, finalReview, fleetTicketView, formatOutput, freeTextTicket, inspectionResourceLabel, inspectionSummary, inspectionTransitionAnnouncement, parseDiff, preferredStageId, preferredStepId, proofMapView, restartOptions, restoreInspectionSelection, reviewNotesForRows, runHeartbeat, runMetrics, runProgress, stageDetailModel, verificationProgress, stageMilestones, steeringLifecycle, steeringTarget, stepInspectorSummary } from "/ui-model.js";
 
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -28,6 +28,7 @@ let activeTab = currentView && ["activity", "details", "overview", "run", "artif
 let selectedArtifactId = null;
 let deliberateSelection = false;
 let transportState = "connected";
+let daemonHealth = { responsive: true };
 let transportTimer = null;
 let hasConnected = false;
 let diffExpanded = false;
@@ -442,13 +443,12 @@ function runNoticesHtml(run) {
   else if (run?.startedFreshFrom) notes.push({ title: "Fresh run", detail: `Previous run ${run.startedFreshFrom.runId} was archived.` });
   if (run?.recovery?.message) notes.push({ title: "Restart recovery", detail: run.recovery.message });
   const errors = [run?.trackerSyncError, run?.lastError].filter(Boolean);
-  const cleanup = cleanupAdvisoryHtml(run);
-  if (!notes.length && !errors.length && !cleanup) return "";
+  if (!notes.length && !errors.length) return "";
   const history = notes.length
     ? `<details class="run-history"><summary>${notes.length} recovery note${notes.length === 1 ? "" : "s"}</summary>${notes.map((note) => `<p><strong>${escapeHtml(note.title)}</strong> ${escapeHtml(note.detail)}</p>`).join("")}</details>`
     : "";
   const errorHtml = errors.map((error) => `<p class="error-banner">${escapeHtml(error)}</p>`).join("");
-  return `<div class="run-notices">${history}${errorHtml}${cleanup}</div>`;
+  return `<div class="run-notices">${history}${errorHtml}</div>`;
 }
 
 function renderHeader() {
@@ -465,10 +465,12 @@ function renderHeader() {
   const metrics = runMetrics(run);
   const restartPoints = restartOptions(run);
   const restartable = run && !["preparing", "clarifying", "exploring", "planning", "running", "fixing", "verifying", "reviewing", "queued_for_merge", "merging", "resolving_conflicts", "verifying_merge", "rebasing", "waiting_for_checks", "addressing_feedback", "waiting_for_merge", "completed"].includes(run.status) && !run.merge && !run.integration;
-  const progress = runProgress(run || {});
-  const progressHtml = run ? `<div class="work-summary ${progress.working ? "is-working" : ""}" role="status"><span class="work-indicator" aria-hidden="true"></span><div><strong>${escapeHtml(progress.title)}</strong><span>${escapeHtml(progress.detail)}</span></div><small>${progress.workers} active workers${progress.lastActivitySeconds == null ? "" : ` · last activity ${(progress.lastActivitySeconds < 60 ? `${progress.lastActivitySeconds}s` : duration(progress.lastActivitySeconds))} ago`}</small></div>` : "";
+  const progress = runProgress(run || {}, Date.now(), daemonHealth);
+  const progressHtml = run ? `<div class="work-summary ${progress.working ? "is-working" : ""}" role="status"><span class="work-indicator" aria-hidden="true"></span><div><strong>${escapeHtml(progress.title)}</strong><span>${escapeHtml(progress.detail)} ${escapeHtml(progress.nextAction)}</span></div><small>${progress.workers} active workers${progress.lastActivitySeconds == null ? "" : ` · last activity ${(progress.lastActivitySeconds < 60 ? `${progress.lastActivitySeconds}s` : duration(progress.lastActivitySeconds))} ago`}</small></div>` : "";
   const impact = run?.plan?.uiImpact || run?.uiImpactProvisional;
   const impactHtml = impact ? `<p class="ui-impact"><strong>UI impact: ${escapeHtml(impact.level)}</strong> · ${escapeHtml(impact.reason)}</p>` : "";
+  const reviewPolicy = run?.plan?.reviewPolicy;
+  const reviewPolicyHtml = reviewPolicy ? `<p class="ui-impact"><strong>Review policy: ${reviewPolicy.mode === "small" ? "one comprehensive reviewer for a small diff" : "specialist reviewers"}</strong> · ${escapeHtml(reviewPolicy.reason)}${reviewPolicy.mode === "small" ? " · larger diffs keep specialist review" : ""}</p>` : "";
   const usage = run ? `<span class="usage-strip" title="${metrics.usageState === "unavailable" ? "Token usage was not recorded" : metrics.usageState === "partial" ? "Partial token usage: older events may not have been retained" : "Recorded token usage; input includes cached tokens"}"><span>${duration(metrics.durationSeconds)}</span><span>${metrics.calls} tool calls</span><span>${metrics.modelCalls} model calls</span><span title="SDK-reported model cost in USD; may differ from billing">${metrics.cost.usd == null ? "Cost unavailable" : `${metrics.cost.state === "partial" ? "Partial " : ""}$${metrics.cost.usd.toFixed(4)}`}</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.input + metrics.cacheRead + metrics.cacheWrite)} in</span><span>${metrics.usageState === "unavailable" ? "—" : compactNumber(metrics.output)} out</span><span>${metrics.correctionRounds} corrections</span></span>` : "";
   const canResume = run && ["interrupted", "cancelled", "needs_attention", "failed", "paused"].includes(run.status) && !run.checkpoint && (run.plan || run.stages?.some((stage) => ["active", "blocked", "paused"].includes(stage.status) && ["requirements", "explore", "design"].includes(stage.id)));
   const previewControls = preview?.status === "running" && preview.url
@@ -489,7 +491,7 @@ function renderHeader() {
     : "";
   const histories = runsForTicket(ticket.id);
   const historySelector = histories.length > 1 ? `<label class="run-history"><span>Execution history</span><select data-run-history aria-label="Execution history">${histories.map((item) => `<option value="${escapeHtml(item.runId)}" ${item.runId === run?.runId ? "selected" : ""}>${item.runId === state.ticketRuns?.[ticket.id]?.runId ? "Current" : "Archived"} · ${escapeHtml(item.runId)} · ${escapeHtml(item.status)}</option>`).join("")}</select></label>` : "";
-  const markup = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
+  const markup = `<div class="plan-heading ticket-heading"><div><span class="eyebrow">${escapeHtml(ticket.identifier)} · ${escapeHtml(ticket.state.name)}</span><h2>${escapeHtml(ticket.title)}</h2><p>${escapeHtml(ticket.description || "No ticket description provided.")}</p>${usage}${impactHtml}${reviewPolicyHtml}${historySelector}</div><div class="plan-actions">${action}${reviewAction}${run?.plan ? `<button class="button" data-tab="coordination">Coordination${(run.coordination?.conflicts?.some((item) => item.status === "open") || run.coordination?.revisions?.some((item) => item.status === "proposed")) ? " · needs attention" : ""}</button>` : ""}<span class="transport-status ${escapeHtml(transportState)}" role="status">${escapeHtml(transportLabel())}</span></div></div>${isArchivedRun(run) ? `<div class="recovery-banner"><strong>Archived execution</strong><span>Read-only inspection of run ${escapeHtml(run.runId)}.</span></div>` : `${workflowCheckpointsHtml(run)}${run?.checkpoint && !checkpointUsesWorkspace(run) ? checkpointHtml(run) : ""}`}${progressHtml}${runNoticesHtml(run)}`;
   // Keep controls attached through unrelated state hydration and SSE updates.
   if (markup !== renderedHeaderMarkup) { target.innerHTML = markup; renderedHeaderMarkup = markup; }
 }
@@ -871,7 +873,7 @@ function criterionProofHtml(run, options = {}) {
   const list = proof.criteria.map((criterion) => {
     const history = criterion.history?.length ? `<details><summary>${criterion.history.length} prior result${criterion.history.length === 1 ? "" : "s"}</summary><ol>${criterion.history.map((item) => `<li><strong>${escapeHtml(item.status || "not_yet_verified")}</strong> · ${escapeHtml(item.evidenceValidity || "missing")} · ${escapeHtml(item.explanation?.summary || "No explanation")}${item.invalidationReason ? ` · ${escapeHtml(item.invalidationReason)}` : ""}${item.evidence?.length ? `<div class="proof-controls">${item.evidence.map(proofEvidenceHtml).join("")}</div>` : ""}</li>`).join("")}</ol></details>` : "";
     const evidence = criterion.evidence.length ? `<div class="proof-controls">${criterion.evidence.map(proofEvidenceHtml).join("")}</div>` : `<span class="proof-no-evidence">No evidence reference recorded.</span>`;
-    return `<article class="criterion-proof proof-${escapeHtml(criterion.state)}"><header><span class="proof-statuses"><span class="proof-state">${escapeHtml(criterion.resultLabel)}</span><span class="proof-evidence evidence-${escapeHtml(criterion.current.evidenceValidity || "missing")}">${escapeHtml(criterion.evidenceLabel)}</span></span><code>${escapeHtml(criterion.id)}</code></header><strong>${escapeHtml(criterion.text)}</strong><small>${escapeHtml(criterion.stepTitle || criterion.stepId)}</small><p>${escapeHtml(criterion.current.explanation?.summary || "No structured result was reported.")}</p>${evidence}${history}</article>`;
+    return `<article class="criterion-proof proof-${escapeHtml(criterion.state)}"><header><span class="proof-statuses"><span class="proof-state">${escapeHtml(criterion.resultLabel)}</span><span class="proof-evidence evidence-${escapeHtml(criterion.current.evidenceValidity || "missing")}">${escapeHtml(criterion.evidenceLabel)}</span></span><code>${escapeHtml(criterion.id)}</code></header><strong>${escapeHtml(criterion.text)}</strong><small>${escapeHtml(criterion.stepTitle || criterion.stepId)} · ${criterion.scope === "step" ? "Historical step constraint" : "Final requirement"}</small><p>${escapeHtml(criterion.current.explanation?.summary || "No structured result was reported.")}</p>${evidence}${history}</article>`;
   }).join("") || `<div class="run-empty">No approved acceptance criteria were recorded.</div>`;
   return `<section class="criterion-proof-map"><header><div><span class="eyebrow">Criterion proof</span><strong>${proof.criteria.length} criterion${proof.criteria.length === 1 ? "" : "ia"}</strong></div><span class="proof-eligibility ${proof.compatibility ? "unknown" : gate.eligibility.eligible ? "eligible" : "blocked"}">${proof.compatibility ? "not recorded" : gate.eligibility.eligible ? "ready" : "blocked"}</span></header>${compatibility}${!options.compact && !gate.eligibility.eligible ? `<ul class="proof-blockers">${blockers}</ul>` : ""}<div class="criterion-proof-list">${list}</div></section>`;
 }
@@ -881,11 +883,6 @@ function correctionCriterionPicker(run, options = {}) {
   return criteria.length ? `<fieldset class="criterion-picker"><legend>Affected criteria</legend>${criteria.map((criterion) => `<label><input type="checkbox" name="criterionId" value="${escapeHtml(criterion.id)}">${escapeHtml(criterion.text)}</label>`).join("")}</fieldset>` : "";
 }
 
-function cleanupAdvisoryHtml(run) {
-  const cleanup = cleanupInspectorModel(run);
-  if (!cleanup.advisory) return "";
-  return `<section class="cleanup-advisory" role="alert"><span class="eyebrow">Cleanup advisory</span><strong>${escapeHtml(cleanup.label)}</strong><p>Process cleanup is not confirmed. ${escapeHtml(cleanup.executions.flatMap((item) => item.diagnostics).join("; ") || "Process ownership could not be confirmed; inspect the retained run diagnostics before continuing.")}</p></section>`;
-}
 
 function overviewPanel(step) {
   const run = runFor();
@@ -2240,6 +2237,17 @@ function setTransportState(next, announcement = null) {
   }
   if (announcement) notify(announcement);
 }
+
+// A connected SSE socket can stay open while the daemon event loop is blocked.
+setInterval(async () => {
+  const wasResponsive = daemonHealth.responsive;
+  try {
+    const response = await fetch("/api/health", { signal: AbortSignal.timeout(3000) });
+    if (!response.ok) throw new Error("Health check failed");
+    daemonHealth = { ...(await response.json()), responsive: true };
+  } catch { daemonHealth = { ...daemonHealth, responsive: false }; }
+  if (wasResponsive !== daemonHealth.responsive) render();
+}, 10000);
 
 const events = new EventSource("/api/events");
 events.onopen = () => {

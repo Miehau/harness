@@ -10,6 +10,14 @@ const pending = new Map();
 
 export async function dependencyState(cwd, config) {
   if (!config.commands.install) return { required: false };
+  const install = config.commands.install;
+  if (install.length === 2 && install[0] === "npm" && ["install", "ci"].includes(install[1])) {
+    try { await lstat(join(cwd, "package.json")); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return { required: false, missingManifest: "package.json" };
+    }
+  }
   const { stdout: gitPath } = await exec("git", ["rev-parse", "--git-path", "agent-plan-dependencies.json"], { cwd });
   const marker = resolve(cwd, gitPath.trim());
   const { stdout } = await exec("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd, maxBuffer: 8 * 1024 * 1024 });
@@ -46,6 +54,10 @@ export async function prepareDependencies(cwd, config, install, { force = false 
   if (pending.has(key)) return pending.get(key);
   const work = (async () => {
     const state = await dependencyState(cwd, config);
+    if (state.missingManifest) {
+      if (force) throw new Error(`Create ${state.missingManifest} before running the install command`);
+      return { status: "not_required", reason: `Waiting for ${state.missingManifest}` };
+    }
     if (!force && !state.required) return { status: "ready" };
     const { stdout: tracked } = await exec("git", ["ls-files", "-z"], { cwd });
     if (tracked.split("\0").some((path) => path.split("/").includes("node_modules"))) throw new Error("Dependency setup will not remove tracked node_modules; remove them from version control first");

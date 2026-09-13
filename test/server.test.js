@@ -161,6 +161,8 @@ test("GET /api/health and compact run omit artifact content", async () => {
     const health = await invoke(daemon, "GET", "/api/health");
     assert.equal(health.status, 200);
     assert.equal(health.json.ok, true);
+    assert.ok(Number.isFinite(health.json.eventLoopDelayMs));
+    assert.ok(Number.isFinite(health.json.eventLoopMaxMs));
     const id = await seedRun(daemon, {
       artifacts: [{ id: "a1", name: "design.md", path: "/tmp/design.md", kind: "architecture", content: "# secret" }]
     });

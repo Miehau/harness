@@ -13,7 +13,7 @@ import { applyStepProof, projectProofMap, invalidateProof, proofGate, proofGateE
 import { setStage } from "./run-status.js";
 import { findingsFingerprint, humanProofFindings } from "./review-findings.js";
 import { acknowledgeSteering, failSteering, steeringCheckpointPending, targetMatches } from "./steering.js";
-import { coordinationBlockedSteps } from "./coordination-service.js";
+import { coordinationBlockedSteps, settleCoordinationStatus } from "./coordination-service.js";
 
 export function createStepRunner({ state, runtime, worker, checks, proof, artifacts, activity, steering, lifecycle, coordination }) {
   const { run: runContainedWorker, verifyStep, reviewWorkerReport, generateCommitMessage, evidenceImages } = worker;
@@ -446,11 +446,19 @@ const design = await artifactText([...latest.artifacts].reverse().find((artifact
             design, diff, output: result.output, checks,
             proofMap: projectProofMap(readRun(ticketId)),
             artifacts: await hydrateArtifacts(readRun(ticketId).artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)), dataDir),
-            runId: latest.runId, round,
+            runId: latest.runId, attemptId, round,
             focusFindings,
             images: await evidenceImages(checks.evidence),
             profile: latest.stageProfiles.verification,
             onEvent: activity.onEvent,
+            onEvidence: async (artifact) => {
+              signal?.throwIfAborted();
+              await update((state) => {
+                const current = state.ticketRuns[ticketId];
+                if (!currentAttempt(current, { runId: run.runId, stepId, workerRunId, attemptId })) throw new Error("Verification attempt was superseded");
+                current.artifacts.push(artifact);
+              }, { publish: false });
+            },
             signal
           })),
           checks
@@ -531,12 +539,14 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
           await update((state) => {
             const current = state.ticketRuns[ticketId];
             const target = findNode(current.plan, stepId);
+            const eligibility = proofGate(current, { stepId });
+            const proofError = eligibility.eligible ? null : proofGateError(eligibility);
             target.status = "review_ready";
             target.commitMessage = commitMessage;
             if (target.reviewBudgetResult?.exceeded) current.auto = false;
             current.status = "awaiting_step_review";
-            current.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `${target.reviewBudgetResult?.exceeded ? "Oversized review required" : "Review"}: ${target.title}`, createdAt: new Date().toISOString() };
-            setStage(current, "implement", "blocked", target.reviewBudgetResult?.exceeded ? target.reviewBudgetResult.reasons.join("; ") : `${target.title} is verified and awaiting your review`);
+            current.checkpoint = { id: randomUUID(), kind: "step_review", stepId, title: `${proofError ? "Resolve verification evidence" : target.reviewBudgetResult?.exceeded ? "Oversized review required" : "Review"}: ${target.title}`, ...(proofError ? { prompt: proofError } : {}), createdAt: new Date().toISOString() };
+            setStage(current, "implement", "blocked", proofError || (target.reviewBudgetResult?.exceeded ? target.reviewBudgetResult.reasons.join("; ") : `${target.title} is verified and awaiting your review`));
           });
           return;
         }
@@ -635,6 +645,7 @@ materializeActiveAttempt(target, current.activeRuns[stepId] || { runId: workerRu
       target.status = "interrupted";
       if (target.activeAttempt) target.activeAttempt.status = "interrupted";
       delete current.activeRuns[stepId];
+      settleCoordinationStatus(current);
     });
     if (runtime.stepControllers.get(key) === controller) runtime.stepControllers.delete(key);
     if (activeSteps.get(key) === work) activeSteps.delete(key);

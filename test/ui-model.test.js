@@ -411,7 +411,7 @@ test("cleanup inspector keeps every durable outcome and marks only advisories as
       executions: [{ executionId: "legacy-unrecorded", outcome: "incomplete", unresolved: [], actions: [] }]
     }
   }).advisory, false);
-  assert.match(app, /cleanup-advisory/);
+  assert.doesNotMatch(app, /cleanup-advisory|cleanupAdvisoryHtml|Process cleanup is not confirmed/);
   assert.doesNotMatch(app, /data-tab="cleanup"|function cleanupInspectorHtml/);
 });
 
@@ -557,4 +557,15 @@ test("progress distinguishes actual work, provider waits and user gates", async 
   assert.equal(runProgress({ status: "running", checkpoint: { kind: "provider_wait" } }).title, "Waiting for provider");
   assert.equal(runProgress({ status: "planning", checkpoint: { title: "Approve direction" } }).working, false);
   assert.equal(runProgress({ status: "paused", uiReplay: { status: "running" } }).title, "Replaying proof checks");
+});
+
+test("progress distinguishes evidence repair, approval, live tools and an unresponsive daemon", async () => {
+  const { runProgress } = await import("../public/ui-model.js");
+  const now = Date.now();
+  const run = { status: "reviewing", stages: [{ status: "active", activity: { lastEventAt: new Date(now - 5000).toISOString(), events: [{ type: "tool_start", callId: "one", tool: "review_media" }] } }] };
+  assert.equal(runProgress(run, now).phase, "tool");
+  assert.equal(runProgress(run, now).lastActivitySeconds, 5);
+  assert.equal(runProgress(run, now, { responsive: false }).phase, "daemon_unresponsive");
+  assert.equal(runProgress({ status: "needs_attention", lastError: "Proof gate blocked: missing citation" }).phase, "evidence_error");
+  assert.match(runProgress({ status: "awaiting_step_review", checkpoint: { kind: "step_review", title: "402 lines exceed 400-line budget" } }).nextAction, /accept/);
 });

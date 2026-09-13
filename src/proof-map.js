@@ -47,6 +47,7 @@ function criterionSnapshots(plan) {
       id: binding?.id || criterionId(step.id, index, text),
       ...(binding ? { evidenceType: binding.evidence } : {}),
       ...(binding?.journeyId ? { journeyId: binding.journeyId } : {}),
+      scope: binding?.scope || "final",
       stepId: step.id,
       stepTitle: String(step.title || ""),
       stepRequired: step.required !== false,
@@ -271,7 +272,7 @@ export function applyProofReports(map, reports, run, { criterionIds, reportedAt 
 
 /** A verifier must explicitly resolve every assigned criterion with current evidence. */
 export function applyIndependentProofReports(map, reports, run, { criterionIds, mediaIds = [] } = {}) {
-  const assigned = map.criteria.filter((criterion) => !criterionIds || criterionIds.includes(criterion.id));
+  const assigned = map.criteria.filter((criterion) => criterionIds ? criterionIds.includes(criterion.id) : criterion.scope !== "step");
   const isInspectedImage = (criterion, artifactId) => {
     const needsVideo = (criterion.evidenceType ? criterion.requiresVideoEvidence : criterion.requiresVideoEvidence || stepIn(run, criterion.stepId)?.requiresVideoEvidence);
     return mediaIds.includes(artifactId) && artifactsIn(run).some((artifact) =>
@@ -325,7 +326,7 @@ function blockers(criteria) {
 
 export function proofEligibility(proof, { stepId = null, requiredOnly = false } = {}) {
   const criteria = (proof?.criteria || []).filter((criterion) =>
-    (!stepId || criterion.stepId === stepId) && (!requiredOnly || criterion.stepRequired !== false)
+    (stepId ? criterion.stepId === stepId : criterion.scope !== "step") && (!requiredOnly || criterion.stepRequired !== false)
   );
   const reasons = blockers(criteria);
   return { eligible: reasons.length === 0, blockingReasons: reasons };

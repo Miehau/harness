@@ -109,3 +109,30 @@ node scripts/test.mjs
 node scripts/test.mjs --check
 node scripts/nav.mjs --json > /tmp/nav-before.json   # before behavior changes
 ```
+
+### Review recovery and proportional execution
+
+- Final reviewer responses are checked for complete final-criterion coverage,
+  duplicate verdicts and usable citation identities before the session ends.
+  One repair turn can fill coverage or citations; it cannot discard findings.
+- Successful reviewer results are saved per role and immutable evidence digest.
+  A failed sibling does not repeat them. Changed code, checks, evidence, media,
+  constraints, access or model profile produces a different cache identity.
+- New plans can explicitly approve `reviewPolicy: {mode: "small", reason, risks: []}`.
+  One comprehensive independent reviewer covers bounded single-repository diffs
+  of at most eight files and 400 lines. Larger, risky and legacy plans retain
+  requirements, integration and verification reviewers. No proof gates are waived.
+- Criterion bindings default to `scope: "final"`. Temporary construction constraints
+  use `scope: "step"`: checked at acceptance and retained as history, not asserted
+  as properties of the finished product. Final product requirements must not use
+  step scope. Plan small changes as a vertical slice with its tests and proof.
+- `/api/health` includes event-loop delay and last storage clone/serialization metrics.
+  The dashboard checks responsiveness independently of SSE, distinguishes review
+  evidence errors from approval gates, and shows the next action and last activity.
+- Completed-run output exceeding 4,000 characters is retained in historical-output
+  artifacts; live state keeps 2,000-character excerpts. Active output remains intact.
+  Persistence stays immediate so browser reload cannot miss the last emitted output.
+  Full-state transactional cloning remains; use measured storage timings before
+  considering a different store or more complicated persistence scheme.
+- Supervision should report meaningful gates, failures and completion only. Healthy
+  model/tool activity is a verified wait, not a reason to restart or send an update.

@@ -1,3 +1,4 @@
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { cleanupMergedRun } from "./retention.js";
 import { captureSupervisorEvents, createSupervisor, loadSupervisorConfig } from "./supervisor.js";
 import { createOrchestratorService, guardOrchestratorUpdate } from "./orchestration.js";
@@ -650,7 +651,10 @@ const ticketRoutes = {
 
 const supervisor = createSupervisor({ store, projects: supervisorProjects, fetchImpl: options.supervisorFetch, timeoutMs: options.supervisorTimeoutMs });
 const orchestrator = createOrchestratorService({ state: { read: store.read.bind(store), update }, tickets: ticketService, dataDir });
+const eventLoop = monitorEventLoopDelay({ resolution: 20 });
+eventLoop.enable();
 const routeApi = createRoutes({
+  health: () => ({ eventLoopDelayMs: Number.isFinite(eventLoop.mean) ? Math.round(eventLoop.mean / 1e6) : 0, eventLoopMaxMs: Math.round(eventLoop.max / 1e6), storage: store.metrics || null }),
   orchestrator,
   supervisor,
   version: packageMetadata.version,
@@ -693,6 +697,7 @@ async function close({ exit = false } = {}) {
     await supervisor.close();
     clearInterval(pollTimer);
     clearInterval(sseHeartbeat);
+    eventLoop.disable();
     runtime.clearSteeringTimers();
     coordinationService.close();
     closeSseClients(clients);

@@ -14,6 +14,47 @@ import { invoke, mockHarness, sampleTicket, seedRun, waitFor, withDaemon } from 
 const exec = promisify(execFile);
 const report = (artifact) => ({ prompt: "mock prompt", rawOutput: artifact, output: artifact, sessionFile: null, reviewNotes: [], report: { status: "completed", summary: artifact, artifact } });
 
+test("a lone coordination-aborted worker exposes a gate and an accepted revision can resume", { timeout: 20000 }, async () => {
+  let input;
+  let calls = 0;
+  const harness = { ...mockHarness(), async runStep(value) {
+    input = value;
+    if (++calls === 1) {
+      await new Promise((resolve) => value.signal.addEventListener("abort", resolve, { once: true }));
+      value.signal.throwIfAborted();
+    }
+    return { ...report("Revised work"), report: { status: "needs_input", request: "Review revised work" } };
+  } };
+  await withDaemon(async (daemon, { cwd }) => {
+    const ticket = sampleTicket({ source: "local" });
+    const workspace = await createZeroStateWorkspace({ cwd, ticket, runId: "run-1" });
+    const plan = normalizePlan({ nodes: [{ id: "one", title: "Inspect conventions", permission: "read" }] });
+    const id = await seedRun(daemon, { ticket, workspace, status: "paused", plan, activeRuns: {} });
+    const run = () => daemon.store.read().ticketRuns[id];
+    const post = (path, body = {}) => invoke(daemon, "POST", `/api/tickets/${id}/${path}`, { body });
+    const launch = post("resume");
+    await waitFor(() => assert.ok(input), { timeoutMs: 5000 });
+    const conflict = await post("coordination/conflicts", { summary: "Prerequisite must be corrected", stepIds: ["one"] });
+    assert.equal(conflict.status, 200, conflict.text);
+    await launch;
+    await waitFor(() => assert.equal(run().status, "needs_attention"));
+    assert.deepEqual(run().activeRuns, {});
+    assert.equal(run().checkpoint.source, "coordination");
+    assert.equal(findNode(run().plan, "one").attempts.at(-1).terminationReason, "coordination_pause");
+    const proposal = await post("coordination/revisions", { reason: "Clarify prerequisite ownership", changes: [{ stepId: "one", description: "Inspect only the existing conventions" }], conflictIds: [conflict.json.id] });
+    assert.equal(proposal.status, 200, proposal.text);
+    const accepted = await post(`coordination/revisions/${proposal.json.id}/accept`);
+    assert.equal(accepted.status, 200, accepted.text);
+    assert.equal(run().status, "paused");
+    assert.equal(run().checkpoint, null);
+    assert.equal(calls, 1, "manual mode waits for explicit resume");
+    const resumed = await post("resume");
+    assert.equal(resumed.status, 202, resumed.text);
+    await waitFor(() => assert.equal(calls, 2), { timeoutMs: 5000 });
+    assert.equal(input.step.description, "Inspect only the existing conventions");
+  }, { harness });
+});
+
 test("parallel workers pause selectively, reject late reports, and resume the accepted revision with durable decisions", { timeout: 20000 }, async () => {
   const inputs = new Map();
   let releaseFirst, releaseOther, releaseResumed;

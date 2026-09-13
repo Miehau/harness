@@ -101,7 +101,8 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
   });
   const save = () => {
     dirty = true;
-    if (persistence || !persist) return;
+    if (!persist) { dirty = false; return; }
+    if (persistence) return;
     persistence = (async () => {
       while (dirty) {
         dirty = false;
@@ -131,6 +132,8 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
         lastEvent = item.label || lastEvent;
         save();
       } else if (item.type === "text_delta") {
+        lastEventAt = item.at;
+        lastEvent = item.label || "Writing the response";
         rawOutput = appendBounded(rawOutput, redactText(item.delta), outputLimit);
         save();
       } else {
@@ -158,27 +161,27 @@ export function createActivityCapture({ existing = {}, persist, emit, now = Date
 /** Durable activity snapshots use an explicit persistence and event boundary. */
 export function stageActivity({ store, update, emit, ticketId, stageId, runId }) {
   return createActivityCapture({
-    existing: store.read().ticketRuns[ticketId]?.stages?.find((stage) => stage.id === stageId)?.activity,
+    existing: store.read((state) => state.ticketRuns[ticketId]?.stages?.find((stage) => stage.id === stageId)?.activity),
     persist: (activity) => update((state) => {
       if (state.ticketRuns[ticketId]?.runId !== runId) return;
       const stage = state.ticketRuns[ticketId]?.stages?.find((candidate) => candidate.id === stageId);
       if (stage) stage.activity = activity;
     }, { publish: false }),
     emit: (event) => {
-      if (store.read().ticketRuns[ticketId]?.runId === runId) emit({ channel: "stage", ticketId, stageId, runId, ...event });
+      if (store.read((state) => state.ticketRuns[ticketId]?.runId) === runId) emit({ channel: "stage", ticketId, stageId, runId, ...event });
     }
   });
 }
 
 export function stepActivity({ store, update, emit, ticketId, stepId, runId }) {
   return createActivityCapture({
-    existing: store.read().ticketRuns[ticketId]?.activeRuns?.[stepId]?.activity,
+    existing: store.read((state) => state.ticketRuns[ticketId]?.activeRuns?.[stepId]?.activity),
     persist: (activity) => update((state) => {
       const active = state.ticketRuns[ticketId]?.activeRuns?.[stepId];
       if (active?.runId === runId) active.activity = activity;
     }, { publish: false }),
     emit: (event) => {
-      if (store.read().ticketRuns[ticketId]?.activeRuns?.[stepId]?.runId === runId) emit(event);
+      if (store.read((state) => state.ticketRuns[ticketId]?.activeRuns?.[stepId]?.runId) === runId) emit(event);
     }
   });
 }

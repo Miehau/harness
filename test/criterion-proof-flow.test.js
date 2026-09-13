@@ -224,6 +224,8 @@ test("resuming a worker checkpoint invalidates omitted proof before the worker c
     const resumed = await waitFor(daemon, id, (run) => run.checkpoint?.kind === "step_review");
     assert.deepEqual(resumedStaleCriteria, [criterionId]);
     assert.equal(resumed.proofMap.criteria[0].current.status, "blocked", "omitted independent verdict blocks acceptance");
+    assert.match(resumed.checkpoint.title, /Resolve verification evidence/);
+    assert.match(daemon.store.read().ticketRuns[id].checkpoint.prompt, /Proof gate blocked/);
     assert.equal(await readFile(join(workspace.cwd, "baseline.txt"), "utf8"), "corrected after feedback\n");
     assert.ok(daemon.store.read().ticketRuns[id].artifacts.some((artifact) => artifact.name === "proof-map-worker-resume-correction.json"));
 

@@ -1,6 +1,7 @@
 import { designSystemPath, designSystemExists, ensureDesignSystemStep, uiDesignViolations, uiPlanningInstruction, prepareUiPlan, uiContractViolations } from "./design-system.js";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { validateReviewResponse } from "./review-response.js";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { defineTool, stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -13,6 +14,7 @@ import { stagePrompt } from "./profiles.js";
 import { compactReviewPacket, writeReviewIndex } from "./review-packet.js";
 import { redactRecord, redactText, safeReasoningSummary } from "./redaction.js";
 import { createProcessContainment } from "./process-containment.js";
+import { persistArtifact } from "./artifacts.js";
 import { coordinationContext, describeConfiguredRepositories, discoveryInstruction, enrichReviewPacket, ensureVerificationContractStep, formatCommitMessage, formatTicketHorizon, MAX_VERIFICATION_ACTIONS, MAX_VERIFICATION_MS, planSchemaInstruction, planningInstruction, productContextUpdateInstruction, requirementsFollowUpInstruction, requirementsInstruction, stepContext, supervisorInstruction, ticketDesignInstruction, ticketExplorationInstruction, ticketLookAheadInstruction, verificationContractExists, verificationContractFiles, verificationTools, visualProofIdentityInstruction, workerWriteScope } from "./pi-prompts.js";
 import { coordinationTools, checkpointTool, evidenceContext, filesystemToolNames, projectCommandTool, reviewEvidenceTool, reviewNoteTool, scopedReadTools, scopedWorkerTools, sessionPolicy, stageTool, workerReportTool } from "./pi-tools.js";
 import { defaultRepositoryCheckExec, runRepositoryChecks, transientRepositoryCheckFailure } from "./repository-checks.js";
@@ -539,9 +541,9 @@ ${JSON.stringify(decisions)}`), { publishText: false, onEvent, signal });
     });
   }
 
-  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, round, focusFindings = [], profile, access, onEvent, signal }) {
+  async verifyStep({ cwd, ticket, plan, step, design, diff, output, checks, proofMap, artifacts = [], images = [], runId, attemptId, round, focusFindings = [], profile, access, onEvent, onEvidence, signal }) {
     const { createAgentSession, SessionManager } = await this.sdk();
-    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, `round-${round}`);
+    const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "verifications", step.id, ...(attemptId ? [String(attemptId).replace(/[^a-z0-9._-]+/gi, "-")] : []), `round-${round}`);
     await mkdir(sessionDir, { recursive: true });
     const existingFile = (await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).sort().at(-1);
     let manager;
@@ -558,11 +560,28 @@ ${JSON.stringify(decisions)}`), { publishText: false, onEvent, signal });
       diff, checks, proofMap: { ...proofMap, criteria: (proofMap?.criteria || []).filter((criterion) => criterion.stepId === step.id) }, focusFindings
     });
     const inspectionTools = verificationTools(focusFindings, images);
+    const evidenceDataDir = this.dataDir;
+    const readTools = inspectionTools.length ? scopedReadTools(cwd, access).map((tool) => tool.name !== "read" || !onEvidence ? tool : {
+      ...tool,
+      async execute(callId, args, ...rest) {
+        const result = await tool.execute(callId, args, ...rest);
+        const text = result.content?.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+        if (result.isError || !text) return result;
+        signal?.throwIfAborted();
+        const artifact = await persistArtifact(evidenceDataDir, ticket, {
+          runId, stageId: "verify", stepId: step.id, attemptId,
+          name: `inspected-source-${randomUUID()}.json`, kind: "verification-source",
+          content: redactText(JSON.stringify({ path: args.path, offset: args.offset, limit: args.limit, content: text }))
+        });
+        await onEvidence(artifact);
+        return { ...result, content: [...result.content, { type: "text", text: `Durable evidence for this inspected excerpt: ${JSON.stringify({ type: "artifact", artifactId: artifact.id })}. Cite it only for claims supported by the excerpt.` }] };
+      }
+    }) : [];
     const { session } = await createAgentSession({
       ...(await this.sessionOptions(profile)),
       cwd,
-      tools: inspectionTools,
-      customTools: [...(inspectionTools.length ? scopedReadTools(cwd, access) : []), reviewEvidenceTool(lookup)],
+      tools: [...inspectionTools, "review_evidence"],
+      customTools: [...readTools, reviewEvidenceTool(lookup)],
       sessionManager: manager
     });
     session.setSessionName(`verify:${step.id}:round-${round}`);
@@ -628,7 +647,8 @@ ${artifacts.filter((artifact) => artifact.kind === "visual-evidence" && (!artifa
 ${evidenceContext(lookup)}
 
 Return an explicit criterionResults verdict for EVERY criterion ID in this step, including correction rounds. Worker claims are proposals, not independent proof. Visual criteria must cite current image IDs you inspected; video criteria must cite sampled recording frame IDs and explain how the captured CLI journey and assertions establish the criterion. Verify the worker’s feature-map update or no-change rationale against the actual diff; report stale or missing affected documentation as a review finding. Check the affected feature map and CLI tests, and compare verify.mjs with the repository test/build configuration.
-For the supplied deterministic gate, use ${JSON.stringify({ type: "check", scope: "step", stepId: step.id })}. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
+For the supplied deterministic gate, use exactly ${JSON.stringify({ type: "check", scope: attemptId ? "attempt" : "step", stepId: step.id, ...(attemptId ? { attemptId } : {}) })}. This is the current check execution. Historical proof-map locators and correction feedback refer to earlier attempts; do not copy them as evidence for this execution. Diffs are inspection context, not supported proof locators. Cite only evidence that supports your verdict. Artifact/media references require an actual supplied artifactId; type alone is not a locator.
+${onEvidence ? "For source-content claims, use read to inspect the relevant file. Each successful text read returns a durable artifact locator for exactly that excerpt. Cite that locator; a passing test alone does not prove unrelated file-content claims. Do not claim verified with an empty evidence array." : ""}
 
 Return ONLY JSON:
 {
@@ -637,7 +657,7 @@ Return ONLY JSON:
     "criterionId": "an exact criterion ID from this step",
     "status": "verified | failed | blocked",
     "explanation": {"summary": "specific evidence-based result"},
-    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+    "evidence": [{"type": "check | artifact | media", "scope": "step | attempt | final", "stepId": "when scope is step or attempt", "attemptId": "required for attempt checks", "artifactId": "required for artifact or media evidence; exact ID from the current evidence index"}]
   }],
   "findings": [{
     "severity": "critical | high | medium",
@@ -772,7 +792,7 @@ ${diff.patch || "No textual diff"}`;
   }
 
   async reviewTicket(input) {
-    const { cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, access, onEvent, signal, freshSession = false } = input;
+    const { cwd, ticket, plan, artifacts, diff, checks, proofMap, focusFindings = [], operatorFeedback = "", images = [], role, round, runId, profile, access, onEvent, signal, freshSession = false, comprehensive = false } = input;
     const { createAgentSession, SessionManager } = await this.sdk();
     const sessionDir = join(this.dataDir, "pi-sessions", "tickets", String(ticket.id).replace(/[^a-z0-9._-]+/gi, "-"), String(runId), "reviews", `round-${round}`, role, "progressive-v1");
     await mkdir(sessionDir, { recursive: true });
@@ -784,6 +804,18 @@ ${diff.patch || "No textual diff"}`;
       manager = SessionManager.create(cwd, sessionDir);
     }
     const lookup = await writeReviewIndex(join(sessionDir, "evidence"), input);
+    // Each role owns a durable result: a sibling failure must not repeat its work.
+    const cacheKey = createHash("sha256").update(JSON.stringify({ version: 1, digest: lookup.digest, role, profile, access, comprehensive, charters: reviewerCharters, rubric: findingRubric, images })).digest("hex");
+    const resultFile = join(sessionDir, `result-${cacheKey}.json`);
+    signal?.throwIfAborted();
+    try {
+      const cached = JSON.parse(await readFile(resultFile, "utf8"));
+      validateReviewResponse(cached, { role, criteria: proofMap?.criteria, artifacts, inspectedMedia: new Set(cached.inputMetrics?.inspectedMediaIds || []) });
+      onEvent?.({ type: "phase", label: `Reusing completed ${role} review for unchanged evidence` });
+      return cached;
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "MODEL_RESPONSE_ERROR" && !(error instanceof SyntaxError)) throw error;
+    }
     const inspectedFile = join(lookup.root, "inspected-media.json");
     let retainedInspections = [];
     try { retainedInspections = JSON.parse(await readFile(inspectedFile, "utf8")); }
@@ -803,12 +835,12 @@ ${diff.patch || "No textual diff"}`;
       }
     });
     const { session } = await createAgentSession({
-      ...(await this.sessionOptions(profile)), cwd, tools: filesystemToolNames,
+      ...(await this.sessionOptions(profile)), cwd, tools: [...filesystemToolNames, "review_evidence", "review_media"],
       customTools: [...scopedReadTools(cwd, access), mediaTool, reviewEvidenceTool(lookup)], sessionManager: manager
     });
     session.setSessionName(`review:${role}:round-${round}`);
     onEvent?.({ type: "phase", label: `Progressive review index: ${lookup.textCharacters} characters; ${lookup.summary.counts.criteria} criteria` });
-    const outputContract = `The requirements reviewer must return an explicit criterionResults verdict for EVERY approved criterion ID, even on correction rounds. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate for the combined ticket diff; report stale or missing affected documentation as a review finding.
+    const outputContract = `The requirements reviewer must return an explicit criterionResults verdict for EVERY final-scope approved criterion ID, even on correction rounds. Criteria with scope=step are historical acceptance checks: preserve their audit and do not demand their temporary conditions in the final product. Other reviewers report criteria within their charter; a failed or blocked verdict cannot be overridden by another reviewer. Visual criteria require current inspected image IDs (sampled recording frames for video criteria) and an explanation of the CLI journey/assertions. Check that the feature map and UI CLI remain accurate for the combined ticket diff; report stale or missing affected documentation as a review finding.
 
 Return ONLY JSON:
 {
@@ -817,7 +849,7 @@ Return ONLY JSON:
     "criterionId": "an exact criterion ID",
     "status": "verified | failed | blocked",
     "explanation": {"summary": "specific evidence-based result"},
-    "evidence": [{"type": "check | artifact | media | diff", "scope": "step | attempt | final", "stepId": "when scope is step or attempt"}]
+    "evidence": [{"type": "check | artifact | media", "scope": "step | attempt | final", "stepId": "when scope is step or attempt", "attemptId": "required for attempt checks", "artifactId": "required for artifact or media evidence; exact ID from the current evidence index"}]
   }],
   "findings": [{
     "severity": "critical | high | medium",
@@ -831,12 +863,12 @@ Return ONLY JSON:
 }`;
     const prompt = this.configuredPrompt(session, profile, `# Independent ${role} review
 
-${reviewerCharters[role]} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
+${reviewerCharters[role]} ${comprehensive ? reviewerCharters.integration + " " + reviewerCharters.verification : ""} The deterministic gate has already run; use the supplied result rather than attempting to rerun it.
 
 # Progressive review index
 ${JSON.stringify(lookup.summary, null, 2)}
 
-Use review_evidence to read indexed evidence files (absolute paths or index-relative names); use read for permitted repository files. Read constraints.md first: it contains authoritative operator scope and correction instructions. Read the complete index, then review one behavior at a time, following its criteria, evidence and dependencies on demand. Do not load every detail file or historical review. Requirements review must cover every criterion in the complete index, not just the navigation preview. Integration review must check shared state, dependencies and interactions across behaviors; groups are navigation units, not isolation guarantees.
+Use review_evidence to read indexed evidence files (absolute paths or index-relative names); use read for permitted repository files. Read constraints.md first: it contains authoritative operator scope and correction instructions. Read the complete index, then review one behavior at a time, following its criteria, evidence and dependencies on demand. Do not load every detail file or historical review. Requirements review must cover every final-scope criterion in the complete index, not just the navigation preview. Step-scope criteria are historical acceptance checks, not final-product invariants. Integration review must check shared state, dependencies and interactions across behaviors; groups are navigation units, not isolation guarantees.
 Restrict inspection to the checkout and indexed evidence; do not inspect sibling tickets or global configuration. Read only the relevant changed-file sections from changes.patch; if truncated, inspect the actual repository files. Use review_media to inspect images by artifact ID; filenames and manifests cannot establish visual success.
 ${images.length ? visualProofIdentityInstruction : ""}
 
@@ -849,11 +881,14 @@ ${outputContract}
 ${findingRubric}
 
 Every reported finding triggers an automatic correction round. Report concrete defects, unmet acceptance criteria, or missing required evidence; omit optional polish and speculative improvements. Only report a finding when you can cite repository, diff, or attached screenshot evidence. Do not modify files.`);
+    let repairSource;
     const parseReview = () => {
-      const parsed = parseModelOutput(lastAssistantText(session), { summary: "nonEmptyString", findings: "array" }, "Independent-review output");
-      for (const result of parsed.criterionResults || []) for (const locator of result.evidence || []) {
-        if (locator.type === "media" && !inspectedMedia.has(locator.artifactId)) throw Object.assign(new Error(`Independent-review output cites uninspected media ${locator.artifactId}; inspect it with review_media before reporting visual success.`), { code: "MODEL_RESPONSE_ERROR" });
+      const parsed = parseModelOutput(lastAssistantText(session), {}, "Independent-review output");
+      if (Array.isArray(repairSource?.findings) && repairSource.findings.some((finding) => !Array.isArray(parsed.findings) || !parsed.findings.some((item) => item?.claim === finding?.claim && item?.severity === finding?.severity))) {
+        throw Object.assign(new Error("Independent-review output repair dropped an unresolved finding"), { code: "MODEL_RESPONSE_ERROR" });
       }
+      try { validateReviewResponse(parsed, { role, criteria: proofMap?.criteria, artifacts, inspectedMedia }); }
+      catch (error) { repairSource ||= parsed; throw error; }
       return parsed;
     };
     const unbindAbort = bindAbort(session, signal);
@@ -883,11 +918,11 @@ Every reported finding triggers an automatic correction round. Report concrete d
         if (error.code !== "MODEL_RESPONSE_ERROR" && !/^(?:Model output|Independent-review output)/.test(error.message)) throw error;
         signal?.throwIfAborted();
         onEvent?.({ type: "phase", label: "Retrying failed or incomplete independent-review output" });
-        await session.prompt(`Your previous review response was invalid: ${error.message}. Correct its format without changing your evidence-backed verdicts or dropping unresolved findings; do not repeat repository inspection.\n\n${outputContract}`, { images: [] });
+        await session.prompt(`Your previous review response was invalid: ${error.message}. Repair only the listed contract errors. Preserve evidence-backed verdicts and all unresolved findings. Use review_evidence or review_media only to fill missing coverage or citations; do not repeat completed repository inspection.\n\n${outputContract}`, { images: [] });
         signal?.throwIfAborted();
         parsed = parseReview();
       }
-      return {
+      const result = {
         role,
         inputMetrics: { indexCharacters: lookup.textCharacters, promptCharacters: turnPrompt.length, inspectedMediaIds: [...inspectedMedia], packetDigest: lookup.digest },
         summary: String(parsed.summary || ""),
@@ -895,6 +930,11 @@ Every reported finding triggers an automatic correction round. Report concrete d
         findings: Array.isArray(parsed.findings) ? parsed.findings : [],
         sessionFile: session.sessionFile
       };
+      signal?.throwIfAborted();
+      const temporaryResult = `${resultFile}.${randomUUID()}.tmp`;
+      await writeFile(temporaryResult, JSON.stringify(result), "utf8");
+      await rename(temporaryResult, resultFile);
+      return result;
     } catch (error) {
       if (!freshSession && /context (?:window|length)/i.test(error.message)) {
         signal?.throwIfAborted();
@@ -981,6 +1021,7 @@ Every reported finding triggers an automatic correction round. Report concrete d
       const reviewNotes = [];
       const peerTools = coordinationTools(coordination);
       tools.push("worker_report", ...peerTools.map((tool) => tool.name));
+      if (lookup) tools.push("review_evidence");
       const policy = sessionPolicy(access, repositories);
       const scopedTools = step.permission === "write"
         ? [...scopedWorkerTools(cwd, workerWriteScope(step), policy), projectCommandTool(cwd, signal, containment, runProjectCommand, onCleanup, join(this.dataDir, "visual-evidence"), repositories), reviewNoteTool((note) => reviewNotes.push(note))]

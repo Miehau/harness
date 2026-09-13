@@ -64,6 +64,16 @@ export async function acceptJjChange(cwd, { changeId, message, bookmark }, execI
 }
 
 export async function prepareJjForGit(cwd, bookmark, execImpl = exec) {
+  const { stdout: head } = await execImpl("git", ["rev-parse", "HEAD"], { cwd });
+  // Isolated steps land through Git cherry-picks, which can advance detached
+  // HEAD beyond the last jj bookmark. Import and retain that accepted history.
+  await run(cwd, ["git", "import"], execImpl);
   await run(cwd, ["git", "export"], execImpl);
+  const { stdout: branchHead } = await execImpl("git", ["rev-parse", bookmark], { cwd });
+  if (head.trim() !== branchHead.trim()) {
+    await execImpl("git", ["merge-base", "--is-ancestor", branchHead.trim(), head.trim()], { cwd });
+    await run(cwd, ["bookmark", "set", bookmark, "-r", head.trim()], execImpl);
+    await run(cwd, ["git", "export"], execImpl);
+  }
   await execImpl("git", ["switch", bookmark], { cwd, maxBuffer: 4 * 1024 * 1024 });
 }

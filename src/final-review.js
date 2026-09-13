@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { cleanupLegacyReviewArtifacts, hydrateArtifact, persistArtifact } from "./artifacts.js";
 import { aggregateProofDiffs, diffFileSnapshots, diffTrees, extraProofRoots, labelDiff, labelRepositoryDiffs, labeledProofRootDiffs, repositoryBaselines, snapshotProofPath, snapshotProofRootMap, snapshotTree } from "./git.js";
 import { commitWorkspace, diffRepositoryTrees, gitRepositoriesForStep, snapshotRepositoryTrees } from "./worktrees.js";
-import { flattenSteps } from "./plan.js";
+import { finalReviewRoles, flattenSteps } from "./plan.js";
 import { actionableFindings, correctionPauseReason, correctionWindowRound, executionFailure, finalReviewFixFeedback, finalReviewFixStep, finalReviewSequence, humanProofFindings, pendingReviewAttempt, pendingReviewFix, recoverableCleanReview, refreshedReviewFindings, reviewFixConstraints, reviewFixImages, reviewScopeExpanded, shouldPauseCorrection, storedFindingsFingerprint, unaddressedReviewClusters, unresolvedReviewFindings } from "./execution.js";
 import { applyIndependentProofReports, applyProofReports, invalidateProof, projectProofMap, proofGate, proofGateError } from "./proof-map.js";
 import { retainReviewRecord } from "./redaction.js";
@@ -334,7 +334,7 @@ const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback)
     const reviewArtifacts = await hydrateArtifacts(reviewRun.artifacts.filter((artifact) => artifact.kind !== "visual-evidence" || (checks.evidence || []).some((item) => item.path === artifact.path)), dataDir);
     const reviewMode = checks.status === "passed" ? "independent" : "prerequisite";
     if (reviewMode === "prerequisite") activity.onEvent({ type: "phase", label: "Independent review skipped: verification prerequisites failed" }, "checks");
-    const reviewResults = reviewMode === "prerequisite" ? [] : await Promise.allSettled(["requirements", "integration", "verification"].map((role) => reviewTicket({
+    const reviewResults = reviewMode === "prerequisite" ? [] : await Promise.allSettled(finalReviewRoles(current.plan, diff).map((role) => reviewTicket({
       cwd: current.workspace.cwd,
       ticket: current.ticket,
       access: current.access,
@@ -347,6 +347,7 @@ const humanEvidenceFinding = humanProofFindings(current.pendingEvidenceFeedback)
       operatorFeedback,
       images: reviewImages,
       role,
+      comprehensive: finalReviewRoles(current.plan, diff).length === 1,
       round,
       runId: current.runId,
       profile: current.stageProfiles.verification,
@@ -437,7 +438,7 @@ const reviewId = `final-review-${round}`;
       const run = state.ticketRuns[ticketId];
       if (signal?.aborted || run?.runId !== runId) return;
       invalidated = true;
-      if (run.proofMap) run.proofMap = invalidateProof(run.proofMap, run.proofMap.criteria.map((criterion) => criterion.id), { reason: "Automatic final-review correction." });
+      if (run.proofMap) run.proofMap = invalidateProof(run.proofMap, run.proofMap.criteria.filter((criterion) => criterion.scope !== "step").map((criterion) => criterion.id), { reason: "Automatic final-review correction." });
     });
     if (!invalidated) return reviewOutcome(ticketId, signal);
     await persistProofSnapshot(ticketId, { stageId: "verify", attemptId: `round-${round}`, name: "proof-map-final-automatic-correction.json" });

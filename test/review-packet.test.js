@@ -160,7 +160,10 @@ test("review index retains repository change metadata without patch bodies", asy
   const { writeReviewIndex } = await import("../src/review-packet.js");
   const root = await mkdtemp(join(tmpdir(), "context-patches-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const result = await writeReviewIndex(root, { plan, currentStepId: "future", artifacts: [
+  const result = await writeReviewIndex(root, { plan, currentStepId: "future", proofMap: { criteria: [{ current: { evidence: [{ artifactId: "manifest" }, { artifactId: "lock" }] } }] }, artifacts: [
+    { id: "manifest", kind: "verification-source", stepId: "future", content: "manifest excerpt" },
+    { id: "lock", kind: "verification-source", stepId: "future", content: "lock excerpt" },
+    { id: "uncited", kind: "verification-source", stepId: "future", content: "unused excerpt" },
     { kind: "agent-output", stepId: "future", content: "current-worker-sentinel" },
     { kind: "agent-output", stepId: "search", content: "accepted-worker-sentinel" },
     { kind: "agent-output", stepId: "removed-step", content: "orphaned-worker-sentinel" }
@@ -171,5 +174,6 @@ test("review index retains repository change metadata without patch bodies", asy
   const changes = JSON.parse(await readFile(join(result.root, "changes.json"), "utf8"));
   assert.deepEqual(changes.repositories.map((item) => [item.repositoryId, item.files]), [["primary", ["src/a.js", "src/b.js"]], ["secondary", ["src/b.js"]]]);
   const index = JSON.parse(await readFile(result.summary.index, "utf8"));
-  assert.equal(index.evidence.length, 2, "the current unaccepted worker report and accepted handoffs remain accessible");
+  assert.equal(index.evidence.length, 4, "the current worker, accepted handoffs and both cited source excerpts remain accessible");
+  assert.deepEqual(index.evidence.filter((item) => item.kind === "verification-source").map((item) => item.id), ["manifest", "lock"]);
 });
