@@ -3,6 +3,8 @@ import { mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { json, assert, atomic } from './io.js';
 import { connect, dataRoot } from './connection.js';
 import { repos, resolveRepo } from './repos.js';
@@ -39,6 +41,7 @@ agent-plan artifact <task> <relative-path>
 agent-plan dashboard
 agent-plan notifications
 agent-plan webhook <private-config-file>          Configure owner notifications
+agent-plan supervisor [--model MODEL] [--provider PROVIDER] Open your supervisor Pi session
 
 start/onboard accept --model MODEL and --provider PROVIDER.
 Stage defaults: --discovery-model/--discovery-provider, --planning-model/--planning-provider.
@@ -106,6 +109,14 @@ export async function main(args = process.argv.slice(2)) {
   const [command, ...raw] = args;
   if (!command || ['help', '--help', '-h'].includes(command)) return showHelp(raw[0]);
   if (raw.includes('--help') || raw.includes('-h')) return showHelp(command);
+  if (command === 'supervisor') {
+    await connect();
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/cli.js', import.meta.url)), '-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url)), ...raw], { stdio: 'inherit' });
+      child.once('error', reject); child.once('exit', code => resolve(code ?? 1));
+    });
+    assert(code === 0, `Supervisor exited with status ${code}`); return '';
+  }
   const rest = [], selection = {};
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '--onboarding') selection.onboarding = true;

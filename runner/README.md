@@ -468,3 +468,24 @@ or under `RUNNER_DATA` when set. Credentials remain plaintext readable by your O
 New events are enabled from configuration time. Existing `supervisor.json` settings
 migrate automatically without changing their notification start time or replaying receipts.
 An existing `webhook.json` takes precedence; invalid JSON is reported, not bypassed.
+
+## Pi supervisor sessions
+
+`agent-plan supervisor --provider PROVIDER --model MODEL` opens an ordinary Pi
+session with the runner supervisor extension. Any configured Pi provider works.
+Extra Pi arguments are forwarded (for example `--continue` to resume a session).
+For an existing Pi setup, load `runner/supervisor-extension.js` with `pi -e`.
+
+Use `/runner-watch FULL_TASK_ID` to subscribe and `/runner-unwatch FULL_TASK_ID`
+to detach. Pending questions are included immediately; other historical events
+before attachment are omitted. Watches and successfully consumed event IDs persist
+in the Pi session. Questions, attention and completed/failed results wake the
+supervisor without polling the model. It reads artifacts, including PNG previews,
+and uses `runner_supervisor` to send nonblocking feedback to coordinators.
+
+Use `/runner-answer TASK_ID DECISION_ID your answer` to review the question and
+confirm an exact human reply. The supervisor model tool cannot answer or accept.
+Use `agent-plan accept` for candidate acceptance. This is a trusted local operator
+session with ordinary Pi tools and owner CLI access, not a sandbox: the separation
+in the extension is not protection from arbitrary local shell commands.
+No Grok webhook is required; an existing webhook continues independently.
