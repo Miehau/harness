@@ -10,6 +10,7 @@ import { Herdr } from './herdr.js';
 import { accept, recoverDelivery } from './delivery.js';
 import { modelMenu, chooseModel } from './models.js';
 import { hookFields } from './notifications.js';
+import { selectedSkills } from './skills.js';
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -86,7 +87,12 @@ export class Runtime {
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
     const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, createdAt: now(), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
+    const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
+    await mkdir(join(this.dir(task), 'artifacts', 'skills'), { recursive: true });
+    for (const skill of skills) await writeFile(join(this.dir(task), 'artifacts', skill.path), skill.content, { flag: 'wx', mode: 0o600 });
+    task.skills = 'skills.json';
+    await writeFile(join(this.dir(task), 'artifacts', task.skills), JSON.stringify(skills.map(({ source, path }) => ({ source, path }))), { flag: 'wx', mode: 0o600 });
     let workflow;
     try { workflow = await readFile(join(repo, '.runner', 'workflow.md'), 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; workflow = await bundled('workflow.md'); }
     for (const [name, body] of Object.entries({ 'brief.md': input.text, 'workflow.md': workflow, 'worker.md': await bundled('worker.md'), 'config.json': JSON.stringify(config, null, 2), 'model-menu.json': JSON.stringify(task.modelMenu, null, 2) })) await writeFile(join(this.dir(task), 'artifacts', name), body, { flag: 'wx', mode: 0o600 });
@@ -144,7 +150,7 @@ export class Runtime {
     task.operation = null;
     if (task.config.setup) await this.command(task, { cwd: task.integration.cwd }, task.config.setup);
     const agent = this.agent(task, 'orchestrator', task.integration.cwd);
-    this.message(agent, 'assignment', 'brief.md', { workflow: 'workflow.md', config: 'config.json', models: 'model-menu.json', discovery: task.discovery, artifactDir: agent.artifactDir });
+    this.message(agent, 'assignment', 'brief.md', { workflow: 'workflow.md', config: 'config.json', models: 'model-menu.json', discovery: task.discovery, skills: task.skills, artifactDir: agent.artifactDir });
     await this.launch(task, agent); return this.view(task);
   }
   async spawn(task, input) {
@@ -171,7 +177,7 @@ export class Runtime {
     const agent = this.agent(task, 'worker', workspace.cwd, input.mode);
     Object.assign(agent, { stage, branch: workspace.branch, base: await git(workspace.cwd, 'rev-parse', 'HEAD'), assignment: input.assignment, contract: input.contract ?? null });
     agent.modelSelection = chosen.selection; agent.modelChoice = chosen.choice; agent.modelReason = chosen.reason;
-    this.message(agent, 'assignment', input.assignment, { workflow: 'worker.md', discovery: task.discovery, contract: agent.contract, artifactDir: agent.artifactDir });
+    this.message(agent, 'assignment', input.assignment, { workflow: 'worker.md', discovery: task.discovery, skills: task.skills, contract: agent.contract, artifactDir: agent.artifactDir });
     this.event(task, 'worker-spawned', { agentId: agent.id, artifact: input.assignment, modelSelection: agent.modelSelection });
     await this.launch(task, agent); return { workerId: agent.id, status: agent.status, cwd: agent.cwd, error: agent.error };
   }

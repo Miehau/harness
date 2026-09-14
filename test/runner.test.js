@@ -737,3 +737,31 @@ test('webhook config migrates legacy settings and prefers the private canonical 
   await assert.rejects(loadWebhookConfig(data), SyntaxError);
   validateWebhook(JSON.parse(await readFile(new URL('../webhook.example.json', import.meta.url), 'utf8')));
 });
+
+test('selected skills snapshot committed instructions and reach coordinators and workers', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.repo, '.agents', 'skills', 'example'), { recursive: true });
+  const source = '.agents/skills/example/SKILL.md';
+  await writeFile(join(f.repo, source), 'Use the existing verifier.\n');
+  const configPath = join(f.repo, '.runner', 'project.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8')); config.skills = [source];
+  await writeFile(configPath, JSON.stringify(config));
+  await git(f.repo, 'add', '.'); await git(f.repo, 'commit', '-m', 'Select a skill');
+  await writeFile(join(f.repo, source), 'Uncommitted replacement');
+  const task = await f.call('owner', 'submit', null, { repo: f.repo, text: 'Use selected skills', requestId: id() });
+  await f.call('owner', 'start', task.id);
+  const main = f.runtime.task(task.id).agents[0];
+  assert.equal(main.inbox[0].skills, 'skills.json');
+  const manifest = await f.call('owner', 'read', task.id, { area: 'artifacts', path: 'skills.json' });
+  assert.deepEqual(JSON.parse(manifest.content), [{ source, path: 'skills/0.md' }]);
+  const skill = await f.call('owner', 'read', task.id, { area: 'artifacts', path: 'skills/0.md' });
+  assert.equal(skill.content, 'Use the existing verifier.');
+  await f.call('owner', 'write', task.id, { area: 'artifacts', path: 'assignment.md', content: 'Explore' });
+  await f.call({ taskId: task.id, agentId: main.id }, 'spawn', task.id, { assignment: 'assignment.md', mode: 'explore' });
+  assert.equal(f.runtime.task(task.id).agents[1].inbox[0].skills, 'skills.json');
+  const { selectedSkills } = await import('../runner/skills.js');
+  for (const path of ['../SKILL.md', '/tmp/SKILL.md', '.git/SKILL.md', 'missing/SKILL.md']) {
+    await assert.rejects(selectedSkills(f.repo, task.base, [path]));
+  }
+  await assert.rejects(selectedSkills(f.repo, task.base, [source, source]), /Duplicate/);
+});

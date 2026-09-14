@@ -489,3 +489,18 @@ Use `agent-plan accept` for candidate acceptance. This is a trusted local operat
 session with ordinary Pi tools and owner CLI access, not a sandbox: the separation
 in the extension is not protection from arbitrary local shell commands.
 No Grok webhook is required; an existing webhook continues independently.
+
+## Selected managed skills
+
+Add `"skills": [".agents/skills/review/SKILL.md"]` to `.runner/project.json`.
+These are explicit repository-relative paths (maximum 20), committed before task
+submission. The runtime snapshots those instructions from the task's base commit,
+ignoring uncommitted replacements, and gives coordinators and workers a `skills.json`
+manifest. No automatic global skill discovery is enabled for managed agents.
+
+Agents read the selected snapshots with `runner_read`. Relative supporting files
+are resolved against each manifest entry's original repository source directory.
+Skill instructions use runner file tools; scripts must be exposed as named commands
+by the owner. A skill cannot grant new tools or approval authority. Personal skills
+must first be copied into the repository and committed to use them in managed tasks.
+Ordinary supervisor Pi sessions retain Pi's native skills and tools.
