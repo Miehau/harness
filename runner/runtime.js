@@ -11,6 +11,7 @@ import { accept, recoverDelivery } from './delivery.js';
 import { modelMenu, chooseModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
+import { mediaFile, verifyUI } from './evidence.js';
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -76,6 +77,7 @@ export class Runtime {
     }
     if (input.onboarding) { config.commands.onboard_verify = ['bash', 'verify.sh']; config.verify = [...new Set([...config.verify, 'onboard_verify'])]; }
     for (const name of config.verify) assert(Object.hasOwn(config.commands, name), 'Unknown verification command');
+    if (config.uiEvidence !== undefined) assert(config.uiEvidence && Object.hasOwn(config.commands, config.uiEvidence.command), 'uiEvidence.command must name a configured command');
     for (const key of ['setup']) if (config[key]) assert(Object.hasOwn(config.commands, config[key]), 'Unknown setup command');
     for (const key of ['discoveryModel', 'discoveryProvider', 'planningModel', 'planningProvider']) if (input[key] !== undefined) config[key] = string(input[key], key, 200);
     config.discoveryModel ??= 'gpt-5.6-luna'; config.discoveryProvider ??= 'openai-codex';
@@ -181,7 +183,7 @@ export class Runtime {
     this.event(task, 'worker-spawned', { agentId: agent.id, artifact: input.assignment, modelSelection: agent.modelSelection });
     await this.launch(task, agent); return { workerId: agent.id, status: agent.status, cwd: agent.cwd, error: agent.error };
   }
-  async command(task, agent, name) {
+  async command(task, agent, name, env = {}) {
     assert(Object.hasOwn(task.config.commands, name), 'Unknown named command');
     const argv = task.config.commands[name];
     assert(!task.operation, 'Resolve the interrupted operation before running commands');
@@ -190,7 +192,7 @@ export class Runtime {
     const output = `${directory}/${id()}.log`;
     task.operation = { kind: 'command', name, cwd: agent.cwd, output, at: now(), pid: null }; await this.save(task);
     const log = createWriteStream(join(this.dir(task), 'artifacts', output), { flags: 'wx', mode: 0o600 });
-    const child = spawnProcess(argv[0], argv.slice(1), { cwd: agent.cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnProcess(argv[0], argv.slice(1), { cwd: agent.cwd, env: { ...process.env, ...env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let error, timedOut = false;
     const logDone = finished(log); logDone.catch(() => {});
     log.once('error', () => { if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch {} });
@@ -236,9 +238,10 @@ export class Runtime {
     const commit = await git(task.integration.cwd, 'rev-parse', 'HEAD');
     const checks = [];
     for (const name of task.config.verify) checks.push({ name, ...await this.command(task, task.integration, name) });
-    const passed = checks.every(c => c.passed) && commit === await git(task.integration.cwd, 'rev-parse', 'HEAD') && !await git(task.integration.cwd, 'status', '--porcelain');
-    const artifact = await this.artifact(task, JSON.stringify({ commit, checks, passed, at: now() }, null, 2), 'json');
-    task.verification = { commit, passed, artifact }; await this.save(task); return task.verification;
+    const uiEvidence = task.config.uiEvidence ? await verifyUI(this, task, commit) : null;
+    const passed = (!uiEvidence || uiEvidence.passed) && checks.every(c => c.passed) && commit === await git(task.integration.cwd, 'rev-parse', 'HEAD') && !await git(task.integration.cwd, 'status', '--porcelain');
+    const artifact = await this.artifact(task, JSON.stringify({ commit, checks, uiEvidence, passed, at: now() }, null, 2), 'json');
+    task.verification = { commit, passed, artifact, ...(uiEvidence ? { uiEvidence } : {}) }; await this.save(task); return task.verification;
   }
   async report(task, agent, input) {
     assert(['completed', 'failed'].includes(input.status), 'Invalid report status'); await this.reference(task, input.artifact);
@@ -257,7 +260,7 @@ export class Runtime {
     agent.status = input.status; agent.report = input.artifact;
     if (agent.role === 'orchestrator') { task.status = input.status; task.result = input.artifact; }
     else this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', input.artifact, { workerId: agent.id, status: input.status, commit: agent.commit });
-    this.event(task, agent.role === 'orchestrator' ? input.status : 'worker-report', { agentId: agent.id, artifact: input.artifact });
+    this.event(task, agent.role === 'orchestrator' ? input.status : 'worker-report', { agentId: agent.id, artifact: input.artifact, ...(agent.role === 'orchestrator' && task.verification?.uiEvidence ? { evidence: task.verification.uiEvidence.artifact, attachments: task.verification.uiEvidence.attachments } : {}) });
     await this.save(task); return { status: input.status, artifact: input.artifact };
   }
   async attachments(task, paths = []) {
@@ -323,7 +326,7 @@ export class Runtime {
       const entries = (await readdir(path, { withFileTypes: true })).filter(e => !['.git', '.pi'].includes(e.name));
       return { entries: entries.map(e => e.name).sort(), directories: entries.filter(e => e.isDirectory()).map(e => e.name) };
     }
-    if (path.endsWith('.png')) { assert((await stat(path)).size <= 10000000, 'Image exceeds 10 MB'); const data = await readFile(path); assert(data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), 'Invalid PNG'); return { mimeType: 'image/png', base64: data.toString('base64') }; }
+    if (/\.(png|webm|mp4)$/i.test(path)) { const media = await mediaFile(path); return { mimeType: media.mimeType, size: media.bytes.length, artifact: input.path, ...(media.mimeType === 'image/png' || input.includeMedia === true ? { base64: media.bytes.toString('base64') } : { localPath: path }) }; }
     const content = await readFile(path, 'utf8'); const offset = input.offset ?? 0; const limit = input.limit ?? 20000;
     assert(Number.isInteger(offset) && offset >= 0 && Number.isInteger(limit) && limit > 0 && limit <= 100000, 'Invalid read window');
     return { content: content.slice(offset, offset + limit), nextOffset: offset + limit < content.length ? offset + limit : null };
@@ -438,9 +441,8 @@ export class Runtime {
       else if (action === 'publish') {
         assert(!owner, 'Agent access required');
         const path = await safePath(actor.cwd, body.path);
-        assert((await stat(path)).size <= 10000000, 'Image exceeds 10 MB');
-        const bytes = await readFile(path); assert(bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), 'Only PNG screenshots are supported');
-        const artifact = await this.artifact(task, bytes, 'png', actor.artifactDir);
+        const { bytes, extension } = await mediaFile(path);
+        const artifact = await this.artifact(task, bytes, extension, actor.artifactDir);
         this.event(task, 'evidence-published', { agentId: actor.id, artifact }); await this.save(task); result = { artifact };
       }
       else if (action === 'checkpoint') {

@@ -765,3 +765,40 @@ test('selected skills snapshot committed instructions and reach coordinators and
   }
   await assert.rejects(selectedSkills(f.repo, task.base, [source, source]), /Duplicate/);
 });
+
+test('UI gate imports fresh media, exposes supervisor/Grok references, and blocks missing or stale evidence', async t => {
+  const f = await fixture(t); const task = f.runtime.task(f.task.id);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  task.config.uiEvidence = { command: 'ui' };
+  task.config.commands.ui = [process.execPath, '-e', ''];
+  let proof = await f.runtime.verify(task);
+  assert.equal(proof.passed, false); assert.match(proof.uiEvidence.error, /ENOENT/);
+  await f.artifact('ui-handoff.md');
+  await assert.rejects(f.runtime.report(task, f.main, { status: 'completed', artifact: 'ui-handoff.md' }), /verification/);
+  const script = `const fs=require('fs'),p=require('path'),e=process.env;fs.writeFileSync(p.join(e.RUNNER_UI_DIR,'screen.png'),Buffer.from('${png}','base64'));fs.writeFileSync(p.join(e.RUNNER_UI_DIR,'flow.webm'),Buffer.from([26,69,223,163,0]));fs.writeFileSync(p.join(e.RUNNER_UI_DIR,'manifest.json'),JSON.stringify({commit:e.RUNNER_UI_COMMIT,runId:e.RUNNER_UI_RUN_ID,passed:true,criteria:[{id:'AC-1',assertion:'Saved value is visible',passed:true,files:['screen.png','flow.webm']}]}));`;
+  task.config.commands.ui = [process.execPath, '-e', script.replace('runId:e.RUNNER_UI_RUN_ID', "runId:'old-run'")];
+  assert.equal((await f.runtime.verify(task)).passed, false);
+  task.config.commands.ui = [process.execPath, '-e', script.replace('commit:e.RUNNER_UI_COMMIT', "commit:'old-commit'")];
+  assert.equal((await f.runtime.verify(task)).passed, false);
+  task.config.commands.ui = [process.execPath, '-e', script.replace("files:['screen.png','flow.webm']", 'files:[]')];
+  assert.equal((await f.runtime.verify(task)).passed, false);
+  task.config.commands.ui = [process.execPath, '-e', script];
+  proof = await f.runtime.verify(task); assert.equal(proof.passed, true);
+  const video = proof.uiEvidence.criteria[0].files[1].artifact;
+  const metadata = await f.runtime.files(task, 'owner', 'read', { area: 'artifacts', path: video });
+  assert.equal(metadata.mimeType, 'video/webm'); assert.equal(metadata.base64, undefined); assert(metadata.localPath);
+  const bytes = await f.runtime.files(task, 'owner', 'read', { area: 'artifacts', path: video, includeMedia: true });
+  assert.equal(Buffer.from(bytes.base64, 'base64').length, 5);
+  await f.runtime.report(task, f.main, { status: 'completed', artifact: 'ui-handoff.md' });
+  const event = task.events.findLast(e => e.kind === 'completed');
+  assert.equal(event.evidence, proof.uiEvidence.artifact); assert.equal(event.attachments.length, 2);
+  const { notificationPayload } = await import('../runner/notifications.js');
+  const payload = await notificationPayload(f.runtime, task, event, 'grokbot');
+  assert.equal(payload.attachments[0].mimeType, 'image/png');
+  assert.equal(payload.attachments[1].retrieval.input.path, video); assert.equal(payload.attachments[1].base64, undefined);
+  assert.match(payload.evidence, /json/);
+  // Acceptance must rerun the configured gate, including after rebase.
+  task.config.commands.ui = [process.execPath, '-e', 'process.exit(1)'];
+  await assert.rejects(f.call('owner', 'accept', task.id, { commit: proof.commit }), /verification failed/);
+  assert.equal(f.runtime.task(task.id).delivery.phase, 'needs-attention');
+});

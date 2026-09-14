@@ -11,3 +11,6 @@ Ordinary Pi shell access remains trusted owner access, not a security boundary.
 
 Evidence: `test/supervisor.test.js` checks delivery, restart deduplication,
 advice/answer separation, stale decisions and cancelled confirmation.
+
+UI completion events include evidence manifest/media references; video reads return
+metadata/localPath rather than unsupported image blocks. See [UI evidence](ui-evidence.md).

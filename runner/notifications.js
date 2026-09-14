@@ -29,7 +29,7 @@ export function validateWebhook(config) {
 }
 
 export async function notificationPayload(runtime, task, event, format) {
-  const base = { version: 1, eventId: event.id, taskId: task.id, kind: event.kind, decisionId: event.decisionId ?? null, artifact: event.artifact ?? null, occurredAt: event.at };
+  const base = { version: 1, eventId: event.id, taskId: task.id, kind: event.kind, decisionId: event.decisionId ?? null, artifact: event.artifact ?? null, occurredAt: event.at, evidence: event.evidence ?? null, attachments: event.attachments ?? [] };
   if (format !== 'grokbot') return base;
   const action = eventAction(event);
   if (!action) return null;
@@ -42,13 +42,13 @@ export async function notificationPayload(runtime, task, event, format) {
   const attachments = [];
   for (const path of event.attachments ?? []) {
     const file = await safePath(join(runtime.dir(task), 'artifacts'), path);
-    if ((await stat(file)).size > 1000000) { attachments.push({ artifact: path, omitted: 'Larger than the 1 MB webhook attachment limit' }); continue; }
+    if (/\.(webm|mp4)$/i.test(path) || (await stat(file)).size > 1000000) { attachments.push({ artifact: path, ...( /\.(webm|mp4)$/i.test(path) ? { mimeType: path.endsWith('.mp4') ? 'video/mp4' : 'video/webm' } : {}), omitted: 'Media available through authenticated artifact read', retrieval: { action: 'read', taskId: task.id, input: { area: 'artifacts', path, includeMedia: true } } }); continue; }
     const content = await runtime.files(task, 'owner', 'read', { area: 'artifacts', path, limit: 10000 });
     attachments.push(content.mimeType ? { artifact: path, mimeType: content.mimeType, base64: content.base64 } : { artifact: path, mimeType: 'text/plain', text: content.content, truncated: content.nextOffset != null });
   }
   return { ...base, action, from: 'harness', task: task.id, message: text,
     ...(event.hook?.pr !== undefined ? { pr: event.hook.pr } : {}),
-    ...(action === 'approval' ? { evidence: event.hook?.evidence ?? [task.verification?.artifact, task.documents?.evidence, event.artifact].filter(Boolean).join(', ') } : {}),
+    ...(action === 'approval' ? { evidence: event.hook?.evidence ?? [task.verification?.artifact, event.evidence, task.documents?.evidence, event.artifact].filter(Boolean).join(', ') } : {}),
     ...(action === 'problem' ? { problems: event.hook?.problems ?? [event.error ?? text] } : {}),
     version: 2, job: task.id, status: event.kind, branch: task.integration?.branch ?? null, text, attachments,
     reply: event.decisionId ? { taskId: task.id, decisionId: event.decisionId, command: `agent-plan answer ${task.id} ${event.decisionId} /path/to/answer.md` } : { taskId: task.id, command: event.kind === 'completed' ? `agent-plan accept ${task.id} ${task.verification?.commit ?? ''}`.trim() : `agent-plan feedback ${task.id} /path/to/feedback.md` } };

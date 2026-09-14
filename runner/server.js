@@ -29,7 +29,7 @@ export async function serve(root, options = {}) {
       const identity = typeof token === 'string' && token.length >= 64 ? (token === descriptor.token ? 'owner' : runtime.authenticate(token)) : null;
       const send = (value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
       if (req.method === 'GET' && new URL(req.url, runtime.url).pathname === '/') {
-        res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'", 'cache-control': 'no-store' });
+        res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'self'; frame-ancestors 'none'", 'cache-control': 'no-store' });
         res.end(await readFile(fileURLToPath(new URL('./dashboard.html', import.meta.url)))); return;
       }
       if (req.method === 'POST' && req.url === '/terminal-answer') {

@@ -85,7 +85,7 @@ export default function supervisor(pi, options = {}) {
         await call('write', input.taskId, { area: 'artifacts', path, content: input.text }, `${toolCallId}-write`);
         result = await call('feedback', input.taskId, { artifact: path }, toolCallId);
       } else result = await call(input.action, input.taskId, input.action === 'read' ? { area: 'artifacts', path: input.path } : {}, toolCallId);
-      return { content: result.mimeType ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: {} };
+      return { content: result.mimeType === 'image/png' ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: {} };
     }
   });
 }

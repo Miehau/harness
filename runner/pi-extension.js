@@ -90,7 +90,7 @@ export default function runner(pi) {
     name, label: name, description, parameters,
     async execute(toolCallId, input) {
       const result = await call(action ?? input.action, action ? input : input.input ?? {}, toolCallId);
-      return { content: result.mimeType ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: result.mimeType ? { mimeType: result.mimeType } : result, ...(!action && ['ask', 'report'].includes(input.action) ? { terminate: true } : {}) };
+      return { content: result.mimeType === 'image/png' ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: result.mimeType ? { mimeType: result.mimeType } : result, ...(!action && ['ask', 'report'].includes(input.action) ? { terminate: true } : {}) };
     }
   });
   definition('runner_read', 'Read a file or list a directory. Artifact references are relative to the task artifacts root. Large files support offset/limit.', Type.Object({ area, path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }), 'read');

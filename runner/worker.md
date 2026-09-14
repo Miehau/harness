@@ -44,11 +44,9 @@ If an approach fails, save what failed, what was tried and what must not be repe
 Provider failures also produce a runtime failure artifact when the connection permits;
 retained worktree/session files remain the recovery source after a sudden crash.
 
-For UI evidence, use the configured browser scenario command when available. Publish
-PNG files from your worktree with runner_action({action:"publish",input:{path}}).
-Reference the returned artifact in your evidence/checkpoint or question. Tests prove
-behavior; screenshots show appearance. Map the evidence to the assigned acceptance
-criteria. Do not claim visual verification when no browser check was performed.
+When your assignment changes frontend behavior or appearance, or config.json has
+uiEvidence, read artifact workflow/ui-evidence.md before implementing or verifying.
+The coordinator should include this reference in frontend assignments.
 
 Keep discovery documentation aligned with implementation. Read the relevant feature
 map entry/document if present. A new capability needs a focused feature document and

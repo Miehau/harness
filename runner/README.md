@@ -537,3 +537,44 @@ Ask the supervisor to read a ticket, submit its requirements through
 instruction; incoming ticket content does not authorize writes or task acceptance.
 Managed coordinator/worker sessions still disable ambient extensions and expose
 only runner tools. No MCP server credentials are copied into task artifacts.
+
+## Required UI evidence
+
+Browser navigation/capture tooling belongs to the target project. To enforce evidence
+for every task in a frontend repository, add a named command and policy to its
+owner-maintained `.runner/project.json` before submitting tasks:
+
+```json
+{
+  "commands": { "test": ["npm", "test"], "ui": ["npm", "run", "verify:ui"] },
+  "verify": ["test"],
+  "uiEvidence": { "command": "ui" }
+}
+```
+
+The runtime runs `ui` after ordinary verification, on the integration candidate and
+again during acceptance after rebase. It provides RUNNER_UI_DIR, RUNNER_UI_COMMIT and
+RUNNER_UI_RUN_ID. The project command starts/stops its app, runs browser assertions,
+and writes media plus manifest.json to that unique output directory. The schema is
+in [UI evidence](workflow/ui-evidence.md), which agents load conditionally for frontend
+work. Existing tasks retain their configuration and instruction snapshots.
+
+Each manifest criterion requires a passing assertion and at least one PNG, WebM or
+MP4. The runtime checks run/commit identity, file boundaries, sizes and media headers,
+then copies evidence into immutable artifacts. Missing, failed or stale evidence
+fails verification and blocks completion/acceptance. It does not infer frontend files,
+prove assertion quality, decode media, or automatically judge visual correctness.
+When configured, the gate applies to all tasks in that repository, including backend
+changes; without configuration, frontend evidence remains a workflow requirement.
+
+PNG publication retains its 10 MB cap; WebM/MP4 publication allows 25 MB. The inspector
+plays video. Artifact reads return video metadata and a localPath by default; an
+explicit `read {area:"artifacts",path,includeMedia:true}` returns base64 for playback
+or relay. Pi/Claude supervisor tools return video metadata as text, never as an image.
+
+Completion events expose the evidence manifest and up to four media attachments to
+the supervisor and webhook adapters. The manifest includes every media reference.
+Grok sends small PNGs inline; videos and larger files carry an authenticated artifact
+read request for a trusted local relay. No public media hosting or credentials are
+added. Receiver-side playback/forwarding requires that adapter to implement retrieval;
+no live Claude/Grok delivery is claimed. Use `surface`/`ask` attachments for previews.

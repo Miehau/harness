@@ -40,3 +40,12 @@ test('supervisor MCP is opt-in, pinned, and preserves Pi model/session arguments
   assert.throws(() => supervisorArgs(['--mcp-config']), /Missing/);
   assert.match(await main(['supervisor', '--help']), /managed workers use runner tools only/);
 });
+
+test('supervisor exposes video metadata as text rather than an image block', async () => {
+  let tool;
+  const pi = { on() {}, registerCommand() {}, registerTool(value) { tool = value; } };
+  supervisor(pi, { request: async () => ({ mimeType: 'video/webm', artifact: 'runtime/clip.webm', localPath: '/tmp/clip.webm', size: 42 }) });
+  const result = await tool.execute('video', { action: 'read', taskId: 'task', path: 'runtime/clip.webm' });
+  assert.equal(result.content[0].type, 'text');
+  assert.equal(JSON.parse(result.content[0].text).localPath, '/tmp/clip.webm');
+});
