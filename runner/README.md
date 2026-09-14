@@ -182,7 +182,7 @@ work is retained. Branches, artifacts, and histories remain available.
 ## GrokBot notifications
 
 The adapter is available but disabled by default. No live bot connection is assumed.
-Place an owner-only `supervisor.json` in the data directory:
+Place an owner-only `webhook.json` in the data directory:
 
 ```json
 {"webhook":{"url":"https://your-receiver.example/events","authorization":"Bearer YOUR_TOKEN"}}
@@ -457,3 +457,14 @@ Aliases normalize: pr-approval/impl-approval → approval; harness-opinion → o
 impl-problem/blocker → problem. Approval requires a real owner answer; opinions are
 for product choices; problems need a question only when blocked. Probe/health/noop
 are never sent. Merged events do not generate another Grok approval request.
+
+### Private webhook configuration
+
+Copy the committed `webhook.example.json` to `webhook.json`, fill in your receiver
+URL and Bearer token, then run `agent-plan webhook /absolute/path/to/webhook.json`.
+The local `webhook.json` is ignored by Git; never put real values in the example.
+The CLI installs a private copy at `~/.local/state/agent-plan/webhook.json` (mode 600),
+or under `RUNNER_DATA` when set. Credentials remain plaintext readable by your OS user.
+New events are enabled from configuration time. Existing `supervisor.json` settings
+migrate automatically without changing their notification start time or replaying receipts.
+An existing `webhook.json` takes precedence; invalid JSON is reported, not bypassed.

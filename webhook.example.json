@@ -1,0 +1,7 @@
+{
+  "webhook": {
+    "url": "https://receiver.example.invalid/webhook",
+    "authorization": "Bearer REPLACE_WITH_YOUR_TOKEN",
+    "format": "grokbot"
+  }
+}

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { stat } from 'node:fs/promises';
+import { stat, unlink } from 'node:fs/promises';
 import { atomic, json, now, assert, safePath } from './io.js';
 
 const actions = { approval: 'approval', 'pr-approval': 'approval', 'impl-approval': 'approval', opinion: 'opinion', 'harness-opinion': 'opinion', problem: 'problem', 'impl-problem': 'problem', blocker: 'problem' };
@@ -54,11 +54,22 @@ export async function notificationPayload(runtime, task, event, format) {
     reply: event.decisionId ? { taskId: task.id, decisionId: event.decisionId, command: `agent-plan answer ${task.id} ${event.decisionId} /path/to/answer.md` } : { taskId: task.id, command: event.kind === 'completed' ? `agent-plan accept ${task.id} ${task.verification?.commit ?? ''}`.trim() : `agent-plan feedback ${task.id} /path/to/feedback.md` } };
 }
 
+export async function loadWebhookConfig(root) {
+  try { return await json(join(root, 'webhook.json')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  let config;
+  try { config = await json(join(root, 'supervisor.json')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  validateWebhook(config);
+  await atomic(join(root, 'webhook.json'), config);
+  await unlink(join(root, 'supervisor.json'));
+  return config;
+}
+
 // Explicit owner configuration only. HTTP acceptance is not a bot/human acknowledgement.
 export async function notify(runtime, fetchImpl = fetch) {
-  let config;
-  try { config = await json(join(runtime.root, 'supervisor.json')); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
-  if (!config.webhook?.url) return;
+  const config = await loadWebhookConfig(runtime.root);
+  if (!config?.webhook?.url) return;
   const url = validateWebhook(config);
   const receiptPath = join(runtime.root, 'notifications.json');
   let receipts;

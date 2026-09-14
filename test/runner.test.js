@@ -720,3 +720,20 @@ test('Grok hook actions normalize aliases and keep probes silent', async t => {
   await atomic(join(f.data, 'supervisor.json'), { webhook: { url: 'https://receiver.example.invalid/events', format: 'grokbot' } });
   await notify(f.runtime, async () => { assert.fail('Silent events must not send'); });
 });
+
+test('webhook config migrates legacy settings and prefers the private canonical file', async t => {
+  const { data } = await fixture(t);
+  const { loadWebhookConfig, validateWebhook } = await import('../runner/notifications.js');
+  assert.equal(await loadWebhookConfig(data), null);
+  const legacy = { webhook: { url: 'https://receiver.example.invalid/hooks', authorization: 'Bearer test-token', format: 'grokbot' }, since: '2026-01-01T00:00:00Z' };
+  await atomic(join(data, 'supervisor.json'), legacy);
+  assert.deepEqual(await loadWebhookConfig(data), legacy);
+  await assert.rejects(readFile(join(data, 'supervisor.json')), { code: 'ENOENT' });
+  const { stat } = await import('node:fs/promises');
+  assert.equal((await stat(join(data, 'webhook.json'))).mode & 0o777, 0o600);
+  await atomic(join(data, 'supervisor.json'), { obsolete: true });
+  assert.deepEqual(await loadWebhookConfig(data), legacy);
+  await writeFile(join(data, 'webhook.json'), 'invalid json');
+  await assert.rejects(loadWebhookConfig(data), SyntaxError);
+  validateWebhook(JSON.parse(await readFile(new URL('../webhook.example.json', import.meta.url), 'utf8')));
+});

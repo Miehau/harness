@@ -113,7 +113,7 @@ export async function main(args = process.argv.slice(2)) {
     else rest.push(raw[i]);
   }
   assert(['init', 'start', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook'].includes(command), `Unknown command: ${command}\n${help}`);
-  if (command === 'webhook') { assert(rest.length === 1, 'Usage: agent-plan webhook PRIVATE_CONFIG_FILE'); const config = await json(resolve(rest[0])); validateWebhook(config); config.since ??= new Date().toISOString(); await atomic(join(dataRoot(), 'supervisor.json'), config); return { configured: true, format: config.webhook.format ?? 'references', since: config.since }; }
+  if (command === 'webhook') { assert(rest.length === 1, 'Usage: agent-plan webhook PRIVATE_CONFIG_FILE'); const config = await json(resolve(rest[0])); validateWebhook(config); config.since ??= new Date().toISOString(); await atomic(join(dataRoot(), 'webhook.json'), config); return { configured: true, format: config.webhook.format ?? 'references', since: config.since }; }
   if (command === 'repo') return repos(rest);
   if (command === 'init') {
     assert(rest.length === 2, "Usage: agent-plan init <repo> '<verification argv JSON>'");
