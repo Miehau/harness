@@ -1,0 +1,10 @@
+{
+  "commands": {
+    "install": ["npm", "ci"],
+    "test": ["npm", "test"],
+    "check": ["npm", "run", "check"]
+  },
+  "setup": "install",
+  "verify": ["test", "check"],
+  "maxWorkers": 2
+}

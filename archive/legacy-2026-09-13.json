@@ -1,0 +1,23 @@
+{
+  "sourceHead": "bb0e7f3b24a2c99fbb987158ee68a11a8651fc05",
+  "verifiedFiles": 275,
+  "sha256": "64d2a62f8a892af38f96112d3a0d955b4de59c8706ef4ff06a329ccbbbd3a048",
+  "contents": [
+    "src",
+    "public",
+    "docs",
+    "fixtures",
+    "scripts",
+    ".agent-plan",
+    ".agents",
+    "AGENTS.md",
+    "README.md",
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
+    "remote-review-fix.md",
+    "test",
+    ".github/workflows/verify.yml"
+  ],
+  "includesUncommittedChanges": true
+}

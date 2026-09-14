@@ -2,3 +2,12 @@ node_modules/
 .agent-plan-workspace/
 *.log
 .DS_Store
+
+.runner-data/
+
+# Private runtime credentials and local webhook settings
+supervisor.json
+connection.json
+.env
+.env.*
+!.env.example

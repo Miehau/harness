@@ -1,81 +1,32 @@
 ---
 name: agent-plan
-description: Work in Agent Plan Workspace using live helper CLIs for tests, API/UI navigation, JsonStore seeds, and the agent-plan operator CLI that mirrors dashboard actions. Use when editing this repo, running tests, seeding daemon state, inspecting routes, driving a ticket from the CLI, following the hardening plan, or the user runs /agent-plan.
+description: Develop and operate this repository's terminal-first Pi/Herdr runner, including worktrees, Markdown workflows, task decisions, and recovery.
 ---
 
-# Agent Plan Workspace
+# Agent Plan runner
 
-Do not reconstruct this app from memory. Run the helper CLIs; they read current source and `JsonStore`.
+The active application is `runner/`. The old visual pipeline is retired; `archive/`
+contains a verified historical snapshot, not current instructions or reusable modules.
 
-## First actions
+Read `runner/README.md` for operation and `runner/workflow.md` for the main-agent workflow.
+`runner/runtime.js` owns task state, worktrees, permissions, messages, and verification;
+`runner/herdr.js` and `runner/pi-extension.js` connect terminal sessions to that runtime.
 
-```bash
-node scripts/nav.mjs --json
-node scripts/test.mjs --map
-node scripts/seed.mjs --list
-```
+Use `npm test` and `npm run check`. Tests in `test/runner.test.js` exercise disposable
+Git repositories and mocked agents. Never call a live model in tests.
+`npm run probe` is an opt-in real Herdr/Pi connection check that makes no model calls.
 
-Flags and scenarios live in those programs (`--help` / `--list`), not in this skill.
+Use `agent-plan start /absolute/repo "task"` with Herdr running. The CLI automatically
+starts the background runtime and focuses the orchestrator workspace. `agent-plan open`
+focuses a task and `agent-plan stop` cancels it. State defaults to
+`~/.local/state/agent-plan`; `RUNNER_DATA` selects another data directory.
+Use `npm run runner -- help` without a global installation. Explicit `submit` creates
+an inert draft; direct `start REPO TEXT` launches immediately. Pending questions can
+be answered interactively in the Pi terminal using its scoped reply credential. Repo configuration lives in `.runner/project.json`; optional
+`.runner/workflow.md` replaces the bundled workflow. Both are snapshotted per task.
 
-## Tests
-
-- `node scripts/test.mjs` (also `npm test`). Filter by filename: `node scripts/test.mjs plan server`.
-- `--check` for syntax, `--watch` while iterating, `-- --test-name-pattern "…"` for node:test flags.
-- New daemon tests import `test/helpers.js`: `withDaemon`, `invoke`, `seedRun`, `writeSeed`, `runAgainstDaemon`.
-- Do not copy `createDaemon` setup. Do not hand-write `state-v3.json`.
-- Run shapes come from `createTicketRun` / `initialStages` in `src/execution.js`.
-- Never call a real Pi model in tests; pass `mockHarness()`.
-
-## Operator CLI (same buttons as the UI)
-
-Drive a running daemon over HTTP. Do not `store.update` to fake a journey.
-
-```bash
-node src/cli.js new text "Add an empty-state heading"
-node src/cli.js list backlog
-node src/cli.js select <ticketId>
-node src/cli.js wait
-node src/cli.js approve              # Run manually
-node src/cli.js list timeline        # Inspector output for the active step
-node src/cli.js accept <stepId>
-node src/cli.js resume
-node src/cli.js queue clear
-```
-
-`select <id> resume-run` (or `approve` / `cancel`) is allowed. JSON only. `wait` exits 1 on `needs_attention`.
-
-Verify a test ticket against `withDaemon` + `mockHarness()` via `runAgainstDaemon` in `test/helpers.js`. Do not call a live Pi model in CI. For a gate without running Pi, `node scripts/seed.mjs plan-approval` then `select` + `approve`.
-
-## Seeding a dashboard
-
-```bash
-node scripts/seed.mjs <scenario> --json
-AGENT_PLAN_DATA_DIR=<dataDir> npm start -- --cwd <cwd>
-```
-
-`JsonStore.init` marks in-flight statuses interrupted. For a daemon that should stay at a gate, seed `plan-approval`, `review-ready`, `needs-attention`, `interrupted`, or `empty`.
-
-## Where to look
-
-| Need | Source of truth |
-|---|---|
-| Routes, dialogs, CLI, stages, untested files | `node scripts/nav.mjs` |
-| Product boundary | `docs/automation-harness-spec.md` |
-| Next refactors | `docs/hardening-plan.md` |
-| HTTP + pipeline | `src/server.js` |
-| Pi prompts/tools | `src/pi-harness.js` |
-| Dashboard | `public/app.js`, `public/ui-model.js` |
-
-## Constraints
-
-- Pi is the only harness. Localhost daemon. JSON store until measured need.
-- Optional owner-configured supervisor webhooks use the existing orchestrator contract; no other notifiers, direct deploy, or second execution agent layer. See `docs/grokbot-supervisor.md`.
-- Workers have no arbitrary shell; commands are named argv from `.agent-plan/project.json`.
-- Do not parse architecture prose for commands.
-
-## Checks before done
-
-```bash
-node scripts/test.mjs
-node scripts/test.mjs --check
-```
+Keep worker output in immutable files and pass references. Preserve exact task,
+attempt, and decision identities. Herdr idle/done is never evidence of task completion.
+Retain dirty worktrees and uncertain outcomes for explicit recovery. Completion means
+a verified integration branch, not a push, merge, or deployment. GrokBot is disabled
+unless the owner configures its receiver; HTTP acceptance is not a human decision.

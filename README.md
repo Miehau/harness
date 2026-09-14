@@ -1,186 +1,51 @@
-# Agent Plan Workspace
+# Agent Plan runner
 
-A local-first visual workspace for shaping Linear, Jira, and local development tasks with Pi, generating editable execution graphs, and reviewing every agent run through its prompt, progress, exact Git diff, artifacts, and screenshot references. The incremental automation design is recorded in [docs/automation-harness-spec.md](docs/automation-harness-spec.md).
+Terminal-first task orchestration using Pi, Herdr, Markdown workflows, and Git worktrees.
+One main agent coordinates workers through durable file references and explicit decisions.
+The dashboard shows the same runtime state and supports explicit owner acceptance.
 
-## MVP capabilities
-
-- Pi-backed planning chat with project-discovered context, skills, and prompt templates.
-- One persistent plan supervisor with named Pi worker sessions for every step.
-- Binding workflow skills with typed `needs_input` and `awaiting_approval` checkpoints.
-- Structured worker reports reviewed by the supervisor before user acceptance.
-- AI-generated task-specific plans with generic `group` and `step` nodes.
-- One nesting level with parallel sibling runs and a hard acceptance barrier.
-- Fresh, seeded, and forked Pi sessions.
-- Explicit dependency artifact handoffs.
-- Editable prompts, permissions, scopes, skills, references, and acceptance criteria.
-- Live run events and output.
-- Per-run Git tree diffs without modifying the user's index, plus one requirement-linked commit for each accepted step.
-- Review-sized implementation budgets (8 files or 400 changed lines by default), with plan-time splitting, justified atomic exceptions, and automatic-mode stops when actual work exceeds its budget.
-- Canonical step, attempt, verification-stage, handoff, and delivered diffs, navigable by file and lazily expanded Git hunk; optional model-generated review maps only link back to those exact hunks.
-- Review-only agent notes attach intent, invariants, risks, or test evidence to exact old/new diff lines and batch selected sections into one rewrite request without entering the repository change.
-- Dirty-worktree snapshot initialization, scope-enforced writes, and named project commands with no arbitrary shell-string escape hatch.
-- A repository-owned `.agent-plan/project.json` contract separates executable commands, environment allow-lists, ignored local env files, and port variables from human architecture prose.
-- One repository-owned `.agent-plan/verify.mjs` contract for tests, lint, builds, and optional browser screenshot evidence.
-- Ticket-isolated local previews on unique ports with harness-captured Chromium desktop and mobile evidence.
-- One final proof-review gate before delivery, combining automated checks with inline screenshots and interaction recordings when required.
-- Retained run storage with disk-usage previews and explicit cleanup by run, ticket, project, or age.
-- Restart-safe paused recovery, including stale-preview health and remote-delivery uncertainty guards.
-- Subscription-oriented usage reporting for elapsed time, model tokens, tool calls, and correction rounds without artificial budgets.
-- Manual review barriers or an auto mode that accepts verified commits through the whole execution graph.
-- Screenshot references passed into the selected step's Pi session.
-- Local JSON persistence under `~/.agent-plan-workspace`.
-- Prompt-free local fixtures loaded from `feature.md` and `plan.json` into a fresh zero-state repository.
-
-## GrokBot / external supervisor
-
-Optional project-scoped webhooks announce decision checkpoints, failures, provider-capacity pauses, and completion. Delivery is persisted across restarts; requests are bounded, and automatic retries require a receiver that deduplicates event IDs. Normal operation continues without a connected bot.
-
-`orchestrator overview` supplies daily-digest input; `orchestrator brief` supplies exact-run context. A separate bot credential permits inspection and, only when the owner enables it, up to three provider-capacity resumes per run. Approval gates and explicit user pauses remain owner-controlled. The bot cannot bypass restrictions through ordinary operator routes or a claimed user authority.
+Install the command once from this checkout:
 
 ```sh
-node src/cli.js orchestrator overview
-node src/cli.js orchestrator notifications
-node src/cli.js orchestrator policy
+./install.sh
 ```
 
-A single harness webhook receives events from every managed project, without changing paths when switching projects. Local outbound notifications need only the receiver URL and Bearer credential; owner/bot tokens are required only for scoped two-way bot access (or owner authentication for a non-loopback binding).
+The installer checks Node/npm/Git, installs locked dependencies and links the CLI.
+It uses your current npm prefix; rerun after switching NVM versions.
 
-See [supervisor setup and decision policy](docs/grokbot-supervisor.md) for private configuration, bot credentials, event payloads, retries, and digest scheduling. The real GrokBot receiver and daily routine must be configured separately; no live connection or messages are enabled by installation.
+Use `agent-plan help`, `agent-plan help start`, or `agent-plan repo --help` for usage.
 
-## Run
+With Herdr running and Pi credentials configured:
 
-Requires Node.js 22.19 or later and an authenticated Pi installation. The local dependency uses Pi SDK 0.84 or later to include current dependency security fixes.
-
-```bash
-npm install --ignore-scripts
-npm start -- --cwd /absolute/path/to/a/repository
+```sh
+agent-plan start /path/to/repo "Implement this feature"
+agent-plan list
+agent-plan open TASK
+agent-plan stop TASK
 ```
 
-Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
+The runtime starts in the background automatically. `start` opens a Herdr workspace
+with a Pi orchestrator; it launches worker sessions as needed. Answer pending
+questions directly in the terminal. TASK accepts a full ID or unique prefix.
 
-The app uses Pi's existing authentication and model settings from `~/.pi/agent`. It binds to localhost by default.
+Configure each repo's verification command once if it has no `.runner/project.json`:
 
-Tracker credentials can be entered from the Ticket trackers popup. They are saved outside the repository at `~/.agent-plan-workspace/credentials.json` with owner-only (`0600`) permissions and are never copied into run state, prompts, logs, or artifacts. Environment variables remain available as a fallback:
-
-```bash
-# Linear
-LINEAR_API_KEY=lin_api_...
-
-# Jira Cloud
-JIRA_BASE_URL=https://example.atlassian.net
-JIRA_EMAIL=developer@example.com
-JIRA_API_TOKEN=...
-JIRA_EPIC_KEY=PROJ-42
+```sh
+agent-plan init /path/to/repo '["npm","test"]'
 ```
 
-Linear and Jira can be configured together and reconnect immediately after saving. Jira intake uses Atlassian API-token authentication and is restricted to the configured project key. Saved credentials take precedence over environment variables; each saved provider can be removed from the same popup.
+Tasks start from committed HEAD. State lives in `~/.local/state/agent-plan`, shared
+across terminals; set `RUNNER_DATA` only to use a different existing state directory.
 
-Remote delivery uses the repository's existing `origin` plus an environment-only forge token:
+See [the operating guide](runner/README.md) for repo configuration, Markdown workflows,
+worker decisions, recovery, the dashboard, and optional GrokBot notifications.
 
-```bash
-GITHUB_TOKEN=... # GitHub, or
-GITLAB_TOKEN=... # GitLab
-```
-
-Tracker-backed runs rebase onto the remote target, push one ticket branch, open one pull/merge request, monitor existing CI and review feedback, apply focused feedback fixes, and squash-merge only when the remote gates allow it. After merge, the opened local checkout is fast-forwarded only when it is clean and safely behind the target; otherwise the dashboard records why synchronization was skipped.
-
-Completed run artifacts, ticket worktrees, and local branches are retained indefinitely. Use the storage button in the dashboard to inspect their measured disk usage and explicitly clean selected runs. Cleanup stops owned previews and removes only run-owned local resources; it does not delete remote branches or merged changes.
-
-After a restart, in-flight work remains paused and its last checkpoint is shown. Recorded PRs/MRs resume by inspecting the same remote change. If the daemon stopped while an unconfirmed PR/MR creation or squash merge may have been in flight, the dashboard reports the uncertainty and refuses to guess until the forge has been inspected.
-
-Paused or failed work can also start fresh or restart from a recorded exploration, design, implementation-step, or verification checkpoint. Checkpoint restarts restore the exact stored Git tree, reset all later work, use fresh agent sessions, and retain a machine-readable audit artifact; fresh starts archive the previous run under its unique run ID. Runs that reached delivery are never rewound automatically.
-
-## Local zero-state fixture
-
-The included `fixtures/zero-state-task-board` benchmark contains a product brief and a prompt-free ticket graph. Load the fixture, open an empty working directory, then approve the plan. The framework initializes or repairs that directory as the zero-state Git repository, seeds a baseline `.gitignore`, renders its own Pi prompts, commits each accepted step, and preserves the feature, plan, prompts, reports, diffs, and verification artifacts for the run.
-
-Local `plan.json` tickets contain outcomes, permissions, write scopes, acceptance criteria, and dependencies. Runtime fields such as prompts, skills, harnesses, and agent IDs are rejected so framework versions can be compared against the same authored input.
-
-## Workflow
-
-1. Open a repository and optionally bind one of its discovered Pi skills as the supervisor's workflow.
-2. Discuss the task, resolving any workflow checkpoints before generating a plan.
-3. Inspect or edit the plan JSON and every individual worker prompt.
-4. Run a single step or an entire parallel group. Parallel writers use isolated worktrees.
-5. Review the supervisor response, live output, exact diff, and produced artifact.
-6. Accept the step, or choose Auto when approving the graph. Manual runs pause for every verified batch; Auto accepts its commits and continues. Downstream dependencies unlock only after every required predecessor is accepted.
-
-Architecture owns `.agent-plan/verify.mjs`. The framework always calls `node .agent-plan/verify.mjs` when present, falling back to a root `npm test` only for older repositories. Visual steps must write browser screenshots to `AGENT_PLAN_EVIDENCE_DIR`; missing evidence fails the gate and captured images are attached to independent review.
-
-The first architecture slice creates or updates `.agent-plan/project.json` without touching product code or repository documentation. Documentation changes remain ticket-specific and require their own justified plan step. Workers can invoke only named argv commands from the project configuration. The harness passes a minimal process environment plus explicitly allow-listed variable names and values loaded from explicitly allow-listed, Git-ignored local env files; command output is redacted before it enters run history.
-
-When `project.json` declares a `preview` or `dev` command, visual tickets receive a localhost preview with their own allocated port. The configured port variables are set only for that preview process. The harness captures 1440×900 desktop and 390×844 mobile Chromium images, attaches them to independent review, and exposes the live preview URL in the run header.
-
-## Deliberate MVP limits
-
-- Pi is the intentionally selected harness.
-- Linear and Jira support polling, dependency-aware intake, comments, answers, and lifecycle transitions; unsupported workflow transitions stop with a visible blocker.
-- Groups can contain steps, not nested groups.
-- Dependency-ready siblings run in isolated worktrees. Accepted worktree commits are cherry-picked into the run worktree in review order; conflicts stop for human attention.
-- Existing tracked and untracked files seed the ticket worktree without touching the user's index. Final integration waits until the target repository is clean.
-- Built-in Pi tools respect the selected permission. Any third-party Pi extension still runs with the authority it defines, so review installed extensions before use.
-- Write workers intentionally have no arbitrary shell tool; their `edit` and `write` tools reject paths outside the approved scope before mutation.
-
-## Checks
-
-```bash
+```sh
 npm test
-node scripts/test.mjs plan          # one file
-node scripts/test.mjs --map         # src → test
-node scripts/nav.mjs                # live API / UI / module map
-node scripts/seed.mjs --list        # daemon state fixtures
-node src/cli.js list backlog        # same actions as the dashboard
+npm run check
+npm run probe  # opt-in live Herdr/Pi connection check; no model calls
 ```
 
-See [scripts/README.md](scripts/README.md).
-
-For agent orientation, read the [feature map](docs/feature-map.md) and separate [navigation reference](docs/feature-navigation.md). The [interactive repository review](docs/feature-review.html) records findings and lets you assemble a follow-up task brief. These are dated snapshots; refresh the live helpers before changing behavior.
-
-Jujutsu is the default history layer: each serial implementation step is an editable change whose stable change ID survives evolving revisions. Accepted changes are exported as ordinary Git commits before the existing review and delivery flow. Dependency-ready siblings run serially in this mode for now. Use `--vcs git` (or `AGENT_PLAN_VCS=git`) only when a repository needs the compatibility path.
-
-## Project readiness
-
-Run `agent-plan doctor` (or `node src/cli.js doctor`) against the running daemon.
-Add `--visual` to inspect UI command and preview declarations. The same read-only
-report is available at `GET /api/workspace/readiness?visual=1`. Exit status 1 means
-setup needs attention. Reports distinguish executed prerequisite checks from
-command declarations: doctor never runs project commands or paid model calls.
-Local authentication presence does not establish that a provider will accept it.
-Ticket requirements planning checks Node, Git, selected VCS, and configured Pi
-models/authentication first; project contract bootstrap can still follow planning.
-
-`agent-plan init [--install] [--verify]` initializes the selected daemon workspace
-and preserves existing project configuration and verifier files. It detects Node
-package-manager scripts when creating a new contract. Empty projects receive a
-verifier that fails until real checks are configured. Non-Node projects should
-supply their named install/test/build commands in project.json.
-
-A declared `commands.install` enables automatic dependency preparation before
-project commands, canonical verification, and preview startup. Preparation tracks
-package manifests and lockfiles in a Git-local fingerprint, removes worktree
-node_modules links before installing private dependencies, and repeats when inputs
-change or installed directories disappear. Tracked node_modules are never removed.
-Projects without an install declaration retain their existing dependency behavior;
-add that command to opt into managed preparation. `init --verify` reports baseline
-failures without claiming they are feature regressions. Initialization is blocked
-while ticket execution or delivery is active.
-
-Material frontend plans now generate a self-contained UI proposal during Design.
-Review the sandboxed prototype in the dashboard, request revisions, then approve
-the proposal and plan together. Minor cosmetic exemptions remain normal plan
-approvals. The operator equivalents are `proposal show <ticketId>`,
-`proposal revise <ticketId> <revisionId> <feedback>`, and
-`approve <ticketId> --proposal <revisionId> [--auto]`.
-
-Approval binds to the exact retained proposal and plan. Plan changes invalidate
-that binding; auto execution and final delivery cannot bypass it. Paused work can
-request a new direction, which invalidates prior visual proof. Old revisions remain
-available as artifacts/history. Prototype artifacts describe approved direction;
-only actual application captures can count as final visual evidence. Final review
-shows the approved prototype beside the implementation proof.
-
-Reported model cost appears beside token usage in USD. This is the SDK-reported amount, which may differ from billing. Unknown cost is unavailable; mixed reporting shows a partial total; a reported zero remains $0.0000. Totals include failed responses and corrections and survive activity-log trimming and reload. Tool calls and model responses with recorded usage are counted separately. No budget enforcement is added.
-
-Repository settings expose the same readiness and initialization actions as `doctor` and `init`. The header shows current work or the pending decision, active workers, and last recorded activity; connectivity is labelled separately. Final visual review includes the approved proposal and journey assertions. To replay checks and journeys while a ticket is stopped, use `node src/cli.js preview replay <ticketId> <runId>` or **Replay proof checks**. Replay requires an isolated ticket workspace and may change preview data; it records diagnostics without replacing final-proof approval.
-
-Conversational agents can use `orchestrator submit`, `orchestrator show`, `orchestrator brief`, and `orchestrator act`. Submission creates an idempotent draft; starting and approving are explicit operations tied to the exact run and checkpoint. See [the local orchestrator contract](docs/orchestrator-contract.md) for JSON examples, authority rules, dependencies, and artifact access.
+The old visual pipeline is retired. Its source, tests, configuration, and uncommitted
+changes are preserved in the verified [legacy archive](archive/README.md).
+There is no automatic migration of legacy task state.

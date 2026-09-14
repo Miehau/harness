@@ -1,4 +1,4 @@
 interface:
-  display_name: "Agent Plan"
-  short_description: "Test, navigate, and seed this daemon from live source"
-  default_prompt: "Use $agent-plan. Run node scripts/nav.mjs, node scripts/test.mjs, node scripts/seed.mjs, and node src/cli.js (list backlog, new text, approve, timeline) instead of reconstructing the app."
+  display_name: "Agent Plan runner"
+  short_description: "Operate and develop the Pi/Herdr task runner"
+  default_prompt: "Use $agent-plan to work on the terminal-first runner."

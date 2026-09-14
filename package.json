@@ -7,17 +7,19 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "start": "node runner/server.js",
+    "dev": "node --watch runner/server.js",
+    "runner": "node runner/cli.js",
     "test": "node scripts/test.mjs",
-    "nav": "node scripts/nav.mjs",
-    "seed": "node scripts/seed.mjs"
+    "check": "node scripts/test.mjs --check",
+    "probe": "node runner/probe.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.0",
     "typebox": "1.3.7"
   },
   "bin": {
-    "agent-plan": "src/cli.js"
-  }
+    "agent-plan": "runner/cli.js"
+  },
+  "description": "Terminal-first Pi orchestration with Herdr, Markdown workflows, and Git worktrees."
 }
