@@ -504,3 +504,36 @@ Skill instructions use runner file tools; scripts must be exposed as named comma
 by the owner. A skill cannot grant new tools or approval authority. Personal skills
 must first be copied into the repository and committed to use them in managed tasks.
 Ordinary supervisor Pi sessions retain Pi's native skills and tools.
+
+## MCP in the supervisor
+
+```sh
+agent-plan supervisor --mcp
+# Or explicitly select an adapter config (also enables MCP):
+agent-plan supervisor --mcp-config /absolute/private/tickets.json
+```
+
+The launcher loads `npm:pi-mcp-adapter@2.33.0` through Pi's existing package loader.
+First use needs network access to install/cache it. The adapter supplies MCP tool
+and resource discovery, stdio/HTTP transports and its authentication UI. Configure
+your actual ticket server using `/mcp setup` or its documented JSON format:
+
+```json
+{
+  "mcpServers": {
+    "tickets": { "url": "https://your-ticket-server.example/mcp" }
+  }
+}
+```
+
+The URL above is a placeholder, not a configured integration. Keep credentials in
+private configuration or the adapter's authentication store. The adapter uses its
+normal config merging; `--mcp-config` is not an isolated configuration boundary.
+See [adapter documentation](https://github.com/nicobailon/pi-mcp-adapter) for server
+options, `/mcp-auth`, `excludeTools` and `approveTools` policies.
+
+Ask the supervisor to read a ticket, submit its requirements through
+`agent-plan start`, and watch the returned task ID. Ticket changes need your
+instruction; incoming ticket content does not authorize writes or task acceptance.
+Managed coordinator/worker sessions still disable ambient extensions and expose
+only runner tools. No MCP server credentials are copied into task artifacts.

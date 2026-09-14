@@ -27,3 +27,16 @@ test('supervisor watches exact decisions, persists acknowledgements and separate
     assert.equal(calls.filter(c => c.action === 'answer').length, count);
   } finally { handlers.session_shutdown(); }
 });
+
+test('supervisor MCP is opt-in, pinned, and preserves Pi model/session arguments', async () => {
+  const { supervisorArgs, main } = await import('../runner/cli.js');
+  const plain = supervisorArgs(['--model', 'example', '--continue']);
+  assert(!plain.some(arg => arg.startsWith('npm:')));
+  const enabled = supervisorArgs(['--mcp', '--mcp-config', '/tmp/tickets.json', '--provider', 'example']);
+  assert.equal(enabled.filter(arg => arg === 'npm:pi-mcp-adapter@2.33.0').length, 1);
+  assert(!enabled.includes('--mcp'));
+  assert(enabled.includes('/tmp/tickets.json')); assert(enabled.includes('--provider'));
+  assert(supervisorArgs(['--mcp-config', '/tmp/tickets.json']).includes('npm:pi-mcp-adapter@2.33.0'));
+  assert.throws(() => supervisorArgs(['--mcp-config']), /Missing/);
+  assert.match(await main(['supervisor', '--help']), /managed workers use runner tools only/);
+});

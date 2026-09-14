@@ -41,13 +41,20 @@ agent-plan artifact <task> <relative-path>
 agent-plan dashboard
 agent-plan notifications
 agent-plan webhook <private-config-file>          Configure owner notifications
-agent-plan supervisor [--model MODEL] [--provider PROVIDER] Open your supervisor Pi session
+agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] Open your supervisor Pi session
 
 start/onboard accept --model MODEL and --provider PROVIDER.
 Stage defaults: --discovery-model/--discovery-provider, --planning-model/--planning-provider.
 Starting work uses your configured Pi model and the repo's committed HEAD.
 `;
 const topics = {
+  supervisor: `agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] [--mcp-config FILE]
+
+Open an ordinary Pi supervisor. /runner-watch TASK subscribes to coordinator events.
+--mcp loads the pinned pi-mcp-adapter package using Pi's package loader (first use
+needs network access). --mcp-config also enables the adapter and selects a config
+file using its normal merge rules. Other Pi arguments, including --continue, pass
+through. MCP stays in the supervisor; managed workers use runner tools only.`,
   accept: `agent-plan accept TASK [COMMIT] [--target main]
 
 Accept a completed candidate, rebase its task changes onto local main, rerun checks,
@@ -105,14 +112,27 @@ function showHelp(topic) {
   assert(lines.length, `Unknown help topic: ${topic}. Run agent-plan help.`);
   return lines.join('\n') + '\n';
 }
+export function supervisorArgs(raw) {
+  const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url))];
+  if (raw.includes('--mcp') || raw.includes('--mcp-config')) args.push('-e', 'npm:pi-mcp-adapter@2.33.0');
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === '--mcp') continue;
+    if (raw[i] === '--mcp-config') {
+      assert(raw[i + 1] && !raw[i + 1].startsWith('--'), 'Missing --mcp-config value');
+      args.push(raw[i], resolve(raw[++i]));
+    } else args.push(raw[i]);
+  }
+  return args;
+}
 export async function main(args = process.argv.slice(2)) {
   const [command, ...raw] = args;
   if (!command || ['help', '--help', '-h'].includes(command)) return showHelp(raw[0]);
   if (raw.includes('--help') || raw.includes('-h')) return showHelp(command);
   if (command === 'supervisor') {
+    const args = supervisorArgs(raw);
     await connect();
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/cli.js', import.meta.url)), '-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url)), ...raw], { stdio: 'inherit' });
+      const child = spawn(process.execPath, [fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/cli.js', import.meta.url)), ...args], { stdio: 'inherit' });
       child.once('error', reject); child.once('exit', code => resolve(code ?? 1));
     });
     assert(code === 0, `Supervisor exited with status ${code}`); return '';
