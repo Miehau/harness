@@ -125,9 +125,12 @@ test('contextual human questions preserve the exact original and save receipts a
   const first = session(); await first.handlers.session_start({}, first.ctx);
   await assert.rejects(first.run({ action: 'compact_memory' }), /Save the supervisor index/);
   await first.run({ action: 'memory_write', path: 'memory.md', previous: '', text: 'Guest checkout is active.' });
-  await first.run({ action: 'compact_memory' }); assert(first.ctx.compacted);
+  await first.run({ action: 'compact_memory' }); assert(!first.ctx.compacted);
+  await first.handlers.agent_end({ messages: [] }); assert(first.ctx.compacted);
   await first.run(input); first.handlers.session_shutdown();
   const second = session(); await second.handlers.session_start({}, second.ctx);
-  await second.run(input); assert.equal(dialogs, 1);
+  const reply = JSON.parse((await second.run(input)).content[0].text);
+  assert.equal(reply.humanAnswer, 'Email only'); assert.equal(reply.answeredBy, 'owner');
+  assert.equal(dialogs, 1);
   await assert.rejects(second.run({ ...input, text: 'Changed context' }), /different input/);
 });

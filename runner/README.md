@@ -621,7 +621,8 @@ changes and before ending its turn. Original Pi transcripts and runtime artifact
 remain the detailed record; unsaved conversation cannot be recovered from these notes.
 
 Use `/runner-checkpoint` to ask the agent to save outstanding discussion and then call
-`compact_memory`, which persists watch state before requesting Pi compaction. A fresh
+`compact_memory`, which persists watch state and waits for the turn to finish before
+requesting Pi compaction. Completion or failure is shown in Pi. A fresh
 Pi supervisor session also loads the same memory and watch/action receipts from
 `supervisor/state.json`. Live task state must be inspected before acting. This storage
 is intended for one supervisor at a time per data directory; simultaneous supervisors
@@ -633,3 +634,5 @@ Scope changes, unclear product tradeoffs and required approvals still go to you.
 `ask_user` accepts `text` alongside a task/decision ID to show agreed context,
 a recommendation and consequences above the unchanged original coordinator question.
 Human input still targets that exact decision; context participates in retry identity.
+The tool returns the recorded `humanAnswer` so the supervisor can save the decision
+and acknowledge it without asking again.

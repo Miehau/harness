@@ -49,8 +49,10 @@ can continue monitoring without replaying consumed events or prompting twice on 
 One supervisor owns this directory; concurrent sessions require separate data roots.
 
 `/runner-checkpoint` requests model-maintained notes before `compact_memory` saves
-state and requests Pi compaction. Summaries retain source references, not a lossless
+state and queues Pi compaction after the turn ends (avoiding an aborted tool turn). Summaries retain source references, not a lossless
 copy of conversation. Routine decision guidance consults memory and records provenance;
 contextual human dialogs show recommendations alongside the original exact question.
+Their result includes the recorded human answer for memory updates; compaction reports
+success or failure through Pi notifications.
 Tests in `test/supervisor.test.js` cover fresh-session recovery, stale writes, path and
 size limits, contextual question identity, human receipts and the compaction prerequisite.
