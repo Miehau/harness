@@ -20,7 +20,7 @@ test('supervisor watches exact decisions, persists acknowledgements and separate
     await tool.execute('routine-answer', { action: 'answer', taskId: 'task', decisionId: 'decision', text: 'Blue, per the agreed requirements' });
     assert.equal(calls.at(-1).action, 'supervisor-answer');
     assert.deepEqual(calls.at(-1).input, { decisionId: 'decision', text: 'Blue, per the agreed requirements' });
-    await assert.rejects(tool.execute('bad', { action: 'accept', taskId: 'task' }), /Unsupported/);
+    await assert.rejects(tool.execute('bad', { action: 'delete', taskId: 'task' }), /Unsupported/);
     await assert.rejects(commands['runner-answer'].handler('task stale yes', ctx), /pending decision/);
     await commands['runner-answer'].handler('task decision Blue please', ctx);
     assert.equal(calls.at(-1).action, 'answer'); assert.equal(calls.at(-1).input.decisionId, 'decision');
@@ -51,4 +51,25 @@ test('supervisor exposes video metadata as text rather than an image block', asy
   const result = await tool.execute('video', { action: 'read', taskId: 'task', path: 'runtime/clip.webm' });
   assert.equal(result.content[0].type, 'text');
   assert.equal(JSON.parse(result.content[0].text).localPath, '/tmp/clip.webm');
+});
+
+test('human dialogs fail closed on cancellation, stale identity, headless mode and abort', async () => {
+  let tool; const mutations = [];
+  const pi = { on() {}, registerCommand() {}, registerTool: value => { tool = value; }, appendEntry() {} };
+  const task = { status: 'completed', repo: '/repo', verification: { passed: true, commit: 'current', artifact: 'proof.md' }, decisions: [] };
+  supervisor(pi, { request: async body => { if (body.action === 'inspect') return task; mutations.push(body); return {}; } });
+  const ctx = { hasUI: true, ui: { input: async () => undefined, confirm: async () => false } };
+  const accept = { action: 'accept', taskId: 'task', commit: 'current' };
+  assert((await tool.execute('cancel-accept', accept, undefined, undefined, ctx)).details.cancelled);
+  assert((await tool.execute('cancel-question', { action: 'ask_user', text: 'Requirements?' }, undefined, undefined, ctx)).details.cancelled);
+  await assert.rejects(tool.execute('no-ui', accept), /interactive/);
+  await assert.rejects(tool.execute('stale', { ...accept, commit: 'old' }, undefined, undefined, ctx), /current verified/);
+  await assert.rejects(tool.execute('wrong', { action: 'ask_user', taskId: 'task', decisionId: 'old' }, undefined, undefined, ctx), /active coordinator/);
+  ctx.ui.confirm = async () => true;
+  await assert.rejects(tool.execute('aborted', accept, AbortSignal.abort(), undefined, ctx), /aborted/);
+  assert.deepEqual(mutations, []);
+  ctx.ui.input = async () => 'Support dark mode';
+  const result = await tool.execute('requirements', { action: 'ask_user', text: 'Requirements?' }, undefined, undefined, ctx);
+  assert.equal(JSON.parse(result.content[0].text).answer, 'Support dark mode');
+  assert.deepEqual(mutations, []);
 });

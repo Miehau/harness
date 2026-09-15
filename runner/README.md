@@ -492,17 +492,28 @@ in the Pi session. Questions, attention and completed/failed results wake the
 supervisor without polling the model. It reads artifacts, including PNG previews,
 and uses `runner_supervisor` to send nonblocking feedback to coordinators.
 
-Use `/runner-answer TASK_ID DECISION_ID your answer` to review the question and
-confirm an exact human reply. The supervisor model can answer routine coordinator questions directly with
-`answer {taskId,decisionId,text}`. Its replies are recorded as `answeredBy: supervisor`
-and wake the exact waiting coordinator. It uses the agreed requirements and prior
-user direction; new scope/product choices must come back to you.
-`ask {requiresOwner:true}` and approval hooks require a human answer, enforced by
-the runtime (including approval hooks on older tasks). The model cannot accept.
-Use `agent-plan accept` for candidate acceptance. This is a trusted local operator
-session with ordinary Pi tools and owner CLI access, not a sandbox: the separation
-in the extension is not protection from arbitrary local shell commands.
-No Grok webhook is required; an existing webhook continues independently.
+The supervisor uses `ask_user {text}` for requirements questions before starting,
+or `ask_user {taskId,decisionId}` for a coordinator question. Pi displays an input
+dialog in the same session; the extension sends exactly what you type to the
+pending decision as a human reply. No IDs or slash commands need to be copied.
+The coordinator resumes and relays the decision to its waiting workers.
+
+Routine questions use `answer {taskId,decisionId,text}` and are recorded as
+`answeredBy: supervisor`. New scope/product choices, `requiresOwner` decisions and
+approval hooks use the human dialog. The optional `/runner-answer` shortcut remains.
+
+Once evidence is ready, `accept {taskId,commit,target?}` opens a confirmation showing
+the repository, exact verified commit and target branch. Approval runs the existing
+rebase, verification and local merge operation; it does not push. Cancelled dialogs
+send nothing, and headless sessions cannot supply human approval. Human responses
+and approvals persist in the Pi session keyed by requestId (tool call ID by default),
+so retrying the same request does not prompt again or repeat a completed operation.
+A changed decision, commit or target requires a new request and human interaction.
+
+This is a trusted local operator session with ordinary Pi tools and owner CLI access,
+not a sandbox: the extension's human/model distinction is not protection from
+arbitrary local shell commands. No Grok webhook is required; an existing webhook
+continues independently.
 
 ## Selected managed skills
 

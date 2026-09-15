@@ -876,3 +876,48 @@ test('supervisor answers resume exact coordinator decisions without granting hum
   await call('owner', 'cancel', task.id);
   await assert.rejects(call('owner', 'supervisor-answer', task.id, { decisionId: cancelled.decisionId, text: 'Late reply' }), /active coordinator/);
 });
+
+test('supervisor human conversation relays a worker question and accepts the finished candidate', async t => {
+  const f = await fixture(t);
+  const { default: supervisor } = await import('../runner/supervisor-extension.js');
+  const handlers = {}, entries = []; let tool, prompts = 0, confirmations = 0, loseReply = true;
+  const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand() {}, registerTool: value => { tool = value; }, appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }) };
+  supervisor(pi, { request: async body => {
+    const result = await f.runtime.execute('owner', body);
+    if (body.action === 'answer' && loseReply) { loseReply = false; throw Error('Lost answer response'); }
+    return result;
+  } });
+  const ctx = { hasUI: true, sessionManager: { getEntries: () => entries }, ui: {
+    input: async question => { prompts++; assert.match(question, /Which wording/); return 'Use improved'; },
+    confirm: async (_title, message) => { confirmations++; assert.match(message, /Commit: .*\nTarget: main/); return true; }, setStatus() {}
+  } };
+  handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  await f.artifact('work.md', 'Update value.txt');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { mode: 'write', assignment: 'work.md' });
+  const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
+  const workerQuestion = await f.artifact('question.md', 'Which wording?', f.who(worker));
+  const wq = await f.call(f.who(worker), 'ask', f.task.id, { artifact: workerQuestion });
+  assert(f.runtime.poll(f.who(f.main)).messages.some(m => m.decisionId === wq.decisionId));
+  await f.artifact('owner-question.md', 'Which wording should the worker use?');
+  const cq = await f.call(f.who(f.main), 'ask', f.task.id, { artifact: 'owner-question.md', requiresOwner: true });
+  const input = { action: 'ask_user', taskId: f.task.id, decisionId: cq.decisionId, requestId: 'human-wording' };
+  await assert.rejects(tool.execute('human-1', input, undefined, undefined, ctx), /Lost answer response/);
+  handlers.session_shutdown(); handlers.session_start({}, ctx);
+  const answer = JSON.parse((await tool.execute('human-retry', input, undefined, undefined, ctx)).content[0].text);
+  assert.equal(prompts, 1); assert.equal(f.runtime.task(f.task.id).decisions.at(-1).answeredBy, 'owner');
+  assert(f.runtime.poll(f.who(f.main)).messages.some(m => m.decisionId === cq.decisionId && m.answeredBy === 'owner'));
+  await f.call(f.who(f.main), 'answer', f.task.id, { decisionId: wq.decisionId, artifact: answer.artifact });
+  assert(f.runtime.poll(f.who(worker)).messages.some(m => m.decisionId === wq.decisionId && m.artifact === answer.artifact));
+  await f.call(f.who(worker), 'write', f.task.id, { area: 'repo', path: 'value.txt', content: 'improved\n' });
+  const report = await f.artifact('done.md', 'Changed wording', f.who(worker));
+  await f.call(f.who(worker), 'report', f.task.id, { status: 'completed', artifact: report });
+  await f.call(f.who(f.main), 'integrate', f.task.id, { workerId: worker.id });
+  const proof = await f.call(f.who(f.main), 'verify', f.task.id);
+  await f.artifact('handoff.md', 'Verified wording');
+  await f.call(f.who(f.main), 'report', f.task.id, { status: 'completed', artifact: 'handoff.md' });
+  const accept = { action: 'accept', taskId: f.task.id, commit: proof.commit, requestId: 'human-accept' };
+  const delivery = JSON.parse((await tool.execute('accept-1', accept, undefined, undefined, ctx)).content[0].text);
+  assert.equal(delivery.phase, 'merged'); assert.equal(await readFile(join(f.repo, 'value.txt'), 'utf8'), 'improved\n');
+  await tool.execute('accept-retry', accept, undefined, undefined, ctx); assert.equal(confirmations, 1);
+  await assert.rejects(tool.execute('changed', { ...accept, target: 'other' }, undefined, undefined, ctx), /different input/);
+});
