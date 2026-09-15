@@ -8,7 +8,7 @@ runner_action actions and input:
 - contract: {artifact} — publish a shared contract; revisions require no active writers
 - clarify: {artifact} — record coordinator review of the current document revisions
 - surface: {artifact,attachments?} — notify the owner without creating a blocking question
-- ask: {artifact,attachments?} — ask the user, then stop until an answer arrives
+- ask: {artifact,attachments?,requiresOwner?,hook?} — ask a blocking question, then stop until an answer arrives. For coordinators, a supervisor may answer routine questions from agreed requirements. Set requiresOwner:true for new scope/product choices or other decisions needing the human; approval hooks always require the human.
 - answer: {decisionId,artifact} — answer a worker question
 - integrate: {workerId} — commit references come from worker reports
 - verify: {} — execute snapshotted repo commands and retain output files

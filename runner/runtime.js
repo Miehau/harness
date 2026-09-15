@@ -270,24 +270,33 @@ export class Runtime {
   }
   async ask(task, agent, input) {
     const hook = hookFields(input.hook);
+    assert(input.requiresOwner === undefined || typeof input.requiresOwner === 'boolean', 'requiresOwner must be boolean');
     await this.reference(task, input.artifact); const attachments = await this.attachments(task, input.attachments);
-    const decision = { id: id(), agentId: agent.id, audience: agent.role === 'orchestrator' ? 'owner' : 'orchestrator', artifact: input.artifact, attachments, at: now() };
+    const decision = { id: id(), agentId: agent.id, audience: agent.role === 'orchestrator' ? 'owner' : 'orchestrator', artifact: input.artifact, attachments, requiresOwner: input.requiresOwner === true || hook.hook?.action === 'approval', at: now() };
     task.decisions.push(decision); agent.status = 'waiting';
-    if (decision.audience === 'owner') { task.status = 'waiting'; this.event(task, 'decision', { decisionId: decision.id, artifact: input.artifact, attachments, ...hook }); }
+    if (decision.audience === 'owner') { task.status = 'waiting'; this.event(task, 'decision', { decisionId: decision.id, artifact: input.artifact, attachments, requiresOwner: decision.requiresOwner, ...hook }); }
     else this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'question', input.artifact, { decisionId: decision.id, workerId: agent.id, attachments });
     await this.save(task); return { decisionId: decision.id, status: 'waiting' };
   }
   async answer(task, actor, input) {
     const decision = task.decisions.find(d => d.id === input.decisionId);
     assert(decision, 'Unknown decision');
-    assert(actor === 'owner' || decision.audience === 'orchestrator', 'Only the owner may answer user decisions');
-    await this.reference(task, input.artifact);
+    const supervisor = actor === 'supervisor';
+    assert(actor === 'owner' || supervisor || decision.audience === 'orchestrator', 'Only the owner may answer user decisions');
+    if (supervisor) {
+      assert(decision.audience === 'owner' && !terminal.has(task.status), 'Supervisor answers require an active coordinator decision');
+      // Older decisions stored approval classification only on their event.
+      assert(!decision.requiresOwner && !task.events.some(e => e.decisionId === decision.id && e.hook?.action === 'approval'), 'This decision requires a human owner answer');
+      string(input.text, 'answer', 100000);
+      assert(!decision.answer, 'Decision already answered');
+    } else await this.reference(task, input.artifact);
     if (decision.answer) { assert(decision.answer === input.artifact, 'Decision already answered differently'); return { decisionId: decision.id, artifact: decision.answer }; }
     const agent = task.agents.find(a => a.id === decision.agentId);
     assert(agent?.status === 'waiting', 'Decision targets an inactive attempt');
+    if (supervisor) input = { ...input, artifact: await this.artifact(task, input.text, 'md', 'supervisor') };
     decision.answer = input.artifact; decision.answeredBy = actor; decision.answeredAt = now(); agent.status = 'running'; agent.startedAt = now();
     if (agent.role === 'orchestrator') task.status = 'running';
-    this.message(agent, 'answer', input.artifact, { decisionId: decision.id }); await this.save(task); return { decisionId: decision.id, artifact: input.artifact };
+    this.message(agent, 'answer', input.artifact, { decisionId: decision.id, answeredBy: actor }); await this.save(task); return { decisionId: decision.id, artifact: input.artifact };
   }
   async terminalAnswer(token, input) {
     let match;
@@ -413,6 +422,7 @@ export class Runtime {
         for (const message of actor.inbox) if (body.ids.includes(message.id)) message.acknowledgedAt ??= now();
         result = { acknowledged: body.ids }; await this.save(task);
       } else if (action === 'answer') { assert(owner || orchestrator, 'Orchestrator access required'); result = await this.answer(task, owner ? 'owner' : actor.id, body); }
+      else if (action === 'supervisor-answer') { assert(owner, 'Owner connection required for supervisor answers'); result = await this.answer(task, 'supervisor', body); }
       else if (action === 'start') { assert(owner, 'Owner access required'); result = await this.start(task); }
       else if (action === 'resume') { assert(owner, 'Owner access required'); result = await this.resume(task, body); }
       else if (action === 'recover') { assert(owner, 'Owner access required'); result = await this.recover(task, body); }

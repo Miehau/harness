@@ -493,7 +493,12 @@ supervisor without polling the model. It reads artifacts, including PNG previews
 and uses `runner_supervisor` to send nonblocking feedback to coordinators.
 
 Use `/runner-answer TASK_ID DECISION_ID your answer` to review the question and
-confirm an exact human reply. The supervisor model tool cannot answer or accept.
+confirm an exact human reply. The supervisor model can answer routine coordinator questions directly with
+`answer {taskId,decisionId,text}`. Its replies are recorded as `answeredBy: supervisor`
+and wake the exact waiting coordinator. It uses the agreed requirements and prior
+user direction; new scope/product choices must come back to you.
+`ask {requiresOwner:true}` and approval hooks require a human answer, enforced by
+the runtime (including approval hooks on older tasks). The model cannot accept.
 Use `agent-plan accept` for candidate acceptance. This is a trusted local operator
 session with ordinary Pi tools and owner CLI access, not a sandbox: the separation
 in the extension is not protection from arbitrary local shell commands.

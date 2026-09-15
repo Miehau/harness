@@ -17,7 +17,10 @@ test('supervisor watches exact decisions, persists acknowledgements and separate
     await commands['runner-watch'].handler('task', ctx); assert.equal(messages.length, 1);
     await tool.execute('advice', { action: 'feedback', taskId: 'task', text: 'Consider blue' });
     assert.equal(calls.at(-1).action, 'feedback');
-    await assert.rejects(tool.execute('bad', { action: 'answer', taskId: 'task' }), /Unsupported/);
+    await tool.execute('routine-answer', { action: 'answer', taskId: 'task', decisionId: 'decision', text: 'Blue, per the agreed requirements' });
+    assert.equal(calls.at(-1).action, 'supervisor-answer');
+    assert.deepEqual(calls.at(-1).input, { decisionId: 'decision', text: 'Blue, per the agreed requirements' });
+    await assert.rejects(tool.execute('bad', { action: 'accept', taskId: 'task' }), /Unsupported/);
     await assert.rejects(commands['runner-answer'].handler('task stale yes', ctx), /pending decision/);
     await commands['runner-answer'].handler('task decision Blue please', ctx);
     assert.equal(calls.at(-1).action, 'answer'); assert.equal(calls.at(-1).input.decisionId, 'decision');

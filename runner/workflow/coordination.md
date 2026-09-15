@@ -41,7 +41,10 @@ workers with its reference. A sent message is not agreement or authorization.
 
 ## Grok hooks
 
-Use `ask` for a blocking owner decision and `surface` for a nonblocking escalation.
+Use `ask` for a blocking question and `surface` for a nonblocking escalation.
+A supervisor can answer routine coordinator questions from agreed requirements;
+its answer is labeled answeredBy="supervisor", not human approval. Set
+`requiresOwner: true` for new scope/product choices or decisions needing the human.
 Both accept `hook: {action, pr?, evidence?, problems?}` alongside artifact/attachments.
 Actions: approval (aliases pr-approval, impl-approval), opinion (harness-opinion),
 problem (impl-problem, blocker). Put the message in the referenced artifact.

@@ -838,3 +838,41 @@ test('supervisor start launches once, auto-watches across restart and recovers a
   await assert.rejects(tool.execute('invalid', { action: 'start', repo: f.repo, text: 'Missing retry identity' }), /requestId/);
   await assert.rejects(tool.execute('changed', { ...input, text: 'Different ticket' }), /different input/);
 });
+
+test('supervisor answers resume exact coordinator decisions without granting human approval', async t => {
+  const f = await fixture(t); const { call, task, main, who, artifact } = f;
+  await assert.rejects(call(who(main), 'supervisor-answer', task.id, { decisionId: 'missing', text: 'No' }), /Owner connection/);
+  await artifact('routine.md', 'Which verifier should we use?');
+  const question = await call(who(main), 'ask', task.id, { artifact: 'routine.md' });
+  const input = { decisionId: question.decisionId, text: 'Use npm test, as agreed in the requirements.' };
+  const receipt = id();
+  const result = await call('owner', 'supervisor-answer', task.id, input, receipt);
+  let current = f.runtime.task(task.id);
+  assert.equal(current.status, 'running'); assert.equal(current.agents[0].status, 'running');
+  assert.equal(current.decisions[0].answeredBy, 'supervisor');
+  assert.equal(current.agents[0].inbox.at(-1).decisionId, question.decisionId);
+  assert.equal(current.agents[0].inbox.at(-1).answeredBy, 'supervisor');
+  assert.equal((await call('owner', 'read', task.id, { area: 'artifacts', path: result.artifact })).content, input.text);
+  const restarted = new Runtime(f.data, { transport: f.transport }); await restarted.init();
+  assert.deepEqual(await restarted.execute('owner', { action: 'supervisor-answer', taskId: task.id, input, requestId: receipt }), result);
+  assert.equal(restarted.task(task.id).agents[0].inbox.filter(m => m.decisionId === question.decisionId).length, 1);
+  await assert.rejects(call('owner', 'supervisor-answer', task.id, input), /already answered/);
+  await assert.rejects(call('owner', 'supervisor-answer', task.id, { ...input, decisionId: 'wrong-task-decision' }), /Unknown decision/);
+  await artifact('human.md', 'Expand the agreed scope?');
+  await artifact('human-answer.md', 'Yes', 'owner');
+  for (const classification of [{ requiresOwner: true }, { requiresOwner: false, hook: { action: 'pr-approval' } }]) {
+    const q = await call(who(main), 'ask', task.id, { artifact: 'human.md', ...classification });
+    current = f.runtime.task(task.id);
+    assert.equal(current.decisions.at(-1).requiresOwner, true);
+    if (classification.hook) { // Legacy tasks stored approval only on the event.
+      delete current.decisions.at(-1).requiresOwner; await f.runtime.save(current);
+    }
+    await assert.rejects(call('owner', 'supervisor-answer', task.id, { decisionId: q.decisionId, text: 'Approve' }), /human owner/);
+    assert.equal(f.runtime.task(task.id).status, 'waiting');
+    await call('owner', 'answer', task.id, { decisionId: q.decisionId, artifact: 'human-answer.md' });
+    assert.equal(f.runtime.task(task.id).decisions.at(-1).answeredBy, 'owner');
+  }
+  const cancelled = await call(who(main), 'ask', task.id, { artifact: 'routine.md' });
+  await call('owner', 'cancel', task.id);
+  await assert.rejects(call('owner', 'supervisor-answer', task.id, { decisionId: cancelled.decisionId, text: 'Late reply' }), /active coordinator/);
+});
