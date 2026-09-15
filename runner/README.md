@@ -655,3 +655,24 @@ eligible final events have been consumed successfully. Missing tasks are detache
 connection failures keep their watches and do not block other tasks. Historical task
 references and Markdown notes remain. Waiting/running tasks stay watched; Herdr idle
 alone is not completion. Reattach explicitly with `/runner-watch` when resuming work.
+
+### Supervisor task lifecycle
+
+Ask the supervisor to cancel, resume or recover a task. `runner_supervisor` exposes
+these actions with `taskId` and a stable `requestId`; identical retries reuse runtime
+receipts, including after a lost response or fresh supervisor session.
+
+- `cancel` stops the task while retaining worktrees and artifacts. Any `stopErrors`
+  are returned for inspection; successful cancellation detaches its watch.
+- `resume` inspects the task and selects its coordinator automatically. It restores
+  the watch before resuming the existing attempt; it cannot select a worker, reopen a
+  cancelled/completed task or answer a pending human decision.
+- `recover` requires the exact `operation` object from inspection, `outcome` of
+  `applied` or `aborted`, and `text` explaining the observed recovery evidence. It
+  acknowledges already resolved state; it does not resolve conflicts or discard work.
+  Runtime checks still reject active command groups, dirty/unresolved Git state and
+  unproven integration outcomes. A changed operation invalidates the request.
+
+Lifecycle requests and results persist in supervisor state. After each action the
+supervisor updates the linked task note with the outcome and next step. Recovery
+restores monitoring but does not automatically resume an agent or approve delivery.

@@ -64,3 +64,10 @@ references. Tests cover all trigger reasons, preserved user instructions, authen
 failure, terminal-event acknowledgement before unwatching, missing tasks and transient
 connection failures. Final-event handling precedes watch removal; retained notes and
 references remain available after removal.
+
+Task lifecycle actions reuse runtime cancel/resume/recover with durable retry inputs.
+Resume selects only the coordinator and restores its watch; cancel retains worktrees.
+Recovery requires explicit outcome/evidence and an exact operation snapshot, rechecked
+inside the runtime's serialized recovery operation. No worker selection or new delivery
+approval path is exposed. Runtime integration tests cover lost-response retries across
+supervisor sessions, stale operation identity, retained work and terminal-task rejection.

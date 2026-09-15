@@ -921,3 +921,45 @@ test('supervisor human conversation relays a worker question and accepts the fin
   await tool.execute('accept-retry', accept, undefined, undefined, ctx); assert.equal(confirmations, 1);
   await assert.rejects(tool.execute('changed', { ...accept, target: 'other' }, undefined, undefined, ctx), /different input/);
 });
+
+test('supervisor lifecycle resumes only the coordinator, recovers exact operations and cancels without removing work', async t => {
+  const f = await fixture(t);
+  const { default: supervisor } = await import('../runner/supervisor-extension.js');
+  let tool, loseResume = true; const handlers = {}, requests = [];
+  supervisor({ on: (name, fn) => { handlers[name] = fn; }, registerCommand() {}, registerTool: value => { tool = value; }, appendEntry() {} }, { root: f.data, request: async body => {
+    requests.push(body);
+    const result = await f.runtime.execute('owner', body);
+    if (body.action === 'resume' && loseResume) { loseResume = false; throw Error('Lost resume response'); }
+    return result;
+  } });
+  const ctx = { sessionManager: { getEntries: () => [] }, ui: { setStatus() {} } };
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  const run = async input => JSON.parse((await tool.execute('lifecycle', { taskId: f.task.id, ...input })).content[0].text);
+  f.transport.agents.delete(f.main.id);
+  const resume = { action: 'resume', requestId: 'resume-coordinator' };
+  await assert.rejects(run(resume), /Lost resume response.*reuse requestId resume-coordinator/);
+  handlers.session_shutdown(); await handlers.session_start({}, ctx);
+  const resumed = await run(resume);
+  assert.equal(resumed.resumed, f.main.id); assert(resumed.watching);
+  assert.equal(f.transport.starts.filter(id => id === f.main.id).length, 2);
+  assert(requests.filter(r => r.action === 'resume').every(r => r.input.agentId === f.main.id));
+  await assert.rejects(run({ ...resume, action: 'cancel' }), /different input/);
+  let task = f.runtime.task(f.task.id);
+  task.operation = { kind: 'command', pid: 2147483647, at: '2026-09-16T00:00:00Z' };
+  await f.runtime.save(task);
+  const operation = structuredClone(task.operation);
+  await assert.rejects(run({ action: 'recover', requestId: 'stale', outcome: 'aborted', operation: { ...operation, at: 'old' }, text: 'Process exited' }), /exact interrupted operation/);
+  await assert.rejects(run({ action: 'recover', requestId: 'no-evidence', outcome: 'aborted', operation }), /recovery evidence/);
+  const recovery = { action: 'recover', requestId: 'recover-command', outcome: 'aborted', operation, text: 'The recorded process group is gone and integration worktree is clean.' };
+  const recovered = await run(recovery);
+  assert(recovered.recovered); assert(recovered.watching);
+  assert.equal(f.runtime.task(f.task.id).operation, null);
+  assert((await run(recovery)).recovered); // Retry after operation was cleared uses the runtime receipt.
+  // Runtime rechecks identity inside its serialized action, not only in supervisor inspection.
+  task = f.runtime.task(f.task.id); task.operation = { ...operation, at: 'new-operation' }; await f.runtime.save(task);
+  await assert.rejects(f.call('owner', 'recover', task.id, { outcome: 'aborted', expectedOperation: operation }), /operation changed/);
+  const cancelled = await run({ action: 'cancel', requestId: 'cancel-task' });
+  assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.watching, false);
+  assert.equal(await readFile(join(f.main.cwd, 'value.txt'), 'utf8'), 'base\n');
+  await assert.rejects(run({ action: 'resume', requestId: 'resume-cancelled' }), /Only unfinished tasks/);
+});

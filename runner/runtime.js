@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, writeFile, stat, realpath, unlink } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
@@ -359,6 +360,7 @@ export class Runtime {
   }
   async recover(task, input) {
     assert(task.operation, 'No interrupted operation');
+    if (input.expectedOperation !== undefined) assert(isDeepStrictEqual(task.operation, input.expectedOperation), 'Interrupted operation changed; inspect before recovery');
     if (['accept-rebase', 'accept-merge'].includes(task.operation.kind)) return recoverDelivery(this, task, input);
     if (task.operation.kind === 'command') {
       assert(task.operation.pid, 'Command launch identity is uncertain; inspect retained work before recovery');
