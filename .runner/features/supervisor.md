@@ -37,3 +37,20 @@ The full conversation test in `test/runner.test.js` exercises a worker question,
 coordinator escalation, human dialog reply, coordinator-to-worker answer, completed
 implementation and human-confirmed local acceptance. Unit tests cover cancelled,
 headless, aborted and stale requests, plus requirements questions before task creation.
+
+## Durable memory
+
+The supervisor index and per-feature Markdown files live beneath the runner data
+root in `supervisor/`; task notes can precede launch. The index is loaded every turn,
+with task filenames and watched IDs for retrieval and live reconciliation. Memory
+writes compare previous contents, reject path traversal and use atomic replacement.
+Watch/event/human-action receipts also persist outside Pi sessions, so fresh sessions
+can continue monitoring without replaying consumed events or prompting twice on retries.
+One supervisor owns this directory; concurrent sessions require separate data roots.
+
+`/runner-checkpoint` requests model-maintained notes before `compact_memory` saves
+state and requests Pi compaction. Summaries retain source references, not a lossless
+copy of conversation. Routine decision guidance consults memory and records provenance;
+contextual human dialogs show recommendations alongside the original exact question.
+Tests in `test/supervisor.test.js` cover fresh-session recovery, stale writes, path and
+size limits, contextual question identity, human receipts and the compaction prerequisite.

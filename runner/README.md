@@ -603,3 +603,33 @@ Grok sends small PNGs inline; videos and larger files carry an authenticated art
 read request for a trusted local relay. No public media hosting or credentials are
 added. Receiver-side playback/forwarding requires that adapter to implement retrieval;
 no live Claude/Grok delivery is claimed. Use `surface`/`ask` attachments for previews.
+
+### Supervisor memory and context checkpoints
+
+The supervisor keeps `supervisor/memory.md` and `supervisor/tasks/SLUG.md` under
+`RUNNER_DATA` (the default runner data directory otherwise). The index holds priorities,
+preferences and links; task files hold scope, acceptance criteria, decisions and their
+sources, unresolved questions, artifact references and next actions. Files can exist
+before launch. Launch creates a task-ID note with the brief reference; the supervisor
+links it to any pre-launch feature discussion. Completed files remain available.
+
+The index and available filenames are loaded into each turn; task contents are read
+on demand with `runner_supervisor memory_read`. `memory_write` requires the exact
+previous contents, uses atomic replacement, and limits the index to 12,000 characters
+and task notes to 24,000. The supervisor is instructed to update notes after meaningful
+changes and before ending its turn. Original Pi transcripts and runtime artifacts
+remain the detailed record; unsaved conversation cannot be recovered from these notes.
+
+Use `/runner-checkpoint` to ask the agent to save outstanding discussion and then call
+`compact_memory`, which persists watch state before requesting Pi compaction. A fresh
+Pi supervisor session also loads the same memory and watch/action receipts from
+`supervisor/state.json`. Live task state must be inspected before acting. This storage
+is intended for one supervisor at a time per data directory; simultaneous supervisors
+should use separate data directories. Memory is local private state, not committed code.
+
+Before asking you, the supervisor consults task memory and answers routine questions
+from agreed requirements, prior decisions or repository conventions, citing its basis.
+Scope changes, unclear product tradeoffs and required approvals still go to you.
+`ask_user` accepts `text` alongside a task/decision ID to show agreed context,
+a recommendation and consequences above the unchanged original coordinator question.
+Human input still targets that exact decision; context participates in retry identity.

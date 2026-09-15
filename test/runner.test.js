@@ -809,19 +809,19 @@ test('supervisor start launches once, auto-watches across restart and recovers a
   const { default: supervisor } = await import('../runner/supervisor-extension.js');
   const handlers = {}, commands = {}, entries = [], messages = []; let tool, loseResponse = true;
   const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; }, registerTool: value => { tool = value; }, appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }), sendMessage: message => messages.push(message) };
-  supervisor(pi, { request: async body => {
+  supervisor(pi, { root: f.data, request: async body => {
     const result = await f.runtime.execute('owner', body);
     if (body.action === 'start' && loseResponse) { loseResponse = false; throw new Error('Connection lost'); }
     return result;
   } });
   const ctx = { sessionManager: { getEntries: () => entries }, ui: { setStatus() {} } };
-  handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
   const input = { action: 'start', repo: f.repo, text: 'Agreed ticket requirements and acceptance criteria', requestId: 'ticket-launch' };
   await assert.rejects(tool.execute('first-call', input), /Task .*Connection lost.*Reuse requestId ticket-launch/);
   const task = [...f.runtime.tasks.values()].find(task => task.requestId === input.requestId);
   assert(task); assert.equal(task.agents.length, 1);
   assert(entries.at(-1).data.watched[task.id]);
-  handlers.session_shutdown(); handlers.session_start({}, ctx);
+  handlers.session_shutdown(); await handlers.session_start({}, ctx);
   const result = JSON.parse((await tool.execute('retry-call', input)).content[0].text);
   assert.deepEqual(result, { taskId: task.id, status: 'running', watching: true });
   assert.equal(f.transport.starts.length, 2); // fixture coordinator plus the new coordinator
@@ -882,7 +882,7 @@ test('supervisor human conversation relays a worker question and accepts the fin
   const { default: supervisor } = await import('../runner/supervisor-extension.js');
   const handlers = {}, entries = []; let tool, prompts = 0, confirmations = 0, loseReply = true;
   const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand() {}, registerTool: value => { tool = value; }, appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }) };
-  supervisor(pi, { request: async body => {
+  supervisor(pi, { root: f.data, request: async body => {
     const result = await f.runtime.execute('owner', body);
     if (body.action === 'answer' && loseReply) { loseReply = false; throw Error('Lost answer response'); }
     return result;
@@ -891,7 +891,7 @@ test('supervisor human conversation relays a worker question and accepts the fin
     input: async question => { prompts++; assert.match(question, /Which wording/); return 'Use improved'; },
     confirm: async (_title, message) => { confirmations++; assert.match(message, /Commit: .*\nTarget: main/); return true; }, setStatus() {}
   } };
-  handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
   await f.artifact('work.md', 'Update value.txt');
   const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { mode: 'write', assignment: 'work.md' });
   const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
@@ -902,7 +902,7 @@ test('supervisor human conversation relays a worker question and accepts the fin
   const cq = await f.call(f.who(f.main), 'ask', f.task.id, { artifact: 'owner-question.md', requiresOwner: true });
   const input = { action: 'ask_user', taskId: f.task.id, decisionId: cq.decisionId, requestId: 'human-wording' };
   await assert.rejects(tool.execute('human-1', input, undefined, undefined, ctx), /Lost answer response/);
-  handlers.session_shutdown(); handlers.session_start({}, ctx);
+  handlers.session_shutdown(); await handlers.session_start({}, ctx);
   const answer = JSON.parse((await tool.execute('human-retry', input, undefined, undefined, ctx)).content[0].text);
   assert.equal(prompts, 1); assert.equal(f.runtime.task(f.task.id).decisions.at(-1).answeredBy, 'owner');
   assert(f.runtime.poll(f.who(f.main)).messages.some(m => m.decisionId === cq.decisionId && m.answeredBy === 'owner'));
