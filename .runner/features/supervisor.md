@@ -56,3 +56,11 @@ Their result includes the recorded human answer for memory updates; compaction r
 success or failure through Pi notifications.
 Tests in `test/supervisor.test.js` cover fresh-session recovery, stale writes, path and
 size limits, contextual question identity, human receipts and the compaction prerequisite.
+
+Native/manual, threshold and overflow compaction share a `session_before_compact`
+hook using Pi's standard summarizer and a deterministic recovery footer. Structured
+state keeps supervisor transcript paths plus last-observed agent/session/decision
+references. Tests cover all trigger reasons, preserved user instructions, authentication
+failure, terminal-event acknowledgement before unwatching, missing tasks and transient
+connection failures. Final-event handling precedes watch removal; retained notes and
+references remain available after removal.

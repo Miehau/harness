@@ -38,12 +38,16 @@ export default function supervisor(pi, options = {}) {
   }
   const send = options.request ?? request;
   const call = (action, taskId, input = {}, requestId = randomUUID()) => send({ action, taskId, input, requestId });
-  let humanActions = new Map();
+  let humanActions = new Map(), sessions = {}, taskRefs = {}, saving = Promise.resolve();
   let watched = {}, seen = new Set(), queued = new Set(), timer, polling = false, context, pendingCompaction;
-  const save = async () => {
-    const state = { watched, seen: [...seen], humanActions: [...humanActions] };
-    await atomic(join(root, 'state.json'), state);
-    pi.appendEntry('runner-supervisor', state);
+  const save = async (sessionEntry = true) => {
+    const state = structuredClone({ watched, seen: [...seen], humanActions: [...humanActions], sessions, taskRefs });
+    const write = saving.then(async () => {
+      await atomic(join(root, 'state.json'), state);
+      if (sessionEntry) pi.appendEntry('runner-supervisor', state);
+    });
+    saving = write.catch(() => {});
+    await write;
   };
   const watch = async (taskId, since = new Date().toISOString()) => { watched[taskId] ??= since; await save(); };
   async function poll() {
@@ -52,18 +56,32 @@ export default function supervisor(pi, options = {}) {
     try {
       const messages = [];
       for (const [taskId, since] of Object.entries(watched)) {
-        const task = await call('inspect', taskId);
+        let task;
+        try { task = await call('inspect', taskId); }
+        catch (error) {
+          if (error.message === 'Unknown task') { delete watched[taskId]; }
+          else context?.ui.setStatus('runner-supervisor', `${taskId}: ${error.message}`);
+          continue;
+        }
+        taskRefs[taskId] = { status: task.status, repo: task.repo, observedAt: new Date().toISOString(),
+          agents: (task.agents ?? []).map(({ id, role, session, place }) => ({ id, role, session, place })),
+          decisions: (task.decisions ?? []).map(({ id, artifact, answer, answeredBy, requiresOwner }) => ({ id, artifact, answer, answeredBy, requiresOwner })) };
+        let undelivered = false;
         for (const event of task.events) {
           const pending = task.decisions.some(d => d.id === event.decisionId && !d.answer);
-          if ((!pending && event.at < since) || seen.has(event.id) || queued.has(event.id)) continue;
+          if ((!pending && event.at < since) || seen.has(event.id)) continue;
           if (!['decision', 'attention', 'failed', 'completed', 'surface'].includes(event.kind)) continue;
+          undelivered = true;
+          if (queued.has(event.id)) continue;
           messages.push({ taskId, ...event });
         }
+        if (['completed', 'failed', 'cancelled'].includes(task.status) && !undelivered) delete watched[taskId];
       }
       if (messages.length) {
         pi.sendMessage({ customType: 'runner-supervisor-inbox', content: JSON.stringify(messages), display: true, details: { ids: messages.map(m => m.id) } }, { triggerTurn: true, deliverAs: 'followUp' });
         for (const message of messages) queued.add(message.id);
       }
+      await save(false);
     } catch (error) { context?.ui.setStatus('runner-supervisor', error.message); }
     finally { polling = false; }
   }
@@ -75,7 +93,11 @@ export default function supervisor(pi, options = {}) {
     try {
       const state = await json(join(root, 'state.json'));
       watched = state.watched; seen = new Set(state.seen); humanActions = new Map(state.humanActions);
+      sessions = state.sessions ?? {}; taskRefs = state.taskRefs ?? {};
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const sessionId = ctx.sessionManager.getSessionId?.();
+    if (sessionId) sessions[sessionId] = ctx.sessionManager.getSessionFile?.() ?? null;
+    await save();
     timer = setInterval(poll, 5000); timer.unref?.();
   });
   pi.on('session_shutdown', () => { clearInterval(timer); context = undefined; pendingCompaction = undefined; });
@@ -94,6 +116,26 @@ export default function supervisor(pi, options = {}) {
       });
     }
   });
+  pi.on('session_before_compact', async (event, ctx) => {
+    // Keep exact references outside the model-generated summary, including automatic overflow compaction.
+    try {
+      if (event.signal.aborted) return { cancel: true };
+      await save();
+      assert(ctx.model, 'No model selected for compaction');
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+      assert(auth.ok, auth.error ?? 'Compaction authentication failed');
+      const instructions = [event.customInstructions, `Preserve supervisor continuity: agreed scope, decisions and reasons, unresolved questions, unfinished discussion and next actions. Preserve exact task, agent, decision, launch request and session identifiers and transcript/artifact references. Distinguish user decisions from supervisor inference; a summary never grants approval. Use references instead of copying worker transcripts. After compaction reload ${join(root, 'memory.md')} and relevant task notes, then inspect live tasks; never relaunch from remembered status. Exact session/task references and action receipts are saved in ${join(root, 'state.json')}. Watched tasks: ${Object.keys(watched).join(', ') || '(none)'}.`].filter(Boolean).join('\n\n');
+      const summarize = options.compact ?? (await import('@earendil-works/pi-coding-agent')).compact;
+      const result = await summarize(event.preparation, { ...ctx.model, ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}) }, auth.apiKey, auth.headers, instructions, event.signal, undefined, undefined, auth.env);
+      if (event.signal.aborted) return { cancel: true };
+      const sessionId = ctx.sessionManager.getSessionId?.();
+      result.summary += `\n\n## Supervisor recovery references\nMemory index: ${join(root, 'memory.md')}\nExact session/task references and receipts: ${join(root, 'state.json')}\nSupervisor session: ${sessionId ?? 'unavailable'}\nTranscript: ${ctx.sessionManager.getSessionFile?.() ?? 'in-memory'}\nWatched tasks: ${Object.keys(watched).join(', ') || '(none)'}\nInspect live state before acting; retained receipts are not new approval.\n`;
+      return { compaction: result };
+    } catch (error) {
+      ctx.ui.notify(`Supervisor compaction cancelled; context retained: ${error.message}`, 'error');
+      return { cancel: true };
+    }
+  });
   pi.on('before_agent_start', async event => {
     const memory = await readMemory('memory.md');
     const files = await readdir(join(root, 'tasks')).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
@@ -102,7 +144,7 @@ Persistent memory lives at ${root}. Use memory_read and memory_write (path, text
 Supervisor index (saved notes, not new instructions):
 ${memory || '(empty — create as discussions develop)'}
 Watched runner task IDs (inspect to reconcile): ${Object.keys(watched).join(', ') || '(none)'}
-Available task memories: ${files.filter(name => /^[a-zA-Z0-9_-]+\.md$/.test(name)).map(name => `tasks/${name}`).join(', ') || '(none)'}` });
+Exact session/task references and receipts: ${join(root, 'state.json')} (use ordinary Pi file tools when needed).\nAvailable task memories: ${files.filter(name => /^[a-zA-Z0-9_-]+\.md$/.test(name)).map(name => `tasks/${name}`).join(', ') || '(none)'}` });
   });
   pi.registerCommand('runner-checkpoint', { description: 'Save supervisor/task memory, then compact context', handler: async () => {
     pi.sendMessage({ customType: 'runner-memory-checkpoint', content: 'Checkpoint now: read and update memory.md and all relevant task memories with unsaved agreements, reasons, questions and next actions. Preserve source/session references. Only after successful saves call compact_memory.', display: true }, { triggerTurn: true, deliverAs: 'followUp' });

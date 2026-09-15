@@ -636,3 +636,22 @@ a recommendation and consequences above the unchanged original coordinator quest
 Human input still targets that exact decision; context participates in retry identity.
 The tool returns the recorded `humanAnswer` so the supervisor can save the decision
 and acknowledge it without asking again.
+
+Native `/compact`, automatic threshold compaction and overflow recovery now use
+`session_before_compact` to run Pi's standard summarizer with supervisor continuity
+instructions, preserving any user-supplied compaction focus. It keeps the existing
+cut point, split-turn handling and file tracking. A deterministic recovery footer
+retains the supervisor session ID, transcript path, watched IDs and memory/state paths.
+Compaction failures cancel the operation rather than silently dropping this guidance.
+
+`supervisor/state.json` also retains supervisor session IDs/transcript paths and the
+last observed task/agent/session/decision references. These are recovery references,
+not live status or new approval; inspect the runtime before acting. Original transcripts
+remain available. This hook does not turn unsaved discussion into per-task Markdown;
+`/runner-checkpoint` still asks the agent to update those notes first.
+
+Polling automatically unwatches completed, failed and cancelled tasks after all
+eligible final events have been consumed successfully. Missing tasks are detached;
+connection failures keep their watches and do not block other tasks. Historical task
+references and Markdown notes remain. Waiting/running tasks stay watched; Herdr idle
+alone is not completion. Reattach explicitly with `/runner-watch` when resuming work.

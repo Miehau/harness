@@ -134,3 +134,64 @@ test('contextual human questions preserve the exact original and save receipts a
   assert.equal(dialogs, 1);
   await assert.rejects(second.run({ ...input, text: 'Changed context' }), /different input/);
 });
+
+test('native compaction preserves exact references and instructions for manual, threshold and overflow paths', async t => {
+  const root = await memoryRoot(t), handlers = {}, summaries = [], notifications = [];
+  const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand() {}, registerTool() {}, appendEntry() {} };
+  supervisor(pi, { root, compact: async (...args) => {
+    summaries.push(args);
+    assert(JSON.parse(await readFile(join(root, 'supervisor/state.json'))).sessions['session-1']);
+    return { summary: 'Decisions and next actions', firstKeptEntryId: 'keep', tokensBefore: 1200 };
+  } });
+  const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => 'session-1', getSessionFile: () => '/sessions/one.jsonl' },
+    model: { id: 'test', provider: 'test' }, modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'test-key', baseUrl: 'https://test.invalid', env: { TEST: 'yes' } }) },
+    ui: { notify: (...args) => notifications.push(args) } };
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  const preparation = { firstKeptEntryId: 'keep', tokensBefore: 1200 };
+  for (const reason of ['manual', 'threshold', 'overflow']) {
+    const signal = new AbortController().signal;
+    const result = await handlers.session_before_compact({ preparation, reason, customInstructions: 'Keep receipt design', signal }, ctx);
+    assert.match(result.compaction.summary, /session-1/); assert.match(result.compaction.summary, /\/sessions\/one.jsonl/);
+    assert.match(result.compaction.summary, /state.json/); assert.equal(result.compaction.firstKeptEntryId, 'keep');
+    const args = summaries.at(-1);
+    assert.equal(args[0], preparation); assert.equal(args[1].baseUrl, 'https://test.invalid');
+    assert.match(args[4], /Keep receipt design/); assert.match(args[4], /launch request/); assert.equal(args[5], signal);
+    assert.deepEqual(args[8], { TEST: 'yes' });
+  }
+  ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: 'No credentials' });
+  assert.deepEqual(await handlers.session_before_compact({ preparation, signal: new AbortController().signal }, ctx), { cancel: true });
+  assert.match(notifications.at(-1)[0], /No credentials/);
+});
+
+test('dead watches retire only after final delivery; transient errors do not drop other watches', async t => {
+  const root = await memoryRoot(t), handlers = {}, commands = {}, messages = [];
+  const tasks = {
+    done: { status: 'completed', agents: [{ id: 'coordinator', role: 'orchestrator', session: '/sessions/coordinator.jsonl', token: 'must-not-save' }], decisions: [], events: [{ id: 'final', kind: 'completed', at: '9999' }] },
+    failed: { status: 'failed', agents: [], decisions: [], events: [] },
+    cancelled: { status: 'cancelled', agents: [], decisions: [], events: [] },
+    running: { status: 'running', agents: [], decisions: [], events: [] },
+    missing: null, offline: 'offline'
+  };
+  supervisor({ on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; }, registerTool() {}, appendEntry() {}, sendMessage: message => messages.push(message) }, { root, request: async body => {
+    if (tasks[body.taskId] === null) throw Error('Unknown task');
+    if (tasks[body.taskId] === 'offline') throw Error('Connection refused');
+    return tasks[body.taskId];
+  } });
+  const ctx = { sessionManager: { getEntries: () => [] }, ui: { setStatus() {} } };
+  // Seed watches to exercise missing and unreachable tasks without needing a successful watch request.
+  const { atomic } = await import('../runner/io.js');
+  await atomic(join(root, 'supervisor/state.json'), { watched: Object.fromEntries(Object.keys(tasks).map(id => [id, '2000'])), seen: [], humanActions: [] });
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  await commands['runner-watch'].handler('running', ctx);
+  let state = JSON.parse(await readFile(join(root, 'supervisor/state.json')));
+  assert.deepEqual(Object.keys(state.watched).sort(), ['done','offline','running']);
+  assert.equal(messages.length, 1); assert.equal(messages[0].details.ids[0], 'final');
+  assert.equal(state.taskRefs.done.agents[0].session, '/sessions/coordinator.jsonl');
+  assert(!JSON.stringify(state).includes('must-not-save'));
+  await commands['runner-watch'].handler('running', ctx); assert.equal(messages.length, 1);
+  await handlers.agent_end({ messages });
+  await commands['runner-watch'].handler('running', ctx);
+  state = JSON.parse(await readFile(join(root, 'supervisor/state.json')));
+  assert.deepEqual(Object.keys(state.watched).sort(), ['offline','running']);
+  assert(state.taskRefs.done); // Keep recovery references even after unwatching.
+});
