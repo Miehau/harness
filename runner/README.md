@@ -476,8 +476,17 @@ session with the runner supervisor extension. Any configured Pi provider works.
 Extra Pi arguments are forwarded (for example `--continue` to resume a session).
 For an existing Pi setup, load `runner/supervisor-extension.js` with `pi -e`.
 
-Use `/runner-watch FULL_TASK_ID` to subscribe and `/runner-unwatch FULL_TASK_ID`
-to detach. Pending questions are included immediately; other historical events
+Discuss requirements in the supervisor chat, then ask it to spin up the ticket.
+Its `runner_supervisor` start action takes `repo` (path or saved alias), `text`
+(agreed requirements and acceptance criteria), and a stable `requestId`. Optional
+`model`/`provider` select the coordinator. It submits and launches through the runtime
+API and automatically watches the task before launch. The coordinator delegates to
+workers; you do not need to watch them or run a CLI command. Retries reuse the same
+requestId and runtime receipts, including after an uncertain launch response.
+
+The tool also supports `watch {taskId}` for existing tasks.
+`/runner-watch FULL_TASK_ID` remains available; `/runner-unwatch FULL_TASK_ID`
+detaches. Pending questions are included immediately; other historical events
 before attachment are omitted. Watches and successfully consumed event IDs persist
 in the Pi session. Questions, attention and completed/failed results wake the
 supervisor without polling the model. It reads artifacts, including PNG previews,
@@ -532,8 +541,8 @@ normal config merging; `--mcp-config` is not an isolated configuration boundary.
 See [adapter documentation](https://github.com/nicobailon/pi-mcp-adapter) for server
 options, `/mcp-auth`, `excludeTools` and `approveTools` policies.
 
-Ask the supervisor to read a ticket, submit its requirements through
-`agent-plan start`, and watch the returned task ID. Ticket changes need your
+Ask the supervisor to read a ticket and start it with the agreed requirements.
+Its start tool launches and automatically watches the coordinator. Ticket changes need your
 instruction; incoming ticket content does not authorize writes or task acceptance.
 Managed coordinator/worker sessions still disable ambient extensions and expose
 only runner tools. No MCP server credentials are copied into task artifacts.

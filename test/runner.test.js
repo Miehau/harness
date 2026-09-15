@@ -802,3 +802,39 @@ test('UI gate imports fresh media, exposes supervisor/Grok references, and block
   await assert.rejects(f.call('owner', 'accept', task.id, { commit: proof.commit }), /verification failed/);
   assert.equal(f.runtime.task(task.id).delivery.phase, 'needs-attention');
 });
+
+test('supervisor start launches once, auto-watches across restart and recovers a lost response', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t);
+  const { default: supervisor } = await import('../runner/supervisor-extension.js');
+  const handlers = {}, commands = {}, entries = [], messages = []; let tool, loseResponse = true;
+  const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; }, registerTool: value => { tool = value; }, appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }), sendMessage: message => messages.push(message) };
+  supervisor(pi, { request: async body => {
+    const result = await f.runtime.execute('owner', body);
+    if (body.action === 'start' && loseResponse) { loseResponse = false; throw new Error('Connection lost'); }
+    return result;
+  } });
+  const ctx = { sessionManager: { getEntries: () => entries }, ui: { setStatus() {} } };
+  handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  const input = { action: 'start', repo: f.repo, text: 'Agreed ticket requirements and acceptance criteria', requestId: 'ticket-launch' };
+  await assert.rejects(tool.execute('first-call', input), /Task .*Connection lost.*Reuse requestId ticket-launch/);
+  const task = [...f.runtime.tasks.values()].find(task => task.requestId === input.requestId);
+  assert(task); assert.equal(task.agents.length, 1);
+  assert(entries.at(-1).data.watched[task.id]);
+  handlers.session_shutdown(); handlers.session_start({}, ctx);
+  const result = JSON.parse((await tool.execute('retry-call', input)).content[0].text);
+  assert.deepEqual(result, { taskId: task.id, status: 'running', watching: true });
+  assert.equal(f.transport.starts.length, 2); // fixture coordinator plus the new coordinator
+  assert.equal(f.runtime.tasks.size, 2);
+  const brief = await f.call('owner', 'read', task.id, { area: 'artifacts', path: 'brief.md' });
+  assert.equal(brief.content, input.text);
+  await f.call('owner', 'write', task.id, { area: 'artifacts', path: 'question.md', content: 'Clarify scope' });
+  await f.call({ taskId: task.id, agentId: task.agents[0].id }, 'ask', task.id, { artifact: 'question.md' });
+  t.mock.timers.tick(5000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(messages.length, 1); assert(JSON.parse(messages[0].content).some(message => message.taskId === task.id && message.kind === 'decision'));
+  const attached = JSON.parse((await tool.execute('attach-existing', { action: 'watch', taskId: f.task.id })).content[0].text);
+  assert.equal(attached.watching, true); assert(entries.at(-1).data.watched[f.task.id]);
+  await assert.rejects(tool.execute('invalid', { action: 'start', repo: f.repo, text: 'Missing retry identity' }), /requestId/);
+  await assert.rejects(tool.execute('changed', { ...input, text: 'Different ticket' }), /different input/);
+});
