@@ -14,7 +14,7 @@ class FakeHerdr {
   async status(agent) { return this.agents.get(agent.id) ?? 'missing'; }
   async stop(agent) { this.agents.delete(agent.id); }
 }
-async function fixture(t) {
+async function fixture(t, { reviewRequired = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'runner-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'); await mkdir(join(repo, '.runner'), { recursive: true });
@@ -25,6 +25,8 @@ async function fixture(t) {
   const transport = new FakeHerdr(); const data = join(root, 'data'); const runtime = new Runtime(data, { transport }); await runtime.init(); runtime.url = 'http://127.0.0.1:1';
   const call = (identity, action, taskId, input = {}, requestId = id()) => runtime.execute(identity, { action, taskId, input, requestId });
   const task = await call('owner', 'submit', null, { repo, text: 'Implement an improvement', requestId: id() });
+  // Existing scenarios cover legacy tasks; review-specific scenarios opt into the new gate.
+  if (!reviewRequired) { const legacy = runtime.task(task.id); delete legacy.reviewRequired; await runtime.save(legacy); }
   await call('owner', 'start', task.id);
   const main = runtime.task(task.id).agents[0]; const who = a => ({ taskId: task.id, agentId: a.id });
   await call(who(main), 'write', task.id, { area: 'artifacts', path: 'fixture-clarification.md', content: 'Fixture scope clarified' });
@@ -962,4 +964,70 @@ test('supervisor lifecycle resumes only the coordinator, recovers exact operatio
   assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.watching, false);
   assert.equal(await readFile(join(f.main.cwd, 'value.txt'), 'utf8'), 'base\n');
   await assert.rejects(run({ action: 'resume', requestId: 'resume-cancelled' }), /Only unfinished tasks/);
+});
+
+test('candidate review blocks defects and stale commits, then passes after fix and independent re-review', async t => {
+  const f = await fixture(t, { reviewRequired: true });
+  const { call, task, main, who, artifact, runtime } = f;
+  f.transport.availableModels = async () => [{ provider: 'anthropic', model: 'claude-test' }, { provider: 'openai-codex', model: 'gpt-test' }];
+  f.transport.resolveModel = async selection => selection;
+  await artifact('work.md', 'Implement or repair the candidate');
+  async function implement(value) {
+    const spawned = await call(who(main), 'spawn', task.id, { mode: 'write', assignment: 'work.md' });
+    const worker = runtime.task(task.id).agents.find(a => a.id === spawned.workerId);
+    await call(who(worker), 'model', task.id, { provider: 'anthropic', model: 'claude-test' });
+    await call(who(worker), 'write', task.id, { area: 'repo', path: 'value.txt', content: value });
+    const report = await artifact('done.md', 'Implementation done', who(worker));
+    await call(who(worker), 'report', task.id, { status: 'completed', artifact: report });
+    await call(who(main), 'integrate', task.id, { workerId: worker.id });
+    return call(who(main), 'verify', task.id);
+  }
+  async function review(findings, extra = {}) {
+    const spawned = await call(who(main), 'spawn', task.id, { stage: 'review', mode: 'explore', assignment: 'work.md' });
+    const worker = runtime.task(task.id).agents.find(a => a.id === spawned.workerId);
+    assert.equal(worker.modelSelection.provider, 'openai-codex');
+    assert.equal(worker.base, runtime.task(task.id).verification.commit);
+    assert(worker.inbox[0].review.diff); assert.equal(worker.inbox[0].review.rubric, 'workflow/review.md');
+    await assert.rejects(call(who(worker), 'write', task.id, { area: 'repo', path: 'value.txt', content: 'tamper' }), /read-only|Writing|Explore|write/i);
+    const path = await artifact('review.json', JSON.stringify({ commit: worker.base, scope: 'Full candidate diff and acceptance criteria', findings, ...extra }), who(worker));
+    return { worker, path };
+  }
+  await implement('bug\n');
+  await artifact('handoff.md', 'Candidate handoff');
+  const finish = () => call(who(main), 'report', task.id, { status: 'completed', artifact: 'handoff.md' });
+  await assert.rejects(finish(), /Fresh review/);
+  await assert.rejects(call(who(main), 'spawn', task.id, { stage: 'review', mode: 'write', assignment: 'work.md' }), /read-only/);
+  const finding = { severity: 'medium', file: 'value.txt', line: 1, description: 'Wrong value', evidence: 'Acceptance expects fixed', fix: 'Use fixed' };
+  const first = await review([finding]);
+  await call(who(first.worker), 'report', task.id, { status: 'completed', artifact: first.path });
+  await assert.rejects(finish(), /Fresh review/);
+  await implement('fixed\n');
+  const second = await review([]);
+  const invalid = await artifact('wrong.json', JSON.stringify({ commit: first.worker.base, scope: 'Old candidate', findings: [] }), who(second.worker));
+  await assert.rejects(call(who(second.worker), 'report', task.id, { status: 'completed', artifact: invalid }), /exact candidate/);
+  await call(who(second.worker), 'report', task.id, { status: 'completed', artifact: second.path });
+  // A later candidate invalidates even a clean review, including after fresh verification.
+  await implement('fixed again\n');
+  await assert.rejects(finish(), /Fresh review/);
+  const third = await review([{ ...finding, severity: 'minor', description: 'Optional clarity improvement' }]);
+  await call(who(third.worker), 'report', task.id, { status: 'completed', artifact: third.path });
+  await finish(); assert.equal(runtime.task(task.id).status, 'completed');
+});
+
+test('review model selection falls back after unavailable or failed providers without bypassing the review', async () => {
+  const { reviewModel } = await import('../runner/models.js');
+  const writer = { mode: 'write', integrated: 'commit', modelSelection: { provider: 'openai-codex', model: 'gpt-test' } };
+  const task = { config: {}, modelMenu: { choices: {} }, agents: [writer] };
+  const models = [{ provider: 'anthropic', model: 'claude-test' }, writer.modelSelection];
+  const transport = { availableModels: async () => models };
+  assert.equal((await reviewModel(task, {}, transport, 'commit')).selection.provider, 'anthropic');
+  task.agents.push({ id: 'failed-review', stage: 'review', base: 'commit', status: 'failed', modelSelection: models[0] });
+  const fallback = await reviewModel(task, {}, transport, 'commit');
+  assert.equal(fallback.selection.provider, 'openai-codex'); assert.match(fallback.reason, /failed-review/);
+  task.agents.push({ id: 'failed-fallback', stage: 'review', base: 'commit', status: 'failed', modelSelection: models[1] });
+  await assert.rejects(reviewModel(task, {}, transport, 'commit'), /Review models failed/);
+  task.agents = [writer]; task.config.workerModels = { review: { provider: 'missing', model: 'missing' } }; task.modelMenu.choices.review = task.config.workerModels.review;
+  transport.resolveModel = async () => { throw Error('No credentials'); };
+  const configured = await reviewModel(task, {}, transport, 'commit');
+  assert.equal(configured.selection.provider, 'anthropic'); assert.match(configured.reason, /No credentials/);
 });

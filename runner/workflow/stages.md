@@ -28,15 +28,16 @@
    checkpoint progress, update discovery docs and provide tests/visual evidence.
 5. Read worker reports and answer questions using file references. Pause affected
    workers for changed contracts. Use peer coordinator messages to resolve overlaps;
-   unresolved product decisions go to the owner. Delegate fixes or review as needed.
+   unresolved product decisions go to the owner. Delegate fixes as needed. Independent candidate review is required.
 6. Integrate completed writing workers and verify the combined candidate. Save a
-   handoff with changes, evidence mapped to acceptance criteria, limitations and the
+   read workflow/review.md and run review → fix → integrate → verify → review until
+   there are no major/medium findings. Save a handoff with changes, evidence mapped to acceptance criteria, limitations and the
    branch/commit. Complete with report only after verification. End at the candidate:
    only the owner can invoke accept to rebase, reverify and merge it.
 
 
 Use the named choices in model-menu.json when spawning: discovery, planning,
-implementation or complex (plus any configured alternatives). Do not infer availability
+implementation, review or complex (plus any configured alternatives). Do not infer availability
 or prices from your own model name. Your actual running provider/model is stated in
 your system instructions. Explicit model/provider overrides require modelReason and
 are checked against Pi's available models before creating a worker worktree. If a

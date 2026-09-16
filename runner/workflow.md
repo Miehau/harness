@@ -11,7 +11,8 @@ file needed for the current step; do not preload this entire directory.
    and [discovery documentation](workflow/discovery-docs.md). Assign code/docs ownership.
 3. For action arguments when needed: [tools](workflow/tools.md).
 4. On clashes, questions, revisions or failures: revisit coordination.md before acting.
-5. Integrate completed workers, verify the combined commit, and report a handoff mapping
+5. Integrate completed workers, verify, then run the [review loop](workflow/review.md)
+   until the exact candidate has no major/medium findings. Report a handoff mapping
    acceptance criteria to evidence. Only the owner may accept/rebase/merge.
 
 For frontend changes or config.json uiEvidence, read [UI evidence](workflow/ui-evidence.md)

@@ -676,3 +676,29 @@ receipts, including after a lost response or fresh supervisor session.
 Lifecycle requests and results persist in supervisor state. After each action the
 supervisor updates the linked task note with the outcome and next step. Recovery
 restores monitoring but does not automatically resume an agent or approve delivery.
+
+## Independent candidate review
+
+New tasks require a read-only `stage: "review"` worker after integration and verification.
+The runtime supplies the exact candidate commit, full task diff, previous review reports
+and the snapshotted [review rubric](workflow/review.md). Reviewers report structured JSON
+with scope and findings (`major`, `medium`, `minor`), file/line, evidence and a suggested fix.
+Major and medium findings block completion. The coordinator delegates repairs, integrates,
+verifies and requests another review until a current review has no blocking findings.
+A changed commit invalidates the passing review. Minor findings go in the handoff.
+
+Review defaults prefer the opposite OpenAI/Claude family from the latest integrated
+writer, avoiding models used by other writers where possible. Pi's configured available
+models are used; no missing model IDs are invented. `workerModels.review` can select an
+explicit reviewer. Unavailable configured reviewers and failed review attempts fall back
+to another available model (ultimately the implementation model if necessary), with the
+reason and failed attempt IDs recorded. Quota errors discovered at execution time are
+handled by a new review attempt; availability checks cannot predict quota exhaustion.
+
+Pi sessions report their actual provider/model to the runtime, including inherited
+Pi defaults. Review is performed by a separate worker even if fallback uses the same
+model. Existing task attempt/time/concurrency limits still apply: on exhaustion, stop
+and surface a blocker rather than accept an unreviewed candidate. There is no automatic
+waiver. Existing tasks retain their original completion policy. This gate validates
+review identity/schema/severity and freshness, not the semantic correctness of a model's
+judgment. Runtime verification remains required alongside review.

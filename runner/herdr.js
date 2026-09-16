@@ -29,15 +29,18 @@ export class Herdr {
     assert(row.root_pane?.pane_id && row.tab?.tab_id, 'Herdr did not return a pane and tab');
     return { pane: row.root_pane.pane_id, tab: row.tab.tab_id, workspace: row.workspace?.workspace_id ?? task.workspace };
   }
+  async availableModels(query) {
+    let stdout;
+    try { ({ stdout } = await exec(process.execPath, [resolve(dirname(extension), '../node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--list-models', ...(query ? [query] : [])], { timeout: 20000, maxBuffer: 1024 * 1024 })); }
+    catch { throw new Error('Could not inspect Pi model availability; inspect Pi configuration before retrying'); }
+    return stdout.split('\n').map(line => line.trim().split(/\s+/)).filter(row => row.length >= 3 && /\d/.test(row[2])).map(row => ({ provider: row[0], model: row[1] }));
+  }
   async resolveModel(selection) {
     if (!selection.model && !selection.provider) return selection;
     assert(selection.model, 'Specify a model with the provider');
-    let stdout;
-    try { ({ stdout } = await exec(process.execPath, [resolve(dirname(extension), '../node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--list-models', selection.model], { timeout: 20000, maxBuffer: 1024 * 1024 })); }
-    catch { throw new Error('Could not inspect Pi model availability; inspect Pi configuration before retrying'); }
-    const matches = stdout.split('\n').map(line => line.trim().split(/\s+/)).filter(row => row[1] === selection.model && (!selection.provider || row[0] === selection.provider));
+    const matches = (await this.availableModels(selection.model)).filter(row => row.model === selection.model && (!selection.provider || row.provider === selection.provider));
     assert(matches.length === 1, 'Model is unavailable or ambiguous in Pi; configure a provider/model with credentials');
-    return { model: matches[0][1], provider: matches[0][0] };
+    return matches[0];
   }
   async start(agent, config) {
     // Herdr 0.8 requires a settled foreground shell. Never blindly retry agent start.

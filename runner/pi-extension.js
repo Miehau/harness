@@ -44,6 +44,7 @@ export default function runner(pi) {
   pi.on('session_start', async (_event, ctx) => {
     context = ctx;
     pi.setActiveTools(['runner_read', 'runner_write', 'runner_action']);
+    if (ctx.model) await call('model', { provider: ctx.model.provider, model: ctx.model.id }, randomUUID());
     timer = setInterval(poll, 2000); timer.unref?.();
     // Initialization must finish before the first model turn is injected.
     setTimeout(poll, 100).unref?.();

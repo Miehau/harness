@@ -9,7 +9,7 @@ import { finished } from 'node:stream/promises';
 import { atomic, json, id, now, assert, string, git, exec, safePath } from './io.js';
 import { Herdr } from './herdr.js';
 import { accept, recoverDelivery } from './delivery.js';
-import { modelMenu, chooseModel } from './models.js';
+import { modelMenu, chooseModel, reviewModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
 import { mediaFile, verifyUI } from './evidence.js';
@@ -88,7 +88,7 @@ export class Runtime {
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
     assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
-    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, createdAt: now(), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
+    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
@@ -163,15 +163,21 @@ export class Runtime {
     assert(['write', 'explore'].includes(input.mode), 'mode must be write or explore');
     for (const key of ['model', 'provider']) if (input[key] !== undefined) string(input[key], key, 200);
     const stage = input.stage ?? (input.mode === 'write' ? 'implementation' : 'discovery');
-    assert(['discovery', 'architecture', 'planning', 'implementation'].includes(stage), 'Unknown worker stage');
-    assert(stage === 'implementation' || input.mode === 'explore', 'Discovery, architecture and planning workers must be read-only');
+    assert(['discovery', 'architecture', 'planning', 'implementation', 'review'].includes(stage), 'Unknown worker stage');
+    assert(stage === 'implementation' || input.mode === 'explore', 'Discovery, architecture, planning and review workers must be read-only');
     if (stage === 'implementation' && task.stagedWorkflow) assert(task.clarification?.documentsDigest === digest(task.documents ?? {}) && !task.decisions.some(d => !d.answer), 'Coordinator clarification is required before implementation');
     await this.reference(task, input.assignment);
     if (input.contract) { await this.reference(task, input.contract); assert(task.contracts.at(-1)?.artifact === input.contract, 'Use the current shared contract'); }
     if (input.mode === 'write' && task.agents.some(a => a.role === 'worker' && a.mode === 'write' && active(a))) {
       assert(input.contract && task.agents.filter(a => a.role === 'worker' && a.mode === 'write' && active(a)).every(a => a.contract === input.contract), 'Parallel writers must share the same published contract');
     }
-    const chosen = chooseModel(task, input, stage);
+    const candidate = stage === 'review' ? await git(task.integration.cwd, 'rev-parse', 'HEAD') : null;
+    if (stage === 'review') {
+      assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a)), 'Finish and integrate workers before review');
+      assert(task.agents.filter(a => a.mode === 'write' && a.status === 'completed').every(a => a.integrated), 'Integrate completed writers before review');
+      assert(!await git(task.integration.cwd, 'status', '--porcelain'), 'Review requires a clean integrated candidate');
+    }
+    const chosen = stage === 'review' ? await reviewModel(task, input, this.transport, candidate) : chooseModel(task, input, stage);
     if (this.transport.resolveModel) chosen.selection = await this.transport.resolveModel(chosen.selection);
     task.operation = { kind: 'create-worker', at: now() }; await this.save(task);
     const workspace = await this.worktree(task, `w-${id().slice(0, 8)}`, 'refs/heads/' + task.integration.branch);
@@ -180,7 +186,12 @@ export class Runtime {
     const agent = this.agent(task, 'worker', workspace.cwd, input.mode);
     Object.assign(agent, { stage, branch: workspace.branch, base: await git(workspace.cwd, 'rev-parse', 'HEAD'), assignment: input.assignment, contract: input.contract ?? null });
     agent.modelSelection = chosen.selection; agent.modelChoice = chosen.choice; agent.modelReason = chosen.reason;
-    this.message(agent, 'assignment', input.assignment, { workflow: 'worker.md', discovery: task.discovery, skills: task.skills, contract: agent.contract, artifactDir: agent.artifactDir });
+    let review;
+    if (stage === 'review') {
+      const diff = await this.artifact(task, await git(task.integration.cwd, 'diff', '--no-ext-diff', task.base, agent.base), 'diff');
+      review = { commit: agent.base, base: task.base, diff, rubric: 'workflow/review.md', previous: task.reviews ?? [], verification: task.verification };
+    }
+    this.message(agent, 'assignment', input.assignment, { ...(review ? { review } : {}), workflow: 'worker.md', discovery: task.discovery, skills: task.skills, contract: agent.contract, artifactDir: agent.artifactDir });
     this.event(task, 'worker-spawned', { agentId: agent.id, artifact: input.assignment, modelSelection: agent.modelSelection });
     await this.launch(task, agent); return { workerId: agent.id, status: agent.status, cwd: agent.cwd, error: agent.error };
   }
@@ -250,6 +261,7 @@ export class Runtime {
       assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a)), 'Unfinished work remains');
       assert(!task.decisions.some(d => !d.answer), 'Unanswered decisions remain');
       assert(task.agents.filter(a => a.role === 'worker' && a.mode === 'write' && a.status === 'completed').every(a => a.integrated), 'Completed writing work must be integrated');
+      if (task.reviewRequired) assert(task.reviews?.at(-1)?.passed && task.reviews.at(-1).commit === await git(agent.cwd, 'rev-parse', 'HEAD'), 'Fresh review with no major or medium findings is required');
       assert(task.verification?.passed && task.verification.commit === await git(agent.cwd, 'rev-parse', 'HEAD') && !await git(agent.cwd, 'status', '--porcelain'), 'Fresh passing integration verification is required');
     }
     if (agent.role === 'worker' && agent.mode === 'write' && input.status === 'completed') {
@@ -257,6 +269,20 @@ export class Runtime {
       await git(agent.cwd, 'add', '-A');
       if (await git(agent.cwd, 'diff', '--cached', '--name-only')) await git(agent.cwd, 'commit', '-m', `Implement runner assignment ${agent.id.slice(0, 8)}`, '-m', `Fulfil the task described in ${agent.assignment}; handoff: ${input.artifact}`);
       agent.commit = await git(agent.cwd, 'rev-parse', 'HEAD'); task.operation = null;
+    }
+    if (agent.stage === 'review' && input.status === 'completed') {
+      assert(input.artifact.startsWith(agent.artifactDir + '/'), 'Review report must belong to the reviewer');
+      const review = await json(await safePath(join(this.dir(task), 'artifacts'), input.artifact));
+      assert(review.commit === agent.base, 'Review must identify its exact candidate commit');
+      string(review.scope, 'review scope', 10000);
+      assert(Array.isArray(review.findings) && review.findings.length <= 200, 'Review findings must be an array of at most 200 items');
+      for (const finding of review.findings) {
+        assert(['major', 'medium', 'minor'].includes(finding.severity), 'Invalid review severity');
+        for (const key of ['file', 'description', 'evidence', 'fix']) string(finding[key], `finding ${key}`, 10000);
+        assert(Number.isInteger(finding.line) && finding.line > 0, 'Finding needs a positive line number');
+      }
+      task.reviews ??= [];
+      task.reviews.push({ agentId: agent.id, commit: agent.base, artifact: input.artifact, passed: !review.findings.some(f => f.severity !== 'minor'), at: now() });
     }
     agent.status = input.status; agent.report = input.artifact;
     if (agent.role === 'orchestrator') { task.status = input.status; task.result = input.artifact; }
@@ -413,12 +439,17 @@ export class Runtime {
       const key = `${owner ? 'owner' : actor.id}:${input.requestId}`; const fingerprint = digest({ action, body });
       if (task.receipts[key]) { const receipt = task.receipts[key]; assert(receipt.fingerprint === fingerprint, 'requestId reused with different input'); assert(receipt.status === 'completed', receipt.error || 'Previous request outcome is uncertain; inspect before issuing another action'); return receipt.result; }
       assert(owner || active(actor) && !terminal.has(task.status), 'Inactive attempt');
-      if (!owner && actor.status === 'waiting') assert(['read', 'ack'].includes(action), 'Waiting for a decision');
+      if (!owner && actor.status === 'waiting') assert(['read', 'ack', 'model'].includes(action), 'Waiting for a decision');
       let result;
       if (action !== 'read') { task.receipts[key] = { fingerprint, action, status: 'pending' }; await this.save(task); }
       try {
       if (action === 'read' || action === 'write') result = await this.files(task, actor, action, body);
       else if (action === 'remove') { assert(!owner && actor.role === 'worker' && actor.mode === 'write', 'Writing worker required'); await unlink(await safePath(actor.cwd, body.path)); result = { removed: body.path }; }
+      else if (action === 'model') {
+        assert(!owner, 'Agent model identity required');
+        actor.modelSelection = { provider: string(body.provider, 'provider', 200), model: string(body.model, 'model', 200) };
+        result = actor.modelSelection; await this.save(task);
+      }
       else if (action === 'ack') {
         assert(!owner && Array.isArray(body.ids), 'Invalid acknowledgement');
         for (const message of actor.inbox) if (body.ids.includes(message.id)) message.acknowledgedAt ??= now();

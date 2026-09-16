@@ -4,9 +4,11 @@ Use the stage recorded on your agent in task state:
 - discovery: bounded code/document exploration; save findings and unknowns with refs.
 - architecture: existing concepts, patterns, constraints and a proposed task design.
 - planning: acceptance criteria, assignments, dependencies, evidence and checkpoints.
+- review: read workflow/review.md; inspect the supplied candidate diff, scope and evidence,
+  then report the required structured JSON findings. Never modify code or fix your own findings.
 - implementation: implement the clarified plan and update code/docs/evidence.
 
-Discovery, architecture and planning are read-only for repository files. Save authored
+Discovery, architecture, planning and review are read-only for repository files. Save authored
 proposals in your own artifact directory for the coordinator to publish. Do not do
 implementation early. Revise proposals through new artifacts after clarification.
 
