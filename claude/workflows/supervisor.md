@@ -97,3 +97,8 @@ Revalidation reactivates the ticket before coordinator resume; preserve history.
 Use [recovery](recovery.md) for pause, checkpoints or interruption. Restore the
 supervisor-to-coordinator association before continuing a ticket. Saved worker
 IDs do not authorize the supervisor to silently replace its coordinator.
+
+For supervisor context refresh, follow [continuity](continuity.md). Maintain readable session memory after meaningful decisions, dispatch/results and
+delivery changes and before ending a turn. Save discussion even without a ticket.
+Snapshot memory before requested compaction. Restore from files before acting; do not request child
+checkpoints or change their lifecycle merely to refresh this conversation.

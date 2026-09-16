@@ -144,7 +144,8 @@ flowchart LR
 | `/agent-plan:onboard [constraints]` | Establish missing useful docs/checks, preserving existing work. |
 | `/agent-plan:status [task ID]` | Inspect saved notes and actual Git/native agent state. |
 | `/agent-plan:watch [task ID]` | Follow known native agents in this open session. |
-| `/agent-plan:checkpoint [task ID]` | Save discussion and recovery references before leaving/compacting. |
+| `/agent-plan:checkpoint [focus ticket]` | Save all supervisor memory and a verified snapshot before compaction. |
+| `/agent-plan:restore [memory or snapshot path]` | Reload supervisor context and reconcile current state. |
 | `/agent-plan:recover [task ID]` | Reconcile interrupted work and continue when safe. |
 | `/agent-plan:accept [task ID] [commit] [target]` | Approve the exact PR/MR candidate for hosted merge. |
 | `/agent-plan:stop [task ID] [pause or cancel]` | Stop known native agents and retain work. |
@@ -201,7 +202,21 @@ blockers and human waits, and has a repeat guard. It uses a Claude model evaluat
 on Stop events even when the report is unmarked. It cannot prove test results or
 enforce approvals. There are no scripts behind these hooks.
 
-Use checkpoint before `/compact` or leaving. Recovery inspects notes and actual
+Supervisor continuity uses one readable `agent-plan/sessions/SESSION/memory.md`
+plus versioned snapshots before requested compaction. It preserves discussion,
+requirements, actual decisions, all owned ticket references, pending operations and
+next steps, including ideas without tickets. Only the supervisor uses this memory;
+coordinators and workers keep their existing short-lived lifecycle.
+
+Run `/agent-plan:checkpoint`, then the focused `/compact` command it provides.
+Keep the same session: do not use `/clear`. The SessionStart reminder directs Claude
+to reload memory and the relevant task files; `/agent-plan:restore <memory path>`
+is the explicit fallback. The generated compact summary is secondary to saved
+memory and current evidence. Compaction does not authorize restarting agents or
+replaying operations. Native messaging continuity still needs a live smoke test.
+See [supervisor continuity](workflows/continuity.md).
+
+Recovery inspects notes and actual
 Git state. The supervisor resumes the exact coordinator, which resumes its workers,
 only when those native IDs are available.
 After a lost session, reconcile the old coordinator and its descendants before

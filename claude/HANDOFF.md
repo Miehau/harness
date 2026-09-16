@@ -52,7 +52,7 @@ upgrade/settings mutation or supervisor-to-worker fallback is implemented.
 
 1. Update to a nesting-capable Claude version, check effective spawn depth, install/enable
    the plugin, then start plain Claude in a clean disposable Git repo
-   with a committed base and a meaningful test command. Confirm the eight skills and
+   with a committed base and a meaningful test command. Confirm the nine skills and
    four agent types load. No custom MCP server should appear.
 2. Start two small independent tickets. Confirm the supervisor spawns one isolated
    coordinator per ticket, and each coordinator has Agent and spawns its own workers.
@@ -135,3 +135,16 @@ status may archive accepted. Confirm the original checkout stays unchanged.
 
 These are manual live checks, not completed tests. Package/reference checks do not
 validate host authentication, actual uploads, CI or model adherence to instructions.
+
+## Supervisor continuity (0.6.0)
+
+In a native live session, discuss an idea without a ticket, make an explicit decision,
+and launch two short-lived coordinators. Checkpoint: verify memory.md and a snapshot
+retain all discussion, decisions, ticket IDs and pending operations without requesting
+child checkpoints. Run the supplied `/compact` command in the same session. Verify
+SessionStart instructs loading continuity.md, memory and relevant task artifacts.
+Confirm coordinators can still message the supervisor, including a result arriving
+during compaction, and that no duplicate agents or remote operations are dispatched.
+Test explicit restore, missing memory, stale PR head, ambiguous session IDs and
+auto-compaction without a fresh snapshot. Unknown states must remain unresolved,
+not invented. Never use `/clear` in this flow. These live checks remain unverified.

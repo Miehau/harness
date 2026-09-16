@@ -39,7 +39,7 @@ test('native Claude package has no executable runtime, MCP config or escaping re
       await readFile(destination);
     }
   }
-  assert.equal(paths.filter(path => path.endsWith('SKILL.md')).length, 8);
+  assert.equal(paths.filter(path => path.endsWith('SKILL.md')).length, 9);
 });
 
 test('native agent definitions restrict research/review and isolate writers without permission bypass', async () => {
@@ -72,7 +72,7 @@ test('native startup hook needs no helper program and stop prompt includes bound
   const startup = hooks.SessionStart[0].hooks[0];
   assert.equal(startup.type, 'command');
   assert.match(startup.command, /^printf '%s\\n' "[^"`\n]*"$/);
-  assert.doesNotMatch(startup.command.replace('${CLAUDE_PLUGIN_ROOT}', ''), /\$/);
+  assert.doesNotMatch(startup.command.replaceAll('${CLAUDE_PLUGIN_ROOT}', ''), /\$/);
   const cwd = await mkdtemp(join(tmpdir(), 'native-claude-hook-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const { stdout, stderr } = await run('/bin/sh', ['-c', startup.command], {
@@ -80,6 +80,10 @@ test('native startup hook needs no helper program and stop prompt includes bound
   });
   assert.equal(stderr, '');
   assert.match(stdout, /\/plugin path\/with spaces\/workflows\/supervisor.md/);
+  assert.match(stdout, /\/plugin path\/with spaces\/workflows\/continuity.md/);
+  assert.match(stdout, /Restore before action/);
+  assert.match(hooks.SessionStart[0].matcher, /clear/);
+  assert.match(hooks.SessionStart[0].matcher, /compact/);
   assert.deepEqual(await readdir(cwd), []);
   const stop = hooks.Stop[0].hooks[0];
   assert.equal(stop.type, 'prompt');

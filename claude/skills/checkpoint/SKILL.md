@@ -1,18 +1,18 @@
 ---
 name: checkpoint
-description: Save the current Agent Plan discussion and exact recovery references before compaction or leaving.
-argument-hint: "[task ID]"
+description: Save the whole supervisor session in a structured, verified checkpoint before compaction.
+argument-hint: "[optional focus ticket]"
 disable-model-invocation: true
 ---
 
-Follow the checkpoint steps in [recovery](../../workflows/recovery.md).
-Requested task: $ARGUMENTS
+Supervisor session identity: ${CLAUDE_SESSION_ID}
+Optional resume focus: $ARGUMENTS
 
-Save the supervisor's requirements, user decisions, pending questions, coordinator
-IDs and evidence references in supervisor.md. Request a coordinator checkpoint
-through native controls and follow the role-specific recovery instructions. The
-coordinator owns state.md and its child-agent notes; do not overwrite them from
-this conversation or claim a requested checkpoint has completed without evidence.
-
-Report the saved path. Do not claim unsaved discussion or background processes
-will survive a closed session. With no task selected, ask which task to checkpoint.
+Follow [supervisor continuity](../../workflows/continuity.md), save the complete
+supervisor discussion and owned ticket references, and read the checkpoint back.
+No ticket is required: preserve discussion that has not yet become a task too.
+Do not request coordinator/worker checkpoints or change their lifecycle.
+Update memory.md, save a versioned snapshot and report both absolute paths. Provide
+the focused native `/compact` command and `/agent-plan:restore <memory path>`
+fallback described in the workflow. Keep the same session; never suggest `/clear`.
+Do not invoke or claim to have performed compaction.

@@ -1,6 +1,6 @@
 {
   "name": "agent-plan",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Native Claude skills, subagents and workflows for parallel implementation, verification and review.",
   "author": { "name": "Agent Plan contributors" }
 }

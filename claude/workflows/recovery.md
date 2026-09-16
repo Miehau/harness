@@ -55,11 +55,9 @@ Quota/login/model failures remain blockers until the user resolves them. Do not
 switch billing methods, launch an external agent or repeatedly retry. A cancelled
 task stays cancelled unless the user explicitly requests new continuation work.
 
-For a supervisor checkpoint, save requirements, actual user decisions and sources,
-coordinator IDs, returned handoff/decision references and next actions in supervisor.md.
-Request an active coordinator checkpoint through native steering when available;
-otherwise record it as pending and wait for its next safe return. Do not claim its
-internal state was saved until it reports the saved reference.
+For supervisor context checkpoints and reload after compaction, follow
+[continuity](continuity.md). This does not request checkpoints from child agents.
+The coordinator checkpoint below concerns its existing pause/recovery lifecycle.
 
 For a coordinator checkpoint, save agreed requirements, actual user decisions and their source,
 assumptions, full commits, current operation, native agent IDs and worktree paths,

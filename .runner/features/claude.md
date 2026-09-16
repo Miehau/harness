@@ -1,6 +1,6 @@
 # Native Claude workflow
 
-The independent `claude/` plugin is Markdown and JSON only: eight skills, four
+The independent `claude/` plugin is Markdown and JSON only: nine skills, four
 native subagent types, task/delivery/recovery workflows and native hooks. It does
 not import or launch the runner, Pi, Herdr, MCP, a custom CLI or background service.
 Claude's main conversation supervises ticket coordinators. Each coordinator owns
@@ -27,3 +27,6 @@ Coordinators discover clashes there and use native SendMessage for reachable pee
 with supervisor relay for stale or cross-session handles. No external broker exists.
 Finished coordinators move into archive.md; unmerged candidates stay discoverable
 under Pending acceptance. Canonical artifacts and Git work remain intact.
+
+Supervisor-only checkpoint/restore uses readable session memory, snapshots and an explicit
+reload order after same-session compaction; it does not checkpoint short-lived children.
