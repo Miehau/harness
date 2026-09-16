@@ -1,0 +1,12 @@
+{
+  "name": "agent-plan-native",
+  "owner": { "name": "Agent Plan contributors" },
+  "metadata": { "description": "Self-contained native Claude planning and implementation workflows." },
+  "plugins": [
+    {
+      "name": "agent-plan",
+      "source": "./",
+      "description": "Native Claude planning, parallel implementation and review."
+    }
+  ]
+}

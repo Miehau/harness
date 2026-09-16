@@ -4,6 +4,10 @@ The primary application in this repository. The former visual pipeline is retire
 its final working-tree snapshot is retained in [archive/](../archive/README.md).
 Existing legacy daemon state is not migrated.
 
+An independent [native Claude plugin](../claude/README.md) provides skills, hooks
+and subagent workflows. It does not use this runtime, Pi or Herdr. The commands
+below describe the Pi runner.
+
 ## Run
 
 Requires Node 22.19+, installed project dependencies, Git, and a running Herdr server.
