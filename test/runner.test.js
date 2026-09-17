@@ -253,8 +253,12 @@ test('Pi extension delivers references, acknowledges turns, and surfaces model f
     if (prior.token === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = prior.token;
     if (prior.reply === undefined) delete process.env.RUNNER_REPLY_TOKEN; else process.env.RUNNER_REPLY_TOKEN = prior.reply;
   });
-  const notices = []; const ctx = { isIdle: () => true, shutdown() {}, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
+  const notices = []; const ctx = { isIdle: () => true, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
+  assert.deepEqual(handlers.get('project_trust')(), { trusted: 'yes' });
   await handlers.get('session_start')({}, ctx);
+  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'anthropic', model: 'claude-test' });
+  await handlers.get('model_select')({ model: { provider: 'openai-codex', id: 'gpt-test' } });
+  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'openai-codex', model: 'gpt-test' });
   const { setTimeout: sleep } = await import('node:timers/promises');
   for (let i = 0; !messages.length && i < 100; i++) await sleep(10);
   assert.equal(messages.length, 1); assert.match(messages[0].content, /brief.md/);
@@ -317,6 +321,42 @@ test('malformed connection credentials fail closed and release the startup lock'
 });
 
 
+test('managed Pi launch auto-trusts the worktree', async t => {
+  const { Herdr } = await import('../runner/herdr.js');
+  const herdr = new Herdr(); const args = [];
+  herdr.call = async (cmd, sub, ...rest) => {
+    if (cmd === 'pane' && sub === 'process-info') return { process_info: { foreground_processes: [{ name: 'zsh', pid: 1 }], shell_pid: 1, foreground_process_group_id: 1 } };
+    if (cmd === 'workspace' && sub === 'list') return { workspaces: [] };
+    if (cmd === 'agent' && sub === 'start') { args.push(...rest); return {}; }
+    return {};
+  };
+  await herdr.start({ name: 'agent', session: '/tmp/session.jsonl', place: { pane: 'pane', tab: 'tab' } }, {});
+  assert(args.includes('--approve'));
+  assert(args.includes('--no-extensions'));
+});
+
+test('Pi extension keeps starting when an older runtime lacks the model action', async t => {
+  const { createServer } = await import('node:http');
+  const previous = { url: process.env.RUNNER_URL, token: process.env.RUNNER_TOKEN };
+  const token = id() + id();
+  const server = createServer((req, res) => {
+    if (req.url === '/poll') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ status: 'running', messages: [] })); return; }
+    res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'Unknown action: model' }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.RUNNER_URL = `http://127.0.0.1:${server.address().port}`; process.env.RUNNER_TOKEN = token;
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    if (previous.url === undefined) delete process.env.RUNNER_URL; else process.env.RUNNER_URL = previous.url;
+    if (previous.token === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = previous.token;
+  });
+  const handlers = new Map();
+  const pi = { on: (name, fn) => handlers.set(name, fn), registerTool() {}, setActiveTools() {}, sendMessage() {} };
+  const { default: extension } = await import('../runner/pi-extension.js'); extension(pi);
+  await handlers.get('session_start')({}, { isIdle: () => true, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify() {} } });
+  handlers.get('session_shutdown')();
+});
+
 test('Herdr transport errors never expose launch credentials', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-herdr-error-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -363,8 +403,11 @@ test('terminal replies require a separate credential and exact decision', async 
 });
 
 test('background runtime starts once for concurrent clients and recovers a stale connection', async t => {
-  const { connect } = await import('../runner/connection.js');
+  const { connect, sourceStamp } = await import('../runner/connection.js');
   const { setTimeout: sleep } = await import('node:timers/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { spawn } = await import('node:child_process');
+  const { open } = await import('node:fs/promises');
   const root = await mkdtemp(join(tmpdir(), 'runner-auto-'));
   const stop = async () => {
     let pid; try { pid = JSON.parse(await readFile(join(root, 'daemon.lock'), 'utf8')).pid; } catch (e) { if (e.code === 'ENOENT') return; throw e; }
@@ -375,7 +418,28 @@ test('background runtime starts once for concurrent clients and recovers a stale
   t.after(async () => { await stop(); await rm(root, { recursive: true, force: true }); });
   const [a, b] = await Promise.all([connect(root), connect(root)]);
   assert.deepEqual(a, b); assert.deepEqual(await connect(root), a);
+  const health = await fetch(`http://127.0.0.1:${a.port}/health`, { headers: { authorization: `Bearer ${a.token}` } });
+  assert.equal((await health.json()).source, await sourceStamp());
   await stop(); assert.deepEqual(await connect(root), a);
+  await stop();
+  const log = await open(join(root, 'daemon.log'), 'a', 0o600);
+  try {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../runner/server.js', import.meta.url)), root], { cwd: root, env: { ...process.env, RUNNER_SOURCE_STAMP: 'stale' }, detached: true, stdio: ['ignore', log.fd, log.fd] });
+    child.unref();
+  } finally { await log.close(); }
+  for (let i = 0; i < 100; i++) {
+    try {
+      const stale = await fetch(`http://127.0.0.1:${a.port}/health`, { headers: { authorization: `Bearer ${a.token}` } });
+      if (stale.ok && (await stale.json()).source === 'stale') break;
+    } catch {}
+    if (i === 99) throw new Error('Stale runner did not become ready');
+    await sleep(50);
+  }
+  const previous = JSON.parse(await readFile(join(root, 'daemon.lock'), 'utf8')).pid;
+  assert.deepEqual(await connect(root), a);
+  assert.notEqual(JSON.parse(await readFile(join(root, 'daemon.lock'), 'utf8')).pid, previous);
+  const replaced = await fetch(`http://127.0.0.1:${a.port}/health`, { headers: { authorization: `Bearer ${a.token}` } });
+  assert.equal((await replaced.json()).source, await sourceStamp());
 });
 
 test('installed CLI symlink runs help without starting a runtime', async t => {

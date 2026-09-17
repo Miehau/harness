@@ -2,13 +2,14 @@ import { createServer } from 'node:http';
 import { readFile, open, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dataRoot } from './connection.js';
+import { dataRoot, sourceStamp } from './connection.js';
 import { notify } from './notifications.js';
 import { Runtime } from './runtime.js';
 import { atomic, json, id, assert } from './io.js';
 
 export async function serve(root, options = {}) {
   const runtime = new Runtime(root, options); await runtime.init(); root = runtime.root;
+  const source = options.source ?? process.env.RUNNER_SOURCE_STAMP ?? await sourceStamp();
   const lockPath = join(root, 'daemon.lock');
   // A stale lock is removed only when its recorded process is certainly gone.
   try {
@@ -40,7 +41,7 @@ export async function serve(root, options = {}) {
       }
       if (!identity) { send({ error: 'Unauthorized' }, 401); return; }
       if (req.headers.origin && req.headers.origin !== runtime.url) { send({ error: 'Unexpected origin' }, 403); return; }
-      if (req.method === 'GET' && req.url === '/health') { assert(identity === 'owner', 'Owner access required'); send({ service: 'agent-plan-runner' }); return; }
+      if (req.method === 'GET' && req.url === '/health') { assert(identity === 'owner', 'Owner access required'); send({ service: 'agent-plan-runner', source }); return; }
       if (req.method === 'GET' && req.url === '/tasks') { assert(identity === 'owner', 'Owner access required'); send([...runtime.tasks.values()].map(t => runtime.view(t))); return; }
       if (req.method === 'GET' && req.url === '/poll') { assert(identity !== 'owner', 'Agent access required'); send(runtime.poll(identity)); return; }
       assert(req.method === 'POST' && req.url === '/action', 'Unknown route');

@@ -56,7 +56,7 @@ export class Herdr {
       }
     };
     await waitForShell();
-    const args = ['--no-extensions', '--no-skills', '--no-prompt-templates', '--tools', 'runner_read,runner_write,runner_action', '-e', extension, '--session', agent.session];
+    const args = ['--approve', '--no-extensions', '--no-skills', '--no-prompt-templates', '--tools', 'runner_read,runner_write,runner_action', '-e', extension, '--session', agent.session];
     if (config.model) args.push('--model', config.model);
     if (config.provider) args.push('--provider', config.provider);
     const previous = (await this.call('workspace', 'list')).workspaces?.find(w => w.focused);
