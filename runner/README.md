@@ -397,15 +397,18 @@ agent-plan accept TASK COMMIT --target master
 COMMIT is optional; without it the CLI selects the task's recorded verified commit.
 Acceptance authorizes rebasing those task changes onto the local target (main by
 default), rerunning verification and fast-forward merging. The source checkout must
-be clean and on that target. No remote fetch or push is performed. Acceptance is
+be clean and on that target. Untracked `.runner/answers/` files (local Pi/supervisor
+replies) do not count as dirt. No remote fetch or push is performed. Acceptance is
 serialized per repository; unrelated task work continues asynchronously.
 
 Dirty work, stale approval, rebase conflicts, failed checks or a target that advances
-during verification stop delivery. Nothing resets or stashes user changes. Inspect the
-retained state; resolve/abort any rebase before `recover TASK applied|aborted`, then
-`verify TASK` and accept the reviewed commit again. An interrupted merge has its own
-record, allowing recovery to confirm the commit is already on the target without
-repeating it. The dashboard shows delivery state and an explicit accept button.
+during verification stop delivery. Nothing resets or stashes user changes. A failed
+accept that never started Git mutation can be retried with the same requestId after
+the source is cleaned. Inspect retained state; resolve/abort any rebase before
+`recover TASK applied|aborted`, then `verify TASK` and accept the reviewed commit
+again. An interrupted merge has its own record, allowing recovery to confirm the
+commit is already on the target without repeating it. The dashboard shows delivery
+state and an explicit accept button.
 
 ## GrokBot-style notifications
 

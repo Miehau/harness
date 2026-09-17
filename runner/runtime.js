@@ -129,12 +129,21 @@ export class Runtime {
     await mkdir(dirname(agent.session), { recursive: true });
     if (agent.artifactDir) await mkdir(join(this.dir(task), 'artifacts', agent.artifactDir), { recursive: true });
     await this.save(task);
-    try {
+    const begin = async () => {
       agent.place = await this.transport.create(task, agent, this.url);
       task.workspace = agent.place.workspace; await this.save(task);
       await this.transport.start(agent, { ...task.config, ...agent.modelSelection });
       agent.status = task.decisions.some(d => d.agentId === agent.id && !d.answer) ? 'waiting' : 'running'; agent.startedAt = now();
-    } catch (e) { agent.status = 'failed'; agent.error = `Launch uncertain: ${e.message}. Resume reconciles the recorded attempt.`; this.event(task, 'attention', { agentId: agent.id, error: agent.error }); }
+    };
+    try {
+      await begin();
+    } catch (error) {
+      if (String(error.message).includes('is not an available shell')) {
+        try { await this.transport.stop(agent); } catch {}
+        try { await begin(); await this.save(task); return; } catch (retry) { error = retry; }
+      }
+      agent.status = 'failed'; agent.error = `Launch uncertain: ${error.message}. Resume reconciles the recorded attempt.`; this.event(task, 'attention', { agentId: agent.id, error: agent.error });
+    }
     await this.save(task);
   }
   agent(task, role, cwd, mode = 'explore') {
@@ -267,7 +276,14 @@ export class Runtime {
     if (agent.role === 'worker' && agent.mode === 'write' && input.status === 'completed') {
       task.operation = { kind: 'worker-commit', agentId: agent.id, at: now() }; await this.save(task);
       await git(agent.cwd, 'add', '-A');
-      if (await git(agent.cwd, 'diff', '--cached', '--name-only')) await git(agent.cwd, 'commit', '-m', `Implement runner assignment ${agent.id.slice(0, 8)}`, '-m', `Fulfil the task described in ${agent.assignment}; handoff: ${input.artifact}`);
+      if (await git(agent.cwd, 'diff', '--cached', '--name-only')) {
+        let subject = `Implement runner assignment ${agent.id.slice(0, 8)}`;
+        try {
+          const line = (await readFile(join(this.dir(task), 'artifacts', 'brief.md'), 'utf8')).split(/\r?\n/).map(value => value.trim()).find(Boolean);
+          if (line) subject = line.slice(0, 72);
+        } catch {}
+        await git(agent.cwd, 'commit', '-m', subject, '-m', `Fulfil the task described in ${agent.assignment}; handoff: ${input.artifact}`);
+      }
       agent.commit = await git(agent.cwd, 'rev-parse', 'HEAD'); task.operation = null;
     }
     if (agent.stage === 'review' && input.status === 'completed') {
@@ -437,7 +453,14 @@ export class Runtime {
       if (action === 'peers') { assert(owner || orchestrator, 'Orchestrator access required'); return [...this.tasks.values()].filter(t => t.repo === task.repo && t.id !== task.id).map(t => ({ id: t.id, status: t.status, documents: t.documents ?? {} })); }
       string(input.requestId, 'requestId', 200);
       const key = `${owner ? 'owner' : actor.id}:${input.requestId}`; const fingerprint = digest({ action, body });
-      if (task.receipts[key]) { const receipt = task.receipts[key]; assert(receipt.fingerprint === fingerprint, 'requestId reused with different input'); assert(receipt.status === 'completed', receipt.error || 'Previous request outcome is uncertain; inspect before issuing another action'); return receipt.result; }
+      if (task.receipts[key]) {
+        const receipt = task.receipts[key];
+        assert(receipt.fingerprint === fingerprint, 'requestId reused with different input');
+        if (receipt.status === 'completed') return receipt.result;
+        const retryable = receipt.status === 'failed' && receipt.action === 'accept' && !task.operation && !task.delivery;
+        assert(retryable, receipt.error || 'Previous request outcome is uncertain; inspect before issuing another action');
+        delete task.receipts[key];
+      }
       assert(owner || active(actor) && !terminal.has(task.status), 'Inactive attempt');
       if (!owner && actor.status === 'waiting') assert(['read', 'ack', 'model'].includes(action), 'Waiting for a decision');
       let result;
