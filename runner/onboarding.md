@@ -12,7 +12,8 @@ Create a reliable verify.sh that runs meaningful existing tests and exits nonzer
 when checks fail. Do not fake success, suppress failures, or install global tools.
 Document prerequisites, commands and coverage gaps. If meaningful verification
 cannot be established, ask the owner. Include .runner/project.json configured to run
-bash verify.sh. Run every configured verification command, including onboard_verify.
+bash verify.sh. Keep .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
+agent-local files stay untracked. Run every configured verification command, including onboard_verify.
 
 ## Experimental feature map
 

@@ -621,6 +621,7 @@ test('onboard by alias snapshots discovery instructions and retains verification
   const { main } = await import('../runner/cli.js');
   await main(['repo', 'add', 'discovery', f.repo]);
   const configBefore = await readFile(join(f.repo, '.runner/project.json'), 'utf8');
+  const before = await git(f.repo, 'rev-parse', 'HEAD');
   const result = await main(['onboard', 'discovery', '--model', 'test-model']);
   const task = app.runtime.task(result.id);
   assert.equal(task.config.model, 'test-model'); assert(task.config.verify.includes('onboard_verify'));
@@ -628,7 +629,27 @@ test('onboard by alias snapshots discovery instructions and retains verification
   assert.equal(brief.content, await readFile(new URL('../runner/onboarding.md', import.meta.url), 'utf8'));
   assert.match(brief.content, /feature-map\.md/); assert.match(brief.content, /brownfield only/);
   assert.equal(await readFile(join(f.repo, '.runner/project.json'), 'utf8'), configBefore);
+  const ignore = await readFile(join(f.repo, '.gitignore'), 'utf8');
+  assert.match(ignore, /^\.pi\/$/m); assert.match(ignore, /^\.runner\/answers\/$/m); assert.match(ignore, /^\.runner-ui-\*\/$/m);
+  assert.equal(await git(f.repo, 'log', '-1', '--format=%s'), 'Ignore agent-local directories');
+  assert.notEqual(task.base, before); assert.equal(task.base, await git(f.repo, 'rev-parse', 'HEAD'));
   assert.equal(await git(f.repo, 'status', '--porcelain'), '');
+});
+
+test('onboard gitignore helper appends missing agent directories, commits, and is idempotent', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-ignore-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo'); await mkdir(repo);
+  await git(repo, 'init', '-b', 'main'); await git(repo, 'config', 'user.email', 'test@example.invalid'); await git(repo, 'config', 'user.name', 'Runner Test');
+  await writeFile(join(repo, 'README'), 'base\n'); await writeFile(join(repo, '.gitignore'), 'node_modules/\n');
+  await git(repo, 'add', '.'); await git(repo, 'commit', '-m', 'Base');
+  const { ensureAgentIgnore } = await import('../runner/cli.js');
+  assert.deepEqual(await ensureAgentIgnore(repo), { updated: true });
+  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.runner/answers/\n.runner-ui-*/\n');
+  assert.equal(await git(repo, 'log', '-1', '--format=%s'), 'Ignore agent-local directories');
+  const head = await git(repo, 'rev-parse', 'HEAD');
+  assert.deepEqual(await ensureAgentIgnore(repo), { updated: false });
+  assert.equal(await git(repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(await git(repo, 'status', '--porcelain'), '');
 });
 
 test('unconfigured repositories start and pass lightweight discovery references to agents', async t => {

@@ -249,7 +249,9 @@ and uninspected areas; existing curated docs are preserved and referenced.
 Copies are published as current documents in the inspector. The reusable instructions
 are in [onboarding.md](onboarding.md) and are snapshotted into each onboarding brief. If configuration is absent, the CLI creates a
 minimal `.runner/project.json` in the source repo first. Existing configuration is
-preserved. The onboarding task must pass both existing checks and `bash verify.sh`.
+preserved. It also adds `.pi/`, `.runner/answers/`, and `.runner-ui-*/` to `.gitignore`
+and commits that file when those entries were missing, so Pi internals, local replies,
+and browser-evidence output stay untracked in later worktrees. The onboarding task must pass both existing checks and `bash verify.sh`.
 The script remains a candidate until reviewed/integrated into the source branch.
 Its reliability still depends on meaningful test coverage; a zero exit alone does
 not establish that a test suite is adequate.

@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { json, assert, atomic } from './io.js';
+import { json, assert, atomic, git } from './io.js';
 import { connect, dataRoot } from './connection.js';
 import { repos, resolveRepo } from './repos.js';
 import { validateWebhook } from './notifications.js';
@@ -83,6 +83,8 @@ Example: agent-plan repo add demo /path/to/demo`,
 Launch an agent task to produce verify.sh, a .runner/feature-map.md index with
 .runner/features/ documents, and conceptual .runner/architecture.md for existing code.
 Missing .runner/project.json is scaffolded; existing configuration is preserved.
+Missing .pi/, .runner/answers/, and .runner-ui-*/ gitignore entries are added and
+committed so agent-local files do not dirty later worktrees.
 The result stays in its integration worktree for review; it is not merged.`,
   init: `agent-plan init REPO 'VERIFY_ARGV_JSON'
 
@@ -124,6 +126,19 @@ export function supervisorArgs(raw) {
   }
   return args;
 }
+export const agentIgnore = ['.pi/', '.runner/answers/', '.runner-ui-*/'];
+export async function ensureAgentIgnore(repo) {
+  const path = join(repo, '.gitignore');
+  let current = '';
+  try { current = await readFile(path, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const present = new Set(current.split(/\r?\n/).map(line => line.trim()));
+  const missing = agentIgnore.filter(entry => !present.has(entry));
+  if (!missing.length) return { updated: false };
+  await writeFile(path, (current && !current.endsWith('\n') ? current + '\n' : current) + missing.join('\n') + '\n');
+  await git(repo, 'add', '--', '.gitignore');
+  await git(repo, 'commit', '-m', 'Ignore agent-local directories', '--', '.gitignore');
+  return { updated: true };
+}
 export async function main(args = process.argv.slice(2)) {
   const [command, ...raw] = args;
   if (!command || ['help', '--help', '-h'].includes(command)) return showHelp(raw[0]);
@@ -159,6 +174,7 @@ export async function main(args = process.argv.slice(2)) {
     const repo = await resolveRepo(rest[0]); await mkdir(join(repo, '.runner'), { recursive: true });
     try { await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({ commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
+    await ensureAgentIgnore(repo);
     return main(['start', repo, await readFile(new URL('./onboarding.md', import.meta.url), 'utf8'), '--onboarding', ...Object.entries(selection).filter(([k]) => k !== 'onboarding').flatMap(([k,v]) => ['--' + k.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()),v])]);
   }
   const root = dataRoot();
