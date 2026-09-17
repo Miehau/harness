@@ -170,7 +170,7 @@ export async function main(args = process.argv.slice(2)) {
   }
   const action = (action, taskId, input = {}, requestId = randomUUID()) => request('/action', { action, taskId, input, requestId });
   if (command === 'dashboard') return `${url}/#${connection.token}`;
-  if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, status: t.status, repo: t.repo, workspace: t.workspace ?? null }));
+  if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, title: t.title ?? null, status: t.status, repo: t.repo, workspace: t.workspace ?? null }));
   if (command === 'submit') return action('submit', null, { repo: await resolveRepo(rest[0]), text: await readFile(rest[1], 'utf8'), requestId: rest[2] ?? randomUUID() });
   let taskId;
   if (command === 'start' && rest.length >= 2) {

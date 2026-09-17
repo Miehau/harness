@@ -13,6 +13,7 @@ import { modelMenu, chooseModel, reviewModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
 import { mediaFile, verifyUI } from './evidence.js';
+import { titleOf, slugOf, agentName, branchName } from './names.js';
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -88,7 +89,7 @@ export class Runtime {
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
     assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
-    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
+    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
@@ -119,7 +120,7 @@ export class Runtime {
   async worktree(task, name, base) {
     const cwd = join(this.dir(task), 'worktrees', name);
     await mkdir(dirname(cwd), { recursive: true });
-    const branch = `codex/runner-${task.id.slice(0, 8)}-${name}`;
+    const branch = branchName(task, name);
     await this.serial(() => git(task.repo, 'worktree', 'add', '-b', branch, cwd, base), `git:${task.repo}`);
     return { cwd: await realpath(cwd), branch };
   }
@@ -151,7 +152,7 @@ export class Runtime {
     const agent = { id: id(), role, mode, cwd, token: id() + id(), replyToken: id() + id(), status: 'starting', createdAt: now(), inbox: [] };
     agent.artifactDir = role === 'orchestrator' ? 'orchestrator' : `workers/${agent.id}`;
     agent.modelSelection = { model: task.config.model, provider: task.config.provider };
-    agent.name = `r-${agent.id.slice(0, 16)}`; agent.session = join(this.dir(task), 'sessions', `${agent.id}.jsonl`);
+    agent.name = agentName(task, agent); agent.session = join(this.dir(task), 'sessions', `${agent.id}.jsonl`);
     task.agents.push(agent); return agent;
   }
   async start(task) {
@@ -189,11 +190,12 @@ export class Runtime {
     const chosen = stage === 'review' ? await reviewModel(task, input, this.transport, candidate) : chooseModel(task, input, stage);
     if (this.transport.resolveModel) chosen.selection = await this.transport.resolveModel(chosen.selection);
     task.operation = { kind: 'create-worker', at: now() }; await this.save(task);
-    const workspace = await this.worktree(task, `w-${id().slice(0, 8)}`, 'refs/heads/' + task.integration.branch);
+    const workspace = await this.worktree(task, `${stage}-${id().slice(0, 6)}`, 'refs/heads/' + task.integration.branch);
     task.operation = null;
     if (task.config.setup) await this.command(task, workspace, task.config.setup);
     const agent = this.agent(task, 'worker', workspace.cwd, input.mode);
     Object.assign(agent, { stage, branch: workspace.branch, base: await git(workspace.cwd, 'rev-parse', 'HEAD'), assignment: input.assignment, contract: input.contract ?? null });
+    agent.name = agentName(task, agent);
     agent.modelSelection = chosen.selection; agent.modelChoice = chosen.choice; agent.modelReason = chosen.reason;
     let review;
     if (stage === 'review') {
@@ -277,11 +279,7 @@ export class Runtime {
       task.operation = { kind: 'worker-commit', agentId: agent.id, at: now() }; await this.save(task);
       await git(agent.cwd, 'add', '-A');
       if (await git(agent.cwd, 'diff', '--cached', '--name-only')) {
-        let subject = `Implement runner assignment ${agent.id.slice(0, 8)}`;
-        try {
-          const line = (await readFile(join(this.dir(task), 'artifacts', 'brief.md'), 'utf8')).split(/\r?\n/).map(value => value.trim()).find(Boolean);
-          if (line) subject = line.slice(0, 72);
-        } catch {}
+        const subject = (task.title || `Implement runner assignment ${agent.id.slice(0, 8)}`).slice(0, 72);
         await git(agent.cwd, 'commit', '-m', subject, '-m', `Fulfil the task described in ${agent.assignment}; handoff: ${input.artifact}`);
       }
       agent.commit = await git(agent.cwd, 'rev-parse', 'HEAD'); task.operation = null;

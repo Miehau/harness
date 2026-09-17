@@ -2,6 +2,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { exec, assert } from './io.js';
+import { tabLabel, workspaceLabel } from './names.js';
 const extension = fileURLToPath(new URL('./pi-extension.js', import.meta.url));
 export class Herdr {
   async call(...args) {
@@ -20,11 +21,11 @@ export class Herdr {
     const env = ['--env', `PATH=${resolve(dirname(extension), '../node_modules/.bin')}:${process.env.PATH}`, '--env', `RUNNER_URL=${url}`, '--env', `RUNNER_TOKEN=${agent.token}`, '--env', `RUNNER_REPLY_TOKEN=${agent.replyToken}`];
     let row;
     try { row = task.workspace
-      ? await this.call('tab', 'create', '--workspace', task.workspace, '--cwd', agent.cwd, '--label', `${agent.role} ${agent.id.slice(0, 8)}`, ...env, '--no-focus')
-      : await this.call('workspace', 'create', '--cwd', agent.cwd, '--label', `runner ${task.id.slice(0, 8)}`, ...env, '--no-focus');
+      ? await this.call('tab', 'create', '--workspace', task.workspace, '--cwd', agent.cwd, '--label', tabLabel(agent), ...env, '--no-focus')
+      : await this.call('workspace', 'create', '--cwd', agent.cwd, '--label', workspaceLabel(task), ...env, '--no-focus');
     } catch (error) {
       if (!task.workspace || !['workspace_not_found', 'target_not_found'].includes(error.code)) throw error;
-      row = await this.call('workspace', 'create', '--cwd', agent.cwd, '--label', `runner ${task.id.slice(0, 8)}`, ...env, '--no-focus');
+      row = await this.call('workspace', 'create', '--cwd', agent.cwd, '--label', workspaceLabel(task), ...env, '--no-focus');
     }
     assert(row.root_pane?.pane_id && row.tab?.tab_id, 'Herdr did not return a pane and tab');
     return { pane: row.root_pane.pane_id, tab: row.tab.tab_id, workspace: row.workspace?.workspace_id ?? task.workspace };

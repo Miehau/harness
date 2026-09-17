@@ -29,7 +29,9 @@ agent-plan stop TASK
 
 `start` creates the task, starts the background runtime when needed, creates an
 integration worktree and Herdr workspace, and focuses the Pi orchestrator. Workers
-open their own sessions without taking focus away permanently. TASK accepts a full
+open their own sessions without taking focus away permanently. Herdr workspace
+labels, agent names and Git branches use the first line of the task brief, not
+the opaque task id. Existing tasks keep their original branch names. TASK accepts a full
 ID or a unique prefix. No separate daemon terminal, submission file, or copied ID
 is required for starting work. `stop` cancels execution while retaining worktrees.
 
@@ -116,7 +118,8 @@ is no per-repo application code or required dependency on the old daemon.
 
 - Multiple tasks can run in the same repository, with separate integration and worker
   worktrees. Mutations serialize per task; Git worktree creation uses a short repository
-  queue. Up to `maxWorkers` workers can run within a task.
+  queue. Up to `maxWorkers` workers can run within a task. New worktrees use
+  `runner/<brief-slug>-<id>` branches so Herdr's spaces list shows the task title.
 - A task has an integration worktree. Each worker has its own worktree, including
   read-only exploration workers. The main agent cannot directly edit repository files.
   Managed Pi sessions auto-trust that worktree for the run so Pi does not prompt

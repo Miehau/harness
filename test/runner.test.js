@@ -113,7 +113,9 @@ test('HTTP owner and worker scopes survive server restart', async t => {
   assert.equal(server.runtime.url, url); assert.equal(server.descriptor.token, token);
   const dashboard = await fetch(url + '/?task=example');
   assert.equal(dashboard.status, 200);
-  assert.match(await dashboard.text(), /Evidence reader/);
+  const page = await dashboard.text();
+  assert.match(page, /Evidence reader/);
+  assert.match(page, /task\.title/);
 });
 
 test('submission is idempotent and workflow snapshot survives repo edits', async t => {
@@ -320,6 +322,28 @@ test('malformed connection credentials fail closed and release the startup lock'
   await assert.rejects(readFile(join(root, 'daemon.lock')), /ENOENT/);
 });
 
+
+test('worktrees and Herdr labels use the brief title', async t => {
+  const f = await fixture(t);
+  const task = f.runtime.task(f.task.id);
+  assert.equal(task.title, 'Implement an improvement');
+  assert.equal(task.slug, 'implement-an-improvement');
+  assert.equal(task.integration.branch, `runner/implement-an-improvement-${task.id.slice(0, 8)}`);
+  assert.match(f.main.name, /^implement-an-improvement-coord-/);
+  await f.artifact('assignment.md', 'Change value.txt');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
+  const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
+  assert.match(worker.branch, new RegExp(`^runner/implement-an-improvement-${task.id.slice(0, 8)}-implementation-`));
+  assert.match(worker.name, /implementation/);
+  const { Herdr } = await import('../runner/herdr.js');
+  const herdr = new Herdr(); const calls = [];
+  herdr.call = async (...args) => { calls.push(args); return { root_pane: { pane_id: 'p' }, tab: { tab_id: 't' }, workspace: { workspace_id: 'w' } }; };
+  const labelOf = args => args[args.indexOf('--label') + 1];
+  await herdr.create({ ...task, workspace: null }, { ...f.main, cwd: f.main.cwd }, 'http://127.0.0.1:1');
+  assert.equal(labelOf(calls[0]), 'Implement an improvement');
+  await herdr.create({ ...task, workspace: 'w' }, { ...worker, cwd: worker.cwd }, 'http://127.0.0.1:1');
+  assert.equal(labelOf(calls[1]), 'Implementation worker');
+});
 
 test('managed Pi launch auto-trusts the worktree', async t => {
   const { Herdr } = await import('../runner/herdr.js');
