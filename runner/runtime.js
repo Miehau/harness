@@ -13,7 +13,7 @@ import { modelMenu, chooseModel, reviewModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
 import { mediaFile, verifyUI } from './evidence.js';
-import { titleOf, slugOf, agentName, branchName } from './names.js';
+import { titleOf, slugOf, agentName, branchName, commitMessage, ticketOf } from './names.js';
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -31,6 +31,14 @@ export class Runtime {
       const task = await json(join(this.root, 'tasks', dir, 'state.json'));
       assert(task.id === dir && task.version === 1, `Invalid task ${dir}`);
       for (const agent of task.agents) agent.artifactDir ??= agent.role === 'orchestrator' ? 'orchestrator' : `workers/${agent.id}`;
+      if (!task.title || !task.ticket) {
+        try {
+          const brief = await readFile(join(this.dir(task), 'artifacts', 'brief.md'), 'utf8');
+          task.title ||= titleOf(brief);
+          task.slug ??= slugOf(task.title);
+          task.ticket ||= ticketOf(task.title, brief) || undefined;
+        } catch {}
+      }
       this.tasks.set(task.id, task);
     }
   }
@@ -89,7 +97,7 @@ export class Runtime {
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
     assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
-    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
+    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
@@ -279,8 +287,9 @@ export class Runtime {
       task.operation = { kind: 'worker-commit', agentId: agent.id, at: now() }; await this.save(task);
       await git(agent.cwd, 'add', '-A');
       if (await git(agent.cwd, 'diff', '--cached', '--name-only')) {
-        const subject = (task.title || `Implement runner assignment ${agent.id.slice(0, 8)}`).slice(0, 72);
-        await git(agent.cwd, 'commit', '-m', subject, '-m', `Fulfil the task described in ${agent.assignment}; handoff: ${input.artifact}`);
+        const read = async path => { try { return await readFile(await safePath(join(this.dir(task), 'artifacts'), path), 'utf8'); } catch { return ''; } };
+        const { subject, body } = commitMessage({ title: task.title, ticket: task.ticket, assignment: await read(agent.assignment), handoff: await read(input.artifact), brief: await read('brief.md') });
+        await git(agent.cwd, 'commit', '-m', subject, ...(body ? ['-m', body] : []));
       }
       agent.commit = await git(agent.cwd, 'rev-parse', 'HEAD'); task.operation = null;
     }

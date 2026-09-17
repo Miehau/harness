@@ -134,8 +134,10 @@ is no per-repo application code or required dependency on the old daemon.
   and answers their questions with the updated contract reference.
 - Artifacts are immutable. Save a new revision instead of overwriting a published file.
   A report contains status and references; full transcripts remain in Pi session files.
-- Completed worker changes are committed and integrated by the runtime. Integration
-  waits for workers, executes serially, and refreshes final verification afterward.
+- Completed worker changes are committed and integrated by the runtime. The commit
+  subject is the assignment title, then the task title, with a ticket id from the
+  brief when present; agent IDs are never used.
+  Integration waits for workers, executes serially, and refreshes final verification afterward.
 - `completed` means a verified candidate branch. Owner acceptance can rebase, verify and merge the candidate locally. No push, PR
   or deployment occurs automatically. Failed workers can retain useful work.
 

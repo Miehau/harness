@@ -26,8 +26,10 @@ Command outputs are saved; read the returned artifact when needed.
 
 Save a concise handoff file containing changes, verification, and remaining concerns.
 Use runner_action({action:"report",input:{status:"completed"|"failed",artifact}}).
-The runtime commits completed writing work and sends the handoff reference to the main
-agent. A report is the final action. Do not continue editing after reporting.
+The runtime commits completed writing work using the assignment title (or task title),
+prefixed with a ticket id from the brief when present, never an agent id, and sends
+the handoff reference to the main agent. A report is the final action. Do not continue
+editing after reporting.
 
 For a question or a shared-contract conflict, save a question artifact and use
 runner_action({action:"ask",input:{artifact}}). End the turn and wait for the durable

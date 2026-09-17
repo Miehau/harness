@@ -730,6 +730,30 @@ test('writing worker commits use the brief subject', async t => {
   assert.equal(await git(worker.cwd, 'log', '-1', '--format=%s'), 'Implement an improvement');
 });
 
+test('writing worker commits include a ticket id from the brief', async t => {
+  const f = await fixture(t);
+  const current = f.runtime.task(f.task.id); current.ticket = 'MEA-48'; await f.runtime.save(current);
+  await f.artifact('assignment.md', 'Fix the greeting copy');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
+  const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
+  await f.call(f.who(worker), 'write', f.task.id, { area: 'repo', path: 'value.txt', content: 'improved\n' });
+  await f.call(f.who(worker), 'report', f.task.id, { status: 'completed', artifact: await f.artifact('handoff.md', 'Updated value.txt.', f.who(worker)) });
+  assert.equal(await git(worker.cwd, 'log', '-1', '--format=%s'), 'MEA-48: Fix the greeting copy');
+});
+
+test('writing worker commits use the assignment title instead of an agent id', async t => {
+  const f = await fixture(t); await f.artifact('assignment.md', '# Fix the greeting copy\n\nUpdate value.txt.');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
+  const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
+  const current = f.runtime.task(f.task.id); delete current.title; await f.runtime.save(current);
+  await f.call(f.who(worker), 'write', f.task.id, { area: 'repo', path: 'value.txt', content: 'improved\n' });
+  await f.call(f.who(worker), 'report', f.task.id, { status: 'completed', artifact: await f.artifact('handoff.md', 'Updated value.txt.\nTests pass.', f.who(worker)) });
+  const message = await git(worker.cwd, 'log', '-1', '--format=%s%n%n%b');
+  assert.equal(message.split('\n')[0], 'Fix the greeting copy');
+  assert.match(message, /Updated value\.txt/);
+  assert.doesNotMatch(message, /runner assignment|Fulfil the task/);
+});
+
 test('launch recreates a pane when the first Herdr shell is unavailable', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-'));
   t.after(() => rm(root, { recursive: true, force: true }));
