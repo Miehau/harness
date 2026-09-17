@@ -44,6 +44,7 @@ agent-plan init /absolute/repo '["npm","test"]'
 By default all terminals share `~/.local/state/agent-plan`. Set `RUNNER_DATA` to use
 another data directory, including one created with the earlier manual setup. The
 runtime stays in the background; startup failures are logged in its `daemon.log`.
+A later CLI command replaces a still-running daemon built from different runner source.
 `node runner/server.js /absolute/data-dir` remains available for foreground debugging.
 Without installing a global command, use `npm run runner -- <command>` in this checkout.
 
@@ -118,6 +119,8 @@ is no per-repo application code or required dependency on the old daemon.
   queue. Up to `maxWorkers` workers can run within a task.
 - A task has an integration worktree. Each worker has its own worktree, including
   read-only exploration workers. The main agent cannot directly edit repository files.
+  Managed Pi sessions auto-trust that worktree for the run so Pi does not prompt
+  to approve project-local `.agents/skills` on every new checkout.
 - Workers can read their worktree and task artifacts. Writing workers can edit/remove
   repository files and invoke named commands. Exploration workers only write artifacts.
   Git/Pi internals and symlink escapes are blocked by the file API. Worktrees are
