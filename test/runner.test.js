@@ -664,6 +664,47 @@ test('accept rejects stale approval and dirty source without changing main', asy
   assert.equal(await git(f.repo, 'rev-parse', 'HEAD'), before); assert.equal(await readFile(join(f.repo, 'local.txt'), 'utf8'), 'Keep this');
 });
 
+test('accept ignores untracked runner answers and retries a failed dirty-source receipt', async t => {
+  const f = await candidate(t);
+  await mkdir(join(f.repo, '.runner/answers'), { recursive: true });
+  await writeFile(join(f.repo, '.runner/answers/note.md'), 'accept');
+  const requestId = id(); const input = { commit: f.commit };
+  await writeFile(join(f.repo, 'local.txt'), 'Keep this');
+  await assert.rejects(f.call('owner', 'accept', f.task.id, input, requestId), /Source repository must be clean/);
+  await rm(join(f.repo, 'local.txt'));
+  const result = await f.call('owner', 'accept', f.task.id, input, requestId);
+  assert.equal(result.phase, 'merged'); assert.equal(await git(f.repo, 'rev-parse', 'HEAD'), result.commit);
+});
+
+test('writing worker commits use the brief subject', async t => {
+  const f = await fixture(t); await f.artifact('assignment.md');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
+  const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
+  await f.call(f.who(worker), 'write', f.task.id, { area: 'repo', path: 'value.txt', content: 'improved\n' });
+  await f.call(f.who(worker), 'report', f.task.id, { status: 'completed', artifact: await f.artifact('handoff.md', 'Implemented', f.who(worker)) });
+  assert.equal(await git(worker.cwd, 'log', '-1', '--format=%s'), 'Implement an improvement');
+});
+
+test('launch recreates a pane when the first Herdr shell is unavailable', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo'); await mkdir(join(repo, '.runner'), { recursive: true });
+  await git(repo, 'init', '-b', 'main'); await git(repo, 'config', 'user.email', 'test@example.invalid'); await git(repo, 'config', 'user.name', 'Runner Test');
+  await writeFile(join(repo, 'value.txt'), 'base\n');
+  await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({ commands: { test: [process.execPath, '-e', 'true'] }, verify: ['test'], maxWorkers: 2 }));
+  await git(repo, 'add', '.'); await git(repo, 'commit', '-m', 'Fixture');
+  const transport = new FakeHerdr(); transport.start = async function start(agent) {
+    this.starts.push(agent.id);
+    if (this.starts.length === 1) throw new Error('agent target pane x is not an available shell');
+    this.agents.set(agent.id, 'idle');
+  };
+  const runtime = new Runtime(join(root, 'data'), { transport }); await runtime.init(); runtime.url = 'http://127.0.0.1:1';
+  const task = await runtime.execute('owner', { action: 'submit', input: { repo, text: 'Retry launch', requestId: id() }, requestId: id() });
+  await runtime.execute('owner', { action: 'start', taskId: task.id, requestId: id() });
+  const agent = runtime.task(task.id).agents[0];
+  assert.equal(agent.status, 'running'); assert.equal(transport.starts.length, 2);
+});
+
 test('accept retains a rebase conflict until explicit recovery', async t => {
   const f = await candidate(t);
   await writeFile(join(f.repo, 'value.txt'), 'conflicting main change\n'); await git(f.repo, 'add', '.'); await git(f.repo, 'commit', '-m', 'Conflict');

@@ -2,6 +2,17 @@ import { resolve } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { assert, git, now } from './io.js';
 
+export function dirty(output) {
+  return output.split('\n').some(line => {
+    if (!line) return false;
+    if (line.startsWith('??')) {
+      const path = line.slice(3);
+      if (path === '.runner/answers' || path.startsWith('.runner/answers/')) return false;
+    }
+    return true;
+  });
+}
+
 export async function rebaseInProgress(cwd) {
   for (const name of ['rebase-merge', 'rebase-apply']) {
     const path = await git(cwd, 'rev-parse', '--git-path', name);
@@ -26,7 +37,7 @@ export async function accept(runtime, task, input) {
   const target = input.target ?? 'main';
   await git(task.repo, 'check-ref-format', '--branch', target);
   assert(await git(task.repo, 'symbolic-ref', '--short', 'HEAD') === target, `Check out ${target} in the source repository before accepting`);
-  assert(!await git(task.repo, 'status', '--porcelain'), 'Source repository must be clean before accepting');
+  assert(!dirty(await git(task.repo, 'status', '--porcelain')), 'Source repository must be clean before accepting');
   const before = await git(task.repo, 'rev-parse', `refs/heads/${target}`);
   const base = task.delivery?.rebasedOnto ?? task.base;
   await git(cwd, 'merge-base', '--is-ancestor', base, commit);
@@ -40,7 +51,7 @@ export async function accept(runtime, task, input) {
     assert(proof.passed, `Rebased verification failed; see ${proof.artifact}`);
     assert(await git(task.repo, 'symbolic-ref', '--short', 'HEAD') === target, 'Source checkout changed during verification');
     assert(await git(task.repo, 'rev-parse', 'HEAD') === before, 'Target branch advanced; inspect the candidate and accept again');
-    assert(!await git(task.repo, 'status', '--porcelain'), 'Source repository changed during verification');
+    assert(!dirty(await git(task.repo, 'status', '--porcelain')), 'Source repository changed during verification');
     const merged = await git(cwd, 'rev-parse', 'HEAD');
     await git(cwd, 'merge-base', '--is-ancestor', before, merged);
     task.delivery.phase = 'merging'; task.delivery.commit = merged;
