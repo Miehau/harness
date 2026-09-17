@@ -3,8 +3,9 @@
 Explore this repository's actual code, documentation, build/test instructions and CI.
 Produce a reviewable onboarding candidate in the task's integration worktree. Do not
 merge, push or deploy it. Preserve existing documentation and unrelated source code.
-Follow the delegated discovery, architecture, planning and coordinator clarification
-stages before using one implementation worker to apply the onboarding files.
+Select preparation stages according to workflow/stages.md; delegate substantial
+repository exploration, but skip separate design/planning workers when unnecessary.
+Record coordinator clarification before one implementation worker applies the files.
 
 ## Verification
 

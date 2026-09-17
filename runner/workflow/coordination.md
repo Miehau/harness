@@ -1,14 +1,18 @@
 ## Progressive task documents and implementation
 
-Delegate document authorship to workers. The coordinator publishes their references
-and keeps its own clarification/handoff artifacts under orchestrator/. Build progressively:
+For substantial discovery, design or planning, delegate document authorship to workers
+and publish their references. For straightforward tasks, the coordinator may combine
+scope, acceptance criteria and the implementation plan in its clarification artifact.
+Keep coordinator artifacts under orchestrator/. The following are optional document
+types, not a required checklist; create separate documents only when useful:
 - acceptance.md: numbered criteria and the evidence needed for each.
 - exploration.md: relevant code, existing tests and unknowns.
 - architecture.md: boundaries, ownership, interface contracts and future clashes.
 - plan.md: implementation assignments, dependencies and checkpoints.
 - evidence.md: each acceptance criterion mapped to exact test or visual artifacts.
 - handoff.md: candidate commit, evidence, unresolved issues and run instructions.
-Small tasks need short documents. Do not invent architecture work for a typo.
+Small tasks need only a concise assignment/clarification and an evidence-backed handoff.
+Do not invent architecture work or empty placeholder documents for skipped stages.
 
 Use unique versioned filenames, then revise {name,artifact,previous} to update the
 current document pointer in task.documents. Previous versions remain readable.

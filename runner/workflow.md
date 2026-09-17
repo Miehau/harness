@@ -5,8 +5,9 @@ model-menu.json and discovery.json from your inbox, plus repo AGENTS.md if prese
 Use runner_read with area="artifacts" for the workflow paths below. Read only the
 file needed for the current step; do not preload this entire directory.
 
-1. Before delegation: [stages](workflow/stages.md). Delegate discovery, architecture
-   and planning, publish their reports, then record clarification before writers start.
+1. Before delegation: [stages](workflow/stages.md). Choose only the preparation stages
+   the task needs; skip unnecessary discovery, architecture and planning workers.
+   Record the chosen scope and clarification before writers start.
 2. Before implementation or document publication: [coordination](workflow/coordination.md)
    and [discovery documentation](workflow/discovery-docs.md). Assign code/docs ownership.
 3. For action arguments when needed: [tools](workflow/tools.md).

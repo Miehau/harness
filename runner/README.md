@@ -361,10 +361,16 @@ assignments, and workers follow those links progressively.
 
 ## Delegated stages and model menu
 
-New tasks use discovery → architecture worker → planning worker → coordinator
-clarification → implementation → verification. The first three workers are read-only
-for repository files. The coordinator publishes their document references, resolves
-material questions with the owner, and calls `clarify` before starting writers. A new
+The coordinator selects preparation stages by scope, uncertainty and risk. Straightforward
+cleanup, deletions and small fixes can go directly from a concise coordinator assignment
+and clarification to implementation, verification and independent candidate review.
+Discovery is for uncertain impact; architecture is for unresolved design decisions;
+planning workers are for substantial sequencing or multiple assignments. Even a new
+feature may skip these when it follows an established pattern. Selected preparation
+workers are read-only. Skipped stages and a brief reason go in the clarification artifact,
+without placeholder documents or a user approval round.
+The coordinator resolves material questions with the owner and calls `clarify` before
+starting writers. Required verification, review and owner acceptance still apply. A new
 current-document revision invalidates that checkpoint. Existing task snapshots retain
 their previous workflow.
 
