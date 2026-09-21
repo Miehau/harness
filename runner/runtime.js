@@ -19,9 +19,73 @@ const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const bundled = name => readFile(fileURLToPath(new URL(name, import.meta.url)), 'utf8');
 
+/**
+ * @typedef {object} Agent
+ * @property {string} id
+ * @property {'orchestrator'|'worker'} role
+ * @property {'write'|'explore'} mode
+ * @property {string} cwd
+ * @property {string} token
+ * @property {string} replyToken
+ * @property {'starting'|'running'|'waiting'|'completed'|'failed'|'cancelled'} status
+ * @property {Array<object>} inbox
+ * @property {string} artifactDir
+ */
+
+/**
+ * @typedef {object} Decision
+ * @property {string} id
+ * @property {string} agentId
+ * @property {'owner'|'orchestrator'} audience
+ * @property {string} artifact
+ * @property {string=} answer
+ * @property {string=} answeredBy
+ */
+
+/**
+ * Durable identity for a side effect that may require explicit recovery.
+ * @typedef {object} Operation
+ * @property {string} kind
+ * @property {string} at
+ * @property {string=} workerId
+ * @property {string=} agentId
+ * @property {number|null=} pid
+ */
+
+/**
+ * @typedef {object} Receipt
+ * @property {string} fingerprint
+ * @property {string} action
+ * @property {'pending'|'completed'|'failed'} status
+ * @property {*=} result
+ * @property {string=} error
+ */
+
+/**
+ * Durable task state. Artifacts and session transcripts remain separate files.
+ * @typedef {object} Task
+ * @property {1} version
+ * @property {string} id
+ * @property {string} repo
+ * @property {string} base
+ * @property {'queued'|'running'|'waiting'|'completed'|'failed'|'cancelled'} status
+ * @property {Array<Agent>} agents
+ * @property {Array<Decision>} decisions
+ * @property {Record<string, Receipt>} receipts
+ * @property {Operation|null=} operation
+ * @property {object} config
+ */
+
 export class Runtime {
   constructor(root, { transport = new Herdr() } = {}) {
-    this.root = resolve(root); this.transport = transport; this.tasks = new Map(); this.tail = Promise.resolve(); this.queues = new Map(); this.processes = new Map(); this.heartbeats = new Map();
+    this.root = resolve(root);
+    this.transport = transport;
+    /** @type {Map<string, Task>} */
+    this.tasks = new Map();
+    this.tail = Promise.resolve();
+    this.queues = new Map();
+    this.processes = new Map();
+    this.heartbeats = new Map();
   }
   async init() {
     await mkdir(join(this.root, 'tasks'), { recursive: true, mode: 0o700 });
@@ -46,7 +110,9 @@ export class Runtime {
   serial(fn, key = 'intake') { const result = (this.queues.get(key) ?? Promise.resolve()).then(fn); const settled = result.catch(() => {}); this.queues.set(key, settled); this.tail = Promise.all([...this.queues.values()]); return result; }
   interrupt(taskId) { for (const [pid, owner] of this.processes) if (owner === taskId) try { process.kill(-pid, 'SIGKILL'); } catch {} }
   dir(task) { return join(this.root, 'tasks', task.id); }
+  /** @param {Task} task */
   async save(task) { task.updatedAt = now(); await atomic(join(this.dir(task), 'state.json'), task); this.tasks.set(task.id, task); }
+  /** @param {string} taskId @returns {Task} */
   task(taskId) { const task = this.tasks.get(taskId); assert(task, 'Unknown task'); return structuredClone(task); }
   view(task) {
     const value = structuredClone(task);
@@ -166,7 +232,9 @@ export class Runtime {
   async start(task) {
     assert(task.status === 'queued', 'Only queued tasks can start');
     await this.transport.ready?.();
-    task.status = 'running'; task.operation = { kind: 'create-integration', at: now() }; await this.save(task);
+    task.status = 'running';
+    task.operation = { kind: 'create-integration', at: now() };
+    await this.save(task);
     task.integration = await this.worktree(task, 'integration', task.base);
     task.operation = null;
     if (task.config.setup) await this.command(task, { cwd: task.integration.cwd }, task.config.setup);
@@ -197,7 +265,8 @@ export class Runtime {
     }
     const chosen = stage === 'review' ? await reviewModel(task, input, this.transport, candidate) : chooseModel(task, input, stage);
     if (this.transport.resolveModel) chosen.selection = await this.transport.resolveModel(chosen.selection);
-    task.operation = { kind: 'create-worker', at: now() }; await this.save(task);
+    task.operation = { kind: 'create-worker', at: now() };
+    await this.save(task);
     const workspace = await this.worktree(task, `${stage}-${id().slice(0, 6)}`, 'refs/heads/' + task.integration.branch);
     task.operation = null;
     if (task.config.setup) await this.command(task, workspace, task.config.setup);
@@ -221,7 +290,8 @@ export class Runtime {
     const directory = agent.artifactDir ?? 'runtime';
     await mkdir(join(this.dir(task), 'artifacts', directory), { recursive: true });
     const output = `${directory}/${id()}.log`;
-    task.operation = { kind: 'command', name, cwd: agent.cwd, output, at: now(), pid: null }; await this.save(task);
+    task.operation = { kind: 'command', name, cwd: agent.cwd, output, at: now(), pid: null };
+    await this.save(task);
     const log = createWriteStream(join(this.dir(task), 'artifacts', output), { flags: 'wx', mode: 0o600 });
     const child = spawnProcess(argv[0], argv.slice(1), { cwd: agent.cwd, env: { ...process.env, ...env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let error, timedOut = false;
@@ -252,7 +322,8 @@ export class Runtime {
     assert(!await git(task.integration.cwd, 'status', '--porcelain'), 'Integration worktree is dirty');
     assert(!task.agents.some(a => a.role === 'worker' && active(a)), 'Wait for current workers before integration');
     const before = await git(task.integration.cwd, 'rev-parse', 'HEAD');
-    task.operation = { kind: 'integrate', workerId: worker.id, before, commit: worker.commit, at: now() }; await this.save(task);
+    task.operation = { kind: 'integrate', workerId: worker.id, before, commit: worker.commit, at: now() };
+    await this.save(task);
     try {
       if (worker.commit !== worker.base) {
         await git(worker.cwd, 'merge-base', '--is-ancestor', worker.base, worker.commit);
@@ -260,8 +331,15 @@ export class Runtime {
         await git(task.integration.cwd, 'cherry-pick', ...commits);
       }
       worker.integrated = await git(task.integration.cwd, 'rev-parse', 'HEAD');
-      task.operation = null; task.verification = null; await this.save(task); return { commit: worker.integrated };
-    } catch (e) { this.event(task, 'attention', { error: 'Integration conflict; retained for owner recovery', workerId: worker.id }); await this.save(task); throw new Error(`Integration stopped: ${e.message}`); }
+      task.operation = null;
+      task.verification = null;
+      await this.save(task);
+      return { commit: worker.integrated };
+    } catch (e) {
+      this.event(task, 'attention', { error: 'Integration conflict; retained for owner recovery', workerId: worker.id });
+      await this.save(task);
+      throw new Error(`Integration stopped: ${e.message}`);
+    }
   }
   async verify(task) {
     assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a)), 'Wait for workers and resolve interrupted operations');
@@ -446,20 +524,38 @@ export class Runtime {
     task.cleanedAt = now(); await this.save(task); return { cleanedAt: task.cleanedAt, branchesRetained: true };
   }
   async execute(identity, input) {
-    const target = this.tasks.get(identity === 'owner' ? input.taskId : identity.taskId);
-    if (identity === 'owner' && input.action === 'open') { assert(target, 'Unknown task'); const agent = target.agents.findLast(a => a.role === 'orchestrator'); assert(agent, 'This task has no orchestrator session'); return { taskId: target.id, ...await this.transport.open(agent) }; }
+    const taskId = identity === 'owner' ? input.taskId : identity.taskId;
+    const target = this.tasks.get(taskId);
+    if (identity === 'owner' && input.action === 'open') {
+      assert(target, 'Unknown task');
+      const agent = target.agents.findLast(a => a.role === 'orchestrator');
+      assert(agent, 'This task has no orchestrator session');
+      return { taskId: target.id, ...await this.transport.open(agent) };
+    }
     if (identity === 'owner' && input.action === 'cancel' && target) this.interrupt(target.id);
-    if (input.action === 'read' && target) { const actor = identity === 'owner' ? 'owner' : target.agents.find(a => a.id === identity.agentId); assert(actor === 'owner' || actor && active(actor) && !terminal.has(target.status), 'Inactive attempt'); return this.files(target, actor, 'read', input.input); }
+    if (input.action === 'read' && target) {
+      const actor = identity === 'owner' ? 'owner' : target.agents.find(a => a.id === identity.agentId);
+      assert(actor === 'owner' || actor && active(actor) && !terminal.has(target.status), 'Inactive attempt');
+      return this.files(target, actor, 'read', input.input);
+    }
     return this.serial(async () => {
-      if (input.action === 'submit') { assert(identity === 'owner', 'Owner access required'); return this.create(input.input); }
-      const task = this.task(identity === 'owner' ? input.taskId : identity.taskId);
+      if (input.action === 'submit') {
+        assert(identity === 'owner', 'Owner access required');
+        return this.create(input.input);
+      }
+
+      const task = this.task(taskId);
       const actor = identity === 'owner' ? 'owner' : task.agents.find(a => a.id === identity.agentId);
-      const owner = actor === 'owner'; const orchestrator = actor?.role === 'orchestrator';
-      const action = input.action; const body = input.input ?? {};
+      const owner = actor === 'owner';
+      const orchestrator = actor?.role === 'orchestrator';
+      const action = input.action;
+      const body = input.input ?? {};
       if (action === 'inspect') return this.view(task);
       if (action === 'peers') { assert(owner || orchestrator, 'Orchestrator access required'); return [...this.tasks.values()].filter(t => t.repo === task.repo && t.id !== task.id).map(t => ({ id: t.id, status: t.status, documents: t.documents ?? {} })); }
+
       string(input.requestId, 'requestId', 200);
-      const key = `${owner ? 'owner' : actor.id}:${input.requestId}`; const fingerprint = digest({ action, body });
+      const key = `${owner ? 'owner' : actor.id}:${input.requestId}`;
+      const fingerprint = digest({ action, body });
       if (task.receipts[key]) {
         const receipt = task.receipts[key];
         assert(receipt.fingerprint === fingerprint, 'requestId reused with different input');
@@ -471,7 +567,11 @@ export class Runtime {
       assert(owner || active(actor) && !terminal.has(task.status), 'Inactive attempt');
       if (!owner && actor.status === 'waiting') assert(['read', 'ack', 'model'].includes(action), 'Waiting for a decision');
       let result;
-      if (action !== 'read') { task.receipts[key] = { fingerprint, action, status: 'pending' }; await this.save(task); }
+      if (action !== 'read') {
+        task.receipts[key] = { fingerprint, action, status: 'pending' };
+        await this.save(task);
+      }
+
       try {
       if (action === 'read' || action === 'write') result = await this.files(task, actor, action, body);
       else if (action === 'remove') { assert(!owner && actor.role === 'worker' && actor.mode === 'write', 'Writing worker required'); await unlink(await safePath(actor.cwd, body.path)); result = { removed: body.path }; }
@@ -551,10 +651,22 @@ export class Runtime {
       else if (action === 'fault') { assert(!owner, 'Agent access required'); await this.reference(task, body.artifact); actor.status = 'failed'; actor.error = 'Agent turn failed; see the failure artifact'; actor.failure = body.artifact; this.event(task, 'attention', { agentId: actor.id, artifact: body.artifact }); if (actor.role === 'worker') this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', body.artifact, { workerId: actor.id, status: 'failed' }); await this.save(task); result = { status: 'failed' }; }
       else if (action === 'report') { assert(!owner, 'Agent access required'); result = await this.report(task, actor, body); }
       else throw new Error(`Unknown action: ${action}`);
-      // Reads do not retain their contents in task state or inflate every future write.
-      if (action !== 'read') { const current = this.task(task.id); current.receipts[key] = { fingerprint, action, status: 'completed', result }; await this.save(current); }
-      return result;
-      } catch (error) { if (action !== 'read') { const current = this.task(task.id); current.receipts[key] = { fingerprint, action, status: 'failed', error: error.message }; await this.save(current); } throw error; }
+
+        // Reload before completing the receipt so handler saves are never overwritten.
+        if (action !== 'read') {
+          const current = this.task(task.id);
+          current.receipts[key] = { fingerprint, action, status: 'completed', result };
+          await this.save(current);
+        }
+        return result;
+      } catch (error) {
+        if (action !== 'read') {
+          const current = this.task(task.id);
+          current.receipts[key] = { fingerprint, action, status: 'failed', error: error.message };
+          await this.save(current);
+        }
+        throw error;
+      }
     }, target?.id ?? 'intake');
   }
   async deliverCoordination() {
