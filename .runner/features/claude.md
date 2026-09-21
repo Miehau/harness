@@ -10,6 +10,9 @@ nesting requires Claude Code 2.1.219+ and effective spawn depth of at least two.
 Coordinators publish versioned feature/file/interface scope and align overlapping
 tickets through native direct proposals and mutual acknowledgments before
 writers start. Scope changes reopen alignment; dependency evidence reaches review.
+The coordinator classifies concrete risk. Sensitive changes get fresh plan assurance
+before writers and matching candidate assurance on the exact commit, followed by the
+existing final general review; routine work adds no specialist pass.
 
 Install once through the bundled local marketplace, then launch plain `claude` in
 the target repository and use `/agent-plan:start <description>`. Git and project

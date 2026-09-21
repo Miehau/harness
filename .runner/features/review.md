@@ -6,6 +6,11 @@ reviews and verification. JSON findings are validated and recorded against the w
 base commit. Completion requires fresh verification and a clean review of that exact
 commit; major/medium findings require repair and re-review. Legacy tasks are unchanged.
 
+Sensitive tasks first run risk-matched candidate-assurance reviewers against the same
+exact commit and their plan-assurance evidence. A fresh general reviewer remains last;
+routine tasks skip specialist assurance. This sequencing is workflow policy, while the
+existing runtime continues to enforce freshness of the final clean review.
+
 Model selection prefers the opposite OpenAI/Claude family from the latest integrated
 writer and avoids all writer models where possible. Explicit reviewer configuration is
 supported. Recorded failed reviewers are excluded for the same commit; unavailable

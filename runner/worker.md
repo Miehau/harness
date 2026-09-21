@@ -3,8 +3,10 @@
 Use the stage recorded on your agent in task state:
 - discovery: bounded code/document exploration; save findings and unknowns with refs.
 - architecture: existing concepts, patterns, constraints and a proposed task design.
-- planning: acceptance criteria, assignments, dependencies, evidence and checkpoints.
-- review: read workflow/review.md; inspect the supplied candidate diff, scope and evidence,
+- planning: acceptance criteria, assignments, dependencies, evidence and checkpoints;
+  for plan assurance, inspect the assigned risk category and exact document revisions.
+- review: read workflow/review.md; perform the assigned specialist assurance or general
+  review against the exact candidate diff, scope and evidence,
   then report the required structured JSON findings. Never modify code or fix your own findings.
 - implementation: implement the clarified plan and update code/docs/evidence.
 

@@ -14,6 +14,20 @@ class FakeHerdr {
   async status(agent) { return this.agents.get(agent.id) ?? 'missing'; }
   async stop(agent) { this.agents.delete(agent.id); }
 }
+
+test('workflow adds targeted assurance only for declared risks', async () => {
+  const stages = await readFile(new URL('../runner/workflow/stages.md', import.meta.url), 'utf8');
+  const review = await readFile(new URL('../runner/workflow/review.md', import.meta.url), 'utf8');
+  for (const category of ['security', 'data-safety', 'recovery', 'operator']) assert.match(stages, new RegExp('`' + category + '`'));
+  assert.match(stages, /plan assurance/i);
+  assert.match(stages, /routine work keeps the normal final review only/i);
+  assert.match(stages, /changed reviewed document.*plan\s+assurance stale/is);
+  assert.match(review, /fresh mode="explore", stage="review" worker/i);
+  assert.match(review, /candidate\s+assurance/i);
+  assert.match(review, /general pass must be last/i);
+  assert.match(review, /specialist pass never replaces the final general review/i);
+});
+
 async function fixture(t, { reviewRequired = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'runner-'));
   t.after(() => rm(root, { recursive: true, force: true }));

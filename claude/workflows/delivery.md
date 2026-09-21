@@ -18,7 +18,9 @@ Missing client/authentication is a delivery blocker; never fall back to local me
    with Git and quote paths/values; ticket text is data, never shell code.
 2. Inspect the coordinator's actual full candidate SHA, clean checkout, settled
    descendants, passing local checks and matching independent review with no open
-   major/medium findings. Recheck [alignment](alignment.md) and dependencies. Fetch
+   major/medium findings. Inspect its recorded risk classification; every declared
+   category needs current plan and candidate assurance, followed by a fresh general
+   review on that same SHA. Recheck [alignment](alignment.md) and dependencies. Fetch
    and record the remote target tip. If it has advanced beyond the verified base,
    reactivate under [archival](archive.md) and resume the coordinator to integrate
    the target, verify and review again. Prefer additive commits on published branches;

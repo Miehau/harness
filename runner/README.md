@@ -130,6 +130,8 @@ overrides, onboarding, aliases, model routing, managed skills, and UI evidence.
   the runtime integrates serially and verifies the resulting candidate.
 - New candidates require an independent read-only review. Major and medium findings
   block completion; changed commits invalidate prior review.
+- Sensitive changes receive targeted plan assurance before writers and fresh candidate
+  assurance before the final general review; routine changes keep the single review.
 - Back up the runner data directory together with the source repository's Git object
   database. State defaults to `~/.local/state/agent-plan`; `RUNNER_DATA` selects another
   existing data directory.

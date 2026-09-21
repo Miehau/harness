@@ -147,6 +147,12 @@ verification. The reviewer receives the candidate commit, task diff, prior revie
 and the snapshotted [review rubric](../workflow/review.md). Reports contain structured
 findings with severity, file/line, evidence, and a suggested fix.
 
+Clarification classifies tasks as routine or declares concrete security, data-safety,
+recovery or operator risks. Sensitive work receives plan assurance before writers and
+fresh matching candidate-assurance passes on the exact verified commit. A fresh general
+review still runs last; routine work skips the specialist passes. These are workflow
+requirements rather than new runtime state.
+
 Major and medium findings block completion. The coordinator delegates repairs,
 integrates, verifies, and requests another review until the current commit passes.
 Changing the commit invalidates the review; minor findings remain in the handoff.

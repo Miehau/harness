@@ -58,10 +58,11 @@ flowchart TD
   U[You] <--> S[Supervisor: main Claude conversation]
   S <--> C1[Ticket A coordinator: native worktree]
   S <--> C2[Ticket B coordinator: native worktree]
-  C1 --> R[Research / architecture / planning workers]
+  C1 --> R[Research / planning assurance workers]
   C1 --> W1[Implementation worker A: native worktree]
   C1 --> W2[Implementation worker B: native worktree]
-  C1 --> V[Independent reviewer]
+  C1 --> A[Candidate assurance reviewers]
+  C1 --> V[Final general reviewer]
   C2 --> W3[Ticket B workers]
 ```
 
@@ -77,6 +78,12 @@ and planning, records clarification, then spawns up to two parallel implementers
 The coordinator alone owns ticket state, worker assignments, integration, checks
 and independent reviewer dispatch. Workers report to it; it reports to the supervisor.
 No experimental agent teams are required. The hierarchy has two subagent layers.
+
+During planning the coordinator classifies concrete security, data-safety, recovery
+and operator risks. Routine work adds no planning ceremony. Sensitive changes get a
+fresh read-only plan-assurance worker before implementation and a fresh matching
+candidate-assurance reviewer on the exact verified commit. A separate general review
+still runs last. Changed plans or commits invalidate the affected assurance evidence.
 
 Before writers start, coordinators publish versioned scope artifacts describing
 features, files, APIs, schemas and dependencies, then return `needs-alignment`.
@@ -109,8 +116,8 @@ resumes the exact coordinator. It never supplies invented approval or launches a
 second coordinator to answer a question. A coordinator settles its known children
 before returning a candidate, blocker or pause, reporting any uncertainty.
 
-The coordinator integrates commits, verifies the combined candidate and spawns a
-separate read-only reviewer. After a pass, the supervisor presents that exact
+The coordinator integrates commits, verifies the combined candidate, runs required
+candidate assurance and then spawns a separate read-only general reviewer. After a pass, the supervisor presents that exact
 candidate as a GitHub PR or GitLab MR with evidence. The supervisor follows hosted
 CI and required reviews, then merges through the host only after you approve the
 exact candidate. Fixes return to the coordinator for workers, verification and a

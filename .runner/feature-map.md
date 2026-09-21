@@ -8,4 +8,5 @@ Partial coverage; this is not a full repository inventory.
 - [UI evidence](features/ui-evidence.md): project verification, media artifacts and supervisor/Grok exposure.
 
 - [Candidate review](features/review.md): independent review, severity rubric, repair loop and provider fallback.
+- [Risk assurance](features/assurance.md): targeted plan and candidate scrutiny for sensitive changes.
 - [Native Claude workflow](features/claude.md): independent skills, hooks and native subagents; no runner dependency.

@@ -7,14 +7,16 @@ file needed for the current step; do not preload this entire directory.
 
 1. Before delegation: [stages](workflow/stages.md). Choose only the preparation stages
    the task needs; skip unnecessary discovery, architecture and planning workers.
-   Record the chosen scope and clarification before writers start.
+   Classify concrete risk and run targeted plan assurance only for sensitive changes.
+   Record the chosen scope, assurance evidence and clarification before writers start.
 2. Before implementation or document publication: [coordination](workflow/coordination.md)
    and [discovery documentation](workflow/discovery-docs.md). Assign code/docs ownership.
 3. For action arguments when needed: [tools](workflow/tools.md).
 4. On clashes, questions, revisions or failures: revisit coordination.md before acting.
-5. Integrate completed workers, verify, then run the [review loop](workflow/review.md)
-   until the exact candidate has no major/medium findings. Report a handoff mapping
-   acceptance criteria to evidence. Only the owner may accept/rebase/merge.
+5. Integrate completed workers and verify. For declared risks, run the targeted
+   candidate assurance passes in [review](workflow/review.md), then finish with a fresh
+   general review of the exact commit. Report a handoff mapping acceptance criteria
+   and assurance results to evidence. Only the owner may accept/rebase/merge.
 
 For frontend changes or config.json uiEvidence, read [UI evidence](workflow/ui-evidence.md)
 and pass that reference to relevant workers. Backend-only tasks may skip this page.
