@@ -1,8 +1,14 @@
 # Agent Plan runner
 
-Terminal-first task orchestration using Pi, Herdr, Markdown workflows, and Git worktrees.
-One main agent coordinates workers through durable file references and explicit decisions.
-The dashboard shows the same runtime state and supports explicit owner acceptance.
+Terminal-first task orchestration using Pi, Herdr, Markdown workflows, and Git
+worktrees. One coordinator delegates to workers through durable artifacts and exact
+decisions; the dashboard shows the same runtime state.
+
+[`runner/`](runner/README.md) is the primary application. [`claude/`](claude/README.md)
+is an independent native Claude plugin with its own skills, hooks, and subagent
+workflow; it does not use the Pi/Herdr runtime.
+
+## Run the Pi/Herdr runner
 
 Install the command once from this checkout:
 
@@ -10,35 +16,39 @@ Install the command once from this checkout:
 ./install.sh
 ```
 
-The installer checks Node/npm/Git, installs locked dependencies and links the CLI.
-It uses your current npm prefix; rerun after switching NVM versions.
-
-Use `agent-plan help`, `agent-plan help start`, or `agent-plan repo --help` for usage.
-
-With Herdr running and Pi credentials configured:
+With Herdr running and Pi credentials configured, the normal flow is:
 
 ```sh
 agent-plan start /path/to/repo "Implement this feature"
+# Answer questions in the Pi terminal when asked.
+agent-plan accept TASK
+```
+
+`start` launches the background runtime, integration worktree, coordinator, and
+workers. `accept` rebases the verified candidate onto the local target, verifies it
+again, and fast-forward merges it. It never pushes or deploys.
+
+Useful commands:
+
+```sh
 agent-plan list
 agent-plan open TASK
+agent-plan inspect TASK
+agent-plan dashboard
 agent-plan stop TASK
 ```
 
-The runtime starts in the background automatically. `start` opens a Herdr workspace
-with a Pi orchestrator; it launches worker sessions as needed. Answer pending
-questions directly in the terminal. TASK accepts a full ID or unique prefix.
-
-Configure each repo's verification command once if it has no `.runner/project.json`:
+Configure a repository's verification command when it has no
+`.runner/project.json`:
 
 ```sh
 agent-plan init /path/to/repo '["npm","test"]'
 ```
 
-Tasks start from committed HEAD. State lives in `~/.local/state/agent-plan`, shared
-across terminals; set `RUNNER_DATA` only to use a different existing state directory.
+See the [runner operating guide](runner/README.md) for configuration, recovery,
+supervisor sessions, notifications, evidence, and safety boundaries.
 
-See [the operating guide](runner/README.md) for repo configuration, Markdown workflows,
-worker decisions, recovery, the dashboard, and optional GrokBot notifications.
+## Develop
 
 ```sh
 npm test
@@ -46,6 +56,5 @@ npm run check
 npm run probe  # opt-in live Herdr/Pi connection check; no model calls
 ```
 
-The old visual pipeline is retired. Its source, tests, configuration, and uncommitted
-changes are preserved in the verified [legacy archive](archive/README.md).
-There is no automatic migration of legacy task state.
+The former visual pipeline is retired. Its final snapshot remains in
+[`archive/`](archive/README.md); it is not active code and legacy state is not migrated.
