@@ -103,6 +103,7 @@ export class Runtime {
           task.ticket ||= ticketOf(task.title, brief) || undefined;
         } catch {}
       }
+      for (const agent of task.agents) agent.name = agentName(task, agent);
       this.tasks.set(task.id, task);
     }
   }
@@ -472,14 +473,13 @@ export class Runtime {
     assert(['running', 'waiting'].includes(task.status), 'Only unfinished tasks can resume');
     assert(!task.operation, 'Resolve interrupted operation first with recover');
     const agent = task.agents.find(a => a.id === input.agentId); assert(agent && agent.status !== 'completed' && agent.status !== 'cancelled', 'Unknown or settled attempt');
+    agent.name = agentName(task, agent);
     let status = await this.transport.status(agent);
     assert(status !== 'unknown', 'Session state unknown; inspect its terminal before retrying');
     if (status !== 'missing' && agent.status !== 'failed') return { resumed: agent.id, existing: true };
-    if (status !== 'missing') {
-      await this.transport.stop(agent);
-      status = await this.transport.status(agent);
-      assert(status === 'missing', 'Previous attempt has not stopped; inspect before relaunching');
-    }
+    await this.transport.stop(agent);
+    status = await this.transport.status(agent);
+    assert(status === 'missing', 'Previous attempt has not stopped; inspect before relaunching');
     const artifact = await this.artifact(task, JSON.stringify({ instruction: 'Resume the saved assignment. Inspect current task state and decisions before changing anything. Reuse completed work.', assignment: agent.assignment ?? 'brief.md', workflow: agent.role === 'orchestrator' ? 'workflow.md' : 'worker.md', contract: agent.contract, decisions: task.decisions.filter(d => d.agentId === agent.id), checkpoint: agent.checkpoint ?? null, lastCommand: agent.lastCommand ?? null, previousFailure: agent.failure ?? agent.error ?? null }, null, 2), 'json');
     this.message(agent, 'resume', artifact);
     // Reuse the durable Pi session and inbox after confirming the previous process is gone.

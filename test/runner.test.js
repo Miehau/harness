@@ -109,8 +109,10 @@ test('Herdr idle/done never completes a task, missing agents require explicit re
   assert.equal(runtime.task(task.id).status, 'running');
   transport.agents.delete(main.id); await runtime.reconcile();
   assert.equal(runtime.task(task.id).agents[0].status, 'failed');
+  const failed = runtime.task(task.id); failed.agents[0].name = 'mea-12-spike-jev-staged--coord-0c7a'; await runtime.save(failed);
   await call('owner', 'resume', task.id, { agentId: main.id });
   assert.equal(runtime.task(task.id).agents[0].session, main.session);
+  assert(runtime.task(task.id).agents[0].name.length <= 32);
   assert.equal(transport.starts.length, 2);
 });
 
@@ -343,12 +345,12 @@ test('worktrees and Herdr labels use the brief title', async t => {
   assert.equal(task.title, 'Implement an improvement');
   assert.equal(task.slug, 'implement-an-improvement');
   assert.equal(task.integration.branch, `runner/implement-an-improvement-${task.id.slice(0, 8)}`);
-  assert.match(f.main.name, /^implement-an-improvement-coord-/);
+  assert.match(f.main.name, /^implement-an-improv.*-coord-/); assert(f.main.name.length <= 32);
   await f.artifact('assignment.md', 'Change value.txt');
   const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
   const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
   assert.match(worker.branch, new RegExp(`^runner/implement-an-improvement-${task.id.slice(0, 8)}-implementation-`));
-  assert.match(worker.name, /implementation/);
+  assert.match(worker.name, /implementation/); assert(worker.name.length <= 32);
   const { Herdr } = await import('../runner/herdr.js');
   const herdr = new Herdr(); const calls = [];
   herdr.call = async (...args) => { calls.push(args); return { root_pane: { pane_id: 'p' }, tab: { tab_id: 't' }, workspace: { workspace_id: 'w' } }; };
