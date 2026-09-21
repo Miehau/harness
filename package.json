@@ -12,7 +12,8 @@
     "runner": "node runner/cli.js",
     "test": "node scripts/test.mjs",
     "check": "node scripts/test.mjs --check",
-    "probe": "node runner/probe.js"
+    "probe": "node runner/probe.js",
+    "canary": "node runner/canary.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.0",
