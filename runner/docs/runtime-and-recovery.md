@@ -102,8 +102,10 @@ attempt budgets become attention events. The runtime reconnects surviving Pi ses
 after restart and reuses saved session files.
 
 Budgets limit concurrent workers, total attempts, commands, and running-attempt time.
-A recorded user wait is exempt; active time includes gaps between model turns. An
-explicit resume grants a fresh window.
+Workers have a hard per-attempt window. For the long-lived coordinator,
+`timeoutMinutes` measures task inactivity and does not expire while a worker is active;
+task progress refreshes the window. A recorded user wait is exempt. An explicit resume
+grants a fresh window.
 
 ## Resume, cancel, and clean up
 

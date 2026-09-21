@@ -215,9 +215,25 @@ test('verification failure and changed integration invalidate completion', async
 });
 
 test('worker time budget applies even with a healthy heartbeat', async t => {
+  const { runtime, call, task, main, who, artifact } = await fixture(t);
+  await artifact('budget-assignment.md');
+  const spawned = await call(who(main), 'spawn', task.id, { assignment: 'budget-assignment.md', mode: 'explore', stage: 'discovery' });
+  const current = runtime.task(task.id); const worker = current.agents.find(agent => agent.id === spawned.workerId);
+  worker.startedAt = new Date(0).toISOString(); await runtime.save(current);
+  runtime.heartbeats.set(worker.id, Date.now()); await runtime.reconcile();
+  const reconciled = runtime.task(task.id);
+  assert.equal(reconciled.agents.find(agent => agent.id === worker.id).status, 'failed');
+  assert.match(reconciled.agents.find(agent => agent.id === worker.id).error, /budget/);
+  assert.equal(reconciled.agents.find(agent => agent.id === main.id).status, 'running');
+});
+
+test('coordinator budget measures task inactivity rather than total orchestration time', async t => {
   const { runtime, task, main } = await fixture(t);
   const current = runtime.task(task.id); current.agents[0].startedAt = new Date(0).toISOString(); await runtime.save(current);
   runtime.heartbeats.set(main.id, Date.now()); await runtime.reconcile();
+  assert.equal(runtime.task(task.id).agents[0].status, 'running');
+  runtime.tasks.get(task.id).updatedAt = new Date(0).toISOString();
+  await runtime.reconcile();
   assert.equal(runtime.task(task.id).agents[0].status, 'failed');
   assert.match(runtime.task(task.id).agents[0].error, /budget/);
 });

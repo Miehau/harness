@@ -687,27 +687,33 @@ export class Runtime {
   }
   async reconcile() {
     await this.deliverCoordination();
+    const expired = (task, agent) => {
+      if (agent.status === 'waiting') return false;
+      if (agent.role === 'orchestrator' && task.agents.some(other => other.role === 'worker' && active(other))) return false;
+      const anchor = agent.role === 'orchestrator' ? task.updatedAt : agent.startedAt;
+      return Date.now() - Date.parse(anchor ?? agent.createdAt) > task.config.timeoutMinutes * 60000;
+    };
     for (const original of [...this.tasks.values()]) {
       if (!['running', 'waiting'].includes(original.status)) continue;
       for (const old of original.agents.filter(active)) {
-        const overdue = old.status !== 'waiting' && Date.now() - Date.parse(old.startedAt ?? old.createdAt) > original.config.timeoutMinutes * 60000;
+        const overdue = expired(original, old);
         if (!overdue && Date.now() - (this.heartbeats.get(old.id) ?? 0) < 15000) continue;
         const observedStart = old.startedAt;
         const status = await this.transport.status(old);
         await this.serial(async () => {
           const task = this.task(original.id); const agent = task.agents.find(a => a.id === old.id);
           if (!active(agent) || agent.startedAt !== observedStart) return;
-          const expired = agent.status !== 'waiting' && Date.now() - Date.parse(agent.startedAt ?? agent.createdAt) > task.config.timeoutMinutes * 60000;
+          const overdue = expired(task, agent);
           // Herdr lookup happens outside the task queue: a live Pi may poll while it runs.
-          if (!expired && Date.now() - (this.heartbeats.get(agent.id) ?? 0) < 15000) return;
-          if (status === 'missing' || expired) {
-            agent.status = 'failed'; agent.error = expired ? 'Attempt time budget exceeded' : 'Session disappeared; partial work retained';
+          if (!overdue && Date.now() - (this.heartbeats.get(agent.id) ?? 0) < 15000) return;
+          if (status === 'missing' || overdue) {
+            agent.status = 'failed'; agent.error = overdue ? 'Attempt time budget exceeded' : 'Session disappeared; partial work retained';
             const artifact = await this.artifact(task, JSON.stringify({ agentId: agent.id, error: agent.error, observedStatus: status, lastHeartbeat: this.heartbeats.get(agent.id) ?? null, checkedAt: now(), session: agent.session, place: agent.place }, null, 2), 'json');
             agent.failure = artifact;
             this.event(task, 'attention', { agentId: agent.id, error: agent.error, artifact });
             if (agent.role === 'worker') this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', artifact, { workerId: agent.id, status: 'failed' });
             await this.save(task);
-            if (expired) await this.transport.stop(agent).catch(() => {});
+            if (overdue) await this.transport.stop(agent).catch(() => {});
           }
         }, original.id);
       }
