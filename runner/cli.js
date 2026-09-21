@@ -7,11 +7,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { json, assert, atomic, git } from './io.js';
 import { connect, dataRoot } from './connection.js';
-import { repos, resolveRepo } from './repos.js';
+import { repos, resolveAlias, resolveRepo } from './repos.js';
 import { validateWebhook } from './notifications.js';
 const help = `agent-plan — launch Pi tasks in your running Herdr
 
 agent-plan start <repo> "task description"       Create a workspace and open its orchestrator
+agent-plan launch <alias> <brief> <request-id>    Idempotent unattended launch for GrokBot
 agent-plan repo add <alias> <path>                Save a repository alias
 agent-plan repo list                              List saved repositories
 agent-plan repo remove <alias>                    Forget an alias
@@ -70,6 +71,14 @@ New tasks use committed HEAD and snapshot .runner/project.json plus the workflow
 Model/provider flags select the coordinator for a new task.
 
 Example: agent-plan start demo "Add a dark mode toggle"`,
+  launch: `agent-plan launch ALIAS BRIEF_FILE REQUEST_ID
+
+Launch an unattended task for GrokBot or another local scheduler. ALIAS must be a
+saved repository alias; paths are rejected. BRIEF_FILE contains the complete task.
+REQUEST_ID must be stable across retries: identical retries return the same task,
+while different input with the same ID is rejected. The command does not focus Herdr.
+
+Example: agent-plan launch meal-minder /absolute/task.md grok-issue-123-20260921`,
   repo: `agent-plan repo add NAME PATH
 agent-plan repo list
 agent-plan repo remove NAME
@@ -158,7 +167,7 @@ export async function main(args = process.argv.slice(2)) {
     else if (['--model', '--provider', '--target', '--discovery-model', '--discovery-provider', '--planning-model', '--planning-provider'].includes(raw[i])) { const key = raw[i].slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()); assert(raw[i + 1] && !raw[i + 1].startsWith('--'), `Missing ${raw[i]} value`); selection[key] = raw[++i]; }
     else rest.push(raw[i]);
   }
-  assert(['init', 'start', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook'].includes(command), `Unknown command: ${command}\n${help}`);
+  assert(['init', 'start', 'launch', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook'].includes(command), `Unknown command: ${command}\n${help}`);
   if (command === 'webhook') { assert(rest.length === 1, 'Usage: agent-plan webhook PRIVATE_CONFIG_FILE'); const config = await json(resolve(rest[0])); validateWebhook(config); config.since ??= new Date().toISOString(); await atomic(join(dataRoot(), 'webhook.json'), config); return { configured: true, format: config.webhook.format ?? 'references', since: config.since }; }
   if (command === 'repo') return repos(rest);
   if (command === 'init') {
@@ -188,6 +197,17 @@ export async function main(args = process.argv.slice(2)) {
   if (command === 'dashboard') return `${url}/#${connection.token}`;
   if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, title: t.title ?? null, status: t.status, repo: t.repo, workspace: t.workspace ?? null }));
   if (command === 'submit') return action('submit', null, { repo: await resolveRepo(rest[0]), text: await readFile(rest[1], 'utf8'), requestId: rest[2] ?? randomUUID() });
+  if (command === 'launch') {
+    assert(rest.length === 3, 'Usage: agent-plan launch ALIAS BRIEF_FILE REQUEST_ID');
+    const requestId = rest[2];
+    const task = await action('submit', null, { repo: await resolveAlias(rest[0]), text: await readFile(resolve(rest[1]), 'utf8'), requestId });
+    try {
+      const started = await action('start', task.id, {}, requestId);
+      const agent = started.agents.find(a => a.role === 'orchestrator');
+      assert(agent && agent.status !== 'failed', agent?.error ?? 'Orchestrator did not start');
+      return { id: task.id, status: started.status, workspace: started.workspace, worktree: started.integration.cwd };
+    } catch (e) { throw new Error(`Task ${task.id}: ${e.message}. Retry with the same request ID or inspect this task; never create a replacement.`); }
+  }
   let taskId;
   if (command === 'start' && rest.length >= 2) {
     const task = await action('submit', null, { repo: await resolveRepo(rest[0]), text: rest.slice(1).join(' '), ...selection, requestId: randomUUID() }); taskId = task.id;

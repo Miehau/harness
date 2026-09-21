@@ -593,6 +593,14 @@ test('repository aliases persist, resolve in CLI intake, and never overwrite ano
   assert.deepEqual(await main(['repo', 'list']), [{ alias: 'demo', path: await realpath(f.repo) }]);
   const brief = join(f.root, 'brief.md'); await writeFile(brief, 'Alias task');
   const task = await main(['submit', 'demo', brief]); assert.equal(task.repo, await realpath(f.repo));
+  const starts = f.transport.starts.length;
+  const launched = await main(['launch', 'demo', brief, 'grok-roadmap-slice-1']);
+  assert.deepEqual(await main(['launch', 'demo', brief, 'grok-roadmap-slice-1']), launched);
+  assert.equal(f.transport.starts.length, starts + 1);
+  assert.equal([...app.runtime.tasks.values()].filter(item => item.requestId === 'grok-roadmap-slice-1').length, 1);
+  await writeFile(brief, 'Changed task');
+  await assert.rejects(main(['launch', 'demo', brief, 'grok-roadmap-slice-1']), /different input/);
+  await assert.rejects(main(['launch', f.repo, brief, 'grok-path']), /saved repository alias/);
   await assert.rejects(main(['repo', 'add', '../escape', f.repo]), /Alias must/);
   await assert.rejects(main(['repo', 'add', 'demo', f.main.cwd]), /already exists/);
   await main(['repo', 'remove', 'demo']); assert.deepEqual(await main(['repo', 'list']), []);
@@ -603,6 +611,7 @@ test('help topics and command help never connect to a runtime', async () => {
   const { main } = await import('../runner/cli.js');
   assert.match(await main(['help']), /Examples and details/);
   assert.match(await main(['help', 'start']), /committed HEAD/);
+  assert.match(await main(['help', 'launch']), /stable across retries/);
   assert.equal(await main(['repo', '--help']), await main(['help', 'repo']));
   assert.match(await main(['start', '--help']), /--model/);
   assert.match(await main(['help', 'answer']), /decision-id/);

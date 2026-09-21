@@ -54,6 +54,15 @@ agent-plan inspect TASK
 agent-plan dashboard
 ```
 
+GrokBot or another local scheduler can launch an alias-only task without focusing the
+workspace. Its request ID makes retries duplicate-safe:
+
+```sh
+agent-plan launch meal-minder /absolute/task.md grok-roadmap-20260921
+```
+
+The external bot owns its schedule; the runner owns task execution and receipts.
+
 For automation, save an answer in a file and target the exact decision:
 
 ```sh
@@ -149,7 +158,7 @@ claimed end-to-end quality parity based only on mocked tests or the transport pr
 - [Supervisor sessions](docs/supervisor.md): conversational task control, memory,
   MCP, lifecycle actions, and trust boundaries.
 - [Webhook notifications](docs/webhooks.md): optional GrokBot-style event delivery,
-  payload limits, receipts, and private configuration.
+  safe local launches, payload limits, receipts, and private configuration.
 
 ## Verify this repository
 

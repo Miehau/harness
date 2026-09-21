@@ -49,6 +49,30 @@ reply instructions. No owner credentials or authenticated dashboard links are se
 Replies still use the owner answer or feedback interface; there is no public answer
 endpoint or implicit bot approval authority.
 
+## Start and schedule from GrokBot
+
+Register the repositories the bot may launch, once:
+
+```sh
+agent-plan repo add meal-minder /absolute/path/to/meal-minder
+```
+
+GrokBot may write an agreed task brief to a UTF-8 Markdown file and run:
+
+```sh
+agent-plan launch meal-minder /absolute/path/to/task.md STABLE_REQUEST_ID
+```
+
+`launch` accepts only a saved alias, starts the coordinator without focusing Herdr,
+and prints the task as JSON. An identical retry with the same request ID returns the
+same task; changed input is rejected. The bot should schedule this local command with
+its own scheduler and use a deterministic ID for that scheduled occurrence. The CLI
+must run on the harness host as the same OS user and with the same `RUNNER_DATA`.
+
+This command grants task launch only. Questions and candidate acceptance retain their
+existing human-approval rules. The runner exposes no remote control port and keeps no
+second schedule database.
+
 Up to four PNG attachments of at most 1 MB each may be base64 encoded. Larger images,
 videos, and other files carry an omission notice and artifact reference. A trusted
 local relay must implement authenticated retrieval for those references; the runner
