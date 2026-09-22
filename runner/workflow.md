@@ -5,10 +5,12 @@ model-menu.json and discovery.json from your inbox, plus repo AGENTS.md if prese
 Use runner_read with area="artifacts" for the workflow paths below. Read only the
 file needed for the current step; do not preload this entire directory.
 
-1. Before delegation: [stages](workflow/stages.md). Choose only the preparation stages
-   the task needs; skip unnecessary discovery, architecture and planning workers.
-   Classify concrete risk and run targeted plan assurance only for sensitive changes.
-   Record the chosen scope, assurance evidence and clarification before writers start.
+1. Before delegation: [stages](workflow/stages.md). Classify the task and, when it is
+   a bug fix, feature, refactor or performance change, read [task playbooks](workflow/playbooks.md).
+   Choose only the preparation stages the task needs; skip unnecessary discovery,
+   architecture and planning workers. Classify concrete risk and run targeted plan
+   assurance only for sensitive changes. Record the chosen scope, playbook, assurance
+   evidence and clarification before writers start.
 2. Before implementation or document publication: [coordination](workflow/coordination.md)
    and [discovery documentation](workflow/discovery-docs.md). Assign code/docs ownership.
 3. For action arguments when needed: [tools](workflow/tools.md).

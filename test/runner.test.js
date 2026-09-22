@@ -28,6 +28,31 @@ test('workflow adds targeted assurance only for declared risks', async () => {
   assert.match(review, /specialist pass never replaces the final general review/i);
 });
 
+test('workflow routes task playbooks and resolves observable forks with evidence', async () => {
+  const workflow = await readFile(new URL('../runner/workflow.md', import.meta.url), 'utf8');
+  const stages = await readFile(new URL('../runner/workflow/stages.md', import.meta.url), 'utf8');
+  const playbooks = await readFile(new URL('../runner/workflow/playbooks.md', import.meta.url), 'utf8');
+  assert.match(workflow, /task playbooks/);
+  for (const kind of ['Bug fix', 'Feature', 'Refactor', 'Performance']) assert.match(playbooks, new RegExp(`## ${kind}`));
+  assert.match(playbooks, /reproduce.*before changing production code/is);
+  assert.match(playbooks, /numeric baseline/i);
+  assert.match(stages, /two or three isolated throwaway\s+prototypes/i);
+  assert.match(stages, /Do not integrate\s+prototype commits/i);
+  assert.match(stages, /at least two architecture workers the same grounded brief/i);
+  assert.match(stages, /fresh planning worker for cross-judgment/i);
+  assert.match(stages, /product preference, scope choice or authority/i);
+});
+
+test('onboarding creates or maintains project verification skills only when useful', async () => {
+  const onboarding = await readFile(new URL('../runner/onboarding.md', import.meta.url), 'utf8');
+  for (const section of ['Launch', 'Doctor', 'Drive', 'Evidence', 'Cleanup']) assert.match(onboarding, new RegExp(`\\*\\*${section}:\\*\\*`));
+  assert.match(onboarding, /\.agents\/skills\/verify-<app>\/SKILL\.md/);
+  assert.match(onboarding, /add the skill path to `skills`/i);
+  assert.match(onboarding, /one read-only source pass per mapped feature/i);
+  assert.match(onboarding, /`clean`, `changed`.*or `blocked`/is);
+  assert.match(onboarding, /Do not generate one for a library/i);
+});
+
 async function fixture(t, { reviewRequired = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'runner-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -5,6 +5,10 @@
    based on scope, uncertainty and risk, not a fixed pipeline. No owner approval is
    needed to skip optional stages. Record selected/skipped stages and a short reason
    in the clarification artifact; do not create a separate stage-selection report.
+   Classify the task as bug fix, feature, refactor, performance or generic. For the
+   first four, read workflow/playbooks.md and carry its required evidence into the
+   clarification and handoff. The playbook shapes the work; it does not make every
+   preparation stage mandatory.
    - Straightforward cleanup, directory removal, documentation edits or a small known
      fix: inspect the affected files/references, write a concise scope, acceptance
      criteria and verification plan, then go directly to one implementation worker.
@@ -41,7 +45,24 @@
    Resolve material findings by revising the documents and rerun affected assurance;
    an unresolved material finding blocks writers. Independent plan-assurance workers
    may run concurrently against the same frozen document revisions.
-3. Clarification checkpoint (required even when all preparation workers are skipped):
+3. Before asking the owner to choose an approach, classify the fork:
+   - If existing code, documentation or recorded evidence can answer it, investigate
+     and decide from that evidence. Do not build a prototype or ask the owner.
+   - If running something can answer it (behavior, timing, layout, API ergonomics or
+     feasibility), define a rubric and compare two or three isolated throwaway
+     prototypes. Use the clarification checkpoint below to approve only the experiment
+     scope, then use implementation workers in separate worktrees. Do not integrate
+     prototype commits. Publish the comparison, revise the governing documents and
+     return to clarification before final implementation.
+   - If the decision is an expensive-to-reverse boundary or interface, run a design
+     arena: give at least two architecture workers the same grounded brief, then give
+     their artifacts and one rubric to a fresh planning worker for cross-judgment. The
+     coordinator reads every candidate and judge report, chooses one base and records
+     any ideas deliberately grafted from the others.
+   Ask the owner only for a product preference, scope choice or authority that evidence
+   cannot settle. A prototype is disposable evidence, not an implementation candidate.
+   After an empirical fork, continue from this step using the selected evidence.
+4. Clarification checkpoint (required even when all preparation workers are skipped):
    check scope, user intent, acceptance criteria, risks and conflicting requirements.
    If material ambiguity remains, ask the owner and stop dependent work. Otherwise,
    save a concise clarification artifact and call clarify {artifact}; a routine task
@@ -53,15 +74,15 @@
    assurance stale as well as invalidating clarification.
    Implementation cannot start before this checkpoint. Published document changes
    invalidate it, so revisit clarification before launching more writers.
-4. Spawn implementation workers with stage="implementation", mode="write", the
+5. Spawn implementation workers with stage="implementation", mode="write", the
    accepted plan/criteria references and a shared contract for parallel writers.
    One worker owns shared definitions and the feature index. Workers implement,
    checkpoint progress, update discovery docs and provide tests/visual evidence.
-5. Read worker reports and answer questions using file references. Pause affected
+6. Read worker reports and answer questions using file references. Pause affected
    workers for changed contracts. Use peer coordinator messages to resolve overlaps;
    unresolved product decisions go to the owner. Delegate fixes as needed.
    Independent candidate review is required.
-6. Integrate completed writing workers and verify the combined candidate. Read
+7. Integrate completed writing workers and verify the combined candidate. Read
    workflow/review.md and run required candidate assurance, then the final general
    review. Fix → integrate → verify → rerun affected assurance and review until
    there are no major/medium findings. Save a handoff with changes, evidence mapped to

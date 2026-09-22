@@ -75,6 +75,8 @@ agent-plan onboard /repo --model MODEL
 Onboarding is an ordinary isolated task. It creates or improves:
 
 - `verify.sh` and runner configuration;
+- for interactive systems that need one, a committed project verification skill with
+  launch, doctor, drive, evidence and cleanup instructions;
 - an experimental `.runner/feature-map.md` linking focused feature documents;
 - `.runner/architecture.md` for brownfield concepts, boundaries, patterns, and
   conventions when the repository has enough evidence.
@@ -90,6 +92,11 @@ adds `.pi/`, `.runner/answers/`, and `.runner-ui-*/` to `.gitignore` and commits
 file when needed. The onboarding candidate must pass both existing checks and
 `bash verify.sh`; review and integrate it like any other candidate. A zero exit status
 does not prove the test suite is meaningful.
+
+Generated verification skills are added to the project's selected `skills` and use
+named commands for helper scripts. Re-running onboarding audits an existing skill and
+its feature recipes rather than creating a competing harness. The audit reports
+`clean`, `changed` or `blocked`; product regressions remain product work, not doc fixes.
 
 Each task records `discovery.json` with committed feature-map, architecture, and
 features-directory paths. Agents receive paths, not bulk contents, and load only the

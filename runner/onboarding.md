@@ -16,6 +16,41 @@ cannot be established, ask the owner. Include .runner/project.json configured to
 bash verify.sh. Keep .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
 agent-local files stay untracked. Run every configured verification command, including onboard_verify.
 
+### Project verification skill for interactive systems
+
+When the repository has a user-driven runtime surface that `verify.sh` cannot exercise
+meaningfully (web, desktop, mobile, CLI/TUI or a stateful service), create or improve
+one committed `.agents/skills/verify-<app>/SKILL.md`. Do not generate one for a library
+or batch project whose real public behavior is already covered by the configured
+commands. Prefer the repository's existing harness; do not add a framework merely to
+match this structure.
+
+The skill is cold-start instructions for later workers and must contain exact,
+repository-grounded sections:
+
+- **Launch:** start an isolated instance and identify readiness and teardown.
+- **Doctor:** a read-only health check proving the instance is safe to drive.
+- **Drive:** stable user-facing commands, selectors or requests; avoid coordinates.
+- **Evidence:** capture the action and observable result, including persisted effects.
+- **Cleanup:** stop only what the run started while preserving proof artifacts.
+
+Put feature-specific recipes beside the skill, indexed by stable feature IDs from
+`.runner/feature-map.md`. Each recipe names how a user reaches the feature, how the
+harness drives it and what observable state proves it works. Expose helper scripts as
+named commands in `.runner/project.json`, add the skill path to `skills`, and configure
+`uiEvidence` when the project can provide its required integrated-candidate manifest.
+Run launch, doctor, one representative drive, evidence capture and cleanup before
+handing the generated skill over. A skill that has not executed successfully is a
+draft and must not be selected in project configuration.
+
+If a verification skill already exists, maintain it instead of generating another.
+Run one read-only source pass per mapped feature, reconcile concrete drift, then drive
+every reachable feature live through one coordinated session. Edit only the skill,
+its recipes and its owned harness. Report broken product behavior instead of changing
+the verification docs to match it. End with one explicit outcome: `clean`, `changed`
+with one proven candidate, or `blocked` with the missing prerequisite. Keep this audit
+proportionate: a small non-interactive repository does not need a feature-driving layer.
+
 ## Experimental feature map
 
 Create .runner/feature-map.md as a concise navigation aid for humans and later agents.
