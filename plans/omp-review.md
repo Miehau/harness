@@ -15,5 +15,5 @@ Earlier regression fixes also close specialist-role removal, publication retries
 skipped revised evidence, incomplete verification logs, stale capture attribution,
 and loss of explicit merge-recovery rationale.
 
-The reviewed files are local changes on `codex/omp-migration`. The final repository
+The reviewed runtime files are saved at `911f45f` on `codex/omp-migration`. The final repository
 suite and actual model canary results are recorded in `omp-acceptance.md`.

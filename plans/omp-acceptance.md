@@ -1,7 +1,7 @@
 # OMP migration acceptance record
 
 Local implementation and independent review checks passed. External acceptance is pending; no live
-GitHub/GitLab publication or merge, GrokBot reply, or model-driven canary is claimed.
+GitHub/GitLab publication or merge, or GrokBot reply is claimed.
 
 | Journey / criterion | Evidence | Result |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ GitHub/GitLab publication or merge, GrokBot reply, or model-driven canary is cla
 | Retained worktree and preview lifecycle | `test/preview.test.js` | Local process checks pass |
 | Exact-revision human approval, CI gates, merge recovery | Hosted delivery/runtime tests | Mocked checks pass; live provider merge pending |
 | Full repository verification | `npm test`: 128/128; `npm run check` and `git diff --check` passed | Pass |
-| Actual model-driven implementation | `npm run canary` (opt-in model calls) | Running with explicit owner approval |
+| Actual model-driven implementation | `npm run canary` (opt-in model calls) | Pass: task c411e88c-53fe-414e-aea5-25b93f542fb0; candidate 701862f114e3bd7d62a68b1b1624b533d64f18fd |
 | Live GitHub and GitLab upload/read-back/merge | Needs authorized disposable project per provider | Pending |
 | Actual GrokBot screenshot rendering and reply | Needs authorized receiver | Pending |
 
@@ -32,3 +32,8 @@ explicit recovery brief. Preserve old checkout/dependency lockfile and runner da
 before switching. Never run two daemons against the same data directory.
 
 No remote migration branch has been pushed and no PR/MR has been created by these tests.
+
+The live OMP canary completed implementation, verification, parallel requirements and
+correctness reviews, and explicit cleanup. Its synthetic temporary repository was
+removed on success. Runtime code tested: commit `911f45f`; subsequent changes only
+update this evidence record and repository skill documentation.
