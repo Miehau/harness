@@ -55,8 +55,21 @@ new scope/product choices, or decisions needing the human.
 Both accept `hook: {action, pr?, evidence?, problems?}` alongside artifact/attachments.
 Actions: approval (aliases pr-approval, impl-approval), opinion (harness-opinion),
 problem (impl-problem, blocker). Put the message in the referenced artifact.
+Make each question or approval self-contained: state the goal, relevant agreed
+decisions, current blocker, concrete options with tradeoffs, your recommendation,
+and exactly what the answer authorizes. Link the current candidate, PR/MR and
+evidence when available; attach screenshots when they clarify the decision.
 Request approval with `ask` and hook.action="approval"; wait for the actual owner answer.
 Escalate opinions for real product choices, not routine implementation details.
 Surface problems without asking unless an owner decision is needed to unblock work.
 Completed candidates automatically request approval; do not also surface completion.
 Probe, health and noop events stay silent. Never infer approval from webhook delivery.
+
+## Frozen candidate review
+
+After integration and verification, delegate each required reviewRole independently
+against the same commit. Respect maxWorkers and use batches without sharing current
+findings with unstarted reviewers. Consolidate duplicates only after inspection;
+major/medium findings remain blockers until repaired or adjudicated by a fresh
+reviewer of that role. Changed candidates require fresh coverage from every role.
+No final generic reviewer replaces requirements, correctness or risk specialists.

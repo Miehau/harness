@@ -20,7 +20,7 @@ database together when backing up.
 `agent-plan inspect TASK` shows task and agent status, integration worktrees,
 decisions, verification, and the event timeline. The dashboard adds artifact browsing,
 automatic status refresh, and links back to Herdr. Its fragment carries owner access;
-keep the URL private. Dashboard session storage allows browser refresh. Full Pi
+keep the URL private. Dashboard session storage allows browser refresh. Full OMP
 conversations stay in Herdr and the session files listed in the full task state.
 
 For an inert draft rather than immediate launch:
@@ -41,19 +41,25 @@ the task ID reported by the failed call before retrying.
   worktree creation is briefly queued and task mutations are serialized.
 - Up to `maxWorkers` workers run within a task. New branches use
   `runner/<brief-slug>-<id>` so Herdr displays the task name.
-- The coordinator cannot edit repository files. Writing workers can change their
-  worktree and invoke owner-configured named commands. Exploration workers only write
-  artifacts. Git/Pi internals and symlink escapes are blocked by the file API.
-- Worktrees are not OS sandboxes. Named commands run as the runtime user; configure
-  only trusted repositories and commands.
+- Agents have native OMP tools plus runner tools. Coordinators and exploration/review
+  workers must not edit repository files; implementation workers use their own worktree.
+  The runner file API still blocks Git/Pi internals and symlink escapes, but native tools
+  do not pass through that API.
+- This is trusted local execution, not OS isolation. Native tools and named commands
+  run as the same OS user as the runtime and can access its state and credentials.
+  Human approvals, artifact immutability and read-only roles cannot be enforced against
+  an agent using arbitrary local shell commands. Never bypass them.
+- Native shell commands are not tracked as runner named commands. Agents must stop
+  background jobs before asking or reporting, and record relevant results in their
+  handoff. Final verification always uses the configured runner commands.
 - Parallel writers must share the same published contract. To revise it, pause affected
   writers with a recorded question, publish a new revision, then answer those questions
   with the new reference.
 - Completed worker changes are committed and integrated serially. Integration waits
   for relevant workers and refreshes final verification.
 
-`completed` means a verified candidate branch. It does not mean accepted, merged,
-pushed, or deployed.
+`completed` means a verified candidate branch and, when hosting is configured, a
+published PR/MR with evidence. It does not mean merged or deployed.
 
 ## Artifacts and coordination
 
@@ -91,14 +97,14 @@ Workers ask the coordinator; the coordinator asks the owner. Every answer target
 exact decision. A worker cannot answer an owner decision or spawn another worker. The
 owner may answer a worker decision directly when intervention is necessary.
 
-A waiting worker does not stop unrelated workers. The Pi extension checks inboxes
+A waiting worker does not stop unrelated workers. The OMP extension checks inboxes
 without model calls, wakes agents with artifact references, and acknowledges messages
 after successful turns. Delivery can repeat after an uncertain crash, so mutating tool
 calls use durable request receipts. An uncertain receipt is surfaced instead of being
 replayed automatically.
 
 Herdr `idle` and `done` are not evidence of completion. Missing sessions and expired
-attempt budgets become attention events. The runtime reconnects surviving Pi sessions
+attempt budgets become attention events. The runtime reconnects surviving OMP sessions
 after restart and reuses saved session files.
 
 Budgets limit concurrent workers, total attempts, commands, and running-attempt time.
@@ -115,7 +121,7 @@ node runner/cli.js cancel TASK_ID
 node runner/cli.js cleanup TASK_ID
 ```
 
-Resume checks for a surviving session before reopening its saved Pi session. Unknown
+Resume checks for a surviving session before reopening its saved OMP session. Unknown
 Herdr state blocks relaunch. Cancellation interrupts named commands, revokes task
 actions, and closes recorded agent tabs; any stop errors are returned. Cleanup removes
 clean worktrees only for terminal tasks. Dirty or interrupted work, branches, artifacts,
@@ -144,28 +150,17 @@ inspect the retained `worktrees/` directory, and submit a fresh task after resol
 
 ## Independent candidate review
 
-New tasks require a read-only `stage: "review"` worker after integration and
-verification. The reviewer receives the candidate commit, task diff, prior reviews,
-and the snapshotted [review rubric](../workflow/review.md). Reports contain structured
-findings with severity, file/line, evidence, and a suggested fix.
+New tasks persist required reviewer roles. Requirements/AC evidence and correctness/
+code quality are always required; clarification adds security, database, recovery,
+UI or performance roles from declared risks. Review workers run in parallel up to
+`maxWorkers`, all from one clean verified commit. Reports identify `reviewRole`,
+`commit`, nonempty `coverage`, and structured findings. Missing roles or major/medium
+findings block completion. No mandatory generic final reviewer runs.
 
-Clarification classifies tasks as routine or declares concrete security, data-safety,
-recovery or operator risks. Sensitive work receives plan assurance before writers and
-fresh matching candidate-assurance passes on the exact verified commit. A fresh general
-review still runs last; routine work skips the specialist passes. These are workflow
-requirements rather than new runtime state.
-
-Major and medium findings block completion. The coordinator delegates repairs,
-integrates, verifies, and requests another review until the current commit passes.
-Changing the commit invalidates the review; minor findings remain in the handoff.
-
-By default, review prefers the opposite OpenAI/Claude family from the latest integrated
-writer and avoids other writer models where possible. `workerModels.review` can choose
-one explicitly. Unavailable or quota-limited choices fall back to another available
-model, ultimately the implementation model, with the reason recorded. Review still
-runs as a separate worker. Attempt/time/concurrency exhaustion is a blocker; there is
-no automatic waiver. This gate proves review identity, schema, and freshness—not the
-semantic correctness of the review—and runtime verification remains required.
+Changes invalidate all required candidate reviews. Preserve plan-assurance findings;
+rerun all required candidate roles after repairs and verification. Legacy tasks that
+lack `reviewPolicy` retain their original review contract. See the snapshotted
+[review rubric](../workflow/review.md).
 
 ## Acceptance and delivery
 
@@ -180,7 +175,8 @@ verification, and fast-forward merging. The source checkout must be clean and on
 target. Untracked `.runner/answers/` files do not count as dirt. Acceptance is
 serialized per repository while unrelated task work continues.
 
-No remote fetch, push, pull request, or deployment occurs. Dirty work, stale approval,
+For local-only tasks no remote fetch, push, pull request, or deployment occurs.
+Hosted tasks instead use the exact-revision [PR/MR delivery flow](hosted-delivery.md). Dirty work, stale approval,
 rebase conflicts, failed checks, or a target that changes during verification stop the
 operation. Nothing resets or stashes user changes.
 

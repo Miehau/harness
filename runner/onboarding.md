@@ -2,19 +2,71 @@
 
 Explore this repository's actual code, documentation, build/test instructions and CI.
 Produce a reviewable onboarding candidate in the task's integration worktree. Do not
-merge, push or deploy it. Preserve existing documentation and unrelated source code.
+manually merge, push or deploy it; the runtime publishes verified, independently reviewed
+candidates when hosting is configured. Preserve existing documentation and unrelated source code.
 Select preparation stages according to workflow/stages.md; delegate substantial
 repository exploration, but skip separate design/planning workers when unnecessary.
 Record coordinator clarification before one implementation worker applies the files.
+
+## Git hosting
+
+Read the task's snapshotted hosting configuration. Configure `.runner/project.json`
+with the owner-selected provider, hostname, project path, Git remote and target branch:
+
+```json
+{
+  "hosting": {
+    "provider": "github",
+    "host": "github.com",
+    "project": "owner/repository",
+    "remote": "origin",
+    "target": "main"
+  }
+}
+```
+
+Use `gitlab` for GitLab.com or a self-managed instance; nested GitLab namespaces are
+supported. A hostname has no URL scheme. Inspect the actual Git push URL and remote
+HEAD; do not guess the provider of a self-hosted domain. Ask the owner when provider,
+project or target is unclear. Keep credentials in the authenticated `gh` or `glab`
+CLI, never in committed configuration. Check that the selected push remote resolves
+to the same host and project, and document any required CLI prerequisites.
+
+The owner can edit this file or use `agent-plan hosting REPO` with
+`--hosting-provider`, `--hosting-host`, `--hosting-project`, `--hosting-remote` and
+`--hosting-target`. Onboarding accepts these flags too. Changes apply to future
+tasks; each running task keeps its configuration snapshot.
+
+After final verification and a clean independent review of the exact candidate, the
+runtime pushes the task branch and creates or updates its PR/MR. Publication is not
+merge approval. The owner must explicitly approve the exact published head with
+`agent-plan accept TASK COMMIT`; changed heads require fresh approval. Provider
+merge requirements and required CI must pass. Pending or uncertain publication,
+upload or merge outcomes require reconciliation before repeating side effects.
+
+Screenshots and other candidate evidence belong in the PR/MR body with durable
+links. Both providers use the runtime's dedicated evidence branch and commit-pinned
+repository links. GitLab image uploads can be public by URL even in private projects,
+so the runner does not use that upload API. Do not invent upload URLs, make a public gist, or claim an
+unperformed browser check. Record authentication requirements and evidence gaps.
 
 ## Verification
 
 Create a reliable verify.sh that runs meaningful existing tests and exits nonzero
 when checks fail. Do not fake success, suppress failures, or install global tools.
 Document prerequisites, commands and coverage gaps. If meaningful verification
-cannot be established, ask the owner. Include .runner/project.json configured to run
-bash verify.sh. Keep .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
+cannot be established, ask the owner. Merge the verification command into the existing
+.runner/project.json; preserve curated commands, setup, verify, hosting, skills and
+UI evidence settings. Use bash verify.sh when no adequate verification command exists.
+Keep .omp/, .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
 agent-local files stay untracked. Run every configured verification command, including onboard_verify.
+
+For an application with a local HTTP preview, save a named long-running command in
+`commands` and `preview: {"command": "preview", "url": "http://127.0.0.1:PORT"}`
+using its actual launch command and port. Preserve an existing working preview.
+Run it in the candidate worktree, inspect readiness at the saved URL, and stop only
+the process you started. Document prerequisites and port conflicts. For projects
+without an HTTP preview, omit this setting and explain how to inspect the result.
 
 ### Project verification skill for interactive systems
 

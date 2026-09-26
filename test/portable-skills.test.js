@@ -1,20 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadSkillsFromDir } from '@earendil-works/pi-coding-agent';
+import { ensureBun } from '../runner/omp.js';
+import { exec } from '../runner/io.js';
 import { supervisorArgs } from '../runner/cli.js';
 
 const root = fileURLToPath(new URL('../codex/agent-plan/', import.meta.url));
 const names = ['architect', 'arena', 'blast-radius', 'how', 'open-pr', 'why'];
 
-test('supervisor loads all six packaged skills through Pi with no discovery warnings', async () => {
+test('supervisor loads all six packaged skills through OMP with no discovery warnings', async t => {
   const args = supervisorArgs(['--continue']);
-  const path = args[args.indexOf('--skill') + 1];
+  const path = args[args.indexOf('--skills') + 1];
   assert.equal(resolve(path), join(root, 'skills'));
-  const { skills, diagnostics } = loadSkillsFromDir({ dir: path, source: 'local' });
-  assert.deepEqual(diagnostics, []);
+  let bun;
+  try { bun = await ensureBun(); } catch (error) { t.skip(error.message); return; }
+  const state = await mkdtemp(join(tmpdir(), 'runner-omp-skills-'));
+  let skills, warnings;
+  try {
+    const script = `const {loadSkillsFromDir}=await import('@oh-my-pi/pi-coding-agent/extensibility/skills'); console.log(JSON.stringify(await loadSkillsFromDir({dir:process.argv[1],source:'local'})));`;
+    const { stdout } = await exec(bun, ['--eval', script, path], { env: { ...process.env, PI_CODING_AGENT_DIR: state }, timeout: 30000 });
+    ({ skills, warnings } = JSON.parse(stdout));
+  } finally { await rm(state, { recursive: true, force: true }); }
+  assert.deepEqual(warnings, []);
   assert.deepEqual(skills.map(skill => skill.name).sort(), names);
   const manifest = JSON.parse(await readFile(join(root, '.codex-plugin/plugin.json'), 'utf8'));
   assert.equal(manifest.name, 'agent-plan');

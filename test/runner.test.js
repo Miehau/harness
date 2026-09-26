@@ -15,17 +15,17 @@ class FakeHerdr {
   async stop(agent) { this.agents.delete(agent.id); }
 }
 
-test('workflow adds targeted assurance only for declared risks', async () => {
+test('workflow requires independent role reviews and adds targeted assurance for declared risks', async () => {
   const stages = await readFile(new URL('../runner/workflow/stages.md', import.meta.url), 'utf8');
   const review = await readFile(new URL('../runner/workflow/review.md', import.meta.url), 'utf8');
   for (const category of ['security', 'data-safety', 'recovery', 'operator']) assert.match(stages, new RegExp('`' + category + '`'));
   assert.match(stages, /plan assurance/i);
-  assert.match(stages, /routine work keeps the normal final review only/i);
+  assert.match(stages, /routine work requires the requirements and correctness review roles/i);
   assert.match(stages, /changed reviewed document.*plan\s+assurance stale/is);
-  assert.match(review, /fresh mode="explore", stage="review" worker/i);
+  assert.match(review, /fresh mode="explore", stage="review"\s+workers/i);
   assert.match(review, /candidate\s+assurance/i);
-  assert.match(review, /general pass must be last/i);
-  assert.match(review, /specialist pass never replaces the final general review/i);
+  assert.match(review, /No generic final\s+reviewer/i);
+  assert.match(review, /every required role.*latest completed report/is);
 });
 
 test('workflow routes task playbooks and resolves observable forks with evidence', async () => {
@@ -67,8 +67,10 @@ async function fixture(t, { reviewRequired = false } = {}) {
   const transport = new FakeHerdr(); const data = join(root, 'data'); const runtime = new Runtime(data, { transport }); await runtime.init(); runtime.url = 'http://127.0.0.1:1';
   const call = (identity, action, taskId, input = {}, requestId = id()) => runtime.execute(identity, { action, taskId, input, requestId });
   const task = await call('owner', 'submit', null, { repo, text: 'Implement an improvement', requestId: id() });
-  // Existing scenarios cover legacy tasks; review-specific scenarios opt into the new gate.
-  if (!reviewRequired) { const legacy = runtime.task(task.id); delete legacy.reviewRequired; await runtime.save(legacy); }
+  // These scenarios retain the legacy single-review contract; parallel-review.test.js covers role gates.
+  const legacy = runtime.task(task.id); delete legacy.reviewPolicy;
+  if (!reviewRequired) delete legacy.reviewRequired;
+  await runtime.save(legacy);
   await call('owner', 'start', task.id);
   const main = runtime.task(task.id).agents[0]; const who = a => ({ taskId: task.id, agentId: a.id });
   await call(who(main), 'write', task.id, { area: 'artifacts', path: 'fixture-clarification.md', content: 'Fixture scope clarified' });
@@ -357,14 +359,14 @@ test('cancellation interrupts named commands instead of waiting for their timeou
   assert.equal((await cancelled).status, 'cancelled');
 });
 
-test('Pi extension delivers references, acknowledges turns, and surfaces model failure', async t => {
+test('OMP extension delivers references, acknowledges turns, and surfaces model failure', async t => {
   let cleanup;
   const f = await fixture({ after(fn) { cleanup = fn; } });
   const server = await serve(f.data, { transport: f.transport });
   const prior = { url: process.env.RUNNER_URL, token: process.env.RUNNER_TOKEN, reply: process.env.RUNNER_REPLY_TOKEN };
   process.env.RUNNER_URL = server.runtime.url; process.env.RUNNER_TOKEN = f.main.token; process.env.RUNNER_REPLY_TOKEN = f.main.replyToken;
   const handlers = new Map(), tools = new Map(), messages = [];
-  const pi = { on: (name, fn) => handlers.set(name, fn), registerTool: tool => tools.set(tool.name, tool), setActiveTools() {}, sendMessage: message => messages.push(message) };
+  const pi = { on: (name, fn) => handlers.set(name, fn), registerTool: tool => tools.set(tool.name, tool), setActiveTools() { assert.fail('Runner must preserve native tools'); }, sendMessage: message => messages.push(message) };
   const { default: extension } = await import('../runner/pi-extension.js'); extension(pi);
   t.after(async () => {
     handlers.get('session_shutdown')(); await server.close(); await cleanup();
@@ -373,19 +375,28 @@ test('Pi extension delivers references, acknowledges turns, and surfaces model f
     if (prior.reply === undefined) delete process.env.RUNNER_REPLY_TOKEN; else process.env.RUNNER_REPLY_TOKEN = prior.reply;
   });
   const notices = []; const ctx = { isIdle: () => true, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
-  assert.deepEqual(handlers.get('project_trust')(), { trusted: 'yes' });
+  assert.equal(handlers.has('project_trust'), false, 'OMP uses native approval configuration');
+  assert.equal(handlers.has('tool_call'), false, 'Native tool calls are not blocked');
+  assert.equal(handlers.has('user_bash'), false, 'Interactive shell remains available');
+  const prompt = handlers.get('before_agent_start')({ systemPrompt: 'Base prompt' }, ctx).systemPrompt;
+  assert.match(prompt, /Use native tools/);
+  assert.match(prompt, /Never read approval credentials/);
+  assert.match(prompt, /native commands do not count as final runner verification/);
   await handlers.get('session_start')({}, ctx);
   assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'anthropic', model: 'claude-test' });
-  await handlers.get('model_select')({ model: { provider: 'openai-codex', id: 'gpt-test' } });
-  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'openai-codex', model: 'gpt-test' });
   const { setTimeout: sleep } = await import('node:timers/promises');
+  ctx.model = { provider: 'openai-codex', id: 'gpt-test' };
+  for (let i = 0; server.runtime.task(f.task.id).agents[0].modelSelection.model !== 'gpt-test' && i < 300; i++) await sleep(10);
+  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'openai-codex', model: 'gpt-test' });
   for (let i = 0; !messages.length && i < 100; i++) await sleep(10);
   assert.equal(messages.length, 1); assert.match(messages[0].content, /brief.md/);
   await handlers.get('agent_end')({ messages: [messages[0], { role: 'assistant', stopReason: 'stop' }] });
   assert(server.runtime.task(f.task.id).agents[0].inbox.every(m => m.acknowledgedAt));
   const report = tools.get('runner_action');
   await tools.get('runner_write').execute(id(), { area: 'artifacts', path: 'ask.md', content: 'Need user decision' });
-  const q = await report.execute(id(), { action: 'ask', input: { artifact: 'ask.md' } }); assert.equal(q.terminate, true);
+  const q = await report.execute(id(), { action: 'ask', input: { artifact: 'ask.md' } }); assert.equal(q.terminate, undefined);
+  let aborted = false; handlers.get('tool_result')({ toolName: 'runner_action', input: { action: 'ask' }, isError: false }, { abort() { aborted = true; } }); assert(aborted);
+  handlers.get('agent_start')();
   const denied = await fetch(server.runtime.url + '/terminal-answer', { method: 'POST', headers: { authorization: `Bearer ${f.main.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ decisionId: q.details.decisionId, text: 'Forged answer' }) });
   assert.equal(denied.status, 400);
   assert.deepEqual(await handlers.get('input')({ source: 'extension', text: 'Do not approve this' }, ctx), { action: 'continue' });
@@ -462,7 +473,7 @@ test('worktrees and Herdr labels use the brief title', async t => {
   assert.equal(labelOf(calls[1]), 'Implementation worker');
 });
 
-test('managed Pi launch auto-trusts the worktree', async t => {
+test('managed Pi launch auto-trusts the worktree and preserves native tools', async t => {
   const { Herdr } = await import('../runner/herdr.js');
   const herdr = new Herdr(); const args = [];
   herdr.call = async (cmd, sub, ...rest) => {
@@ -472,8 +483,10 @@ test('managed Pi launch auto-trusts the worktree', async t => {
     return {};
   };
   await herdr.start({ name: 'agent', session: '/tmp/session.jsonl', place: { pane: 'pane', tab: 'tab' } }, {});
-  assert(args.includes('--approve'));
+  assert(args.includes('--auto-approve'));
+  assert(args.includes('omp'));
   assert(args.includes('--no-extensions'));
+  assert(!args.includes('--tools'), 'Launch must not restrict tools to runner tools');
 });
 
 test('Pi extension keeps starting when an older runtime lacks the model action', async t => {
@@ -653,6 +666,7 @@ test('PNG evidence is copied into worker artifacts and reads as an image', async
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
   await writeFile(join(worker.cwd, 'proof.png'), png);
   const { artifact } = await f.call(f.who(worker), 'publish', f.task.id, { path: 'proof.png' });
+  assert.equal(f.runtime.task(f.task.id).events.findLast(event => event.kind === 'evidence-published').commit, null, 'Dirty worktree media must not claim to prove HEAD');
   assert(artifact.startsWith(worker.artifactDir + '/'));
   const image = await f.call('owner', 'read', f.task.id, { area: 'artifacts', path: artifact });
   assert.equal(image.mimeType, 'image/png'); assert.equal(image.base64, png.toString('base64'));
@@ -770,7 +784,7 @@ test('onboard gitignore helper appends missing agent directories, commits, and i
   await git(repo, 'add', '.'); await git(repo, 'commit', '-m', 'Base');
   const { ensureAgentIgnore } = await import('../runner/cli.js');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: true });
-  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.runner/answers/\n.runner-ui-*/\n');
+  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.omp/\n.runner/answers/\n.runner-ui-*/\n');
   assert.equal(await git(repo, 'log', '-1', '--format=%s'), 'Ignore agent-local directories');
   const head = await git(repo, 'rev-parse', 'HEAD');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: false });
@@ -954,7 +968,7 @@ test('Grok-style notifications carry question text, explicit images and safe rep
   await atomic(join(f.data, 'supervisor.json'), { webhook: { url: 'https://receiver.example.invalid/events', format: 'grokbot', authorization: 'Bearer test-token' } });
   const sent = []; const transport = async (url, options) => { sent.push(JSON.parse(options.body)); assert.equal(options.redirect, 'error'); return { ok: true, status: 202 }; };
   await notify(f.runtime, transport); await notify(f.runtime, transport);
-  assert.equal(sent[0].action, 'opinion'); assert.equal(sent[0].message, 'Which layout should we use?');
+  assert.equal(sent[0].action, 'opinion'); assert.equal(sent[0].message, `${f.task.title}\n\nWhich layout should we use?`); assert.equal(sent[0].context.goal, f.task.title);
   assert.equal(sent.length, 1); assert.equal(sent[0].job, f.task.id); assert.equal(sent[0].text, 'Which layout should we use?');
   assert.equal(sent[0].attachments[0].base64, png.toString('base64')); assert.equal(sent[0].reply.decisionId, question.decisionId);
   assert(!JSON.stringify(sent).includes(f.main.token));
@@ -1004,7 +1018,7 @@ test('Grok hook actions normalize aliases and keep probes silent', async t => {
     for (const alias of aliases) {
       const event = { id: id(), kind: 'decision', at: new Date().toISOString(), error: 'Example', ...hookFields({ action: alias, pr: 42, evidence: 'tests + screenshots', problems: ['e2e timeout'] }) };
       const payload = await notificationPayload(f.runtime, f.task, event, 'grokbot');
-      assert.equal(payload.action, action); assert.equal(payload.from, 'harness'); assert.equal(payload.task, f.task.id); assert.equal(payload.message, 'Example'); assert.equal(payload.pr, 42);
+      assert.equal(payload.action, action); assert.equal(payload.from, 'harness'); assert.equal(payload.task, f.task.id); assert.match(payload.message, /Example$/); assert.equal(payload.context.goal, f.task.title); assert.equal(payload.pr, 42);
       if (action === 'approval') assert.equal(payload.evidence, 'tests + screenshots');
       if (action === 'problem') assert.deepEqual(payload.problems, ['e2e timeout']);
     }

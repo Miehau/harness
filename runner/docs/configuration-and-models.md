@@ -33,7 +33,7 @@ command runs in each new worktree. Command output streams to evidence files. Put
 required final check in `verify`. Named commands execute as the runtime user, so only
 configure trusted repositories and commands.
 
-Optional top-level `provider` and `model` select the coordinator model; otherwise Pi's
+Optional top-level `provider` and `model` select the coordinator model; otherwise OMP's
 configured default is used. The runner is installed once and can target any Git root;
 the target repository needs no dependency on this repository or its retired daemon.
 
@@ -181,9 +181,12 @@ Add committed repository-relative paths to `.runner/project.json`:
 At most 20 paths are accepted. The runtime snapshots instructions from the task's base
 commit and supplies a `skills.json` manifest. Agents read selected snapshots and
 relative supporting files with runner file tools. Uncommitted replacements are ignored.
-Skills cannot grant tools or approval authority, and scripts must be exposed as named
-commands. Personal skills must be copied into the repository and committed first.
-Ordinary supervisor Pi sessions retain Pi's native skills and tools.
+Skills do not expand the authorized task scope or grant approval authority. Managed
+agents can use native OMP file and shell tools for task-related work; configured named
+commands remain the source of final runner verification. Personal skills must be copied
+into the repository and committed first. Managed sessions still disable automatic
+extension, skill and prompt-template loading so they use the selected snapshots.
+Ordinary supervisor OMP sessions retain OMP's native skills and tools.
 
 ## Optional browser helper
 

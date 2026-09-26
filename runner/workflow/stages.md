@@ -38,7 +38,10 @@ for the later implementation handoff; do not launch a replacement task.
    `data-safety` (migration, destructive behavior, loss or corruption), `recovery`
    (concurrency, retries, durable state or Git operations), and `operator` (a
    safety-critical human workflow). Do not add a category merely because code is
-   important; routine work keeps the normal final review only.
+   important; routine work requires the requirements and correctness review roles.
+   Add `database`, `ui` and `performance` when migrations, interface behavior or
+   performance risk requires the corresponding specialist. Pass declared categories
+   as clarify {artifact,risks:[...]} so required role coverage persists in task state.
 2. For selected preparation stages, pass relevant index/report references rather than
    transcripts. Architecture considers concepts, boundaries, contracts and clashes.
    Planning covers acceptance criteria, assignments, dependencies and evidence needs.
@@ -124,8 +127,9 @@ for the later implementation handoff; do not launch a replacement task.
    unresolved product decisions go to the owner. Delegate fixes as needed.
    Independent candidate review is required.
 7. Integrate completed writing workers and verify the combined candidate. Read
-   workflow/review.md and run required candidate assurance, then the final general
-   review. Fix → integrate → verify → rerun affected assurance and review until
+   workflow/review.md and run all required candidate review roles independently in
+   parallel against one frozen verified commit, bounded by maxWorkers.
+   Fix → integrate → verify → rerun every required role until
    there are no major/medium findings. Save a handoff with changes, evidence mapped to
    acceptance criteria, limitations and the branch/commit. Complete with report only after verification. End at the candidate:
    only the owner can invoke accept to rebase, reverify and merge it.

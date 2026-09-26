@@ -1,6 +1,6 @@
 # Agent Plan runner
 
-This is the repository's primary application: a local, terminal-first Pi/Herdr
+This is the repository's primary application: a local, terminal-first OMP/Herdr
 runner that coordinates agents in isolated Git worktrees. The independent
 [native Claude plugin](../claude/README.md) has its own workflow and does not use this
 runtime. The retired visual pipeline remains only in [archive/](../archive/README.md).
@@ -17,12 +17,12 @@ the next feature. Questions and results return to the supervisor. See
 [Supervisor sessions](docs/supervisor.md) for the preparation and implementation handoff.
 
 For a single task opened directly in its coordinator, use the CLI flow below.
-The daily path is **start → answer if needed → accept**.
+The daily path is **discuss → saved handoff → implement → parallel review → PR/MR → approve**.
 
 ### 1. Start
 
-Requirements: Node 22.19+, installed dependencies, Git, a running Herdr server,
-and configured Pi credentials. Install the CLI once from this checkout:
+Requirements: Node 22.19+, Bun 1.3.14+, installed dependencies, Git, a running Herdr server,
+and configured OMP credentials. Install the CLI once from this checkout:
 
 ```sh
 ./install.sh
@@ -31,11 +31,11 @@ agent-plan start /absolute/repo "Implement this feature"
 
 The installer checks Node, npm, and Git, installs locked dependencies, and links the
 CLI under the current npm prefix; rerun it after changing NVM versions. The launcher
-puts this checkout's Pi binary first on `PATH` so a different global Pi is not used.
+puts this checkout's OMP binary first on `PATH` so a different global OMP is not used.
 
 `start` launches the background runtime when needed, snapshots the committed base
 and configuration, creates an integration worktree and Herdr workspace, and focuses
-the Pi coordinator. Workers open isolated sessions as required. Uncommitted source
+the OMP coordinator. Workers open isolated sessions as required. Uncommitted source
 changes are not copied.
 
 Without `.runner/project.json`, tasks use `bash verify.sh`. Configure a different
@@ -51,7 +51,7 @@ unique prefix.
 
 ### 2. Answer if needed
 
-Questions appear in the coordinator's Pi terminal. Type the answer there; the runtime
+Questions appear in the coordinator's OMP terminal. Type the answer there; the runtime
 applies it to that exact decision before work resumes. Model tools cannot claim human
 approval. Other independent workers may continue while one worker waits.
 
@@ -81,20 +81,21 @@ agent-plan answer TASK DECISION_ID /absolute/answer.md
 
 The dashboard is an optional view of the same runtime state. Its URL contains owner
 access in the fragment; keep it private. Full conversations remain in Herdr and the
-recorded Pi session files.
+recorded OMP session files.
 
 ### 3. Accept
 
-A completed task is a verified candidate branch, not a merge, push, or deployment.
-Review the candidate, then deliver it locally:
+With `hosting` configured, a completed task has a verified, reviewed candidate and a
+published GitHub PR or GitLab MR with evidence links. Required CI is checked again at
+merge. Approve its exact commit using `accept`; without hosting, acceptance remains local:
 
 ```sh
-agent-plan accept TASK
+agent-plan accept TASK # local-only; hosted tasks require the exact published SHA
 # Or select the exact candidate and local target:
 agent-plan accept TASK COMMIT --target master
 ```
 
-Acceptance rebases the candidate onto the local target (`main` by default), reruns
+For local-only tasks, acceptance rebases the candidate onto the local target (`main` by default), reruns
 verification, and fast-forward merges. The source checkout must be clean and on that
 target. It performs no fetch, push, PR creation, or deployment.
 
@@ -142,20 +143,26 @@ overrides, onboarding, aliases, model routing, managed skills, and UI evidence.
 
 ## Boundaries
 
-- Worktrees isolate Git changes; they are not OS sandboxes.
-- Artifacts are immutable. State writes are atomic and mutating calls use durable
+- Agents use native OMP tools alongside runner tools under a trusted-local model.
+  Worktrees isolate Git changes; they are not OS sandboxes. Shell and native file
+  tools can access runner state and credentials as the same OS user. Human approvals
+  and read-only roles are workflow rules, not protection against a malicious agent.
+- The runner API enforces immutable artifacts. State writes are atomic and mutating calls use durable
   receipts so uncertain outcomes are surfaced instead of repeated.
-- Coordinators cannot edit repository files directly. Writing workers commit changes;
-  the runtime integrates serially and verifies the resulting candidate.
-- New candidates require an independent read-only review. Major and medium findings
-  block completion; changed commits invalidate prior review.
-- Sensitive changes receive targeted plan assurance before writers and fresh candidate
-  assurance before the final general review; routine changes keep the single review.
+- Coordinators and reviewers must not edit repository files. Implementation workers
+  use native tools in their own worktrees; the runtime commits reported work, integrates
+  serially and verifies the resulting candidate. Native command success does not replace
+  final configured verification.
+- New candidates require independent requirements/AC and correctness/code-quality
+  reviewers in parallel, plus risk-selected specialists. Major and medium findings
+  block completion; changed commits invalidate every required role review.
+- Sensitive changes receive targeted plan assurance before writers. Candidate reviewers
+  inspect the same verified commit; there is no mandatory final generic reviewer.
 - Back up the runner data directory together with the source repository's Git object
   database. State defaults to `~/.local/state/agent-plan`; `RUNNER_DATA` selects another
   existing data directory.
 
-Current v0.1 non-goals: a public or multi-user service, automatic push/PR/deployment,
+Current v0.1 non-goals: a public or multi-user service, automatic deployment,
 autonomous conflict resolution, semantic proof that tests or docs are adequate, and
 claimed end-to-end quality parity based only on mocked tests or the transport probe.
 
@@ -180,6 +187,26 @@ npm run canary  # opt-in paid end-to-end run; makes live model calls
 ```
 
 Tests use disposable Git repositories and mocked agents. `npm run probe` is an opt-in
-live Herdr/Pi connection check with no model calls. `npm run canary` runs one disposable
+live Herdr/OMP connection check with no model calls. `npm run canary` runs one disposable
 repository task through a live model; set `RUNNER_CANARY_TIMEOUT_MS` to change its
 timeout. It is a smoke check, not a comparative quality benchmark.
+
+## Hosted delivery and previews
+
+```sh
+agent-plan hosting demo --hosting-provider github --hosting-target main
+# GitLab, including self-hosted installations, uses the same saved configuration.
+agent-plan hosted-status TASK
+agent-plan preview TASK
+agent-plan preview TASK --stop
+agent-plan accept TASK EXACT_PUBLISHED_COMMIT
+```
+
+Onboarding discovers hosting from the remote when possible. Edit `hosting` in
+`.runner/project.json` to switch providers for future tasks; each existing task keeps
+its snapshot. Publication uses installed `gh` or `glab` credentials. Both providers
+store evidence on separate `runner-evidence/TASK/CANDIDATE_SHA/EVIDENCE_COMMIT` branches
+with commit-pinned links and repository access controls. GitLab's native image upload
+API is not used because its default URL access can bypass private-project membership.
+No merge occurs from a completion notification. Manual provider merges are detected.
+See [hosted delivery](docs/hosted-delivery.md) for setup, recovery and limitations.

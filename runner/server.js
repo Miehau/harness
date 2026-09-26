@@ -57,7 +57,7 @@ export async function serve(root, options = {}) {
   let notifying = false, notificationWork = Promise.resolve();
   const notifications = setInterval(() => { if (notifying) return; notifying = true; notificationWork = notify(runtime).catch(e => process.stderr.write(`Supervisor: ${e.message}\n`)).finally(() => { notifying = false; }); }, 5000); notifications.unref();
   let checking = false, reconciliationWork = Promise.resolve();
-  const timer = setInterval(() => { if (checking) return; checking = true; reconciliationWork = runtime.reconcile().catch(e => process.stderr.write(`Reconciliation: ${e.message}\n`)).finally(() => { checking = false; }); }, 10000); timer.unref();
+  const timer = setInterval(() => { if (checking) return; checking = true; reconciliationWork = runtime.reconcile().then(() => runtime.refreshHosted()).catch(e => process.stderr.write(`Reconciliation: ${e.message}\n`)).finally(() => { checking = false; }); }, 10000); timer.unref();
   return { runtime, descriptor, async close() { clearInterval(timer); clearInterval(notifications); await new Promise(resolve => server.close(resolve)); await Promise.all([runtime.tail, notificationWork, reconciliationWork]); await unlink(lockPath); } };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { exec, assert } from './io.js';
 import { tabLabel, workspaceLabel } from './names.js';
+import { ensureBun, ensureOmpSession, ompCli } from './omp.js';
 const extension = fileURLToPath(new URL('./pi-extension.js', import.meta.url));
 export class Herdr {
   async call(...args) {
@@ -19,6 +20,7 @@ export class Herdr {
   }
   async create(task, agent, url) {
     const env = ['--env', `PATH=${resolve(dirname(extension), '../node_modules/.bin')}:${process.env.PATH}`, '--env', `RUNNER_URL=${url}`, '--env', `RUNNER_TOKEN=${agent.token}`, '--env', `RUNNER_REPLY_TOKEN=${agent.replyToken}`];
+    if (process.env.PI_CODING_AGENT_DIR) env.push('--env', `PI_CODING_AGENT_DIR=${process.env.PI_CODING_AGENT_DIR}`);
     let row;
     try { row = task.workspace
       ? await this.call('tab', 'create', '--workspace', task.workspace, '--cwd', agent.cwd, '--label', tabLabel(agent), ...env, '--no-focus')
@@ -32,18 +34,21 @@ export class Herdr {
   }
   async availableModels(query) {
     let stdout;
-    try { ({ stdout } = await exec(process.execPath, [resolve(dirname(extension), '../node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--list-models', ...(query ? [query] : [])], { timeout: 20000, maxBuffer: 1024 * 1024 })); }
-    catch { throw new Error('Could not inspect Pi model availability; inspect Pi configuration before retrying'); }
-    return stdout.split('\n').map(line => line.trim().split(/\s+/)).filter(row => row.length >= 3 && /\d/.test(row[2])).map(row => ({ provider: row[0], model: row[1] }));
+    const bun = await ensureBun();
+    try { ({ stdout } = await exec(bun, [ompCli, 'models', 'ls', ...(query ? [query] : []), '--json', '--no-extensions'], { timeout: 20000, maxBuffer: 1024 * 1024 })); }
+    catch { throw new Error('Could not inspect OMP model availability; inspect OMP configuration before retrying'); }
+    return JSON.parse(stdout).models.map(row => ({ provider: row.provider, model: row.id }));
   }
   async resolveModel(selection) {
     if (!selection.model && !selection.provider) return selection;
     assert(selection.model, 'Specify a model with the provider');
     const matches = (await this.availableModels(selection.model)).filter(row => row.model === selection.model && (!selection.provider || row.provider === selection.provider));
-    assert(matches.length === 1, 'Model is unavailable or ambiguous in Pi; configure a provider/model with credentials');
+    assert(matches.length === 1, 'Model is unavailable or ambiguous in OMP; configure a provider/model with credentials');
     return matches[0];
   }
   async start(agent, config) {
+    await ensureBun();
+    await ensureOmpSession(agent.session);
     // Herdr 0.8 requires a settled foreground shell. Never blindly retry agent start.
     const waitForShell = async () => {
       const deadline = Date.now() + 15000;
@@ -57,14 +62,14 @@ export class Herdr {
       }
     };
     await waitForShell();
-    const args = ['--approve', '--no-extensions', '--no-skills', '--no-prompt-templates', '--tools', 'runner_read,runner_write,runner_action', '-e', extension, '--session', agent.session];
+    const args = ['--auto-approve', '--no-extensions', '--no-skills', '-e', extension, '--session', agent.session];
     if (config.model) args.push('--model', config.model);
     if (config.provider) args.push('--provider', config.provider);
     const previous = (await this.call('workspace', 'list')).workspaces?.find(w => w.focused);
     await this.call('tab', 'focus', agent.place.tab);
     try {
       await waitForShell();
-      const launch = () => this.call('agent', 'start', agent.name, '--kind', 'pi', '--pane', agent.place.pane, '--timeout', '30000', '--', ...args);
+      const launch = () => this.call('agent', 'start', agent.name, '--kind', 'omp', '--pane', agent.place.pane, '--timeout', '30000', '--', ...args);
       try { await launch(); } catch (error) {
         // This explicit rejection means no agent was launched; other failures are uncertain.
         if (!error.message.includes('is not an available shell')) throw error;

@@ -1,6 +1,6 @@
 # Supervisor sessions
 
-The optional supervisor is an ordinary trusted Pi session for discussing requirements,
+The optional supervisor is an ordinary trusted OMP session for discussing requirements,
 starting tasks, watching them, answering decisions, and accepting candidates.
 
 ## Start and watch
@@ -9,8 +9,17 @@ starting tasks, watching them, answering decisions, and accepting candidates.
 agent-plan supervisor --provider PROVIDER --model MODEL
 ```
 
-Any configured Pi provider works; extra Pi arguments such as `--continue` are passed
-through. Existing Pi setups can load `runner/supervisor-extension.js` with `pi -e`.
+Any configured OMP provider works; extra OMP arguments such as `--continue` are passed
+through. Existing OMP setups can load `runner/supervisor-extension.js` with `omp -e`.
+
+Explicit `--session`, `--resume`, `-r`, and `--fork` transcript file paths require an
+adjacent `.backend.json` marker identifying the pinned OMP backend/version. Existing
+unmarked files fail closed, including genuine unmanaged OMP transcripts and Pi files
+copied into an OMP directory. Preserve them and start a fresh default OMP session;
+the runner does not convert Pi history or infer provenance from its directory.
+Default OMP session IDs, the resume picker, and `--continue` remain native. Custom
+`--session-dir` or `PI_CODING_AGENT_SESSION_DIR` history selection requires an explicit
+marked transcript path. Relative paths are checked against `--cwd` when supplied.
 
 The CLI also loads the bundled [pstack skills](../../codex/agent-plan/runner.md).
 Use these in the supervisor conversation (no copying skill files into your project):
@@ -24,7 +33,7 @@ Use these in the supervisor conversation (no copying skill files into your proje
 | `/skill:blast-radius Check the export format change` | Investigate affected contracts and concrete safety evidence. |
 | `/skill:open-pr Publish the verified candidate` | A separately authorized hosted publication step. |
 
-When loading the extension manually, also pass `--skill /absolute/path/to/agent-plan-workspace/codex/agent-plan/skills`.
+When loading the extension manually, also pass `--skills /absolute/path/to/agent-plan-workspace/codex/agent-plan/skills`.
 Skill source lives in the runner installation. New tasks snapshot it with all
 supporting references, so workers in another repository can read the same version.
 Project-selected skills remain a separate configuration. Existing tasks retain their
@@ -35,7 +44,7 @@ is unresolved, ask for competing proposals. The supervisor uses `runner_supervis
 `start` with a **preparation-only** brief: at least three independent architecture
 workers inspect separate worktrees at the same committed base and return proposals.
 The coordinator keeps that base fixed and batches workers when capacity is below
-three. Proposals are artifacts; architecture workers cannot edit repository files.
+three. Proposals are artifacts; architecture workers must not edit repository files.
 
 The coordinator returns all proposal references and a comparison through the existing
 `ask` decision with `requiresOwner:true`. The supervisor reads the proposals, compares
@@ -66,7 +75,7 @@ for the implementation handoff.
 The same tool can `watch` an existing task. `/runner-watch FULL_TASK_ID` and
 `/runner-unwatch FULL_TASK_ID` remain available. Pending questions are delivered
 immediately; later questions, attention, completion, and failure wake the supervisor
-without polling the model. Watches and consumed event IDs persist in the Pi session.
+without polling the model. Watches and consumed event IDs persist in the OMP session.
 
 ## Human decisions and acceptance
 
@@ -77,13 +86,14 @@ recorded as supervisor answers. New scope, product choices, `requiresOwner` deci
 and approval actions always use the human dialog.
 
 `accept {taskId,commit,target?}` shows the exact repository, verified commit, and target
-before requesting confirmation. Approval uses the runner's existing rebase, verification,
-and local fast-forward merge. It never pushes. Cancelled dialogs send nothing, and
+before requesting confirmation. Hosting-configured tasks display the provider and
+PR/MR URL, then merge only that approved revision after required CI and provider merge
+requirements pass. Local-only tasks use rebase, verification and fast-forward merge. Cancelled dialogs send nothing, and
 headless sessions cannot provide approval. Responses are persisted by request ID so a
 retry cannot prompt again or repeat a completed action; changed decision/commit/target
 requires a new request.
 
-This is trusted local operator access with ordinary Pi tools, not a sandbox. The
+This is trusted local operator access with ordinary OMP tools, not a sandbox. The
 extension's model/human distinction does not protect against arbitrary local shell
 commands. No webhook is required.
 
@@ -101,7 +111,7 @@ agreed requirements and conventions and cites the basis for routine answers. Sco
 changes, unclear tradeoffs, and approvals still go to the owner.
 
 `/runner-checkpoint` asks the agent to save current discussion, persists watch state,
-then requests Pi compaction. Native and automatic compaction use Pi's normal summarizer
+then requests OMP compaction. Native and automatic compaction use OMP's normal summarizer
 with a deterministic recovery footer for session, transcript, watches, and memory paths.
 Compaction failure cancels rather than silently dropping continuity. Unsaved conversation
 is not converted into task notes automatically.
@@ -110,8 +120,10 @@ Live state must always be inspected before acting; saved references are not curr
 status or approval. This storage assumes one supervisor per data directory. Use
 separate data directories for simultaneous supervisors.
 
-Completed, failed, cancelled, or missing tasks are unwatched after eligible final
-events are consumed. Connection failures keep watches. Reattach explicitly when
+Completed hosted candidates with open requests stay watched for failed CI; pending
+and successful CI updates do not wake the model. Merged or closed requests and other
+terminal or missing tasks are unwatched after eligible final events are consumed.
+Connection failures keep watches. Reattach explicitly when
 resuming historical work; Herdr idle alone is not completion.
 
 ## Lifecycle actions
@@ -129,30 +141,20 @@ The runtime still rejects active command groups, dirty or unresolved Git state, 
 unproven integration outcomes. Changed operations invalidate prior requests. Recovery
 restores monitoring but does not resume an agent or approve delivery automatically.
 
-## MCP ticket sources
+## Onboarding and MCP
 
-```sh
-agent-plan supervisor --mcp
-agent-plan supervisor --mcp-config /absolute/private/tickets.json
-```
+Use `/runner-onboard ALIAS_OR_PATH`, the supervisor tool's `onboard` action, or
+`agent-plan onboard REPO` to prepare a project. Existing skills remain available.
+The tool reuses its `requestId` for uncertain retries; CLI callers can supply
+`--request-id ID` to reuse the same onboarding task and launch.
+GrokBot can read their instructions with `agent-plan skills` and `agent-plan skills how`
+(and `why`, `arena`, `architect`); returned source paths resolve supporting references.
 
-This loads `npm:pi-mcp-adapter@2.33.0` through Pi's package loader; first use may need
-network access. Configure the actual server with `/mcp setup` or the adapter's JSON:
+OMP discovers MCP from `~/.omp/agent/mcp.json` or `.omp/mcp.json`. The obsolete
+`--mcp-config` argument reports migration instructions rather than silently ignoring
+configuration; `--mcp` is accepted for compatibility. The Pi MCP adapter is no longer loaded.
 
-```json
-{
-  "mcpServers": {
-    "tickets": {"url": "https://your-ticket-server.example/mcp"}
-  }
-}
-```
-
-The URL is a placeholder. Keep credentials in private configuration or the adapter's
-authentication store. Configuration merges normally; `--mcp-config` is not an isolated
-security boundary. See the
-[adapter documentation](https://github.com/nicobailon/pi-mcp-adapter) for authentication
-and tool-approval policies.
-
-Incoming ticket text does not authorize task acceptance or writes back to the ticket
-system. Managed coordinator and worker sessions expose only runner tools; MCP credentials
-are never copied into task artifacts.
+Managed sessions use native tools plus runner tools under trusted local execution.
+Only explicitly loaded extensions and selected skill snapshots enter managed workers.
+Task content does not authorize approval or unrelated external writes. See
+[hosted delivery](hosted-delivery.md) for PR/MR publication and exact-head approval.

@@ -75,8 +75,8 @@ second schedule database.
 
 Up to four PNG attachments of at most 1 MB each may be base64 encoded. Larger images,
 videos, and other files carry an omission notice and artifact reference. A trusted
-local relay must implement authenticated retrieval for those references; the runner
-does not provide public media hosting.
+local relay must implement authenticated retrieval for those references; hosted candidates link uploaded provider evidence; the runner
+does not expose its local data directory publicly.
 
 Use coordinator `ask` with attachments for a blocking question or `surface` for a
 nonblocking problem or preview. The receiver must implement this payload shape to
@@ -97,3 +97,18 @@ Coordinator `ask` and `surface` accept
 `impl-problem`/`blocker` to `problem`. Approval requires a real owner answer; opinion is
 for product choices; a problem needs a question only when blocked. Probe, health, and
 noop events are never sent, and merging does not create another approval request.
+
+## Hosted candidates and skills
+
+Grok payloads now include `context` (goal, brief, agreed document references,
+clarification, required review roles and candidate), `evidenceLinks`, `prUrl`, and
+provider/head/CI details. Questions should state prior agreement, the specific blocker,
+a recommendation and alternatives in their artifact. Images retain the existing PNG
+payload contract. Failed CI sends a problem; unchanged or pending CI stays quiet.
+
+For hosted tasks, the acceptance command includes the exact published SHA and merges
+the remote PR/MR only after checks pass. A bot must obtain a real human decision before
+executing it. API receipt, delivery acceptance or a bot-generated reply is not approval.
+Use `agent-plan skills NAME` for packaged discussion skills and `agent-plan onboard`
+for repository setup. Actual receiver rendering and reply handling still need a live
+receiver test; payload unit tests do not prove bot compatibility.

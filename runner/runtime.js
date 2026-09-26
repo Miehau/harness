@@ -9,6 +9,9 @@ import { finished } from 'node:stream/promises';
 import { atomic, json, id, now, assert, string, git, exec, safePath } from './io.js';
 import { Herdr } from './herdr.js';
 import { accept, recoverDelivery } from './delivery.js';
+import { validateHosting } from './hosting.js';
+import { publishCandidate, hostedStatus, mergeHosted } from './hosted-delivery.js';
+import { preview } from './preview.js';
 import { modelMenu, chooseModel, reviewModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
@@ -18,6 +21,22 @@ const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const bundled = name => readFile(fileURLToPath(new URL(name, import.meta.url)), 'utf8');
+const riskRoles = { security: 'security', 'data-safety': 'database', database: 'database', recovery: 'recovery', operator: 'recovery', ui: 'ui', performance: 'performance' };
+
+// Existing snapshotted tasks retain their original single-review contract.
+export function assertCandidateReviews(task, commit) {
+  if (!task.reviewRequired) return;
+  if (!task.reviewPolicy) {
+    assert(task.reviews?.at(-1)?.passed && task.reviews.at(-1).commit === commit, 'Fresh review with no major or medium findings is required');
+    return;
+  }
+  const roles = new Set([...task.reviewPolicy.requiredRoles, ...(task.reviews ?? []).filter(r => r.commit === commit && r.reviewRole).map(r => r.reviewRole)]);
+  for (const role of roles) {
+    const review = task.reviews?.findLast(r => r.commit === commit && r.reviewRole === role);
+    assert(review?.passed && review.coverage?.length, `Fresh clean ${role} review with coverage is required for candidate ${commit}`);
+  }
+}
+
 
 /**
  * @typedef {object} Agent
@@ -77,9 +96,10 @@ const bundled = name => readFile(fileURLToPath(new URL(name, import.meta.url)), 
  */
 
 export class Runtime {
-  constructor(root, { transport = new Herdr() } = {}) {
+  constructor(root, { transport = new Herdr(), hostingFactory } = {}) {
     this.root = resolve(root);
     this.transport = transport;
+    this.hostingFactory = hostingFactory;
     /** @type {Map<string, Task>} */
     this.tasks = new Map();
     this.tail = Promise.resolve();
@@ -145,6 +165,8 @@ export class Runtime {
     for (const task of this.tasks.values()) if (task.requestId === input.requestId) { assert(task.fingerprint === fingerprint, 'requestId reused with different input'); return this.view(task); }
     let config;
     try { config = await json(join(repo, '.runner', 'project.json')); } catch (e) { if (e.code !== 'ENOENT') throw e; config = { commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], inferredSetup: true }; }
+    if (config.hosting) config.hosting = validateHosting(config.hosting);
+    if (config.preview) assert(typeof config.preview.url === 'string' && Object.hasOwn(config.commands ?? {}, config.preview.command), 'Configure preview.command and preview.url');
     for (const key of ['model', 'provider']) if (input[key] !== undefined) config[key] = string(input[key], key, 200);
     assert(config.commands && typeof config.commands === 'object' && !Array.isArray(config.commands), 'commands must be a map');
     assert(Array.isArray(config.verify) && config.verify.length, 'Configure at least one verification command');
@@ -164,7 +186,7 @@ export class Runtime {
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
     assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
-    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
+    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, reviewPolicy: { version: 1, requiredRoles: ['requirements', 'correctness'], risks: [] }, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
@@ -261,9 +283,15 @@ export class Runtime {
     if (input.mode === 'write' && task.agents.some(a => a.role === 'worker' && a.mode === 'write' && active(a))) {
       assert(input.contract && task.agents.filter(a => a.role === 'worker' && a.mode === 'write' && active(a)).every(a => a.contract === input.contract), 'Parallel writers must share the same published contract');
     }
+    assert(stage === 'review' || !task.agents.some(a => a.stage === 'review' && active(a)), 'Finish frozen candidate reviews before starting other workers');
     const candidate = stage === 'review' ? await git(task.integration.cwd, 'rev-parse', 'HEAD') : null;
     if (stage === 'review') {
-      assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a)), 'Finish and integrate workers before review');
+      assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a) && (a.stage !== 'review' || !task.reviewPolicy || a.base !== candidate)), 'Finish and integrate workers before review');
+      if (task.reviewPolicy && task.reviewRequired) {
+        assert(task.reviewPolicy.requiredRoles.includes(input.reviewRole), 'Select a required reviewRole');
+        assert(!task.agents.some(a => a.stage === 'review' && active(a) && a.reviewRole === input.reviewRole), 'This review role is already running');
+        assert(task.verification?.passed && task.verification.commit === candidate, 'Verify the exact candidate before role reviews');
+      }
       assert(task.agents.filter(a => a.mode === 'write' && a.status === 'completed').every(a => a.integrated), 'Integrate completed writers before review');
       assert(!await git(task.integration.cwd, 'status', '--porcelain'), 'Review requires a clean integrated candidate');
     }
@@ -273,21 +301,22 @@ export class Runtime {
     await this.save(task);
     const workspace = await this.worktree(task, `${stage}-${id().slice(0, 6)}`, 'refs/heads/' + task.integration.branch);
     task.operation = null;
-    if (task.config.setup) await this.command(task, workspace, task.config.setup);
+    if (task.config.setup && stage !== 'review') await this.command(task, workspace, task.config.setup);
     const agent = this.agent(task, 'worker', workspace.cwd, input.mode);
-    Object.assign(agent, { stage, branch: workspace.branch, base: await git(workspace.cwd, 'rev-parse', 'HEAD'), assignment: input.assignment, contract: input.contract ?? null });
+    Object.assign(agent, { stage, ...(stage === 'review' && task.reviewPolicy ? { reviewRole: input.reviewRole } : {}), branch: workspace.branch, base: await git(workspace.cwd, 'rev-parse', 'HEAD'), assignment: input.assignment, contract: input.contract ?? null });
     agent.name = agentName(task, agent);
     agent.modelSelection = chosen.selection; agent.modelChoice = chosen.choice; agent.modelReason = chosen.reason;
     let review;
     if (stage === 'review') {
       const diff = await this.artifact(task, await git(task.integration.cwd, 'diff', '--no-ext-diff', task.base, agent.base), 'diff');
-      review = { commit: agent.base, base: task.base, diff, rubric: 'workflow/review.md', previous: task.reviews ?? [], verification: task.verification };
+      review = { commit: agent.base, base: task.base, diff, rubric: 'workflow/review.md', ...(task.reviewPolicy ? { reviewRole: agent.reviewRole, requiredRoles: task.reviewPolicy.requiredRoles, previous: (task.reviews ?? []).filter(r => r.reviewRole === agent.reviewRole && r.commit !== agent.base) } : { previous: task.reviews ?? [] }), verification: task.verification };
     }
     this.message(agent, 'assignment', input.assignment, { ...(review ? { review } : {}), workflow: 'worker.md', discovery: task.discovery, skills: task.skills, pstack: task.pstack, contract: agent.contract, artifactDir: agent.artifactDir });
     this.event(task, 'worker-spawned', { agentId: agent.id, artifact: input.assignment, modelSelection: agent.modelSelection });
     await this.launch(task, agent); return { workerId: agent.id, status: agent.status, cwd: agent.cwd, error: agent.error };
   }
   async command(task, agent, name, env = {}) {
+    assert(!task.agents.some(a => a.stage === 'review' && active(a)), 'Finish frozen candidate reviews before running commands');
     assert(Object.hasOwn(task.config.commands, name), 'Unknown named command');
     const argv = task.config.commands[name];
     assert(!task.operation, 'Resolve the interrupted operation before running commands');
@@ -362,8 +391,9 @@ export class Runtime {
       assert(!task.operation && !task.agents.some(a => a.role === 'worker' && active(a)), 'Unfinished work remains');
       assert(!task.decisions.some(d => !d.answer), 'Unanswered decisions remain');
       assert(task.agents.filter(a => a.role === 'worker' && a.mode === 'write' && a.status === 'completed').every(a => a.integrated), 'Completed writing work must be integrated');
-      if (task.reviewRequired) assert(task.reviews?.at(-1)?.passed && task.reviews.at(-1).commit === await git(agent.cwd, 'rev-parse', 'HEAD'), 'Fresh review with no major or medium findings is required');
+      assertCandidateReviews(task, await git(agent.cwd, 'rev-parse', 'HEAD'));
       assert(task.verification?.passed && task.verification.commit === await git(agent.cwd, 'rev-parse', 'HEAD') && !await git(agent.cwd, 'status', '--porcelain'), 'Fresh passing integration verification is required');
+      if (task.config.hosting) await publishCandidate(this, task, { artifact: input.artifact });
     }
     if (agent.role === 'worker' && agent.mode === 'write' && input.status === 'completed') {
       task.operation = { kind: 'worker-commit', agentId: agent.id, at: now() }; await this.save(task);
@@ -380,6 +410,12 @@ export class Runtime {
       const review = await json(await safePath(join(this.dir(task), 'artifacts'), input.artifact));
       assert(review.commit === agent.base, 'Review must identify its exact candidate commit');
       string(review.scope, 'review scope', 10000);
+      if (task.reviewPolicy && task.reviewRequired) {
+        assert(review.reviewRole === agent.reviewRole, 'Review must identify its assigned role');
+        assert(Array.isArray(review.coverage) && review.coverage.length > 0 && review.coverage.length <= 200, 'Role review requires explicit coverage');
+        for (const item of review.coverage) string(item, 'review coverage', 10000);
+        assert(task.verification?.passed && task.verification.commit === agent.base && await git(task.integration.cwd, 'rev-parse', 'HEAD') === agent.base && !await git(task.integration.cwd, 'status', '--porcelain'), 'Reviewed candidate changed or verification is stale');
+      }
       assert(Array.isArray(review.findings) && review.findings.length <= 200, 'Review findings must be an array of at most 200 items');
       for (const finding of review.findings) {
         assert(['major', 'medium', 'minor'].includes(finding.severity), 'Invalid review severity');
@@ -387,7 +423,7 @@ export class Runtime {
         assert(Number.isInteger(finding.line) && finding.line > 0, 'Finding needs a positive line number');
       }
       task.reviews ??= [];
-      task.reviews.push({ agentId: agent.id, commit: agent.base, artifact: input.artifact, passed: !review.findings.some(f => f.severity !== 'minor'), at: now() });
+      task.reviews.push({ agentId: agent.id, ...(task.reviewPolicy ? { reviewRole: agent.reviewRole, coverage: review.coverage } : {}), commit: agent.base, artifact: input.artifact, passed: !review.findings.some(f => f.severity !== 'minor'), at: now() });
     }
     agent.status = input.status; agent.report = input.artifact;
     if (agent.role === 'orchestrator') { task.status = input.status; task.result = input.artifact; }
@@ -395,6 +431,7 @@ export class Runtime {
     this.event(task, agent.role === 'orchestrator' ? input.status : 'worker-report', { agentId: agent.id, artifact: input.artifact, ...(agent.role === 'orchestrator' && task.verification?.uiEvidence ? { evidence: task.verification.uiEvidence.artifact, attachments: task.verification.uiEvidence.attachments } : {}) });
     await this.save(task); return { status: input.status, artifact: input.artifact };
   }
+  assertCandidateReviews(task, commit) { return assertCandidateReviews(task, commit); }
   async attachments(task, paths = []) {
     assert(Array.isArray(paths) && paths.length <= 4, 'Attach at most four artifact files');
     for (const path of paths) await this.reference(task, path);
@@ -491,6 +528,18 @@ export class Runtime {
   async recover(task, input) {
     assert(task.operation, 'No interrupted operation');
     if (input.expectedOperation !== undefined) assert(isDeepStrictEqual(task.operation, input.expectedOperation), 'Interrupted operation changed; inspect before recovery');
+    if (task.operation.kind.startsWith('hosted-')) {
+      const operation = task.operation; const current = await hostedStatus(this, task);
+      if (!task.operation) return this.view(task);
+      assert(input.outcome === 'aborted', 'Inspect hosted-status before declaring the operation aborted');
+      if (operation.kind === 'hosted-merge') {
+        assert(input.expectedOperation && isDeepStrictEqual(input.expectedOperation, operation), 'Supply the exact inspected hosted merge operation');
+        string(input.evidence, 'recovery evidence', 10000);
+        assert(current.state === 'open' && current.head === operation.commit && current.target === task.config.hosting.target, 'Cannot prove the approved request is still open and unchanged');
+        delete task.hosted.approvedCommit; delete task.hosted.approvedAt;
+      } else assert(current.found === false || current.state === 'open', 'Published request is not open; inspect it before recovery');
+      this.event(task, 'recovered', { operation, outcome: input.outcome, evidence: input.evidence }); task.operation = null; await this.save(task); return this.view(task);
+    }
     if (['accept-rebase', 'accept-merge'].includes(task.operation.kind)) return recoverDelivery(this, task, input);
     if (task.operation.kind === 'command') {
       assert(task.operation.pid, 'Command launch identity is uncertain; inspect retained work before recovery');
@@ -520,6 +569,7 @@ export class Runtime {
   async cleanup(task) {
     assert(terminal.has(task.status), 'Only terminal tasks can be cleaned');
     assert(!task.operation, 'Interrupted operation must be inspected before cleanup');
+    if (task.preview?.pid) await preview(this, task, { stop: true });
     for (const agent of task.agents) await this.transport.stop(agent);
     const paths = [...new Set([task.integration?.cwd, ...task.agents.filter(a => a.role === 'worker').map(a => a.cwd)].filter(Boolean))];
     for (const cwd of paths) { try { await stat(cwd); } catch (e) { if (e.code === 'ENOENT') continue; throw e; } assert(!await git(cwd, 'status', '--porcelain'), `Keep dirty worktree: ${cwd}`); }
@@ -593,7 +643,10 @@ export class Runtime {
       else if (action === 'resume') { assert(owner, 'Owner access required'); result = await this.resume(task, body); }
       else if (action === 'recover') { assert(owner, 'Owner access required'); result = await this.recover(task, body); }
       else if (action === 'cancel') { assert(owner, 'Owner access required'); result = await this.cancel(task); }
-      else if (action === 'accept') { assert(owner, 'Owner access required'); result = await this.serial(() => accept(this, task, body), `delivery:${task.repo}`); }
+      else if (action === 'accept') { assert(owner, 'Owner access required'); result = await this.serial(() => task.config.hosting ? mergeHosted(this, task, body) : accept(this, task, body), `delivery:${task.repo}`); }
+      else if (action === 'hosted-status') { assert(owner || orchestrator, 'Owner or coordinator required'); result = await hostedStatus(this, task); }
+      else if (action === 'publish-candidate') { assert(owner || orchestrator, 'Owner or coordinator required'); result = await publishCandidate(this, task, body); }
+      else if (action === 'preview') { assert(owner, 'Owner access required'); result = await preview(this, task, body); }
       else if (action === 'cleanup') { assert(owner, 'Owner access required'); result = await this.cleanup(task); }
       else if (action === 'surface') {
         assert(orchestrator, 'Orchestrator access required'); await this.reference(task, body.artifact);
@@ -603,6 +656,11 @@ export class Runtime {
       else if (action === 'clarify') {
         assert(orchestrator, 'Orchestrator access required'); await this.reference(task, body.artifact);
         assert(!task.decisions.some(d => !d.answer) && !task.agents.some(a => a.role === 'worker' && a.mode === 'explore' && active(a)), 'Resolve questions and await planning/discovery workers first');
+        if (task.reviewPolicy) {
+          const risks = body.risks ?? task.reviewPolicy.risks;
+          assert(Array.isArray(risks) && risks.every(r => Object.hasOwn(riskRoles, r)), 'Unknown review risk category');
+          task.reviewPolicy = { version: 1, risks: [...new Set([...task.reviewPolicy.risks, ...risks])], requiredRoles: [...new Set([...task.reviewPolicy.requiredRoles, 'requirements', 'correctness', ...risks.map(r => riskRoles[r])])] };
+        }
         task.clarification = { artifact: body.artifact, documentsDigest: digest(task.documents ?? {}), at: now() };
         this.event(task, 'clarified', { artifact: body.artifact }); await this.save(task); result = task.clarification;
       }
@@ -619,7 +677,7 @@ export class Runtime {
         const path = await safePath(actor.cwd, body.path);
         const { bytes, extension } = await mediaFile(path);
         const artifact = await this.artifact(task, bytes, extension, actor.artifactDir);
-        this.event(task, 'evidence-published', { agentId: actor.id, artifact }); await this.save(task); result = { artifact };
+        this.event(task, 'evidence-published', { agentId: actor.id, artifact, commit: await git(actor.cwd, 'status', '--porcelain') ? null : await git(actor.cwd, 'rev-parse', 'HEAD'), worktree: actor.cwd }); await this.save(task); result = { artifact };
       }
       else if (action === 'checkpoint') {
         assert(!owner, 'Agent access required'); await this.reference(task, body.artifact);
@@ -636,9 +694,21 @@ export class Runtime {
         await this.save(task); result = { name: body.name, artifact: body.artifact };
       }
       else if (action === 'feedback') {
-        assert(owner && !terminal.has(task.status), 'Owner feedback requires an unfinished task'); await this.reference(task, body.artifact);
+        assert(owner && (!terminal.has(task.status) || task.status === 'completed' && task.config.hosting), 'Owner feedback requires an unfinished task or a published candidate'); await this.reference(task, body.artifact);
+        if (task.status === 'completed') {
+          const current = await hostedStatus(this, task);
+          assert(current.state === 'open' && !task.operation, 'Only open PR/MR candidates without interrupted operations can be revised');
+          const coordinator = task.agents.findLast(a => a.role === 'orchestrator');
+          await this.transport.stop(coordinator);
+          assert(await this.transport.status(coordinator) === 'missing', 'Previous coordinator must stop before revision');
+          task.status = 'running'; task.verification = null; coordinator.status = 'failed'; delete task.hosted.approvedCommit; delete task.hosted.approvedAt;
+          this.message(coordinator, 'owner-feedback', body.artifact); await this.save(task);
+          result = await this.resume(task, { agentId: coordinator.id });
+          this.event(task, 'feedback', { artifact: body.artifact }); await this.save(task);
+        } else {
         this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'owner-feedback', body.artifact);
         this.event(task, 'feedback', { artifact: body.artifact }); await this.save(task); result = { artifact: body.artifact };
+        }
       }
       else if (action === 'spawn') { assert(orchestrator, 'Orchestrator access required'); result = await this.spawn(task, body); }
       else if (action === 'pause') { assert(orchestrator, 'Orchestrator access required'); const worker = task.agents.find(a => a.id === body.workerId && a.role === 'worker'); assert(worker?.status === 'running', 'Worker must be running'); result = await this.ask(task, worker, body); }
@@ -686,6 +756,16 @@ export class Runtime {
         this.event(target, 'coordination-received', { sourceTaskId: source.id, artifact }); await this.save(target); return true;
       }, message.taskId);
       await this.serial(async () => { const current = this.task(source.id); const pending = current.outbox.find(m => m.id === message.id); pending.deliveredAt = now(); pending.deliveryStatus = delivered ? 'delivered' : 'undeliverable'; if (!delivered) this.event(current, 'attention', { artifact: message.artifact, error: 'Peer task ended before coordination delivery' }); await this.save(current); }, source.id);
+    }
+  }
+  async refreshHosted() {
+    for (const original of this.tasks.values()) {
+      if (!original.config.hosting || !original.hosted?.number || original.hosted.state === 'merged' || Date.now() - Date.parse(original.hosted.checkedAt ?? 0) < 60000) continue;
+      await this.serial(async () => {
+        const task = this.task(original.id);
+        try { await hostedStatus(this, task); }
+        catch { task.hosted.checkedAt = now(); task.hosted.statusError = 'Provider status unavailable; retry with hosted-status'; await this.save(task); }
+      }, original.id);
     }
   }
   async reconcile() {

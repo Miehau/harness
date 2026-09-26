@@ -19,10 +19,11 @@ file needed for the current step; do not preload this entire directory.
    and [discovery documentation](workflow/discovery-docs.md). Assign code/docs ownership.
 3. For action arguments when needed: [tools](workflow/tools.md).
 4. On clashes, questions, revisions or failures: revisit coordination.md before acting.
-5. Integrate completed workers and verify. For declared risks, run the targeted
-   candidate assurance passes in [review](workflow/review.md), then finish with a fresh
-   general review of the exact commit. Report a handoff mapping acceptance criteria
-   and assurance results to evidence. Only the owner may accept/rebase/merge.
+5. Integrate completed workers and verify. Run the independent requirements and
+   correctness roles plus declared risk specialists from [review](workflow/review.md)
+   in parallel on the same frozen verified commit, bounded by maxWorkers. Every required
+   role must finish clean on that commit; changed candidates require every role again.
+   Report a handoff mapping acceptance criteria and role coverage to evidence. Only the owner may accept/rebase/merge.
 
 For frontend changes or config.json uiEvidence, read [UI evidence](workflow/ui-evidence.md)
 and pass that reference to relevant workers. Backend-only tasks may skip this page.

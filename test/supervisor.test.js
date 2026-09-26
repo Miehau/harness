@@ -34,17 +34,13 @@ test('supervisor watches exact decisions, persists acknowledgements and separate
   } finally { handlers.session_shutdown(); }
 });
 
-test('supervisor MCP is opt-in, pinned, and preserves Pi model/session arguments', async t => {
+test('supervisor uses OMP native MCP and preserves model/session arguments', async () => {
   const { supervisorArgs, main } = await import('../runner/cli.js');
-  const plain = supervisorArgs(['--model', 'example', '--continue']);
-  assert(!plain.some(arg => arg.startsWith('npm:')));
-  const enabled = supervisorArgs(['--mcp', '--mcp-config', '/tmp/tickets.json', '--provider', 'example']);
-  assert.equal(enabled.filter(arg => arg === 'npm:pi-mcp-adapter@2.33.0').length, 1);
-  assert(!enabled.includes('--mcp'));
-  assert(enabled.includes('/tmp/tickets.json')); assert(enabled.includes('--provider'));
-  assert(supervisorArgs(['--mcp-config', '/tmp/tickets.json']).includes('npm:pi-mcp-adapter@2.33.0'));
-  assert.throws(() => supervisorArgs(['--mcp-config']), /Missing/);
-  assert.match(await main(['supervisor', '--help']), /managed workers use runner tools only/);
+  const args = supervisorArgs(['--mcp', '--model', 'example', '--continue']);
+  assert(!args.some(arg => arg.startsWith('npm:')));
+  assert(!args.includes('--mcp')); assert(args.includes('--skills')); assert(args.includes('--continue'));
+  assert.throws(() => supervisorArgs(['--mcp-config', '/tmp/tickets.json']), /OMP discovers MCP/);
+  assert.match(await main(['supervisor', '--help']), /native OMP and runner tools/);
 });
 
 test('supervisor exposes video metadata as text rather than an image block', async t => {
@@ -135,32 +131,18 @@ test('contextual human questions preserve the exact original and save receipts a
   await assert.rejects(second.run({ ...input, text: 'Changed context' }), /different input/);
 });
 
-test('native compaction preserves exact references and instructions for manual, threshold and overflow paths', async t => {
-  const root = await memoryRoot(t), handlers = {}, summaries = [], notifications = [];
+test('OMP native compaction includes saved supervisor references without overriding provider compaction', async t => {
+  const root = await memoryRoot(t), handlers = {};
   const pi = { on: (name, fn) => { handlers[name] = fn; }, registerCommand() {}, registerTool() {}, appendEntry() {} };
-  supervisor(pi, { root, compact: async (...args) => {
-    summaries.push(args);
-    assert(JSON.parse(await readFile(join(root, 'supervisor/state.json'))).sessions['session-1']);
-    return { summary: 'Decisions and next actions', firstKeptEntryId: 'keep', tokensBefore: 1200 };
-  } });
-  const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => 'session-1', getSessionFile: () => '/sessions/one.jsonl' },
-    model: { id: 'test', provider: 'test' }, modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'test-key', baseUrl: 'https://test.invalid', env: { TEST: 'yes' } }) },
-    ui: { notify: (...args) => notifications.push(args) } };
+  supervisor(pi, { root });
+  const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => 'session-1', getSessionFile: () => '/sessions/one.jsonl' }, ui: { notify() {} } };
   await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
-  const preparation = { firstKeptEntryId: 'keep', tokensBefore: 1200 };
   for (const reason of ['manual', 'threshold', 'overflow']) {
-    const signal = new AbortController().signal;
-    const result = await handlers.session_before_compact({ preparation, reason, customInstructions: 'Keep receipt design', signal }, ctx);
-    assert.match(result.compaction.summary, /session-1/); assert.match(result.compaction.summary, /\/sessions\/one.jsonl/);
-    assert.match(result.compaction.summary, /state.json/); assert.equal(result.compaction.firstKeptEntryId, 'keep');
-    const args = summaries.at(-1);
-    assert.equal(args[0], preparation); assert.equal(args[1].baseUrl, 'https://test.invalid');
-    assert.match(args[4], /Keep receipt design/); assert.match(args[4], /launch request/); assert.equal(args[5], signal);
-    assert.deepEqual(args[8], { TEST: 'yes' });
+    assert.equal(await handlers.session_before_compact({ reason, signal: new AbortController().signal }, ctx), undefined);
+    const result = await handlers['session.compacting']({}, ctx);
+    assert.match(JSON.stringify(result), /session-1/); assert.match(JSON.stringify(result), /state.json/); assert.match(JSON.stringify(result), /one.jsonl/);
+    assert.equal(result.compaction, undefined);
   }
-  ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: 'No credentials' });
-  assert.deepEqual(await handlers.session_before_compact({ preparation, signal: new AbortController().signal }, ctx), { cancel: true });
-  assert.match(notifications.at(-1)[0], /No credentials/);
 });
 
 test('dead watches retire only after final delivery; transient errors do not drop other watches', async t => {
@@ -194,4 +176,27 @@ test('dead watches retire only after final delivery; transient errors do not dro
   state = JSON.parse(await readFile(join(root, 'supervisor/state.json')));
   assert.deepEqual(Object.keys(state.watched).sort(), ['offline','running']);
   assert(state.taskRefs.done); // Keep recovery references even after unwatching.
+});
+
+test('supervisor retains published candidates for failed CI and retires after merge without success wakes', async t => {
+  const root = await memoryRoot(t), handlers = {}, commands = {}, messages = [];
+  const candidate = { status: 'completed', hosted: { state: 'open' }, agents: [], decisions: [], events: [] };
+  const trigger = { status: 'running', agents: [], decisions: [], events: [] };
+  supervisor({ on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; }, registerTool() {}, appendEntry() {}, sendMessage: message => messages.push(message) }, { root, request: async body => body.taskId === 'candidate' ? candidate : trigger });
+  const ctx = { sessionManager: { getEntries: () => [] }, ui: { setStatus() {} } };
+  await handlers.session_start({}, ctx); t.after(() => handlers.session_shutdown());
+  await commands['runner-watch'].handler('candidate', ctx);
+  candidate.events.push({ id: 'pending', kind: 'ci-status', ci: { state: 'pending' }, at: '9999' }, { id: 'success', kind: 'ci-status', ci: { state: 'passed' }, at: '9999' });
+  await commands['runner-watch'].handler('trigger', ctx);
+  assert.equal(messages.length, 0);
+  assert(Object.hasOwn(JSON.parse(await readFile(join(root, 'supervisor/state.json'))).watched, 'candidate'));
+  candidate.events.push({ id: 'failure', kind: 'ci-status', ci: { state: 'failed' }, at: '9999' });
+  await commands['runner-watch'].handler('trigger', ctx);
+  assert.deepEqual(messages[0].details.ids, ['failure']); await handlers.agent_end({ messages: [messages[0]] });
+  candidate.hosted.state = 'merged'; candidate.events.push({ id: 'merged', kind: 'merged', at: '9999' });
+  await commands['runner-watch'].handler('trigger', ctx);
+  assert.deepEqual(messages[1].details.ids, ['merged']); await handlers.agent_end({ messages: [messages[1]] });
+  await commands['runner-watch'].handler('trigger', ctx);
+  assert.equal(messages.length, 2);
+  assert(!Object.hasOwn(JSON.parse(await readFile(join(root, 'supervisor/state.json'))).watched, 'candidate'));
 });

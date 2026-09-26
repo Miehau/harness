@@ -1,4 +1,4 @@
-// Opt-in live canary: exercises the full Pi/Herdr/model workflow and incurs model calls.
+// Opt-in live canary: exercises the full OMP/Herdr/model workflow and incurs model calls.
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +23,7 @@ try {
   await writeFile(join(repo, 'AGENTS.md'), 'Change only value.txt. Use the configured test command.\n');
   await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({
     commands: { test: [process.execPath, '-e', "const fs=require('node:fs');if(fs.readFileSync('value.txt','utf8')!=='ready\\n')process.exit(1)"] },
-    verify: ['test'], maxWorkers: 1, maxAttempts: 5, timeoutMinutes: Math.ceil(timeoutMs / 60_000), commandTimeoutMs: 30_000,
+    verify: ['test'], maxWorkers: 2, maxAttempts: 5, timeoutMinutes: Math.ceil(timeoutMs / 60_000), commandTimeoutMs: 30_000,
   }, null, 2) + '\n');
   await git(repo, 'init', '-b', 'main');
   await git(repo, 'config', 'user.name', 'Agent Plan Canary');
@@ -35,7 +35,7 @@ try {
   const submitted = await app.runtime.execute('owner', {
     action: 'submit', input: {
       repo,
-      text: 'Live canary: change only value.txt so it contains exactly "ready" followed by a newline. This is a tiny known fix: skip discovery, architecture, and planning; do not ask the owner. Delegate implementation to one writing worker, integrate it, run verification, perform the required independent review, and complete with evidence.',
+      text: 'Live canary: change only value.txt so it contains exactly "ready" followed by a newline. This is a tiny known fix: skip discovery, architecture, and planning; do not ask the owner. Delegate implementation to one writing worker, integrate it, run verification, run independent requirements/AC and correctness/code-quality reviewers in parallel against the verified candidate, and complete with evidence.',
       requestId: id(),
     },
   });

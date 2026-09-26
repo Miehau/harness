@@ -1,89 +1,91 @@
 # Candidate review and fix loop
 
-After integrating all implementation workers, verify the candidate. If clarification
-declared assurance categories, run their candidate passes first; routine tasks skip
-directly to the final general review.
+Integrate every completed writer and verify the candidate before review. Freeze that
+exact commit and its recorded verification. Run fresh mode="explore", stage="review"
+workers independently in parallel, bounded by maxWorkers; use batches if needed.
+Each worker receives the same candidate, requirements, acceptance criteria, diff,
+verification and applicable plan-assurance evidence. Do not show another role's
+current-candidate findings before its independent inspection. No generic final
+reviewer follows or substitutes for these roles.
 
-## Risk assurance passes
+## Required roles
 
-For each declared category, spawn a fresh mode="explore", stage="review" worker with
-a focused assignment. Do not reuse the plan-assurance worker or its conversation.
-Supply the exact candidate commit, relevant plan-assurance report and resolution,
-requirements, diff and verification. The worker traces the plan invariants and failure
-cases into the implementation and reports with the JSON schema below. Closely related
-categories may share one bounded pass. Run these specialist passes before the general
-review; the current runtime starts review workers one at a time.
+Every task requires reviewRole="requirements": map every acceptance criterion to
+concrete implementation/documentation and verification evidence. Missing essential
+evidence is a medium finding. Every code task also requires reviewRole="correctness":
+trace changed flows and affected callers, contracts, edge cases, compatibility,
+tests and code quality. The runtime conservatively requires both roles for all new
+tasks, including documentation tasks; there is no implicit docs-only exemption.
 
-Major or medium findings require repair. Any changed candidate makes every candidate
-assurance for that commit stale: integrate fixes, verify, and rerun all declared
-specialist passes against the new commit. Preserve plan-assurance findings as input;
-rerun the plan pass only when its reviewed documents or risk classification changed.
+Clarify records risks and required roles. Declared `security` adds reviewRole="security"
+for authentication, authorization, privacy and trust boundaries. `data-safety` or
+`database` adds reviewRole="database" for migrations, loss/corruption, constraints
+and rollback. `ui` adds reviewRole="ui" for interaction, accessibility and UI evidence;
+`performance` adds reviewRole="performance" for baselines, resource use and regressions;
+`recovery` or `operator` adds reviewRole="recovery" for concurrency, retries, durable
+state, Git recovery and safety-critical human workflows. Each required role receives
+its own worker and report. Preserve targeted plan assurance before implementation;
+candidate assurance traces its invariants and failure cases into the implementation.
+Never reuse the plan-assurance conversation as a candidate reviewer.
 
-After all declared specialist passes are clean, spawn a fresh general review worker.
-It considers the entire task and earlier assurance reports rather than trusting them.
-This general pass must be last so the runtime's required clean review matches the exact
-verified commit. A specialist pass never replaces the final general review.
+The runtime allows concurrent reviewers only on the same clean verified commit.
+No writers, integration, configured commands or verification may run during review.
+Review workers may use native read-only inspection commands under the trusted-local
+workflow. They cannot use the runner command API or mutate repository files. Inspect
+recorded checks and request additional checks through the coordinator after the round.
+Essential missing evidence blocks a clean pass.
 
-## General review
-
-Spawn one mode="explore", stage="review" worker. The runtime supplies its exact candidate
-commit, full task diff, earlier review reports, verification and this rubric. Include
-requirements, acceptance criteria and relevant design/UI evidence in the assignment.
-Review the whole task change and affected callers, not only the latest repair.
-Review workers cannot run commands. Read recorded verification and ask the coordinator
-for additional checks when needed; report an essential evidence gap as medium.
+## Model selection
 
 Prefer a reviewer from the opposite model family: Claude implementation → OpenAI
-review; OpenAI implementation → Claude review. The runtime checks Pi availability
-and records the choice. For other families prefer OpenAI, then a different available
-model. A configured workerModels.review is an explicit preference. If unavailable,
-or a reviewer attempt fails (quota, credentials, provider/transport error), a later
-review attempt uses another available model and records the fallback. A provider
-failure is not a passed review. If all choices or the attempt/time budget are
-exhausted, surface the blocker to the owner; never waive the review gate.
+review; OpenAI implementation → Claude review. The runtime checks availability and
+records choices/fallbacks. Configured review preferences remain explicit preferences.
+A failed provider attempt is not review evidence: replace the failed role within the
+attempt/time budget. If no reviewer can finish, surface the blocker; never waive it.
 
-## Rubric
+## Rubric and report
 
 - major: concrete security/privacy exposure, data loss/corruption, core flow failure,
-  or a change that cannot meet an essential acceptance criterion.
-- medium: reproducible functional defect, a plausible failing edge case, broken
-  integration/compatibility, missing required behavior or meaningful verification
-  that leaves a changed requirement unproven.
+  or inability to meet an essential acceptance criterion.
+- medium: reproducible defect, plausible failing edge case, broken compatibility,
+  missing required behavior or meaningful evidence leaving a requirement unproven.
 - minor: nonblocking clarity, maintainability or style improvement with no concrete
-  functional/acceptance impact. Do not promote preferences to blocking defects.
+  functional or acceptance impact. Preferences alone are not blocking defects.
 
-Each finding needs an exact file/line, a specific failing scenario or evidence, and
-an actionable fix. Cover correctness, security/data integrity, affected callers and
-contracts, acceptance criteria, tests and relevant UI evidence. State what was inspected
-and any limitations. Uninspected essential behavior is a coverage gap, not a clean pass.
-Deduplicate findings. Re-evaluate earlier findings and inspect for regressions.
-
-The reviewer writes a JSON artifact in its own directory, then reports completed
-with that artifact. A completed review may contain blocking findings; do not report
-failed merely because defects were found. Use failed for inability to perform review.
+Findings need exact file/line, a specific scenario/evidence and an actionable fix.
+State inspected coverage and limitations. Uninspected essential behavior is a coverage
+gap, not a clean pass. Write JSON in the reviewer's artifact directory, then report
+completed even when findings block. Use failed only when review could not be performed.
 
 ```json
 {
   "commit": "EXACT_CANDIDATE_COMMIT",
-  "scope": "Changed flow, callers, acceptance criteria and evidence inspected; limitations",
+  "reviewRole": "requirements",
+  "scope": "Inspected changes, callers, acceptance criteria and limitations",
+  "coverage": ["AC1: behavior in src/example.js:42; recorded check runtime/check.json"],
   "findings": [
     {
       "severity": "medium",
       "file": "src/example.js",
       "line": 42,
       "description": "Concrete defect",
-      "evidence": "Input or scenario demonstrating the failure",
+      "evidence": "Input or scenario demonstrating failure",
       "fix": "Required behavioral correction"
     }
   ]
 }
 ```
 
-The coordinator assigns all major/medium findings from specialist or general passes
-to implementation workers. Supply
-review references; do not silently discard or downgrade findings. If a finding is
-incorrect, ask a fresh reviewer to adjudicate against concrete evidence. Integrate
-repairs, rerun verification, and spawn a new review of the resulting candidate.
-Repeat until a completed review has zero major/medium findings. Carry minor findings
-and limitations in the handoff. Runtime completion requires that passing review to
-match the exact verified commit; changing the candidate requires another review.
+The coordinator consolidates and deduplicates findings without waiving or downgrading
+major/medium blockers. Assign repairs to writers with all source report references.
+A disputed finding requires a fresh reviewer of that same role to adjudicate concrete
+evidence; coordinator opinion cannot replace review. After repair, integrate and
+verify again. Any changed commit invalidates every required role, so rerun the entire
+required role set independently against the new candidate. Preserve plan assurance
+unless its reviewed documents/risk classification changed.
+
+Completion and publication require every required role's latest completed report to
+be clean, explicitly cover its scope and match the exact verified candidate commit.
+Carry minor findings, coverage and limitations into the evidence-backed handoff.
+Existing tasks snapshotted without the role policy retain their legacy single-review
+contract; new tasks always use these role gates.
