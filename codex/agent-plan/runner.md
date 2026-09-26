@@ -1,6 +1,6 @@
 # Agent Plan execution bindings
 
-Read this page when using these skills with the Pi/Herdr runner. It changes tool
+Read this page when using these skills with the OMP/Herdr runner. It changes tool
 usage and ownership, not the skills' engineering methods.
 
 ## Main conversation
@@ -39,20 +39,20 @@ Only load the skill and references required by the current assignment.
 - Architecture, discovery and review workers are read-only for repository files.
   Save proposals, including code sketches, in each worker's artifact directory.
   Executable prototypes require separately authorized implementation workers.
-- Use `runner_read`, `runner_write` and owner-configured named commands. A shell
-  example in a skill is not permission to use native shell tools. For unavailable
-  Git history, connectors or executable checks, request evidence from the supervisor
-  or report the specific gap. Never invent evidence or broaden permissions.
+- Native OMP tools are available under trusted-local execution. Use runner tools for
+  durable artifacts, coordination, configured verification and reports. Native shell
+  success never replaces the final configured candidate checks.
 - Preserve the agreed design. Pause affected work and bring proposed architectural
   departures to the main conversation; routine details stay with the coordinator.
 - Reports, questions, verification, review and acceptance retain the existing runner
-  workflow. Only verified integration candidates complete a task. Managed agents
-  cannot publish, push, open PRs or merge; `open-pr` is an owner-session skill.
+  workflow. Hosted completion publishes the verified, reviewed candidate through
+  the runtime. Merge requires owner approval of the exact published revision;
+  workers must not bypass runtime delivery gates.
 
 ## Other interactive clients
 
 Use available native agents for read-only investigation and independent proposals.
 For background implementation, use the configured runner integration and its return
-channel. If this client lacks that integration, say so and move execution to a Pi
+channel. If this client lacks that integration, say so and move execution to an OMP
 supervisor; do not claim CLI launches can wake this conversation automatically or
 silently replace delegation with edits in the main checkout.

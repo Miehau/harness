@@ -1,15 +1,15 @@
 # Supervisor sessions
 
-`runner/supervisor-extension.js` connects an ordinary, trusted Pi session to the
-existing owner API. `agent-plan supervisor` launches it with Pi provider/model
-arguments. Watches and acknowledged event IDs live in Pi session entries.
+`runner/supervisor-extension.js` connects an ordinary, trusted OMP session to the
+existing owner API. `agent-plan supervisor` launches it with OMP provider/model
+arguments. Watches and acknowledged event IDs live in OMP session entries.
 
 Coordinator questions and result references arrive as follow-up messages. The
 model tool exposes start (submit, launch and auto-watch), watch, inspect, artifact
 read, advisory feedback, routine coordinator answers, ask_user and accept. Start uses a stable requestId for submission and launch
 receipts, persists its watch before launching, and returns a compact task identity.
 The coordinator owns worker delegation; no per-worker subscriptions are needed.
-ask_user collects the human reply through Pi input and routes it to the exact
+ask_user collects the human reply through OMP input and routes it to the exact
 coordinator decision. accept confirms the exact verified commit and target before
 calling runtime acceptance. Cancelled/headless dialogs cannot authorize mutations.
 Human actions persist in session entries and reuse runtime receipts across retries.
@@ -19,7 +19,7 @@ an immutable reply and resumes the exact coordinator with answeredBy=supervisor.
 Approval hooks and requiresOwner questions reject model replies; the shared owner
 answer and acceptance paths remain available for human decisions. Scope reasoning
 remains a supervisor instruction; the runtime enforces the explicit classification.
-Ordinary Pi shell access remains trusted owner access, not a security boundary.
+Ordinary OMP shell access remains trusted owner access, not a security boundary.
 
 Evidence: `test/supervisor.test.js` checks delivery, restart deduplication,
 advice/answer separation, stale decisions and cancelled confirmation.
@@ -44,21 +44,21 @@ The supervisor index and per-feature Markdown files live beneath the runner data
 root in `supervisor/`; task notes can precede launch. The index is loaded every turn,
 with task filenames and watched IDs for retrieval and live reconciliation. Memory
 writes compare previous contents, reject path traversal and use atomic replacement.
-Watch/event/human-action receipts also persist outside Pi sessions, so fresh sessions
+Watch/event/human-action receipts also persist outside OMP sessions, so fresh sessions
 can continue monitoring without replaying consumed events or prompting twice on retries.
 One supervisor owns this directory; concurrent sessions require separate data roots.
 
 `/runner-checkpoint` requests model-maintained notes before `compact_memory` saves
-state and queues Pi compaction after the turn ends (avoiding an aborted tool turn). Summaries retain source references, not a lossless
+state and queues OMP compaction after the turn ends (avoiding an aborted tool turn). Summaries retain source references, not a lossless
 copy of conversation. Routine decision guidance consults memory and records provenance;
 contextual human dialogs show recommendations alongside the original exact question.
 Their result includes the recorded human answer for memory updates; compaction reports
-success or failure through Pi notifications.
+success or failure through OMP notifications.
 Tests in `test/supervisor.test.js` cover fresh-session recovery, stale writes, path and
 size limits, contextual question identity, human receipts and the compaction prerequisite.
 
-Native/manual, threshold and overflow compaction share a `session_before_compact`
-hook using Pi's standard summarizer and a deterministic recovery footer. Structured
+Native/manual, threshold and overflow compaction persist state before compaction;
+OMP's `session.compacting` event adds recovery references to its normal summarizer. Structured
 state keeps supervisor transcript paths plus last-observed agent/session/decision
 references. Tests cover all trigger reasons, preserved user instructions, authentication
 failure, terminal-event acknowledgement before unwatching, missing tasks and transient

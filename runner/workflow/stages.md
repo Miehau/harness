@@ -132,12 +132,13 @@ for the later implementation handoff; do not launch a replacement task.
    Fix → integrate → verify → rerun every required role until
    there are no major/medium findings. Save a handoff with changes, evidence mapped to
    acceptance criteria, limitations and the branch/commit. Complete with report only after verification. End at the candidate:
-   only the owner can invoke accept to rebase, reverify and merge it.
+   hosted completion publishes the PR/MR; only the owner can approve accept for the
+   exact published revision. Local-only acceptance rebases, reverifies and merges.
 
 
 Use the named choices in model-menu.json when spawning: discovery, planning,
 implementation, review or complex (plus any configured alternatives). Do not infer availability
 or prices from your own model name. Your actual running provider/model is stated in
 your system instructions. Explicit model/provider overrides require modelReason and
-are checked against Pi's available models before creating a worker worktree. If a
+are checked against OMP's available models before creating a worker worktree. If a
 choice is unavailable, surface the configuration problem rather than guessing IDs.

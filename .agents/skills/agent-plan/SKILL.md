@@ -5,8 +5,8 @@ description: Develop and operate this repository's terminal-first OMP/Herdr runn
 
 # Agent Plan runner
 
-The active application is `runner/`. The old visual pipeline is retired; `archive/`
-contains a verified historical snapshot, not current instructions or reusable modules.
+The active application is `runner/`. The old visual pipeline is retired and retained
+only in Git history; do not restore its modules or historical instructions.
 
 Read `runner/README.md` for operation and `runner/workflow.md` for the main-agent workflow.
 `runner/runtime.js` owns task state, worktrees, permissions, messages, and verification;

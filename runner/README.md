@@ -3,7 +3,7 @@
 This is the repository's primary application: a local, terminal-first OMP/Herdr
 runner that coordinates agents in isolated Git worktrees. The independent
 [native Claude plugin](../claude/README.md) has its own workflow and does not use this
-runtime. The retired visual pipeline remains only in [archive/](../archive/README.md).
+runtime. The retired visual pipeline is retained in Git history.
 
 ## Operator flow
 
@@ -18,6 +18,11 @@ the next feature. Questions and results return to the supervisor. See
 
 For a single task opened directly in its coordinator, use the CLI flow below.
 The daily path is **discuss → saved handoff → implement → parallel review → PR/MR → approve**.
+
+For a small, understood bug or feature, skip separate discovery, architecture and
+planning workers. Use a concise clarification/assignment, one implementation worker,
+verification and the two required parallel reviewers. Add specialists only for
+relevant risks; see [stage selection](workflow/stages.md).
 
 ### 1. Start
 

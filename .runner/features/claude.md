@@ -2,7 +2,7 @@
 
 The independent `claude/` plugin is Markdown and JSON only: nine skills, four
 native subagent types, task/delivery/recovery workflows and native hooks. It does
-not import or launch the runner, Pi, Herdr, MCP, a custom CLI or background service.
+not import or launch the runner, OMP, Herdr, MCP, a custom CLI or background service.
 Claude's main conversation supervises ticket coordinators. Each coordinator owns
 a native worktree and spawns its own research, implementation and review workers.
 The supervisor relays human decisions and owns GitHub/GitLab publication and approved hosted merge. Native
@@ -18,7 +18,7 @@ Install once through the bundled local marketplace, then launch plain `claude` i
 the target repository and use `/agent-plan:start <description>`. Git and project
 checks use Claude's built-in Bash. Task notes are ordinary Markdown under the user's
 Claude config directory in `agent-plan/tasks/`; this is a documented workflow, not a
-deterministically enforced state machine. The Pi path remains unchanged.
+deterministically enforced state machine. The OMP path remains unchanged.
 
 Read [usage and limits](../../claude/README.md) and [live checks](../../claude/HANDOFF.md).
 `test/claude.test.js` checks packaging, references and native hooks/tools without
