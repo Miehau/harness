@@ -57,6 +57,23 @@ architecture and planning, passing the earlier findings and exact acceptance
 criteria. Separate dependent stages; independent research can run concurrently.
 Keep the stages brief for small tasks rather than inventing design work.
 
+Classify the task as routine or declare only its concrete assurance categories:
+`security` for authentication, authorization, privacy or trust boundaries;
+`data-safety` for migrations, destructive behavior, loss or corruption; `recovery`
+for concurrency, retries, durable state or Git operations; and `operator` for a
+safety-critical human workflow. Importance alone is not a risk category, and routine
+tasks keep the normal final review only. Save the classification in state.md.
+
+For each declared category, after a concrete plan/contract exists and before the
+clarification checkpoint, launch a fresh read-only `agent-plan:researcher` for plan
+assurance. Closely related categories may share one bounded assignment, and independent
+passes may run concurrently against the same frozen document versions. Supply exact
+requirements, plan/contract revisions and relevant code paths. Require invariants,
+abuse or failure cases, rollback/recovery needs, required checks and actionable
+findings. Save each report as `plan-assurance-KIND-vN.md`. Resolve material findings
+by revising the plan and rerun affected assurance; unresolved material findings block
+writers. Changed reviewed documents make the affected plan assurance stale.
+
 Publish versioned exploration, architecture, plan and acceptance notes. Determine
 real setup and verification commands from the repository; an existing
 `.runner/project.json` may be read as documentation, but never execute the runner.
@@ -67,7 +84,9 @@ decisions, save a question with a decision ID, checkpoint and return needs-input
 the supervisor after settling your children. The supervisor asks the user and
 resumes you with the answer's source. Do not ask the user directly or infer approval.
 Record a clarification checkpoint identifying the accepted document
-versions before writers start. Changed scope/contracts require a new checkpoint.
+versions, risk classification, current plan-assurance reports and finding resolutions
+before writers start. Changed scope/contracts require a new checkpoint and affected
+plan assurance.
 
 Before launching writers, follow [cross-ticket alignment](alignment.md): publish
 scope-vN.md, read the supplied active.md and compare peer features/files/interfaces.
@@ -135,23 +154,34 @@ polling; no shell sleep loop, `/loop`, watcher process or model polling loop.
    exit status/output references and full commit in a new verification note. Check
    that HEAD and tracked files stayed unchanged by verification; inspect untracked
    outputs too. A failing/missing check blocks a ready candidate.
-4. Save the full base-to-candidate diff. Launch a separate read-only
-   `agent-plan:reviewer` with the candidate root, full commit, requirements, diff,
-   verification note and all earlier review findings. Keep this checkout unchanged
-   while review runs. The reviewer reads actual code and callers, not only a summary.
-   Include cross-ticket agreements and evidence that their dependencies are met.
-5. Save the review with its exact commit. Major and medium findings require fixes;
+4. Save the full base-to-candidate diff. For each declared assurance category, launch
+   a fresh read-only `agent-plan:reviewer` for candidate assurance. Do not reuse its
+   plan-assurance agent or conversation. Supply the exact commit, relevant plan
+   assurance and resolution, requirements, diff and verification. Independent
+   specialist passes may run concurrently while the checkout remains frozen. Save
+   each report as `candidate-assurance-KIND-SHA.md` with its exact commit.
+5. After all declared specialist passes are clean, launch a fresh read-only
+   `agent-plan:reviewer` for the final general review with the candidate root, full
+   commit, requirements, diff, verification, assurance reports and earlier review
+   findings. The reviewer reads actual code and callers, not only a summary. Include
+   cross-ticket agreements and evidence that their dependencies are met. A specialist
+   pass never replaces this final general review.
+6. Save every review with its exact commit. Major and medium findings require fixes;
    minor suggestions may remain in the handoff. Delegate fixes, integrate, verify
-   and obtain a fresh review of the resulting commit. Do not reuse an old pass.
+   and rerun all declared candidate-assurance passes plus the final general review on
+   the resulting commit. Do not reuse an old pass. Rerun plan assurance only when its
+   reviewed documents or risk classification changed.
    Default to at most three repair rounds; if still blocked, report the evidence
    and next decision rather than looping indefinitely or weakening the checks.
-6. Only after all assignments and decisions are settled, verification passed and
-   the exact candidate has no major/medium review findings, set awaiting-acceptance.
+7. Only after all assignments and decisions are settled, verification passed, every
+   declared candidate assurance is current and clean, and the exact candidate has no
+   major/medium final-review findings, set awaiting-acceptance.
    Save a handoff mapping requirements to evidence, with limitations and run steps.
    Recheck alignment and include its current references and peer dependency state.
    Return a final report to the supervisor with task ID, full
-   candidate commit, checks/outcomes, matching reviewer result and absolute notes
-   path. Completion remains a claim supported by evidence, not a server-enforced gate.
+   candidate commit, checks/outcomes, risk classification, matching assurance/general
+   reviewer results and absolute notes path. Completion remains a claim supported by
+   evidence, not a server-enforced gate.
 
 Settle your known child agents before returning a question, blocker or candidate.
 Report any uncertain surviving child explicitly. The supervisor presents the

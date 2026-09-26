@@ -2,19 +2,106 @@
 
 Explore this repository's actual code, documentation, build/test instructions and CI.
 Produce a reviewable onboarding candidate in the task's integration worktree. Do not
-merge, push or deploy it. Preserve existing documentation and unrelated source code.
+manually merge, push or deploy it; the runtime publishes verified, independently reviewed
+candidates when hosting is configured. Preserve existing documentation and unrelated source code.
 Select preparation stages according to workflow/stages.md; delegate substantial
 repository exploration, but skip separate design/planning workers when unnecessary.
 Record coordinator clarification before one implementation worker applies the files.
+
+## Git hosting
+
+Read the task's snapshotted hosting configuration. Configure `.runner/project.json`
+with the owner-selected provider, hostname, project path, Git remote and target branch:
+
+```json
+{
+  "hosting": {
+    "provider": "github",
+    "host": "github.com",
+    "project": "owner/repository",
+    "remote": "origin",
+    "target": "main"
+  }
+}
+```
+
+Use `gitlab` for GitLab.com or a self-managed instance; nested GitLab namespaces are
+supported. A hostname has no URL scheme. Inspect the actual Git push URL and remote
+HEAD; do not guess the provider of a self-hosted domain. Ask the owner when provider,
+project or target is unclear. Keep credentials in the authenticated `gh` or `glab`
+CLI, never in committed configuration. Check that the selected push remote resolves
+to the same host and project, and document any required CLI prerequisites.
+
+The owner can edit this file or use `agent-plan hosting REPO` with
+`--hosting-provider`, `--hosting-host`, `--hosting-project`, `--hosting-remote` and
+`--hosting-target`. Onboarding accepts these flags too. Changes apply to future
+tasks; each running task keeps its configuration snapshot.
+
+After final verification and a clean independent review of the exact candidate, the
+runtime pushes the task branch and creates or updates its PR/MR. Publication is not
+merge approval. The owner must explicitly approve the exact published head with
+`agent-plan accept TASK COMMIT`; changed heads require fresh approval. Provider
+merge requirements and required CI must pass. Pending or uncertain publication,
+upload or merge outcomes require reconciliation before repeating side effects.
+
+Screenshots and other candidate evidence belong in the PR/MR body with durable
+links. Both providers use the runtime's dedicated evidence branch and commit-pinned
+repository links. GitLab image uploads can be public by URL even in private projects,
+so the runner does not use that upload API. Do not invent upload URLs, make a public gist, or claim an
+unperformed browser check. Record authentication requirements and evidence gaps.
 
 ## Verification
 
 Create a reliable verify.sh that runs meaningful existing tests and exits nonzero
 when checks fail. Do not fake success, suppress failures, or install global tools.
 Document prerequisites, commands and coverage gaps. If meaningful verification
-cannot be established, ask the owner. Include .runner/project.json configured to run
-bash verify.sh. Keep .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
+cannot be established, ask the owner. Merge the verification command into the existing
+.runner/project.json; preserve curated commands, setup, verify, hosting, skills and
+UI evidence settings. Use bash verify.sh when no adequate verification command exists.
+Keep .omp/, .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
 agent-local files stay untracked. Run every configured verification command, including onboard_verify.
+
+For an application with a local HTTP preview, save a named long-running command in
+`commands` and `preview: {"command": "preview", "url": "http://127.0.0.1:PORT"}`
+using its actual launch command and port. Preserve an existing working preview.
+Run it in the candidate worktree, inspect readiness at the saved URL, and stop only
+the process you started. Document prerequisites and port conflicts. For projects
+without an HTTP preview, omit this setting and explain how to inspect the result.
+
+### Project verification skill for interactive systems
+
+When the repository has a user-driven runtime surface that `verify.sh` cannot exercise
+meaningfully (web, desktop, mobile, CLI/TUI or a stateful service), create or improve
+one committed `.agents/skills/verify-<app>/SKILL.md`. Do not generate one for a library
+or batch project whose real public behavior is already covered by the configured
+commands. Prefer the repository's existing harness; do not add a framework merely to
+match this structure.
+
+The skill is cold-start instructions for later workers and must contain exact,
+repository-grounded sections:
+
+- **Launch:** start an isolated instance and identify readiness and teardown.
+- **Doctor:** a read-only health check proving the instance is safe to drive.
+- **Drive:** stable user-facing commands, selectors or requests; avoid coordinates.
+- **Evidence:** capture the action and observable result, including persisted effects.
+- **Cleanup:** stop only what the run started while preserving proof artifacts.
+
+Put feature-specific recipes beside the skill, indexed by stable feature IDs from
+`.runner/feature-map.md`. Each recipe names how a user reaches the feature, how the
+harness drives it and what observable state proves it works. Expose helper scripts as
+named commands in `.runner/project.json`, add the skill path to `skills`, and configure
+`uiEvidence` when the project can provide its required integrated-candidate manifest.
+Run launch, doctor, one representative drive, evidence capture and cleanup before
+handing the generated skill over. A skill that has not executed successfully is a
+draft and must not be selected in project configuration.
+
+If a verification skill already exists, maintain it instead of generating another.
+Run one read-only source pass per mapped feature, reconcile concrete drift, then drive
+every reachable feature live through one coordinated session. Edit only the skill,
+its recipes and its owned harness. Report broken product behavior instead of changing
+the verification docs to match it. End with one explicit outcome: `clean`, `changed`
+with one proven candidate, or `blocked` with the missing prerequisite. Keep this audit
+proportionate: a small non-interactive repository does not need a feature-driving layer.
 
 ## Experimental feature map
 

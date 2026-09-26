@@ -148,3 +148,15 @@ during compaction, and that no duplicate agents or remote operations are dispatc
 Test explicit restore, missing memory, stale PR head, ambiguous session IDs and
 auto-compaction without a fresh snapshot. Unknown states must remain unresolved,
 not invented. Never use `/clear` in this flow. These live checks remain unverified.
+
+## Risk assurance (0.7.0)
+
+Run one routine task and confirm it records a routine classification, skips specialist
+agents and still receives the final general review. Run one sensitive task for each
+category over time: security, data-safety, recovery and operator. Confirm a fresh
+researcher challenges the frozen plan before writers, its material findings are
+resolved, a fresh matching reviewer inspects the exact verified commit, and a separate
+general reviewer runs last. Change the reviewed plan and then the candidate commit;
+each must invalidate only the corresponding assurance evidence. Verify parallel plan
+passes and native candidate passes keep their assignments distinct. These live checks
+remain unverified.

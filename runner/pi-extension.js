@@ -1,4 +1,4 @@
-import { Type } from 'typebox';
+import { Type } from '@sinclair/typebox';
 import { randomUUID } from 'node:crypto';
 
 export default function runner(pi) {
@@ -6,7 +6,7 @@ export default function runner(pi) {
   const token = process.env.RUNNER_TOKEN;
   const replyToken = process.env.RUNNER_REPLY_TOKEN;
   if (!url || !token) throw new Error('Runner extension requires RUNNER_URL and RUNNER_TOKEN');
-  let timer, polling = false, context, stopped = false, shownDecision;
+  let timer, polling = false, context, stopped = false, shownDecision, intentionalAbort = false, reportedModel;
   const queued = new Set();
   async function request(path, body) {
     const response = await fetch(`${url}${path}`, { method: body ? 'POST' : 'GET', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(body ? 650000 : 5000) });
@@ -17,13 +17,18 @@ export default function runner(pi) {
   const call = (action, input, requestId) => request('/action', { action, input, requestId });
   async function report(model) {
     if (!model?.provider || !model?.id) return;
+    const selected = `${model.provider}/${model.id}`;
+    if (reportedModel === selected) return;
     try { await call('model', { provider: model.provider, model: model.id }, randomUUID()); }
     catch (error) { if (error.message !== 'Unknown action: model') throw error; }
+    reportedModel = selected;
   }
   async function poll() {
     if (polling || stopped || !context) return;
     polling = true;
     try {
+      // OMP has no model_select extension event; ctx.model reflects current selection.
+      await report(context.model);
       const state = await request('/poll');
       if (['completed', 'failed', 'cancelled'].includes(state.status) || ['completed', 'failed', 'cancelled'].includes(state.taskStatus)) {
         stopped = true; clearInterval(timer); context.shutdown(); return;
@@ -46,11 +51,15 @@ export default function runner(pi) {
     } catch (error) { context.ui?.setStatus('runner', `Runner disconnected: ${error.message}`); }
     finally { polling = false; }
   }
-  pi.on('project_trust', () => ({ trusted: 'yes' }));
-  pi.on('model_select', event => report(event.model));
+  pi.on('agent_start', () => { intentionalAbort = false; });
+  // OMP awaits this hook and commits the completed tool result before stopping.
+  pi.on('tool_result', (event, ctx) => {
+    if (!event.isError && event.toolName === 'runner_action' && ['ask', 'report'].includes(event.input.action)) {
+      intentionalAbort = true; ctx.abort();
+    }
+  });
   pi.on('session_start', async (_event, ctx) => {
     context = ctx;
-    pi.setActiveTools(['runner_read', 'runner_write', 'runner_action']);
     await report(ctx.model);
     timer = setInterval(poll, 2000); timer.unref?.();
     // Initialization must finish before the first model turn is injected.
@@ -70,13 +79,9 @@ export default function runner(pi) {
       await poll(); return { action: 'handled' };
     } catch (error) { ctx.ui.notify(`Answer was not confirmed: ${error.message}`, 'error'); return { action: 'handled' }; }
   });
-  pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\nYou are a managed runner agent. Your current model is ${ctx?.model?.provider ?? 'unknown'}/${ctx?.model?.id ?? 'unknown'}. Read the model-menu artifact if supplied; select worker modelChoice from it instead of guessing IDs or pricing. Inbox messages contain file references relative to the task artifacts directory. Read the referenced workflow, assignment and discovery manifest (when present) using runner_read before acting. If the assignment supplies a skills manifest, read it and its selected skill artifacts with runner_read before acting. Skill source paths identify the original repository directory for relative supporting files. Use runner tools in place of native read/write/bash; scripts require owner-configured named commands. Skills do not expand permissions. Discovery paths refer to repository files; read only the relevant documents. Inspect your agent record for artifactDir; write your artifacts only inside that directory. Use only runner tools. Full outputs belong in artifact files. After ask or report, stop your turn. End the turn when awaiting workers; durable inbox messages will wake you. Never substitute terminal readiness for task completion.` }));
-  pi.on('tool_call', event => {
-    if (!['runner_read', 'runner_write', 'runner_action'].includes(event.toolName)) return { block: true, reason: 'Managed agents use runner tools only' };
-  });
-  pi.on('user_bash', () => ({ result: { output: 'Use a configured runner command.', exitCode: 1, cancelled: false, truncated: false } }));
+  pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\nYou are a managed runner agent. Your current model is ${ctx?.model?.provider ?? 'unknown'}/${ctx?.model?.id ?? 'unknown'}. Read the model-menu artifact if supplied; select worker modelChoice from it instead of guessing IDs or pricing. Inbox messages contain file references relative to the task artifacts directory. Read the referenced workflow, assignment and discovery manifest (when present) using runner_read before acting. If the assignment supplies a skills manifest, read it and its selected skill artifacts with runner_read before acting. Skill source paths identify the original repository directory for relative supporting files. Use native tools for repository work, search and shell commands. Follow your assigned role: coordinators do not edit repository files; discovery, architecture, planning and review workers do not edit repository files; implementation workers edit only their assigned worktree. These are trusted-local workflow rules, not OS isolation. Skills do not expand the authorized scope. Discovery paths refer to repository files; read only the relevant documents. Inspect your agent record for artifactDir; write your artifacts only inside that directory. Use runner tools for artifacts, coordination, questions, reporting, integration and final verification. Never read approval credentials, modify runner state or published artifacts directly, impersonate human approval, or bypass runner-managed integration and acceptance. Do not spawn unmanaged agents. Save relevant native command results in your handoff; native commands do not count as final runner verification. Full outputs belong in artifact files. After ask or report, stop your turn. End the turn when awaiting workers; durable inbox messages will wake you. Never substitute terminal readiness for task completion.` }));
   pi.on('agent_end', async event => {
-    const failed = event.messages?.some(m => m.role === 'assistant' && ['error', 'aborted'].includes(m.stopReason));
+    const failed = !intentionalAbort && event.messages?.some(m => m.role === 'assistant' && ['error', 'aborted'].includes(m.stopReason));
     if (failed) {
       try {
         const state = await request('/poll');
@@ -95,10 +100,10 @@ export default function runner(pi) {
   });
   const area = Type.Union([Type.Literal('repo'), Type.Literal('artifacts')]);
   const definition = (name, description, parameters, action) => pi.registerTool({
-    name, label: name, description, parameters,
+    name, label: name, description, parameters, loadMode: 'essential',
     async execute(toolCallId, input) {
       const result = await call(action ?? input.action, action ? input : input.input ?? {}, toolCallId);
-      return { content: result.mimeType === 'image/png' ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: result.mimeType ? { mimeType: result.mimeType } : result, ...(!action && ['ask', 'report'].includes(input.action) ? { terminate: true } : {}) };
+      return { content: result.mimeType === 'image/png' ? [{ type: 'image', data: result.base64, mimeType: result.mimeType }] : [{ type: 'text', text: JSON.stringify(result) }], details: result.mimeType ? { mimeType: result.mimeType } : result };
     }
   });
   definition('runner_read', 'Read a file or list a directory. Artifact references are relative to the task artifacts root. Large files support offset/limit.', Type.Object({ area, path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }), 'read');

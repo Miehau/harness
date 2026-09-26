@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Plan runner"
-  short_description: "Operate and develop the Pi/Herdr task runner"
+  short_description: "Operate and develop the OMP/Herdr task runner"
   default_prompt: "Use $agent-plan to work on the terminal-first runner."

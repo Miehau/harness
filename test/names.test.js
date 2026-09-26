@@ -36,5 +36,14 @@ test('branches, workspace labels and agent names stay readable and unique', () =
   assert.equal(branchName(task, 'discovery-a1b2c3'), 'runner/remove-unused-kotlin-backend-8f374acc-discovery-a1b2c3');
   assert.equal(tabLabel({ role: 'orchestrator' }), 'Coordinator');
   assert.equal(tabLabel({ role: 'worker', stage: 'discovery' }), 'Discovery worker');
-  assert.equal(agentName(task, { id: '9979bc7b-f88d-4d00-0000-000000000000', role: 'orchestrator' }), 'remove-unused-kotlin-bac-coord-9979');
+  assert.equal(agentName(task, { id: '9979bc7b-f88d-4d00-0000-000000000000', role: 'orchestrator' }), 'remove-unused-kotlin-coord-9979');
+  for (const agent of [
+    { id: '0c7a0000-0000-0000-0000-000000000000', role: 'orchestrator' },
+    { id: '0c7a0000-0000-0000-0000-000000000000', role: 'worker', stage: 'implementation' },
+    { id: '0c7a0000-0000-0000-0000-000000000000', role: 'worker', stage: 'architecture' }
+  ]) {
+    const name = agentName({ slug: 'mea-12-spike-jev-staged-classifier-for-roadmap' }, agent);
+    assert(name.length <= 32); assert.match(name, /^[a-z][a-z0-9_-]*$/);
+  }
+  assert.match(agentName({ slug: '12-leading-digits' }, { id: '0c7a0000', role: 'orchestrator' }), /^task-12-/);
 });

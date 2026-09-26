@@ -17,7 +17,10 @@ sound answer, return a precise question to the coordinator rather than guessing.
 For discovery, return code paths, current behavior, existing tests and unknowns.
 For architecture, return the smallest design, boundaries and shared interfaces.
 For planning, return bounded assignments, file ownership, dependencies, meaningful
-checks and criteria-to-evidence mapping. These stages may be assigned separately;
+checks and criteria-to-evidence mapping. For plan assurance, identify the assigned
+risk category and exact document revisions, then challenge invariants, abuse/failure
+cases, rollback or recovery, required checks and concrete material findings. These
+stages may be assigned separately;
 do not silently turn a discovery request into implementation.
 
 Return findings with file references, assumptions, unresolved questions and a

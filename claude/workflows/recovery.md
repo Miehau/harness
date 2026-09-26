@@ -47,7 +47,9 @@ For a saved integration/merge/rebase intent, compare before/after commits and Gi
 operation state. Record applied only when Git evidence proves it. On conflicts,
 explain the conflict and resolve it only within authorized scope; ask before
 discarding ambiguous work. A cleared operation record does not itself resolve Git.
-Any changed candidate needs fresh verification/review before completion.
+Any changed candidate needs fresh verification, all declared candidate-assurance
+passes and final general review before completion. Changed reviewed plans or risk
+classification also need affected plan assurance before writers resume.
 Before resuming writers, follow [alignment](alignment.md): inspect current peer
 scope and acknowledgment versions. A saved agreement can be stale after a restart.
 

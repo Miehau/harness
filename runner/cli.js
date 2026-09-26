@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -7,26 +7,34 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { json, assert, atomic, git } from './io.js';
 import { connect, dataRoot } from './connection.js';
-import { repos, resolveRepo } from './repos.js';
+import { repos, resolveAlias, resolveRepo } from './repos.js';
 import { validateWebhook } from './notifications.js';
-const help = `agent-plan — launch Pi tasks in your running Herdr
+import { discoverHosting } from './hosting.js';
+import { ompCli, ensureBun, guardSupervisorSessions } from './omp.js';
+const help = `agent-plan — launch OMP tasks in your running Herdr
 
 agent-plan start <repo> "task description"       Create a workspace and open its orchestrator
+agent-plan launch <alias> <brief> <request-id>    Idempotent unattended launch for GrokBot
 agent-plan repo add <alias> <path>                Save a repository alias
 agent-plan repo list                              List saved repositories
 agent-plan repo remove <alias>                    Forget an alias
+agent-plan skills [name]                         Read packaged skills from GrokBot or scripts
 agent-plan onboard <repo>                        Explore the repo and create onboarding docs
 agent-plan feedback <task> <file>                 Send feedback to its coordinator
 agent-plan list                                  Show tasks
 agent-plan open <task>                            Focus the task's Herdr session
 agent-plan accept <task> [commit] [--target main] Rebase, verify and merge an accepted result
+agent-plan hosting <repo> [--hosting-provider github|gitlab] Save hosting configuration
+agent-plan hosted-status <task>                   Refresh PR/MR and CI status
+agent-plan publish-candidate <task>               Publish a verified reviewed candidate
+agent-plan preview <task> [--stop]                 Start/stop the configured app preview
 agent-plan verify <task>                          Verify a recovered candidate
 agent-plan stop <task>                            Stop agents; preserve worktrees and artifacts
 agent-plan init <repo> '<verification argv JSON>' Configure a repository once
 
 The background runtime starts automatically. No daemon terminal or copied submission ID.
 Repositories accept saved aliases or paths (use ./name to bypass an alias).
-Tasks accept a full ID or a unique prefix. Answer pending questions in the Pi terminal.
+Tasks accept a full ID or a unique prefix. Answer pending questions in the OMP terminal.
 State: ~/.local/state/agent-plan (override with RUNNER_DATA).
 
 Advanced:
@@ -35,41 +43,54 @@ agent-plan start <task>                           Start a saved draft and open i
 agent-plan inspect <task>
 agent-plan answer <task> <decision-id> <answer-file>
 agent-plan resume <task> <agent-id>
-agent-plan recover <task> [applied|aborted]
+agent-plan recover <task> [applied|aborted] ["inspection evidence"]
 agent-plan cleanup <task>
 agent-plan artifact <task> <relative-path>
 agent-plan dashboard
 agent-plan notifications
 agent-plan webhook <private-config-file>          Configure owner notifications
-agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] Open your supervisor Pi session
+agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] Open your supervisor OMP session
 
 start/onboard accept --model MODEL and --provider PROVIDER.
 Stage defaults: --discovery-model/--discovery-provider, --planning-model/--planning-provider.
-Starting work uses your configured Pi model and the repo's committed HEAD.
+Starting work uses your configured OMP model and the repo's committed HEAD.
 `;
 const topics = {
   supervisor: `agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] [--mcp-config FILE]
 
-Open an ordinary Pi supervisor. /runner-watch TASK subscribes to coordinator events.
---mcp loads the pinned pi-mcp-adapter package using Pi's package loader (first use
-needs network access). --mcp-config also enables the adapter and selects a config
-file using its normal merge rules. Other Pi arguments, including --continue, pass
-through. MCP stays in the supervisor; managed workers use runner tools only.`,
+Open an ordinary OMP supervisor. /runner-watch TASK subscribes to coordinator events.
+Bundled skills: /skill:how, /skill:why, /skill:arena, /skill:architect,
+/skill:blast-radius and /skill:open-pr. Architecture returns at least three proposals
+for discussion before authorized background implementation.
+OMP uses its native MCP configuration. --mcp is accepted for compatibility;
+MCP files live at ~/.omp/agent/mcp.json or .omp/mcp.json.
+The old --mcp-config flag reports migration instructions. Other OMP arguments, including --continue, pass
+through. MCP stays in the supervisor; managed workers use native OMP and runner tools (trusted local execution).`,
   accept: `agent-plan accept TASK [COMMIT] [--target main]
 
 Accept a completed candidate, rebase its task changes onto local main, rerun checks,
 and fast-forward merge. The source repo must be clean with the target checked out.
 Conflicts or failed checks stop for inspection. No remote fetch or push is performed.
-An explicit COMMIT rejects stale approval. Without it, accept selects the verified commit.`,
+For hosting-configured tasks, COMMIT is required: merge the published PR/MR only
+when its exact head is approved and provider CI/merge requirements pass. Local-only
+tasks retain local acceptance; without COMMIT they select the verified candidate.`,
   start: `agent-plan start REPO "Task description" [--model MODEL] [--provider PROVIDER]
 agent-plan start TASK
 
 REPO is a saved alias or path. TASK is a saved draft ID or unique prefix.
-Start Herdr and configure Pi credentials first. The runtime starts automatically.
+Start Herdr and configure OMP credentials first. The runtime starts automatically.
 New tasks use committed HEAD and snapshot .runner/project.json plus the workflow.
 Model/provider flags select the coordinator for a new task.
 
 Example: agent-plan start demo "Add a dark mode toggle"`,
+  launch: `agent-plan launch ALIAS BRIEF_FILE REQUEST_ID
+
+Launch an unattended task for GrokBot or another local scheduler. ALIAS must be a
+saved repository alias; paths are rejected. BRIEF_FILE contains the complete task.
+REQUEST_ID must be stable across retries: identical retries return the same task,
+while different input with the same ID is rejected. The command does not focus Herdr.
+
+Example: agent-plan launch meal-minder /absolute/task.md grok-issue-123-20260921`,
   repo: `agent-plan repo add NAME PATH
 agent-plan repo list
 agent-plan repo remove NAME
@@ -101,7 +122,7 @@ Print the private authenticated inspector URL. Open it in your browser to view
 assignments, reports, images, verification and worker handoffs.`,
   recovery: `agent-plan inspect TASK
 agent-plan resume TASK AGENT_ID
-agent-plan recover TASK [applied|aborted]
+agent-plan recover TASK [applied|aborted] ["inspection evidence"]
 agent-plan stop TASK
 
 Inspect retained work before recovering uncertain operations. Resume reconciles the
@@ -115,18 +136,17 @@ function showHelp(topic) {
   return lines.join('\n') + '\n';
 }
 export function supervisorArgs(raw) {
-  const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url))];
-  if (raw.includes('--mcp') || raw.includes('--mcp-config')) args.push('-e', 'npm:pi-mcp-adapter@2.33.0');
+  const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url)),
+    '--skills', fileURLToPath(new URL('../codex/agent-plan/skills/', import.meta.url))];
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '--mcp') continue;
     if (raw[i] === '--mcp-config') {
-      assert(raw[i + 1] && !raw[i + 1].startsWith('--'), 'Missing --mcp-config value');
-      args.push(raw[i], resolve(raw[++i]));
+      throw new Error('OMP discovers MCP in ~/.omp/agent/mcp.json or .omp/mcp.json; --mcp-config is not supported. Move the configuration there before launching.');
     } else args.push(raw[i]);
   }
   return args;
 }
-export const agentIgnore = ['.pi/', '.runner/answers/', '.runner-ui-*/'];
+export const agentIgnore = ['.pi/', '.omp/', '.runner/answers/', '.runner-ui-*/'];
 export async function ensureAgentIgnore(repo) {
   const path = join(repo, '.gitignore');
   let current = '';
@@ -143,11 +163,19 @@ export async function main(args = process.argv.slice(2)) {
   const [command, ...raw] = args;
   if (!command || ['help', '--help', '-h'].includes(command)) return showHelp(raw[0]);
   if (raw.includes('--help') || raw.includes('-h')) return showHelp(command);
+  if (command === 'skills') {
+    const directory = fileURLToPath(new URL('../codex/agent-plan/skills/', import.meta.url));
+    const names = (await readdir(directory, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name).sort();
+    if (!raw[0]) return names;
+    assert(names.includes(raw[0]), 'Unknown packaged skill'); return { name: raw[0], source: join(directory, raw[0], 'SKILL.md'), content: await readFile(join(directory, raw[0], 'SKILL.md'), 'utf8') };
+  }
   if (command === 'supervisor') {
     const args = supervisorArgs(raw);
+    await guardSupervisorSessions(args);
     await connect();
+    const bun = await ensureBun();
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/cli.js', import.meta.url)), ...args], { stdio: 'inherit' });
+      const child = spawn(bun, [ompCli, ...args], { stdio: 'inherit' });
       child.once('error', reject); child.once('exit', code => resolve(code ?? 1));
     });
     assert(code === 0, `Supervisor exited with status ${code}`); return '';
@@ -155,10 +183,10 @@ export async function main(args = process.argv.slice(2)) {
   const rest = [], selection = {};
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '--onboarding') selection.onboarding = true;
-    else if (['--model', '--provider', '--target', '--discovery-model', '--discovery-provider', '--planning-model', '--planning-provider'].includes(raw[i])) { const key = raw[i].slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()); assert(raw[i + 1] && !raw[i + 1].startsWith('--'), `Missing ${raw[i]} value`); selection[key] = raw[++i]; }
+    else if (['--model', '--provider', '--target', '--request-id', '--discovery-model', '--discovery-provider', '--planning-model', '--planning-provider', '--hosting-provider', '--hosting-host', '--hosting-project', '--hosting-remote', '--hosting-target'].includes(raw[i])) { const key = raw[i].slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()); assert(raw[i + 1] && !raw[i + 1].startsWith('--'), `Missing ${raw[i]} value`); selection[key] = raw[++i]; }
     else rest.push(raw[i]);
   }
-  assert(['init', 'start', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook'].includes(command), `Unknown command: ${command}\n${help}`);
+  assert(['init', 'start', 'launch', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook', 'hosting', 'hosted-status', 'publish-candidate', 'preview'].includes(command), `Unknown command: ${command}\n${help}`);
   if (command === 'webhook') { assert(rest.length === 1, 'Usage: agent-plan webhook PRIVATE_CONFIG_FILE'); const config = await json(resolve(rest[0])); validateWebhook(config); config.since ??= new Date().toISOString(); await atomic(join(dataRoot(), 'webhook.json'), config); return { configured: true, format: config.webhook.format ?? 'references', since: config.since }; }
   if (command === 'repo') return repos(rest);
   if (command === 'init') {
@@ -170,12 +198,25 @@ export async function main(args = process.argv.slice(2)) {
     return { configured: root };
   }
   if (!['list', 'dashboard', 'notifications'].includes(command)) assert(rest[0], `Missing arguments. Run agent-plan help.`);
+  if (command === 'hosting') {
+    const repo = await resolveRepo(rest[0]); const file = join(repo, '.runner', 'project.json'); const config = await json(file);
+    const overrides = Object.fromEntries(Object.entries(selection).filter(([k]) => k.startsWith('hosting')).map(([k,v]) => [k.slice(7,8).toLowerCase()+k.slice(8),v]));
+    config.hosting = await discoverHosting(repo, overrides); await atomic(file, config); return { configured: file, hosting: config.hosting };
+  }
   if (command === 'onboard') {
     const repo = await resolveRepo(rest[0]); await mkdir(join(repo, '.runner'), { recursive: true });
     try { await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({ commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
+    const file = join(repo, '.runner', 'project.json'); const config = await json(file);
+    const overrides = Object.fromEntries(Object.entries(selection).filter(([k]) => k.startsWith('hosting')).map(([k,v]) => [k.slice(7,8).toLowerCase()+k.slice(8),v]));
+    if (Object.keys(overrides).length || !config.hosting) {
+      let discovered;
+      try { discovered = await discoverHosting(repo, overrides); }
+      catch (error) { if (Object.keys(overrides).length) throw error; process.stderr.write(`Hosting not configured: ${error.message}. Set it with agent-plan hosting REPO before hosted delivery.\n`); }
+      if (discovered) { config.hosting = discovered; await atomic(file, config); }
+    }
     await ensureAgentIgnore(repo);
-    return main(['start', repo, await readFile(new URL('./onboarding.md', import.meta.url), 'utf8'), '--onboarding', ...Object.entries(selection).filter(([k]) => k !== 'onboarding').flatMap(([k,v]) => ['--' + k.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()),v])]);
+    return main(['start', repo, await readFile(new URL('./onboarding.md', import.meta.url), 'utf8'), '--onboarding', ...Object.entries(selection).filter(([k]) => k !== 'onboarding' && !k.startsWith('hosting')).flatMap(([k,v]) => ['--' + k.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()),v])]);
   }
   const root = dataRoot();
   if (command === 'notifications') { try { return await json(join(root, 'notifications.json')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }
@@ -188,28 +229,40 @@ export async function main(args = process.argv.slice(2)) {
   if (command === 'dashboard') return `${url}/#${connection.token}`;
   if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, title: t.title ?? null, status: t.status, repo: t.repo, workspace: t.workspace ?? null }));
   if (command === 'submit') return action('submit', null, { repo: await resolveRepo(rest[0]), text: await readFile(rest[1], 'utf8'), requestId: rest[2] ?? randomUUID() });
+  if (command === 'launch') {
+    assert(rest.length === 3, 'Usage: agent-plan launch ALIAS BRIEF_FILE REQUEST_ID');
+    const requestId = rest[2];
+    const task = await action('submit', null, { repo: await resolveAlias(rest[0]), text: await readFile(resolve(rest[1]), 'utf8'), requestId });
+    try {
+      const started = await action('start', task.id, {}, requestId);
+      const agent = started.agents.find(a => a.role === 'orchestrator');
+      assert(agent && agent.status !== 'failed', agent?.error ?? 'Orchestrator did not start');
+      return { id: task.id, status: started.status, workspace: started.workspace, worktree: started.integration.cwd };
+    } catch (e) { throw new Error(`Task ${task.id}: ${e.message}. Retry with the same request ID or inspect this task; never create a replacement.`); }
+  }
   let taskId;
   if (command === 'start' && rest.length >= 2) {
-    const task = await action('submit', null, { repo: await resolveRepo(rest[0]), text: rest.slice(1).join(' '), ...selection, requestId: randomUUID() }); taskId = task.id;
+    const task = await action('submit', null, { repo: await resolveRepo(rest[0]), text: rest.slice(1).join(' '), ...selection, requestId: selection.requestId ?? randomUUID() }); taskId = task.id;
   } else {
     const matches = (await request('/tasks')).filter(t => t.id === rest[0] || t.id.startsWith(rest[0]));
     assert(matches.length === 1, matches.length ? 'Task prefix is ambiguous; use more of its ID' : 'Unknown task'); taskId = matches[0].id;
   }
   if (command === 'start') {
     try {
-      const task = await action('start', taskId); const agent = task.agents.find(a => a.role === 'orchestrator');
+      const task = await action('start', taskId, {}, selection.requestId ?? randomUUID()); const agent = task.agents.find(a => a.role === 'orchestrator');
       assert(agent && agent.status !== 'failed', agent?.error ?? 'Orchestrator did not start');
       const place = await action('open', taskId); return { id: taskId, status: task.status, ...place, worktree: task.integration.cwd };
     } catch (e) { throw new Error(`Task ${taskId}: ${e.message}. Inspect this task before retrying; do not submit it again.`); }
   }
-  if (command === 'accept') { const task = await action('inspect', taskId); return action('accept', taskId, { commit: rest[1] ?? task.verification?.commit, target: selection.target ?? 'main' }); }
+  if (command === 'accept') { const task = await action('inspect', taskId); assert(!task.config.hosting || rest[1], 'Hosted approval requires the exact published commit'); return action('accept', taskId, { commit: rest[1] ?? task.verification?.commit, target: selection.target ?? task.config.hosting?.target ?? 'main' }); }
+  if (command === 'preview') return action('preview', taskId, { stop: rest.includes('--stop') });
   if (command === 'feedback') { const path = `feedback-${randomUUID()}.md`; await action('write', taskId, { area: 'artifacts', path, content: await readFile(rest[1], 'utf8') }); return action('feedback', taskId, { artifact: path }); }
   if (command === 'answer') {
     const content = await readFile(rest[2], 'utf8'); const path = `answer-${randomUUID()}.md`;
     await action('write', taskId, { area: 'artifacts', path, content }); return action('answer', taskId, { decisionId: rest[1], artifact: path });
   }
   if (command === 'artifact') return action('read', taskId, { area: 'artifacts', path: rest[1], limit: 100000 });
-  if (command === 'recover') return action('recover', taskId, { outcome: rest[1] });
+  if (command === 'recover') { const task = await action('inspect', taskId); return action('recover', taskId, { outcome: rest[1], expectedOperation: task.operation, ...(rest[2] ? { evidence: rest[2] } : {}) }); }
   if (command === 'resume') return action('resume', taskId, { agentId: rest[1] });
   return action(command === 'stop' ? 'cancel' : command, taskId);
 }

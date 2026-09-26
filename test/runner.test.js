@@ -14,6 +14,48 @@ class FakeHerdr {
   async status(agent) { return this.agents.get(agent.id) ?? 'missing'; }
   async stop(agent) { this.agents.delete(agent.id); }
 }
+
+test('workflow requires independent role reviews and adds targeted assurance for declared risks', async () => {
+  const stages = await readFile(new URL('../runner/workflow/stages.md', import.meta.url), 'utf8');
+  const review = await readFile(new URL('../runner/workflow/review.md', import.meta.url), 'utf8');
+  for (const category of ['security', 'data-safety', 'recovery', 'operator']) assert.match(stages, new RegExp('`' + category + '`'));
+  assert.match(stages, /plan assurance/i);
+  assert.match(stages, /routine work requires the requirements and correctness review roles/i);
+  assert.match(stages, /changed reviewed document.*plan\s+assurance stale/is);
+  assert.match(review, /fresh mode="explore", stage="review"\s+workers/i);
+  assert.match(review, /candidate\s+assurance/i);
+  assert.match(review, /No generic final\s+reviewer/i);
+  assert.match(review, /every required role.*latest completed report/is);
+});
+
+test('workflow routes task playbooks and resolves observable forks with evidence', async () => {
+  const workflow = await readFile(new URL('../runner/workflow.md', import.meta.url), 'utf8');
+  const stages = await readFile(new URL('../runner/workflow/stages.md', import.meta.url), 'utf8');
+  const playbooks = await readFile(new URL('../runner/workflow/playbooks.md', import.meta.url), 'utf8');
+  assert.match(workflow, /task playbooks/);
+  for (const kind of ['Bug fix', 'Feature', 'Refactor', 'Performance']) assert.match(playbooks, new RegExp(`## ${kind}`));
+  assert.match(playbooks, /reproduce.*before changing production code/is);
+  assert.match(playbooks, /numeric baseline/i);
+  assert.match(stages, /two or three isolated throwaway\s+prototypes/i);
+  assert.match(stages, /Do not integrate\s+prototype commits/i);
+  assert.match(stages, /at least\s+three independent architecture workers the same grounded brief/i);
+  assert.match(stages, /same\s+committed integration base/i);
+  assert.match(stages, /run in batches if needed/i);
+  assert.match(stages, /ask \{artifact,requiresOwner:true\}/);
+  assert.match(stages, /coordinator must not select the architecture/i);
+  assert.match(stages, /An answer is not automatically permission to build/i);
+});
+
+test('onboarding creates or maintains project verification skills only when useful', async () => {
+  const onboarding = await readFile(new URL('../runner/onboarding.md', import.meta.url), 'utf8');
+  for (const section of ['Launch', 'Doctor', 'Drive', 'Evidence', 'Cleanup']) assert.match(onboarding, new RegExp(`\\*\\*${section}:\\*\\*`));
+  assert.match(onboarding, /\.agents\/skills\/verify-<app>\/SKILL\.md/);
+  assert.match(onboarding, /add the skill path to `skills`/i);
+  assert.match(onboarding, /one read-only source pass per mapped feature/i);
+  assert.match(onboarding, /`clean`, `changed`.*or `blocked`/is);
+  assert.match(onboarding, /Do not generate one for a library/i);
+});
+
 async function fixture(t, { reviewRequired = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'runner-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -25,8 +67,10 @@ async function fixture(t, { reviewRequired = false } = {}) {
   const transport = new FakeHerdr(); const data = join(root, 'data'); const runtime = new Runtime(data, { transport }); await runtime.init(); runtime.url = 'http://127.0.0.1:1';
   const call = (identity, action, taskId, input = {}, requestId = id()) => runtime.execute(identity, { action, taskId, input, requestId });
   const task = await call('owner', 'submit', null, { repo, text: 'Implement an improvement', requestId: id() });
-  // Existing scenarios cover legacy tasks; review-specific scenarios opt into the new gate.
-  if (!reviewRequired) { const legacy = runtime.task(task.id); delete legacy.reviewRequired; await runtime.save(legacy); }
+  // These scenarios retain the legacy single-review contract; parallel-review.test.js covers role gates.
+  const legacy = runtime.task(task.id); delete legacy.reviewPolicy;
+  if (!reviewRequired) delete legacy.reviewRequired;
+  await runtime.save(legacy);
   await call('owner', 'start', task.id);
   const main = runtime.task(task.id).agents[0]; const who = a => ({ taskId: task.id, agentId: a.id });
   await call(who(main), 'write', task.id, { area: 'artifacts', path: 'fixture-clarification.md', content: 'Fixture scope clarified' });
@@ -69,6 +113,63 @@ test('fresh runner: worker question, restart, answer, report, integrate and veri
   assert.equal(await readFile(join(main.cwd, 'value.txt'), 'utf8'), 'improved\n');
 });
 
+test('three architecture proposals return to the supervisor before the same coordinator implements', async t => {
+  const f = await fixture(t); const { runtime, call, task, main, who, artifact } = f;
+  assert.equal(main.inbox[0].pstack, 'pstack/runner.md');
+  const promptPath = 'pstack/skills/architect/references/runner-prompt.md';
+  const bundledPrompt = await readFile(new URL('../codex/agent-plan/skills/architect/references/runner-prompt.md', import.meta.url), 'utf8');
+  assert.equal((await call(who(main), 'read', task.id, { area: 'artifacts', path: promptPath })).content, bundledPrompt);
+  const proposals = [], worktrees = new Set();
+  await artifact('architecture-brief.md', 'Preparation only: propose an approach and rationale; no feature implementation.');
+  // Capacity is two: independent proposals can run in batches without changing the base.
+  for (let i = 0; i < 3; i++) {
+    const spawned = await call(who(main), 'spawn', task.id, { assignment: 'architecture-brief.md', stage: 'architecture', mode: 'explore' });
+    const worker = runtime.task(task.id).agents.find(a => a.id === spawned.workerId);
+    assert.equal(worker.inbox[0].pstack, main.inbox[0].pstack);
+    assert.equal((await call(who(worker), 'read', task.id, { area: 'artifacts', path: promptPath })).content, bundledPrompt);
+    await assert.rejects(call(who(worker), 'write', task.id, { area: 'artifacts', path: promptPath, content: 'Replace instructions' }), /artifact/);
+    worktrees.add(worker.cwd); assert.equal(worker.base, task.base);
+    assert.equal((await call(who(worker), 'read', task.id, { area: 'repo', path: 'value.txt' })).content, 'base\n');
+    await assert.rejects(call(who(worker), 'write', task.id, { area: 'repo', path: 'value.txt', content: 'premature' }), /cannot write/);
+    const proposal = await artifact('proposal.md', `Approach ${i}: rationale, contracts and verification.`, who(worker));
+    proposals.push(proposal);
+    await call(who(worker), 'report', task.id, { status: 'completed', artifact: proposal });
+  }
+  assert.equal(worktrees.size, 3);
+  await artifact('design-choice.md', `Base: ${task.base}\nProposals:\n${proposals.join('\n')}\nChoose together; implement or continue preparation?`);
+  const question = await call(who(main), 'ask', task.id, { artifact: 'design-choice.md', requiresOwner: true });
+  const implementation = { assignment: 'architecture-brief.md', stage: 'implementation', mode: 'write' };
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /Waiting/);
+
+  const { default: supervisor } = await import('../runner/supervisor-extension.js');
+  const handlers = {}, commands = {}, messages = []; let tool;
+  supervisor({ on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; },
+    registerTool: value => { tool = value; }, appendEntry() {}, sendMessage: message => messages.push(message) },
+  { root: f.data, request: body => runtime.execute('owner', body) });
+  const ctx = { hasUI: true, sessionManager: { getEntries: () => [] }, ui: { setStatus() {}, input: async () => 'Implement approach 1 using the draft handoff.' } };
+  t.after(() => handlers.session_shutdown());
+  await handlers.session_start({}, ctx);
+  const prompt = (await handlers.before_agent_start({ systemPrompt: '' })).systemPrompt;
+  assert.match(prompt, /at least three independent architecture workers/);
+  assert.match(prompt, /Continue the same task after agreement/);
+  await commands['runner-watch'].handler(task.id, ctx);
+  assert(JSON.parse(messages[0].content).some(event => event.decisionId === question.decisionId));
+  await assert.rejects(tool.execute('choose-for-user', { action: 'answer', taskId: task.id, decisionId: question.decisionId, text: 'Implement approach 0' }), /human owner/);
+  const draft = JSON.parse((await tool.execute('handoff', { action: 'feedback', taskId: task.id,
+    text: `Approach 1 from ${proposals[1]} at ${task.base}: retain the existing contract; update value.txt and verify. Others add unnecessary dependencies.` })).content[0].text);
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /Waiting/);
+  await tool.execute('human-choice', { action: 'ask_user', taskId: task.id, decisionId: question.decisionId, text: `Draft handoff: ${draft.artifact}` }, undefined, undefined, ctx);
+  const current = runtime.task(task.id);
+  assert.equal(current.decisions.find(d => d.id === question.decisionId).answeredBy, 'owner');
+  assert(current.agents[0].inbox.some(m => m.kind === 'owner-feedback' && m.artifact === draft.artifact));
+  assert.equal(current.agents.filter(a => a.role === 'orchestrator').length, 1);
+  await call(who(main), 'revise', task.id, { name: 'architecture', artifact: draft.artifact });
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /clarification/);
+  await call(who(main), 'clarify', task.id, { artifact: draft.artifact });
+  const writer = await call(who(main), 'spawn', task.id, { ...implementation, assignment: draft.artifact });
+  assert.equal(runtime.task(task.id).agents.find(a => a.id === writer.workerId).mode, 'write');
+});
+
 test('ownership, shared contracts, path boundaries and exact user decisions', async t => {
   const { runtime, call, task, main, who, artifact, root } = await fixture(t);
   await artifact('assignment.md');
@@ -95,8 +196,10 @@ test('Herdr idle/done never completes a task, missing agents require explicit re
   assert.equal(runtime.task(task.id).status, 'running');
   transport.agents.delete(main.id); await runtime.reconcile();
   assert.equal(runtime.task(task.id).agents[0].status, 'failed');
+  const failed = runtime.task(task.id); failed.agents[0].name = 'mea-12-spike-jev-staged--coord-0c7a'; await runtime.save(failed);
   await call('owner', 'resume', task.id, { agentId: main.id });
   assert.equal(runtime.task(task.id).agents[0].session, main.session);
+  assert(runtime.task(task.id).agents[0].name.length <= 32);
   assert.equal(transport.starts.length, 2);
 });
 
@@ -199,9 +302,25 @@ test('verification failure and changed integration invalidate completion', async
 });
 
 test('worker time budget applies even with a healthy heartbeat', async t => {
+  const { runtime, call, task, main, who, artifact } = await fixture(t);
+  await artifact('budget-assignment.md');
+  const spawned = await call(who(main), 'spawn', task.id, { assignment: 'budget-assignment.md', mode: 'explore', stage: 'discovery' });
+  const current = runtime.task(task.id); const worker = current.agents.find(agent => agent.id === spawned.workerId);
+  worker.startedAt = new Date(0).toISOString(); await runtime.save(current);
+  runtime.heartbeats.set(worker.id, Date.now()); await runtime.reconcile();
+  const reconciled = runtime.task(task.id);
+  assert.equal(reconciled.agents.find(agent => agent.id === worker.id).status, 'failed');
+  assert.match(reconciled.agents.find(agent => agent.id === worker.id).error, /budget/);
+  assert.equal(reconciled.agents.find(agent => agent.id === main.id).status, 'running');
+});
+
+test('coordinator budget measures task inactivity rather than total orchestration time', async t => {
   const { runtime, task, main } = await fixture(t);
   const current = runtime.task(task.id); current.agents[0].startedAt = new Date(0).toISOString(); await runtime.save(current);
   runtime.heartbeats.set(main.id, Date.now()); await runtime.reconcile();
+  assert.equal(runtime.task(task.id).agents[0].status, 'running');
+  runtime.tasks.get(task.id).updatedAt = new Date(0).toISOString();
+  await runtime.reconcile();
   assert.equal(runtime.task(task.id).agents[0].status, 'failed');
   assert.match(runtime.task(task.id).agents[0].error, /budget/);
 });
@@ -240,14 +359,14 @@ test('cancellation interrupts named commands instead of waiting for their timeou
   assert.equal((await cancelled).status, 'cancelled');
 });
 
-test('Pi extension delivers references, acknowledges turns, and surfaces model failure', async t => {
+test('OMP extension delivers references, acknowledges turns, and surfaces model failure', async t => {
   let cleanup;
   const f = await fixture({ after(fn) { cleanup = fn; } });
   const server = await serve(f.data, { transport: f.transport });
   const prior = { url: process.env.RUNNER_URL, token: process.env.RUNNER_TOKEN, reply: process.env.RUNNER_REPLY_TOKEN };
   process.env.RUNNER_URL = server.runtime.url; process.env.RUNNER_TOKEN = f.main.token; process.env.RUNNER_REPLY_TOKEN = f.main.replyToken;
   const handlers = new Map(), tools = new Map(), messages = [];
-  const pi = { on: (name, fn) => handlers.set(name, fn), registerTool: tool => tools.set(tool.name, tool), setActiveTools() {}, sendMessage: message => messages.push(message) };
+  const pi = { on: (name, fn) => handlers.set(name, fn), registerTool: tool => tools.set(tool.name, tool), setActiveTools() { assert.fail('Runner must preserve native tools'); }, sendMessage: message => messages.push(message) };
   const { default: extension } = await import('../runner/pi-extension.js'); extension(pi);
   t.after(async () => {
     handlers.get('session_shutdown')(); await server.close(); await cleanup();
@@ -256,19 +375,28 @@ test('Pi extension delivers references, acknowledges turns, and surfaces model f
     if (prior.reply === undefined) delete process.env.RUNNER_REPLY_TOKEN; else process.env.RUNNER_REPLY_TOKEN = prior.reply;
   });
   const notices = []; const ctx = { isIdle: () => true, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
-  assert.deepEqual(handlers.get('project_trust')(), { trusted: 'yes' });
+  assert.equal(handlers.has('project_trust'), false, 'OMP uses native approval configuration');
+  assert.equal(handlers.has('tool_call'), false, 'Native tool calls are not blocked');
+  assert.equal(handlers.has('user_bash'), false, 'Interactive shell remains available');
+  const prompt = handlers.get('before_agent_start')({ systemPrompt: 'Base prompt' }, ctx).systemPrompt;
+  assert.match(prompt, /Use native tools/);
+  assert.match(prompt, /Never read approval credentials/);
+  assert.match(prompt, /native commands do not count as final runner verification/);
   await handlers.get('session_start')({}, ctx);
   assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'anthropic', model: 'claude-test' });
-  await handlers.get('model_select')({ model: { provider: 'openai-codex', id: 'gpt-test' } });
-  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'openai-codex', model: 'gpt-test' });
   const { setTimeout: sleep } = await import('node:timers/promises');
+  ctx.model = { provider: 'openai-codex', id: 'gpt-test' };
+  for (let i = 0; server.runtime.task(f.task.id).agents[0].modelSelection.model !== 'gpt-test' && i < 300; i++) await sleep(10);
+  assert.deepEqual(server.runtime.task(f.task.id).agents[0].modelSelection, { provider: 'openai-codex', model: 'gpt-test' });
   for (let i = 0; !messages.length && i < 100; i++) await sleep(10);
   assert.equal(messages.length, 1); assert.match(messages[0].content, /brief.md/);
   await handlers.get('agent_end')({ messages: [messages[0], { role: 'assistant', stopReason: 'stop' }] });
   assert(server.runtime.task(f.task.id).agents[0].inbox.every(m => m.acknowledgedAt));
   const report = tools.get('runner_action');
   await tools.get('runner_write').execute(id(), { area: 'artifacts', path: 'ask.md', content: 'Need user decision' });
-  const q = await report.execute(id(), { action: 'ask', input: { artifact: 'ask.md' } }); assert.equal(q.terminate, true);
+  const q = await report.execute(id(), { action: 'ask', input: { artifact: 'ask.md' } }); assert.equal(q.terminate, undefined);
+  let aborted = false; handlers.get('tool_result')({ toolName: 'runner_action', input: { action: 'ask' }, isError: false }, { abort() { aborted = true; } }); assert(aborted);
+  handlers.get('agent_start')();
   const denied = await fetch(server.runtime.url + '/terminal-answer', { method: 'POST', headers: { authorization: `Bearer ${f.main.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ decisionId: q.details.decisionId, text: 'Forged answer' }) });
   assert.equal(denied.status, 400);
   assert.deepEqual(await handlers.get('input')({ source: 'extension', text: 'Do not approve this' }, ctx), { action: 'continue' });
@@ -329,12 +457,12 @@ test('worktrees and Herdr labels use the brief title', async t => {
   assert.equal(task.title, 'Implement an improvement');
   assert.equal(task.slug, 'implement-an-improvement');
   assert.equal(task.integration.branch, `runner/implement-an-improvement-${task.id.slice(0, 8)}`);
-  assert.match(f.main.name, /^implement-an-improvement-coord-/);
+  assert.match(f.main.name, /^implement-an-improv.*-coord-/); assert(f.main.name.length <= 32);
   await f.artifact('assignment.md', 'Change value.txt');
   const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { assignment: 'assignment.md', mode: 'write' });
   const worker = f.runtime.task(f.task.id).agents.find(a => a.id === spawned.workerId);
   assert.match(worker.branch, new RegExp(`^runner/implement-an-improvement-${task.id.slice(0, 8)}-implementation-`));
-  assert.match(worker.name, /implementation/);
+  assert.match(worker.name, /implementation/); assert(worker.name.length <= 32);
   const { Herdr } = await import('../runner/herdr.js');
   const herdr = new Herdr(); const calls = [];
   herdr.call = async (...args) => { calls.push(args); return { root_pane: { pane_id: 'p' }, tab: { tab_id: 't' }, workspace: { workspace_id: 'w' } }; };
@@ -345,7 +473,7 @@ test('worktrees and Herdr labels use the brief title', async t => {
   assert.equal(labelOf(calls[1]), 'Implementation worker');
 });
 
-test('managed Pi launch auto-trusts the worktree', async t => {
+test('managed Pi launch auto-trusts the worktree and preserves native tools', async t => {
   const { Herdr } = await import('../runner/herdr.js');
   const herdr = new Herdr(); const args = [];
   herdr.call = async (cmd, sub, ...rest) => {
@@ -355,8 +483,10 @@ test('managed Pi launch auto-trusts the worktree', async t => {
     return {};
   };
   await herdr.start({ name: 'agent', session: '/tmp/session.jsonl', place: { pane: 'pane', tab: 'tab' } }, {});
-  assert(args.includes('--approve'));
+  assert(args.includes('--auto-approve'));
+  assert(args.includes('omp'));
   assert(args.includes('--no-extensions'));
+  assert(!args.includes('--tools'), 'Launch must not restrict tools to runner tools');
 });
 
 test('Pi extension keeps starting when an older runtime lacks the model action', async t => {
@@ -536,6 +666,7 @@ test('PNG evidence is copied into worker artifacts and reads as an image', async
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
   await writeFile(join(worker.cwd, 'proof.png'), png);
   const { artifact } = await f.call(f.who(worker), 'publish', f.task.id, { path: 'proof.png' });
+  assert.equal(f.runtime.task(f.task.id).events.findLast(event => event.kind === 'evidence-published').commit, null, 'Dirty worktree media must not claim to prove HEAD');
   assert(artifact.startsWith(worker.artifactDir + '/'));
   const image = await f.call('owner', 'read', f.task.id, { area: 'artifacts', path: artifact });
   assert.equal(image.mimeType, 'image/png'); assert.equal(image.base64, png.toString('base64'));
@@ -579,6 +710,14 @@ test('repository aliases persist, resolve in CLI intake, and never overwrite ano
   assert.deepEqual(await main(['repo', 'list']), [{ alias: 'demo', path: await realpath(f.repo) }]);
   const brief = join(f.root, 'brief.md'); await writeFile(brief, 'Alias task');
   const task = await main(['submit', 'demo', brief]); assert.equal(task.repo, await realpath(f.repo));
+  const starts = f.transport.starts.length;
+  const launched = await main(['launch', 'demo', brief, 'grok-roadmap-slice-1']);
+  assert.deepEqual(await main(['launch', 'demo', brief, 'grok-roadmap-slice-1']), launched);
+  assert.equal(f.transport.starts.length, starts + 1);
+  assert.equal([...app.runtime.tasks.values()].filter(item => item.requestId === 'grok-roadmap-slice-1').length, 1);
+  await writeFile(brief, 'Changed task');
+  await assert.rejects(main(['launch', 'demo', brief, 'grok-roadmap-slice-1']), /different input/);
+  await assert.rejects(main(['launch', f.repo, brief, 'grok-path']), /saved repository alias/);
   await assert.rejects(main(['repo', 'add', '../escape', f.repo]), /Alias must/);
   await assert.rejects(main(['repo', 'add', 'demo', f.main.cwd]), /already exists/);
   await main(['repo', 'remove', 'demo']); assert.deepEqual(await main(['repo', 'list']), []);
@@ -589,6 +728,7 @@ test('help topics and command help never connect to a runtime', async () => {
   const { main } = await import('../runner/cli.js');
   assert.match(await main(['help']), /Examples and details/);
   assert.match(await main(['help', 'start']), /committed HEAD/);
+  assert.match(await main(['help', 'launch']), /stable across retries/);
   assert.equal(await main(['repo', '--help']), await main(['help', 'repo']));
   assert.match(await main(['start', '--help']), /--model/);
   assert.match(await main(['help', 'answer']), /decision-id/);
@@ -644,7 +784,7 @@ test('onboard gitignore helper appends missing agent directories, commits, and i
   await git(repo, 'add', '.'); await git(repo, 'commit', '-m', 'Base');
   const { ensureAgentIgnore } = await import('../runner/cli.js');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: true });
-  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.runner/answers/\n.runner-ui-*/\n');
+  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.omp/\n.runner/answers/\n.runner-ui-*/\n');
   assert.equal(await git(repo, 'log', '-1', '--format=%s'), 'Ignore agent-local directories');
   const head = await git(repo, 'rev-parse', 'HEAD');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: false });
@@ -828,7 +968,7 @@ test('Grok-style notifications carry question text, explicit images and safe rep
   await atomic(join(f.data, 'supervisor.json'), { webhook: { url: 'https://receiver.example.invalid/events', format: 'grokbot', authorization: 'Bearer test-token' } });
   const sent = []; const transport = async (url, options) => { sent.push(JSON.parse(options.body)); assert.equal(options.redirect, 'error'); return { ok: true, status: 202 }; };
   await notify(f.runtime, transport); await notify(f.runtime, transport);
-  assert.equal(sent[0].action, 'opinion'); assert.equal(sent[0].message, 'Which layout should we use?');
+  assert.equal(sent[0].action, 'opinion'); assert.equal(sent[0].message, `${f.task.title}\n\nWhich layout should we use?`); assert.equal(sent[0].context.goal, f.task.title);
   assert.equal(sent.length, 1); assert.equal(sent[0].job, f.task.id); assert.equal(sent[0].text, 'Which layout should we use?');
   assert.equal(sent[0].attachments[0].base64, png.toString('base64')); assert.equal(sent[0].reply.decisionId, question.decisionId);
   assert(!JSON.stringify(sent).includes(f.main.token));
@@ -878,7 +1018,7 @@ test('Grok hook actions normalize aliases and keep probes silent', async t => {
     for (const alias of aliases) {
       const event = { id: id(), kind: 'decision', at: new Date().toISOString(), error: 'Example', ...hookFields({ action: alias, pr: 42, evidence: 'tests + screenshots', problems: ['e2e timeout'] }) };
       const payload = await notificationPayload(f.runtime, f.task, event, 'grokbot');
-      assert.equal(payload.action, action); assert.equal(payload.from, 'harness'); assert.equal(payload.task, f.task.id); assert.equal(payload.message, 'Example'); assert.equal(payload.pr, 42);
+      assert.equal(payload.action, action); assert.equal(payload.from, 'harness'); assert.equal(payload.task, f.task.id); assert.match(payload.message, /Example$/); assert.equal(payload.context.goal, f.task.title); assert.equal(payload.pr, 42);
       if (action === 'approval') assert.equal(payload.evidence, 'tests + screenshots');
       if (action === 'problem') assert.deepEqual(payload.problems, ['e2e timeout']);
     }

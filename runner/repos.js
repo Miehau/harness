@@ -5,11 +5,22 @@ import { dataRoot } from './connection.js';
 const valid = name => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name);
 const directory = () => join(dataRoot(), 'repos');
 
+async function saved(name) {
+  try { return (await readFile(join(directory(), name + '.path'), 'utf8')).trim(); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+export async function resolveAlias(value) {
+  assert(valid(value), 'GrokBot launches require a saved repository alias');
+  const path = await saved(value); assert(path, `Unknown repository alias: ${value}`);
+  try { return await realpath(path); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; throw Error(`Repository alias ${value} points to a missing directory; remove and register it again.`); }
+}
+
 export async function resolveRepo(value) {
   if (!valid(value)) return resolve(value);
-  let path;
-  try { path = (await readFile(join(directory(), value + '.path'), 'utf8')).trim(); }
-  catch (error) { if (error.code === 'ENOENT') return resolve(value); throw error; }
+  const path = await saved(value);
+  if (!path) return resolve(value);
   try { return await realpath(path); }
   catch (error) { if (error.code !== 'ENOENT') throw error; throw Error(`Repository alias ${value} points to a missing directory; remove and register it again.`); }
 }

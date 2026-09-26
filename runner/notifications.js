@@ -13,8 +13,8 @@ export function hookFields(hook) {
   return { hook: { action: hookAction(hook.action), ...(hook.pr !== undefined ? { pr: hook.pr } : {}), ...(hook.evidence !== undefined ? { evidence: hook.evidence } : {}), ...(hook.problems !== undefined ? { problems: hook.problems } : {}) } };
 }
 function eventAction(event) {
-  if (['probe', 'health', 'noop'].includes(event.kind)) return null;
-  return hookAction(event.hook?.action ?? event.kind) ?? ({ completed: 'approval', decision: 'opinion', attention: 'problem', failed: 'problem' })[event.kind] ?? null;
+  if (['probe', 'health', 'noop'].includes(event.kind) || event.kind === 'ci-status' && event.ci?.state !== 'failed') return null;
+  return hookAction(event.hook?.action ?? event.kind) ?? ({ completed: 'approval', published: 'approval', 'ci-status': 'problem', decision: 'opinion', attention: 'problem', failed: 'problem' })[event.kind] ?? null;
 }
 
 export function validateWebhook(config) {
@@ -46,12 +46,14 @@ export async function notificationPayload(runtime, task, event, format) {
     const content = await runtime.files(task, 'owner', 'read', { area: 'artifacts', path, limit: 10000 });
     attachments.push(content.mimeType ? { artifact: path, mimeType: content.mimeType, base64: content.base64 } : { artifact: path, mimeType: 'text/plain', text: content.content, truncated: content.nextOffset != null });
   }
-  return { ...base, action, from: 'harness', task: task.id, message: text,
-    ...(event.hook?.pr !== undefined ? { pr: event.hook.pr } : {}),
+  const context = { goal: task.title ?? null, brief: 'brief.md', agreedDocuments: task.documents ?? {}, clarification: task.clarification?.artifact ?? null, candidate: task.hosted?.commit ?? task.verification?.commit ?? null, reviewRoles: task.reviewPolicy?.requiredRoles ?? [], request: task.hosted ? { provider: task.config.hosting?.provider, url: task.hosted.url, number: task.hosted.number, head: task.hosted.head, ci: task.hosted.ci } : null };
+  const evidenceLinks = task.hosted?.evidence ?? [];
+  return { ...base, context, evidenceLinks, action, from: 'harness', task: task.id, message: `${task.title ? task.title + '\n\n' : ''}${text}`,
+    ...(event.hook?.pr !== undefined || task.hosted?.number ? { pr: event.hook?.pr ?? task.hosted.number, prUrl: task.hosted?.url ?? null } : {}),
     ...(action === 'approval' ? { evidence: event.hook?.evidence ?? [task.verification?.artifact, event.evidence, task.documents?.evidence, event.artifact].filter(Boolean).join(', ') } : {}),
     ...(action === 'problem' ? { problems: event.hook?.problems ?? [event.error ?? text] } : {}),
     version: 2, job: task.id, status: event.kind, branch: task.integration?.branch ?? null, text, attachments,
-    reply: event.decisionId ? { taskId: task.id, decisionId: event.decisionId, command: `agent-plan answer ${task.id} ${event.decisionId} /path/to/answer.md` } : { taskId: task.id, command: event.kind === 'completed' ? `agent-plan accept ${task.id} ${task.verification?.commit ?? ''}`.trim() : `agent-plan feedback ${task.id} /path/to/feedback.md` } };
+    reply: event.decisionId ? { taskId: task.id, decisionId: event.decisionId, command: `agent-plan answer ${task.id} ${event.decisionId} /path/to/answer.md` } : { taskId: task.id, command: ['completed', 'published'].includes(event.kind) ? `agent-plan accept ${task.id} ${task.hosted?.commit ?? task.verification?.commit ?? ''}`.trim() : `agent-plan feedback ${task.id} /path/to/feedback.md` } };
 }
 
 export async function loadWebhookConfig(root) {
@@ -75,7 +77,8 @@ export async function notify(runtime, fetchImpl = fetch) {
   let receipts;
   try { receipts = await json(receiptPath); } catch (e) { if (e.code !== 'ENOENT') throw e; receipts = {}; }
   for (const task of runtime.tasks.values()) for (const event of task.events) {
-    if (!(config.webhook.format === 'grokbot' ? eventAction(event) : ['decision', 'attention', 'completed', 'failed', 'merged'].includes(event.kind)) || receipts[event.id] || config.since && Date.parse(event.at) < Date.parse(config.since)) continue;
+    if (event.kind === 'completed' && task.hosted?.number) continue; // Publication already requested approval for this candidate.
+    if (!(config.webhook.format === 'grokbot' ? eventAction(event) : ['decision', 'attention', 'completed', 'published', 'failed', 'merged', 'ci-status'].includes(event.kind)) || receipts[event.id] || config.since && Date.parse(event.at) < Date.parse(config.since)) continue;
     receipts[event.id] = { eventId: event.id, taskId: task.id, status: 'preparing', attemptedAt: now(), wake: 'unobserved' };
     await atomic(receiptPath, receipts);
     let payload;

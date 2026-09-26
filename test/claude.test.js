@@ -110,3 +110,28 @@ test('ticket dispatch preserves supervisor to coordinator to worker hierarchy an
   assert.match(coordinator, /status needs-input/);
   assert.match(coordinator, /settle all known children/);
 });
+
+test('native workflow performs risk-matched assurance before and after implementation', async () => {
+  const task = await read('workflows/task.md');
+  for (const category of ['security', 'data-safety', 'recovery', 'operator']) assert.match(task, new RegExp('`' + category + '`'));
+  assert.match(task, /routine\s+tasks keep the normal final review only/i);
+  assert.match(task, /plan-assurance-KIND-vN\.md/);
+  assert.match(task, /candidate-assurance-KIND-SHA\.md/);
+  assert.match(task, /Do not reuse its\s+plan-assurance agent or conversation/);
+  assert.match(task, /final general review/);
+
+  const researcher = await read('agents/researcher.md');
+  const reviewer = await read('agents/reviewer.md');
+  const delivery = await read('workflows/delivery.md');
+  const recovery = await read('workflows/recovery.md');
+  assert.match(researcher, /For plan assurance/);
+  assert.match(reviewer, /focused candidate-assurance category/);
+  assert.match(reviewer, /focused pass never claims the general pass/);
+  assert.match(delivery, /risk classification/);
+  assert.match(recovery, /all declared candidate-assurance/);
+
+  const stop = JSON.parse(await read('hooks/hooks.json')).hooks.Stop[0].hooks[0].prompt;
+  assert.match(stop, /recorded risk classification/);
+  assert.match(stop, /Routine classifications require no specialist assurance/);
+  assert.match(stop, /final general reviewer result/);
+});

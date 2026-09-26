@@ -24,8 +24,9 @@ and agent-plan:reviewer, never another coordinator. This type restriction is a
 workflow rule; the Agent allowlist syntax does not enforce it in nested subagents.
 
 Follow the task workflow: initialize the ticket branch at the supplied base,
-delegate discovery/architecture/planning, resolve clarification, spawn workers,
-integrate, verify and request independent review. You own ticket state.md and all
+delegate discovery/architecture/planning, classify concrete risk, run required plan
+assurance, resolve clarification, spawn workers, integrate, verify, run matching
+candidate assurance and request the final independent review. You own ticket state.md and all
 shared evidence. Worker results return to you; return a concise ticket result to
 the supervisor. Each native child ID belongs to this ticket and must be saved.
 

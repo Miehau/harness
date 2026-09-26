@@ -2,10 +2,17 @@
 
 Use the stage recorded on your agent in task state:
 - discovery: bounded code/document exploration; save findings and unknowns with refs.
-- architecture: existing concepts, patterns, constraints and a proposed task design.
-- planning: acceptance criteria, assignments, dependencies, evidence and checkpoints.
-- review: read workflow/review.md; inspect the supplied candidate diff, scope and evidence,
-  then report the required structured JSON findings. Never modify code or fix your own findings.
+- architecture: independently propose a design from the assigned committed base and
+  common brief/rubric. Explain the what, how and why, contracts, tradeoffs, risks and
+  verification with code references. Do not read competing proposals before reporting;
+  the owner and supervisor choose the architecture in the main conversation.
+- planning: acceptance criteria, assignments, dependencies, evidence and checkpoints;
+  for plan assurance, inspect the assigned risk category and exact document revisions.
+- review: read workflow/review.md; independently inspect your assigned reviewRole
+  against the exact frozen candidate diff, requirements and recorded verification.
+  Report structured JSON with matching commit/reviewRole, explicit coverage and findings.
+  Do not consult other roles’ current-candidate findings before inspecting; never modify
+  code or fix your own findings.
 - implementation: implement the clarified plan and update code/docs/evidence.
 
 Discovery, architecture, planning and review are read-only for repository files. Save authored
@@ -14,15 +21,31 @@ implementation early. Revise proposals through new artifacts after clarification
 
 # Worker workflow
 
-Read the assignment and shared contract paths in your inbox. Read repository
-AGENTS.md if present. Only work on the assigned objective. Shared interface changes
-must be proposed to the orchestrator before implementing dependent changes.
+Read the assignment and shared contract paths in your inbox. Read any assigned
+pstack skill/reference using artifact reads. The inbox's
+pstack page gives tool bindings; perform only your assigned slice, never nested
+delegation or the whole architect workflow.
+Read repository AGENTS.md if present. Only work on the assigned objective and within the agreed
+architecture. Shared interface changes or evidence challenging an agreed design must
+be proposed to the orchestrator before implementing dependent changes. Routine
+implementation details remain yours to resolve within the handoff's discretion.
 
-Use runner_read({area:"repo"|"artifacts",path}) to inspect files (directories list entries).
-Use runner_write({area:"repo"|"artifacts",path,content}) for changes or immutable artifacts.
-Explore workers can only write artifacts. Implementation workers write only their own
-worktree. Use runner_action({action:"command",input:{name}}) for named repo commands.
-Command outputs are saved; read the returned artifact when needed.
+Use native tools for repository reads, search, editing and shell commands. Implementation
+workers change only their assigned worktree; other stages must not edit repository files.
+These are trusted-local workflow rules, not OS isolation. Do not spawn unmanaged agents,
+read approval credentials, modify runner state or perform integration/acceptance yourself.
+Stop native commands and background jobs before asking a question or reporting completion.
+
+Use runner_read({area:"artifacts",path}) to read shared artifacts and
+runner_write({area:"artifacts",path,content}) to publish immutable artifacts. Never
+modify published artifacts directly. Runner file tools remain available for repository work.
+Writing workers may use runner_action({action:"command",input:{name}}) for configured
+commands with captured output, or native shell for other task-related commands.
+Read-only workers, including reviewers, may use native read-only commands for inspection;
+they cannot use the runner command API or commands that mutate repository files.
+Reviewers rely on recorded configured verification and request missing checks from
+the coordinator after the frozen review round. Record relevant native command
+results in the handoff; final verification still runs through the runner's configured checks.
 
 Save a concise handoff file containing changes, verification, and remaining concerns.
 Use runner_action({action:"report",input:{status:"completed"|"failed",artifact}}).

@@ -65,9 +65,12 @@ export function tabLabel(agent) {
 }
 
 export function agentName(task, agent) {
-  const slug = (task.slug || slugOf(task.title)).slice(0, 24);
   const role = agent.role === 'orchestrator' ? 'coord' : (agent.stage || agent.mode || 'worker');
-  return `${slug}-${role}-${agent.id.slice(0, 4)}`;
+  const suffix = `-${role}-${agent.id.slice(0, 4)}`;
+  const source = task.slug || slugOf(task.title);
+  const rooted = /^[a-z]/.test(source) ? source : `task-${source}`;
+  const slug = rooted.slice(0, 32 - suffix.length).replace(/-+$/g, '') || 'task';
+  return slug + suffix;
 }
 
 export function branchName(task, name) {

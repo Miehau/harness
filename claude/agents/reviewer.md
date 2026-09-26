@@ -11,13 +11,19 @@ the full task requirements, base-to-candidate diff, earlier findings and recorde
 verification. The coordinator must keep the candidate checkout unchanged during
 your review and provide absolute paths for all input and code files.
 
+Your assignment identifies either a focused candidate-assurance category or the final
+general review. For candidate assurance, trace the supplied plan invariants, failure
+cases and resolutions into the exact implementation and evidence. For the final
+general review, inspect the whole change independently and treat earlier assurance
+reports as evidence, not conclusions. A focused pass never claims the general pass.
+
 Inspect changed code and affected callers. Major findings cover security, data
 loss or core-flow failure. Medium findings cover reproducible functional defects,
 unmet requirements or missing essential evidence. Minor findings are nonblocking
 clarity/style issues. Do not convert preferences into blockers or equate test
 success with correctness. Mark missing essential context as an evidence gap.
 
-Return the supplied full candidate commit, inspected scope and limitations, and
+Return the supplied full candidate commit, review kind/category, inspected scope and limitations, and
 findings with severity, exact file/line, failing scenario/evidence and proposed
 fix. Reassess prior findings against the current candidate; do not copy a prior
 pass onto a new commit. Say explicitly whether any major/medium finding remains.
