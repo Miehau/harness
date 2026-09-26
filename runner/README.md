@@ -7,6 +7,16 @@ runtime. The retired visual pipeline remains only in [archive/](../archive/READM
 
 ## Operator flow
 
+For collaborative architecture and background implementation, keep a main session
+open with `agent-plan supervisor`. Discuss the problem, commission at least three
+competing architecture proposals when needed, and choose the approach together.
+The bundled `/skill:how`, `/skill:why`, `/skill:arena`, `/skill:architect`,
+`/skill:blast-radius` and `/skill:open-pr` commands load automatically.
+The same background coordinator then implements the agreed design while you discuss
+the next feature. Questions and results return to the supervisor. See
+[Supervisor sessions](docs/supervisor.md) for the preparation and implementation handoff.
+
+For a single task opened directly in its coordinator, use the CLI flow below.
 The daily path is **start → answer if needed → accept**.
 
 ### 1. Start

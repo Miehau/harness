@@ -112,14 +112,18 @@ onboarding. This is workflow policy, not a semantic completeness check.
 
 ## Delegated stages
 
-The coordinator selects preparation stages by uncertainty and risk. Small fixes,
+The main conversation owns architectural choices; the coordinator selects preparation
+stages within that scope, based on uncertainty and risk. Small fixes,
 cleanup, and deletions may proceed directly from clarification to implementation,
 verification, and independent review. Discovery is for uncertain impact; architecture
-is for unresolved design choices; planning workers are for substantial sequencing or
-multiple assignments. These preparation workers are read-only.
+is for unresolved design choices and requires at least three independent proposals
+against the same committed base, returned to the main conversation for agreement.
+Run proposals in batches if maxWorkers is below three. Planning workers are for
+substantial sequencing or multiple assignments. These preparation workers are read-only.
 
 Skipped stages and their brief reason belong in the clarification artifact—no empty
-placeholder documents or extra approval round. Material owner questions are resolved
+placeholder documents or extra approval round for already-agreed architecture. A
+preparation-only brief does not authorize implementation. Material owner questions are resolved
 before `clarify`; changing a current document revision invalidates that checkpoint.
 
 ## Model choices

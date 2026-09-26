@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile, stat, realpath, unlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile, stat, realpath, unlink, cp } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -168,6 +168,9 @@ export class Runtime {
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
+    // Bundle reference prompts too: target repositories need not contain these skills.
+    await cp(new URL('../codex/agent-plan/', import.meta.url), join(this.dir(task), 'artifacts', 'pstack'), { recursive: true, force: false, errorOnExist: true });
+    task.pstack = 'pstack/runner.md';
     await mkdir(join(this.dir(task), 'artifacts', 'skills'), { recursive: true });
     for (const skill of skills) await writeFile(join(this.dir(task), 'artifacts', skill.path), skill.content, { flag: 'wx', mode: 0o600 });
     task.skills = 'skills.json';
@@ -240,7 +243,7 @@ export class Runtime {
     task.operation = null;
     if (task.config.setup) await this.command(task, { cwd: task.integration.cwd }, task.config.setup);
     const agent = this.agent(task, 'orchestrator', task.integration.cwd);
-    this.message(agent, 'assignment', 'brief.md', { workflow: 'workflow.md', config: 'config.json', models: 'model-menu.json', discovery: task.discovery, skills: task.skills, artifactDir: agent.artifactDir });
+    this.message(agent, 'assignment', 'brief.md', { workflow: 'workflow.md', config: 'config.json', models: 'model-menu.json', discovery: task.discovery, skills: task.skills, pstack: task.pstack, artifactDir: agent.artifactDir });
     await this.launch(task, agent); return this.view(task);
   }
   async spawn(task, input) {
@@ -280,7 +283,7 @@ export class Runtime {
       const diff = await this.artifact(task, await git(task.integration.cwd, 'diff', '--no-ext-diff', task.base, agent.base), 'diff');
       review = { commit: agent.base, base: task.base, diff, rubric: 'workflow/review.md', previous: task.reviews ?? [], verification: task.verification };
     }
-    this.message(agent, 'assignment', input.assignment, { ...(review ? { review } : {}), workflow: 'worker.md', discovery: task.discovery, skills: task.skills, contract: agent.contract, artifactDir: agent.artifactDir });
+    this.message(agent, 'assignment', input.assignment, { ...(review ? { review } : {}), workflow: 'worker.md', discovery: task.discovery, skills: task.skills, pstack: task.pstack, contract: agent.contract, artifactDir: agent.artifactDir });
     this.event(task, 'worker-spawned', { agentId: agent.id, artifact: input.assignment, modelSelection: agent.modelSelection });
     await this.launch(task, agent); return { workerId: agent.id, status: agent.status, cwd: agent.cwd, error: agent.error };
   }

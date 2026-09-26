@@ -7,7 +7,8 @@ Keep coordinator artifacts under orchestrator/. The following are optional docum
 types, not a required checklist; create separate documents only when useful:
 - acceptance.md: numbered criteria and the evidence needed for each.
 - exploration.md: relevant code, existing tests and unknowns.
-- architecture.md: boundaries, ownership, interface contracts and future clashes.
+- architecture.md: the owner's selected approach, rationale, rejected alternatives,
+  boundaries, contracts, worker discretion, exact base and user-decision references.
 - plan.md: implementation assignments, dependencies and checkpoints.
 - evidence.md: each acceptance criterion mapped to exact test or visual artifacts.
 - handoff.md: candidate commit, evidence, unresolved issues and run instructions.
@@ -17,7 +18,8 @@ Do not invent architecture work or empty placeholder documents for skipped stage
 Use unique versioned filenames, then revise {name,artifact,previous} to update the
 current document pointer in task.documents. Previous versions remain readable.
 After user discussion, revise affected documents and explicitly tell workers which
-revision governs their assignment. Pause affected writers before changing a shared
+revision governs their assignment. The coordinator publishes the agreed decision;
+publication does not authorize changing it. Pause affected writers before changing a shared
 contract; notification alone is not agreement. Only the coordinator or owner can
 publish current document revisions.
 
@@ -48,7 +50,8 @@ workers with its reference. A sent message is not agreement or authorization.
 Use `ask` for a blocking question and `surface` for a nonblocking escalation.
 A supervisor can answer routine coordinator questions from agreed requirements;
 its answer is labeled answeredBy="supervisor", not human approval. Set
-`requiresOwner: true` for new scope/product choices or decisions needing the human.
+`requiresOwner: true` for architecture selection or departures from agreed architecture,
+new scope/product choices, or decisions needing the human.
 Both accept `hook: {action, pr?, evidence?, problems?}` alongside artifact/attachments.
 Actions: approval (aliases pr-approval, impl-approval), opinion (harness-opinion),
 problem (impl-problem, blocker). Put the message in the referenced artifact.

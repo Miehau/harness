@@ -1,0 +1,18 @@
+{
+  "name": "agent-plan",
+  "version": "0.2.0",
+  "description": "Repository exploration, rationale, design arenas, architecture-led implementation, blast-radius analysis and hosted change requests.",
+  "author": {
+    "name": "Agent Plan contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Plan",
+    "shortDescription": "Understand, architect, implement and publish repository changes.",
+    "longDescription": "Agent Plan ports pstack's how, why, arena, architect and blast-radius workflows, with at least three architecture proposals discussed in the main conversation before background implementation, tests and review. Publishing remains a separate authorized action.",
+    "developerName": "Agent Plan contributors",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Explore this change and compare at least three architecture proposals with me before delegating implementation."
+  }
+}

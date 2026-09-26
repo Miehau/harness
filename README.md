@@ -8,6 +8,12 @@ decisions; the dashboard shows the same runtime state.
 is an independent native Claude plugin with its own skills, hooks, and subagent
 workflow; it does not use the Pi/Herdr runtime.
 
+The [pstack skill port](codex/agent-plan/runner.md) supplies `how`, `why`, `arena`,
+`architect`, `blast-radius` and `open-pr`, including their reference playbooks and
+[upstream attribution](codex/agent-plan/THIRD_PARTY_NOTICES.md). The Pi supervisor
+loads them automatically. `codex/agent-plan/` also contains a Codex plugin manifest;
+placing it in this repository does not install it into Codex.
+
 ## Run the Pi/Herdr runner
 
 Install the command once from this checkout:
@@ -19,10 +25,21 @@ Install the command once from this checkout:
 With Herdr running and Pi credentials configured, the normal flow is:
 
 ```sh
-agent-plan start /path/to/repo "Implement this feature"
-# Answer questions in the Pi terminal when asked.
-agent-plan accept TASK
+agent-plan supervisor
 ```
+
+In that main conversation, use `/skill:how` to understand existing behavior,
+`/skill:why` to recover rationale, and `/skill:architect` to design a change together.
+Architecture compares at least three independent proposals before you agree the
+design and authorize background implementation. Continue discussing the next feature
+while the coordinator manages workers, checks and review; questions return here.
+The supervisor presents the verified candidate for local acceptance.
+
+For first-time repository setup, `agent-plan onboard /path/to/repo` delegates
+discovery of checks and useful project verification skills. Review and accept that
+candidate before feature tasks. For a single already-defined task, use
+`agent-plan start /path/to/repo "Implement this feature"` followed by
+`agent-plan accept TASK` after reviewing its result.
 
 `start` launches the background runtime, integration worktree, coordinator, and
 workers. `accept` rebases the verified candidate onto the local target, verifies it

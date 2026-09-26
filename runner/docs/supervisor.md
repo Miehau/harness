@@ -12,11 +12,56 @@ agent-plan supervisor --provider PROVIDER --model MODEL
 Any configured Pi provider works; extra Pi arguments such as `--continue` are passed
 through. Existing Pi setups can load `runner/supervisor-extension.js` with `pi -e`.
 
-Discuss requirements, then ask the supervisor to start the ticket. Its
-`runner_supervisor` action takes the repository path or alias, agreed requirements and
-acceptance criteria, and a stable request ID. Optional model settings select the
-coordinator. It submits, watches, and launches through the runtime; identical retries
-reuse durable receipts, including after uncertain responses.
+The CLI also loads the bundled [pstack skills](../../codex/agent-plan/runner.md).
+Use these in the supervisor conversation (no copying skill files into your project):
+
+| Command | Use |
+| --- | --- |
+| `/skill:how How does our export pipeline work?` | Trace current behavior and ownership. |
+| `/skill:why Why do exports use a background job?` | Recover evidence and separate it from inference. |
+| `/skill:architect Add incremental exports` | Compare at least three designs together, then delegate authorized implementation. |
+| `/skill:arena Compare export API designs` | Request independent proposals and cross-judgment directly. |
+| `/skill:blast-radius Check the export format change` | Investigate affected contracts and concrete safety evidence. |
+| `/skill:open-pr Publish the verified candidate` | A separately authorized hosted publication step. |
+
+When loading the extension manually, also pass `--skill /absolute/path/to/agent-plan-workspace/codex/agent-plan/skills`.
+Skill source lives in the runner installation. New tasks snapshot it with all
+supporting references, so workers in another repository can read the same version.
+Project-selected skills remain a separate configuration. Existing tasks retain their
+old snapshots; restart the supervisor to load newly integrated skills.
+
+Discuss the problem, constraints and architecture in this main session. When design
+is unresolved, ask for competing proposals. The supervisor uses `runner_supervisor`
+`start` with a **preparation-only** brief: at least three independent architecture
+workers inspect separate worktrees at the same committed base and return proposals.
+The coordinator keeps that base fixed and batches workers when capacity is below
+three. Proposals are artifacts; architecture workers cannot edit repository files.
+
+The coordinator returns all proposal references and a comparison through the existing
+`ask` decision with `requiresOwner:true`. The supervisor reads the proposals, compares
+tradeoffs, recommends an approach and discusses the choice with you. It sends a draft
+handoff through `feedback` before collecting your answer, so the coordinator receives
+the design context as well as your exact reply. The handoff records what to build,
+how and why, rejected alternatives, contracts, acceptance criteria, worker discretion,
+the exact base and proposal references. Feedback alone never authorizes implementation.
+
+Your answer selects the approach and whether to implement or continue preparation.
+The same coordinator publishes the agreed architecture and handles implementation,
+tests and review while you discuss the next feature here. A request for more research
+or a design-only choice does not authorize implementation. Challenges to agreed
+architecture return here; routine implementation choices stay with the workers.
+Small understood changes or architecture already agreed in this session can go
+straight to an implementation brief with the decision's source, without another
+architecture round or confirmation.
+
+Both briefs use the existing `start` action with the repository path or alias, scope,
+acceptance criteria and a stable request ID; optional model settings select the
+coordinator. Preparation versus implementation is workflow policy in the brief, not
+a new runtime task status. The existing pending human decision blocks coordinator
+actions; proposal count and interpretation of the agreed scope are agent instructions.
+The tool submits, watches and launches through the runtime; identical retries reuse
+durable receipts, including after uncertain responses. Do not create a second task
+for the implementation handoff.
 
 The same tool can `watch` an existing task. `/runner-watch FULL_TASK_ID` and
 `/runner-unwatch FULL_TASK_ID` remain available. Pending questions are delivered

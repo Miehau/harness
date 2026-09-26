@@ -38,9 +38,12 @@ test('workflow routes task playbooks and resolves observable forks with evidence
   assert.match(playbooks, /numeric baseline/i);
   assert.match(stages, /two or three isolated throwaway\s+prototypes/i);
   assert.match(stages, /Do not integrate\s+prototype commits/i);
-  assert.match(stages, /at least two architecture workers the same grounded brief/i);
-  assert.match(stages, /fresh planning worker for cross-judgment/i);
-  assert.match(stages, /product preference, scope choice or authority/i);
+  assert.match(stages, /at least\s+three independent architecture workers the same grounded brief/i);
+  assert.match(stages, /same\s+committed integration base/i);
+  assert.match(stages, /run in batches if needed/i);
+  assert.match(stages, /ask \{artifact,requiresOwner:true\}/);
+  assert.match(stages, /coordinator must not select the architecture/i);
+  assert.match(stages, /An answer is not automatically permission to build/i);
 });
 
 test('onboarding creates or maintains project verification skills only when useful', async () => {
@@ -106,6 +109,63 @@ test('fresh runner: worker question, restart, answer, report, integrate and veri
   assert.equal(runtime.task(task.id).status, 'completed');
   assert.equal(await readFile(join(f.repo, 'value.txt'), 'utf8'), 'base\n');
   assert.equal(await readFile(join(main.cwd, 'value.txt'), 'utf8'), 'improved\n');
+});
+
+test('three architecture proposals return to the supervisor before the same coordinator implements', async t => {
+  const f = await fixture(t); const { runtime, call, task, main, who, artifact } = f;
+  assert.equal(main.inbox[0].pstack, 'pstack/runner.md');
+  const promptPath = 'pstack/skills/architect/references/runner-prompt.md';
+  const bundledPrompt = await readFile(new URL('../codex/agent-plan/skills/architect/references/runner-prompt.md', import.meta.url), 'utf8');
+  assert.equal((await call(who(main), 'read', task.id, { area: 'artifacts', path: promptPath })).content, bundledPrompt);
+  const proposals = [], worktrees = new Set();
+  await artifact('architecture-brief.md', 'Preparation only: propose an approach and rationale; no feature implementation.');
+  // Capacity is two: independent proposals can run in batches without changing the base.
+  for (let i = 0; i < 3; i++) {
+    const spawned = await call(who(main), 'spawn', task.id, { assignment: 'architecture-brief.md', stage: 'architecture', mode: 'explore' });
+    const worker = runtime.task(task.id).agents.find(a => a.id === spawned.workerId);
+    assert.equal(worker.inbox[0].pstack, main.inbox[0].pstack);
+    assert.equal((await call(who(worker), 'read', task.id, { area: 'artifacts', path: promptPath })).content, bundledPrompt);
+    await assert.rejects(call(who(worker), 'write', task.id, { area: 'artifacts', path: promptPath, content: 'Replace instructions' }), /artifact/);
+    worktrees.add(worker.cwd); assert.equal(worker.base, task.base);
+    assert.equal((await call(who(worker), 'read', task.id, { area: 'repo', path: 'value.txt' })).content, 'base\n');
+    await assert.rejects(call(who(worker), 'write', task.id, { area: 'repo', path: 'value.txt', content: 'premature' }), /cannot write/);
+    const proposal = await artifact('proposal.md', `Approach ${i}: rationale, contracts and verification.`, who(worker));
+    proposals.push(proposal);
+    await call(who(worker), 'report', task.id, { status: 'completed', artifact: proposal });
+  }
+  assert.equal(worktrees.size, 3);
+  await artifact('design-choice.md', `Base: ${task.base}\nProposals:\n${proposals.join('\n')}\nChoose together; implement or continue preparation?`);
+  const question = await call(who(main), 'ask', task.id, { artifact: 'design-choice.md', requiresOwner: true });
+  const implementation = { assignment: 'architecture-brief.md', stage: 'implementation', mode: 'write' };
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /Waiting/);
+
+  const { default: supervisor } = await import('../runner/supervisor-extension.js');
+  const handlers = {}, commands = {}, messages = []; let tool;
+  supervisor({ on: (name, fn) => { handlers[name] = fn; }, registerCommand: (name, value) => { commands[name] = value; },
+    registerTool: value => { tool = value; }, appendEntry() {}, sendMessage: message => messages.push(message) },
+  { root: f.data, request: body => runtime.execute('owner', body) });
+  const ctx = { hasUI: true, sessionManager: { getEntries: () => [] }, ui: { setStatus() {}, input: async () => 'Implement approach 1 using the draft handoff.' } };
+  t.after(() => handlers.session_shutdown());
+  await handlers.session_start({}, ctx);
+  const prompt = (await handlers.before_agent_start({ systemPrompt: '' })).systemPrompt;
+  assert.match(prompt, /at least three independent architecture workers/);
+  assert.match(prompt, /Continue the same task after agreement/);
+  await commands['runner-watch'].handler(task.id, ctx);
+  assert(JSON.parse(messages[0].content).some(event => event.decisionId === question.decisionId));
+  await assert.rejects(tool.execute('choose-for-user', { action: 'answer', taskId: task.id, decisionId: question.decisionId, text: 'Implement approach 0' }), /human owner/);
+  const draft = JSON.parse((await tool.execute('handoff', { action: 'feedback', taskId: task.id,
+    text: `Approach 1 from ${proposals[1]} at ${task.base}: retain the existing contract; update value.txt and verify. Others add unnecessary dependencies.` })).content[0].text);
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /Waiting/);
+  await tool.execute('human-choice', { action: 'ask_user', taskId: task.id, decisionId: question.decisionId, text: `Draft handoff: ${draft.artifact}` }, undefined, undefined, ctx);
+  const current = runtime.task(task.id);
+  assert.equal(current.decisions.find(d => d.id === question.decisionId).answeredBy, 'owner');
+  assert(current.agents[0].inbox.some(m => m.kind === 'owner-feedback' && m.artifact === draft.artifact));
+  assert.equal(current.agents.filter(a => a.role === 'orchestrator').length, 1);
+  await call(who(main), 'revise', task.id, { name: 'architecture', artifact: draft.artifact });
+  await assert.rejects(call(who(main), 'spawn', task.id, implementation), /clarification/);
+  await call(who(main), 'clarify', task.id, { artifact: draft.artifact });
+  const writer = await call(who(main), 'spawn', task.id, { ...implementation, assignment: draft.artifact });
+  assert.equal(runtime.task(task.id).agents.find(a => a.id === writer.workerId).mode, 'write');
 });
 
 test('ownership, shared contracts, path boundaries and exact user decisions', async t => {

@@ -2,7 +2,10 @@
 
 Use the stage recorded on your agent in task state:
 - discovery: bounded code/document exploration; save findings and unknowns with refs.
-- architecture: existing concepts, patterns, constraints and a proposed task design.
+- architecture: independently propose a design from the assigned committed base and
+  common brief/rubric. Explain the what, how and why, contracts, tradeoffs, risks and
+  verification with code references. Do not read competing proposals before reporting;
+  the owner and supervisor choose the architecture in the main conversation.
 - planning: acceptance criteria, assignments, dependencies, evidence and checkpoints;
   for plan assurance, inspect the assigned risk category and exact document revisions.
 - review: read workflow/review.md; perform the assigned specialist assurance or general
@@ -16,9 +19,14 @@ implementation early. Revise proposals through new artifacts after clarification
 
 # Worker workflow
 
-Read the assignment and shared contract paths in your inbox. Read repository
-AGENTS.md if present. Only work on the assigned objective. Shared interface changes
-must be proposed to the orchestrator before implementing dependent changes.
+Read the assignment and shared contract paths in your inbox. Read any assigned
+pstack skill/reference using artifact reads. The inbox's
+pstack page gives tool bindings; perform only your assigned slice, never nested
+delegation or the whole architect workflow.
+Read repository AGENTS.md if present. Only work on the assigned objective and within the agreed
+architecture. Shared interface changes or evidence challenging an agreed design must
+be proposed to the orchestrator before implementing dependent changes. Routine
+implementation details remain yours to resolve within the handoff's discretion.
 
 Use runner_read({area:"repo"|"artifacts",path}) to inspect files (directories list entries).
 Use runner_write({area:"repo"|"artifacts",path,content}) for changes or immutable artifacts.

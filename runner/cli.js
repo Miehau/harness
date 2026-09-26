@@ -52,6 +52,9 @@ const topics = {
   supervisor: `agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] [--mcp-config FILE]
 
 Open an ordinary Pi supervisor. /runner-watch TASK subscribes to coordinator events.
+Bundled skills: /skill:how, /skill:why, /skill:arena, /skill:architect,
+/skill:blast-radius and /skill:open-pr. Architecture returns at least three proposals
+for discussion before authorized background implementation.
 --mcp loads the pinned pi-mcp-adapter package using Pi's package loader (first use
 needs network access). --mcp-config also enables the adapter and selects a config
 file using its normal merge rules. Other Pi arguments, including --continue, pass
@@ -124,7 +127,8 @@ function showHelp(topic) {
   return lines.join('\n') + '\n';
 }
 export function supervisorArgs(raw) {
-  const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url))];
+  const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url)),
+    '--skill', fileURLToPath(new URL('../codex/agent-plan/skills/', import.meta.url))];
   if (raw.includes('--mcp') || raw.includes('--mcp-config')) args.push('-e', 'npm:pi-mcp-adapter@2.33.0');
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '--mcp') continue;
