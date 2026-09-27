@@ -1,5 +1,9 @@
 # Deliver through GitHub or GitLab
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 The supervisor owns publication, the human conversation and hosted merge. The
 coordinator owns evidence preparation, code/CI fixes, verification and independent
 review in its own worktree. Keep this hierarchy during delivery. Workers never push.
@@ -19,8 +23,9 @@ Missing client/authentication is a delivery blocker; never fall back to local me
 2. Inspect the coordinator's actual full candidate SHA, clean checkout, settled
    descendants, passing local checks and matching independent review with no open
    major/medium findings. Inspect its recorded risk classification; every declared
-   category needs current plan and candidate assurance, followed by a fresh general
-   review on that same SHA. Recheck [alignment](alignment.md) and dependencies. Fetch
+   specialist role needs current plan assurance where required and a current candidate
+   report, alongside independent requirements/AC and correctness/code-quality reports
+   on that same exact verified SHA. Major/medium blockers cannot be waived. Recheck [alignment](alignment.md) and dependencies. Fetch
    and record the remote target tip. If it has advanced beyond the verified base,
    reactivate under [archival](archive.md) and resume the coordinator to integrate
    the target, verify and review again. Prefer additive commits on published branches;

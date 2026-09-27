@@ -1,0 +1,1 @@
+/skill:how How does createLookup work, including concurrent misses, expiry boundaries, failures, and where the state lives? This is a simple direct read-only leaf smoke test: use the skill simple path without subagents. Only inspect this fixture and the loaded skill package; no external data or writes. Cite files/lines.

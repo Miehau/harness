@@ -6,6 +6,43 @@ per ticket; each coordinator spawns and manages its own workers. There is no cus
 SDK, custom API client, Pi or Herdr dependency. File edits, Git and project checks use
 Claude's built-in tools with the user's normal permissions.
 
+The shared discussion skills are `/agent-plan:how`, `/agent-plan:why`,
+`/agent-plan:arena`, `/agent-plan:architect`, `/agent-plan:blast-radius` and
+`/agent-plan:open-pr`. Their methods and reference playbooks are generated from the
+canonical Codex package, with binding links redirected to this native supervisor.
+They introduce no runner daemon dependency. See [third-party notices](THIRD_PARTY_NOTICES.md)
+for upstream attribution. Regenerate checked-in copies with `npm run package:workflows`;
+`npm run check` rejects changed, missing or obsolete generated resources.
+
+The usual flow is **how → why (when rationale matters) → architect → agreed handoff
+→ native implementation → verification/review**. Small understood tasks can skip
+separate discovery and design. Claude execution stays inside Claude Code.
+
+## Codex architecture and review
+
+Install the official [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)
+separately for the mixed-model architecture and review stages:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+Architect runs two Claude proposal agents by default (three for broader changes) and
+one Codex proposal agent in separate worktrees at the same committed base. Each
+reports what it investigated, its proposed design, pros, cons and uncertainties.
+A fresh Codex judge inspects all reports and available worktree evidence, compares
+them and recommends one approach for your decision before implementation.
+
+Candidate review pairs one Claude requirements reviewer with a background Codex
+correctness reviewer on the same verified commit, plus risk-selected specialists.
+The coordinator owns all jobs, evidence and fixes; both reviews must finish clean.
+See [mixed-model architecture and review](workflows/second-model.md) for the handoffs
+and lifecycle. Implementation remains native Claude; no custom bridge or automatic
+review hook is needed. Live mixed-model execution remains unverified.
+
 ## Native nesting requirement
 
 Use Claude Code **2.1.219 or newer**, with an effective
@@ -13,7 +50,8 @@ Use Claude Code **2.1.219 or newer**, with an effective
 is `3`). The installed development CLI is 2.1.117: it can validate/install this
 package but is below the supported execution baseline. Update Claude through its
 normal update flow before trying the hierarchy. The plugin never silently updates
-Claude, changes settings, flattens worker dispatch or starts external agents.
+Claude, changes settings, flattens worker dispatch or substitutes external agents
+for missing native nesting. Declared Codex roles use the separate plugin above.
 
 ## Install once, then run Claude normally
 
@@ -43,8 +81,8 @@ claude
 The repository is inferred from your current directory. No repo path argument or
 launcher is needed. The plugin does not change Claude's authentication or billing;
 sign in through Claude normally with the subscription you intend to use. No login
-or model call is required to inspect/validate this package. Running agents and the
-prompt hook requires working Claude model access.
+or model call is required to inspect/validate this package. Running agents requires
+working Claude model access.
 
 For development only, `claude --plugin-dir /path/to/this/claude` loads this folder
 directly. Do not load the same plugin both installed and through `--plugin-dir`.
@@ -60,9 +98,8 @@ flowchart TD
   S <--> C2[Ticket B coordinator: native worktree]
   C1 --> R[Research / planning assurance workers]
   C1 --> W1[Implementation worker A: native worktree]
-  C1 --> W2[Implementation worker B: native worktree]
-  C1 --> A[Candidate assurance reviewers]
-  C1 --> V[Final general reviewer]
+  C1 --> A[Risk-selected specialist reviewers]
+  C1 --> V[Parallel requirements and correctness reviewers]
   C2 --> W3[Ticket B workers]
 ```
 
@@ -73,17 +110,26 @@ separate native worktrees while the supervisor remains available to the user.
 
 A coordinator receives the full brief, exact base commit, original checkout/target,
 notes path and bundled workflow paths. It checks that native Agent is available,
-initializes its ticket branch in its own worktree, delegates discovery, architecture
-and planning, records clarification, then spawns up to two parallel implementers.
+initializes its ticket branch in its own worktree, selects only necessary discovery,
+architecture and planning, records clarification, then spawns one implementer by default.
+Known small fixes skip discovery/architecture/planning workers.
 The coordinator alone owns ticket state, worker assignments, integration, checks
 and independent reviewer dispatch. Workers report to it; it reports to the supervisor.
 No experimental agent teams are required. The hierarchy has two subagent layers.
 
-During planning the coordinator classifies concrete security, data-safety, recovery
-and operator risks. Routine work adds no planning ceremony. Sensitive changes get a
-fresh read-only plan-assurance worker before implementation and a fresh matching
-candidate-assurance reviewer on the exact verified commit. A separate general review
-still runs last. Changed plans or commits invalidate the affected assurance evidence.
+The [common contract](shared/contract.md) defines stages and mandatory independent
+parallel requirements/AC and correctness/code-quality reviews, plus risk-selected
+security, database, recovery, UI and performance specialists. Every required report
+covers the same exact verified commit. A changed candidate reruns every required
+role; major/medium blockers cannot be waived. No generic final reviewer is required.
+The [common task record](shared/task-record.md) defines the evidence minimum.
+
+Onboarding reads owner `.agent-plan/project.json` and optional ignored
+`.agent-plan/local.json` for runtime, role models, hosting and checks. This binding
+uses native Claude for implementation and the official Codex plugin for proposal,
+judge and correctness-review roles. Other unsupported runtimes block dispatch rather
+than silently substituting Claude. Models inherit their runtime defaults unless
+explicitly selected through supported routing.
 
 Before writers start, coordinators publish versioned scope artifacts describing
 features, files, APIs, schemas and dependencies, then return `needs-alignment`.
@@ -107,8 +153,8 @@ currently enforced by Claude. Leaves omit Agent entirely.
 Both the coordinator and writers verify their worktree and initialize the assigned
 new branch at the exact supplied commit; native worktree defaults may start from
 another ref. Writers share a versioned contract and explicit file ownership.
-Overlapping changes are sequenced. The coordinator defaults to two concurrent
-implementers and three repair rounds; these limits are workflow instructions.
+Overlapping changes are sequenced. The coordinator defaults to one
+implementer and three repair rounds; these limits are workflow instructions.
 
 For a product question, the coordinator saves the decision, settles affected workers,
 checkpoints and returns needs-input. The supervisor obtains the user's answer and
@@ -117,7 +163,8 @@ second coordinator to answer a question. A coordinator settles its known childre
 before returning a candidate, blocker or pause, reporting any uncertainty.
 
 The coordinator integrates commits, verifies the combined candidate, runs required
-candidate assurance and then spawns a separate read-only general reviewer. After a pass, the supervisor presents that exact
+parallel independent requirements/AC and correctness/code-quality reviewers plus
+risk-selected specialists. After a pass, the supervisor presents that exact
 candidate as a GitHub PR or GitLab MR with evidence. The supervisor follows hosted
 CI and required reviews, then merges through the host only after you approve the
 exact candidate. Fixes return to the coordinator for workers, verification and a
@@ -203,11 +250,9 @@ One coordinator owns each ticket and its worktree.
 
 The SessionStart hook uses only the shell's built-in `printf` to remind Claude where
 the workflow and notes live, including after compaction. It does not read notes,
-start a service or resume work itself. The native prompt Stop hook checks the
-completeness of a report marked `Agent Plan candidate:`. It permits ordinary stops,
-blockers and human waits, and has a repeat guard. It uses a Claude model evaluation
-on Stop events even when the report is unmarked. It cannot prove test results or
-enforce approvals. There are no scripts behind these hooks.
+start a service or resume work itself. There is no Stop hook or model evaluation
+on ordinary conversation stops. Candidate completeness, verification, independent
+reviews and owner approval remain requirements of the explicitly invoked workflow.
 
 Supervisor continuity uses one readable `agent-plan/sessions/SESSION/memory.md`
 plus versioned snapshots before requested compaction. It preserves discussion,

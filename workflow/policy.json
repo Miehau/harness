@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "requiredReviewRoles": ["requirements", "correctness"],
+  "riskReviewRoles": {
+    "security": "security",
+    "data-safety": "database",
+    "database": "database",
+    "recovery": "recovery",
+    "operator": "recovery",
+    "ui": "ui",
+    "performance": "performance"
+  },
+  "blockingSeverities": ["major", "medium"]
+}

@@ -1,5 +1,9 @@
 # Archive completed coordinator work
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 The supervisor automatically archives finished coordinator work after a verified
 candidate or confirmed acceptance/cancellation. Use `<Claude config directory>/
 agent-plan/archive.md`, beside active.md, initialized from

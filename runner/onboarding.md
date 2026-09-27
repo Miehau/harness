@@ -10,7 +10,7 @@ Record coordinator clarification before one implementation worker applies the fi
 
 ## Git hosting
 
-Read the task's snapshotted hosting configuration. Configure `.runner/project.json`
+Read the task's snapshotted hosting configuration. Configure `.agent-plan/project.json`
 with the owner-selected provider, hostname, project path, Git remote and target branch:
 
 ```json
@@ -56,10 +56,13 @@ Create a reliable verify.sh that runs meaningful existing tests and exits nonzer
 when checks fail. Do not fake success, suppress failures, or install global tools.
 Document prerequisites, commands and coverage gaps. If meaningful verification
 cannot be established, ask the owner. Merge the verification command into the existing
-.runner/project.json; preserve curated commands, setup, verify, hosting, skills and
+.agent-plan/project.json; preserve curated commands, setup, verify, hosting, skills and
 UI evidence settings. Use bash verify.sh when no adequate verification command exists.
-Keep .omp/, .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
-agent-local files stay untracked. Run every configured verification command, including onboard_verify.
+Keep .omp/, .pi/, .runner/answers/, .runner/briefs/, and .runner-ui-*/ in .gitignore so
+agent-local files stay untracked. Also ignore `.agent-plan/local.json` and
+`.agent-plan/tasks/`. Do not ignore all of `.runner/` or `.agent-plan/`: shared project
+configuration and maintained feature/architecture documents belong in Git. Task-local
+briefs, answers, logs and credentials do not belong in shared project documentation. Run every configured verification command, including onboard_verify.
 
 For an application with a local HTTP preview, save a named long-running command in
 `commands` and `preview: {"command": "preview", "url": "http://127.0.0.1:PORT"}`
@@ -89,7 +92,7 @@ repository-grounded sections:
 Put feature-specific recipes beside the skill, indexed by stable feature IDs from
 `.runner/feature-map.md`. Each recipe names how a user reaches the feature, how the
 harness drives it and what observable state proves it works. Expose helper scripts as
-named commands in `.runner/project.json`, add the skill path to `skills`, and configure
+named commands in `.agent-plan/project.json`, add the skill path to `skills`, and configure
 `uiEvidence` when the project can provide its required integrated-candidate manifest.
 Run launch, doctor, one representative drive, evidence capture and cleanup before
 handing the generated skill over. A skill that has not executed successfully is a
@@ -195,3 +198,7 @@ worker, and republish its reference. Retain earlier artifacts and checkpoints.
 The final handoff links verify.sh, configuration, feature map, architecture (or reason
 for skipping it), evidence, uncovered areas and the candidate branch/commit. These
 maps are experimental guides, not proof of correctness or complete system coverage.
+
+Use the existing `.runner/project.json` owner file instead when canonical config is absent
+and that legacy file already exists; never create a competing project file. Preserve
+execution and agents choices. Never copy private local overrides into project configuration.

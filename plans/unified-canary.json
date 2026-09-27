@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "taskId": "5388f144-e394-4330-bf55-ec7359207afd",
+  "commit": "2622c13181488832730bf476765465fae90cb52f",
+  "execution": {
+    "mode": "runner",
+    "runtime": "omp"
+  },
+  "agents": [
+    {
+      "role": "orchestrator",
+      "model": {
+        "provider": "xai-oauth",
+        "model": "grok-4.7"
+      }
+    },
+    {
+      "role": "worker",
+      "stage": "implementation",
+      "model": {
+        "provider": "xai-oauth",
+        "model": "grok-4.7"
+      }
+    },
+    {
+      "role": "worker",
+      "reviewRole": "requirements",
+      "stage": "review",
+      "model": {
+        "provider": "xai-oauth",
+        "model": "grok-4.7"
+      }
+    },
+    {
+      "role": "worker",
+      "reviewRole": "correctness",
+      "stage": "review",
+      "model": {
+        "provider": "xai-oauth",
+        "model": "grok-4.7"
+      }
+    }
+  ],
+  "reviews": [
+    {
+      "agentId": "87553bf6-593b-4574-8363-edecf02b5330",
+      "reviewRole": "requirements",
+      "coverage": [
+        "AC1: value.txt:1 at 2622c131 is exactly b'ready\\n' (length 6), confirmed by git show of that path and a worktree binary read. Diff runtime/2599d73c-54ab-4e85-b394-775354927899.diff replaces before with ready and does not mark a missing newline.",
+        "AC2: git diff --name-status 4310de03..2622c131 is only M value.txt (1 insertion, 1 deletion). Review worktree status is clean. No other repository file changes; no tests or docs added, matching the no-feature-map scope.",
+        "AC3: runtime/f9fe952d-4cce-4ab8-8363-ae939094be0b.json records verify passed on 2622c131. runtime/3db83638-aea5-4322-8d80-33a233d36de1.json is test exit 0; argv is node comparing value.txt utf8 to ready\\n. Pre-fix orchestrator/d0ccc2b3-aca0-418a-9b1f-1b308f4b3058.json exited 1 while contents were before\\n."
+      ],
+      "commit": "2622c13181488832730bf476765465fae90cb52f",
+      "artifact": "workers/87553bf6-593b-4574-8363-edecf02b5330/review.json",
+      "passed": true,
+      "at": "2026-09-26T23:06:59.926Z"
+    },
+    {
+      "agentId": "23eed7fb-bcbf-4bed-bfb8-9021c0d5ef60",
+      "reviewRole": "correctness",
+      "coverage": [
+        "value.txt:1 is exactly ready\\n (len 6, hex 72656164790a); base 4310de03be11ce7fa119f1c3a13c9bfe9072068f was before\\n (hex 6265666f72650a)",
+        "git diff 4310de03be11ce7fa119f1c3a13c9bfe9072068f..2622c13181488832730bf476765465fae90cb52f changes only value.txt; review worktree clean at that commit",
+        "no code callers; AGENTS.md only constrains the edit; project.json test contract requires ready\\n and matches the file",
+        "edge cases absent in the file and rejected by the test contract: missing newline, extra newline, trailing space, wrong string, BOM, CRLF",
+        "recorded verification runtime/f9fe952d-4cce-4ab8-8363-ae939094be0b.json passed test on this commit (runtime/3db83638-aea5-4322-8d80-33a233d36de1.json exit 0); pre-fix failure orchestrator/d0ccc2b3-aca0-418a-9b1f-1b308f4b3058.json exit 1"
+      ],
+      "commit": "2622c13181488832730bf476765465fae90cb52f",
+      "artifact": "workers/23eed7fb-bcbf-4bed-bfb8-9021c0d5ef60/review.json",
+      "passed": true,
+      "at": "2026-09-26T23:08:01.160Z"
+    }
+  ]
+}

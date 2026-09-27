@@ -5,6 +5,10 @@ argument-hint: "[task ID]"
 disable-model-invocation: true
 ---
 
+Read [the common workflow contract](../../shared/contract.md) and
+[the common task record](../../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Read [recovery](../../workflows/recovery.md) and inspect the exact selected task.
 Requested task: $ARGUMENTS
 

@@ -3,9 +3,13 @@
 Use the stage recorded on your agent in task state:
 - discovery: bounded code/document exploration; save findings and unknowns with refs.
 - architecture: independently propose a design from the assigned committed base and
-  common brief/rubric. Explain the what, how and why, contracts, tradeoffs, risks and
+  frozen brief/grounding/rubric file references. Accept no hints or evaluative steering
+  during generation. Explain the what, how and why, contracts, tradeoffs, risks and
   verification with code references. Do not read competing proposals before reporting;
-  the owner and supervisor choose the architecture in the main conversation.
+  the owner and supervisor choose the architecture in the main conversation. Save the
+  full proposal without an arbitrary output cap, or a specific evidence-backed failure
+  report. Execution failure does not prove architectural nonviability; a nonviability
+  claim identifies conflicting constraints and evidence.
 - planning: acceptance criteria, assignments, dependencies, evidence and checkpoints;
   for plan assurance, inspect the assigned risk category and exact document revisions.
 - review: read workflow/review.md; independently inspect your assigned reviewRole
@@ -56,7 +60,7 @@ editing after reporting.
 
 For a question or a shared-contract conflict, save a question artifact and use
 runner_action({action:"ask",input:{artifact}}). End the turn and wait for the durable
-answer. The runtime will wake you. Never guess a decision or repeatedly poll.
+answer. The runtime will wake you. Never guess a decision, use shell sleep or repeatedly poll.
 
 Your inbox includes artifactDir. Write all artifacts under that directory, including
 checkpoints, questions, evidence and handoffs. You can read other artifacts but cannot

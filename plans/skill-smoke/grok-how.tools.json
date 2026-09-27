@@ -1,0 +1,80 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "path": "skill://how",
+      "i": "Load how-skill instructions"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "skill://how/../../runner.md",
+      "i": "Load execution bindings"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "skill://how/references/explainer-prompt.md",
+      "i": "Load explainer prompt template"
+    }
+  },
+  {
+    "name": "glob",
+    "arguments": {
+      "i": "Locate runner and skill package files",
+      "path": "skill://how/**"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "skill://how/../runner.md",
+      "i": "Try sibling runner.md"
+    }
+  },
+  {
+    "name": "grep",
+    "arguments": {
+      "i": "Find createLookup definitions and uses",
+      "pattern": "createLookup",
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o"
+    }
+  },
+  {
+    "name": "glob",
+    "arguments": {
+      "i": "List fixture files",
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o/cache.mjs",
+      "i": "Read createLookup implementation"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o/README.md",
+      "i": "Read fixture README"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o/decision.md",
+      "i": "Read design decision notes"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "path": "/tmp/agent-plan-skill-smoke-zHiE5o/cache.test.mjs",
+      "i": "Read lookup behavior tests"
+    }
+  }
+]

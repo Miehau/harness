@@ -1,5 +1,9 @@
 # Supervisor continuity
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 This applies only to the main supervisor conversation. Coordinators and workers
 keep their existing short-lived lifecycle; do not checkpoint, compact or restart
 them to refresh supervisor context. No custom summarizer or external runtime.

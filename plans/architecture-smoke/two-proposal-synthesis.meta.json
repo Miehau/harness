@@ -1,0 +1,36 @@
+{
+  "scope": "two-proposal synthesis diagnostic; original three-candidate requirement not validated",
+  "provider": "openai-codex",
+  "model": "gpt-6-sol",
+  "seconds": 44.137,
+  "code": 0,
+  "timeout": false,
+  "stopReason": "stop",
+  "inputs": [
+    [
+      "COMMON ASSIGNMENT",
+      "orchestrator/architecture-assignment.md"
+    ],
+    [
+      "COMMON RUBRIC",
+      "orchestrator/proposal-rubric.md"
+    ],
+    [
+      "ORIGINAL BRIEF",
+      "brief.md"
+    ],
+    [
+      "GROUNDED FIXTURE FACTS",
+      "workers/67d600cc-d4af-4341-8bbf-eef7a4c568db/discovery.md"
+    ],
+    [
+      "PROPOSAL A (Terra)",
+      "workers/875f190e-df7a-4197-99ba-27658f64894b/proposal.md"
+    ],
+    [
+      "PROPOSAL B (Sol)",
+      "workers/a4851826-032a-4a1d-a45b-e3703c0fe4b7/proposal.md"
+    ]
+  ],
+  "rawDir": "/private/tmp/two-proposal-synthesis-5ArC6u"
+}

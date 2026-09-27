@@ -1,5 +1,20 @@
 # Native Claude handoff
 
+## Mixed-model architecture and review smoke check
+
+The [mixed-model workflow](workflows/second-model.md) adds coordinator-owned Codex
+jobs through the official plugin; it does not route Claude through OMP. In a live
+disposable task, verify two Claude proposal agents (three for a broad change) and
+one Codex proposer inspect distinct worktrees at the exact same base. Each report
+must include work done, learnings, pros and cons. A fresh Codex judge must receive
+all reports and retained worktree evidence, recommend one approach, and return that
+recommendation to the user before implementation. Confirm the judge does not resume
+the proposer. Candidate review must pair a Claude requirements reviewer and a
+background Codex correctness reviewer, with both required on the same verified SHA.
+Test missing Codex, a failed/missing proposal, delayed review, candidate drift and
+cancellation: no silent Claude fallback, premature publication or surviving untracked
+job. These are pending live checks; offline package validation does not prove them.
+
 The earlier MCP/runtime adapter was the wrong architecture and has been removed.
 This replacement consists only of Claude-native skills, subagent definitions,
 workflows and hook JSON. The Pi runtime no longer imports anything from `claude/`.
@@ -56,16 +71,17 @@ upgrade/settings mutation or supervisor-to-worker fallback is implemented.
    four agent types load. No custom MCP server should appear.
 2. Start two small independent tickets. Confirm the supervisor spawns one isolated
    coordinator per ticket, and each coordinator has Agent and spawns its own workers.
-   Confirm the original checkout stays unchanged during ticket execution. Confirm discovery, architecture,
-   planning and clarification precede native implementation. Check that each writer
+   Confirm the original checkout stays unchanged during ticket execution. Confirm known small fixes skip discovery/architecture/planning workers and use
+   one implementer; broader tasks select only necessary stages. Check that each writer
    is in a distinct worktree at the supplied full base commit. A default-branch
    worktree must be corrected before editing; do not weaken this to make it run.
 3. Confirm worker results reach their coordinator, and ticket results reach the
    supervisor. Try a product question: the coordinator checkpoints and returns
    needs-input, the supervisor asks, then resumes the same coordinator with the answer.
    Check that no duplicate coordinator/worker is created.
-4. Confirm combined verification, separate read-only review and a candidate handoff.
-   The prompt Stop hook is a completeness reminder, not a proof checker.
+4. Confirm combined verification, parallel independent requirements/AC and
+   correctness/code-quality reviews and a candidate handoff.
+   The invoked workflow checks report completeness; no Stop hook runs on conversation turns.
 5. Checkpoint, compact or reopen, then recover the supervisor-to-coordinator-to-worker
    mapping from notes/Git. Do not expect old native
    IDs to resume across sessions without checking the installed client's behavior.
@@ -149,14 +165,15 @@ Test explicit restore, missing memory, stale PR head, ambiguous session IDs and
 auto-compaction without a fresh snapshot. Unknown states must remain unresolved,
 not invented. Never use `/clear` in this flow. These live checks remain unverified.
 
-## Risk assurance (0.7.0)
+## Shared workflow (0.8.0)
 
-Run one routine task and confirm it records a routine classification, skips specialist
-agents and still receives the final general review. Run one sensitive task for each
-category over time: security, data-safety, recovery and operator. Confirm a fresh
-researcher challenges the frozen plan before writers, its material findings are
-resolved, a fresh matching reviewer inspects the exact verified commit, and a separate
-general reviewer runs last. Change the reviewed plan and then the candidate commit;
-each must invalidate only the corresponding assurance evidence. Verify parallel plan
-passes and native candidate passes keep their assignments distinct. These live checks
-remain unverified.
+Run one known small fix and confirm discovery/architecture/planning workers are skipped,
+one implementer is used, and both mandatory reviewers run independently in parallel.
+Run sensitive tasks with security, database, recovery, UI and performance risks as
+applicable. Check required plan assurance and risk-selected candidate reports, all
+against the same exact verified commit. Each reviewer saves an independent first
+report before discussing findings; there is no generic final review. Change the
+candidate and confirm every required role reruns. Major/medium findings cannot be
+waived. Verify shared task-record evidence and owner runtime/model/hosting/check
+configuration. Unsupported runtime requests must block instead of silently crossing
+to another CLI. These instruction-level behaviors remain unverified in live Claude.

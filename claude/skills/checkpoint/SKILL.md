@@ -5,6 +5,10 @@ argument-hint: "[optional focus ticket]"
 disable-model-invocation: true
 ---
 
+Read [the common workflow contract](../../shared/contract.md) and
+[the common task record](../../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Supervisor session identity: ${CLAUDE_SESSION_ID}
 Optional resume focus: $ARGUMENTS
 

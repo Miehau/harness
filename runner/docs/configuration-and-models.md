@@ -5,7 +5,7 @@ and snapshotted at task submission.
 
 ## Project configuration
 
-Create `.runner/project.json` manually or start with:
+Create `.agent-plan/project.json` manually or start with:
 
 ```sh
 agent-plan init /absolute/repo '["npm","test"]'
@@ -139,7 +139,7 @@ the coordinator unless configured. Direct provider/model overrides require a rea
 Availability is checked before worker worktree creation; missing models or credentials
 are not silently substituted.
 
-Configure alternatives in `.runner/project.json`:
+Configure alternatives in `.agent-plan/project.json`:
 
 ```json
 {
@@ -170,7 +170,7 @@ resumes a waiting coordinator; use `answer` for the exact decision.
 
 ## Selected managed skills
 
-Add committed repository-relative paths to `.runner/project.json`:
+Add committed repository-relative paths to `.agent-plan/project.json`:
 
 ```json
 {
@@ -244,3 +244,32 @@ explicitly requested; Pi/Claude supervisor tools return video metadata as text.
 Completion events include the manifest and up to four attachments. Webhooks inline
 small PNGs; videos and large files require an authenticated artifact fetch by a trusted
 local relay. No public hosting or receiver-side playback is provided.
+
+## Portable execution selection
+
+Canonical configuration is `.agent-plan/project.json`; existing `.runner/project.json`
+is read only when canonical configuration is absent. Files are not combined.
+Ignored `.agent-plan/local.json` may override execution and model preferences, including
+individual role fields, but cannot change hosting or verification commands.
+No credential fields belong in either file. Runtime authentication stays native.
+
+```json
+{
+  "execution": { "mode": "runner", "runtime": "omp" },
+  "agents": {
+    "coordinator": { "model": "grok-4.7", "provider": "xai-oauth" },
+    "implementation": { "model": "grok-4.7", "provider": "xai-oauth" },
+    "review": { "model": "gpt-6-sol", "provider": "openai-codex" }
+  }
+}
+```
+
+These model IDs require matching authenticated availability; choose your installed
+provider's models. Role runtime inherits execution when omitted. Explicit reviewer
+role selections fail if unavailable; they never silently switch providers.
+Discovery inherits the coordinator unless configured separately. Legacy model fields
+and workerModels remain supported; canonical role fields take precedence.
+Run `agent-plan config REPO` to inspect execution support without starting a daemon.
+Native Claude/Codex packages use `mode: native` and their matching runtime. Native
+Grok/Cursor and cross-runtime delegation remain unavailable. See the
+[examples](../../examples/README.md) and [shared contract](../../workflow/contract.md).

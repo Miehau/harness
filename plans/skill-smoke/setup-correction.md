@@ -1,0 +1,3 @@
+The first attempt mistakenly targeted the claude plugin directory. It was interrupted before completed output capture, and is excluded from results. Correct execution loads codex/agent-plan, matching runner/cli.js supervisorArgs and test/portable-skills.test.js loader. This matrix tests direct leaf execution, not native Claude bindings or runner dispatch.
+
+The first escalated Grok pair timed out before model invocation: OMP startup reported phase readPipedInput because harness stdin remained open. Fixed by spawning OMP with stdin ignored (EOF). Both startup timeouts are excluded from model results; no model output occurred. Prior sandbox attempts were interrupted before completion.

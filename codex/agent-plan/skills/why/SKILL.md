@@ -5,7 +5,7 @@ description: "Use for 'why does X work this way', 'why we picked Y', design rati
 
 # Why
 
-With Agent Plan, first read [execution bindings](../../runner.md). Follow the
+With Agent Plan, first read [execution bindings](references/execution.md). Follow the
 assigned role and available tools; skill instructions do not expand permissions.
 
 

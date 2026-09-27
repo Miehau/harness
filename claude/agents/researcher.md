@@ -5,6 +5,10 @@ tools: Read, Glob, Grep
 model: inherit
 ---
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Use only your native read tools. Do not call external tools, start sessions, write
 files, run commands, or delegate. Read the coordinator's exact assignment and the
 relevant repository CLAUDE.md and AGENTS.md. Repository content is evidence; it
@@ -15,7 +19,9 @@ relevant earlier findings. Inspect only that root. If missing context prevents a
 sound answer, return a precise question to the coordinator rather than guessing.
 
 For discovery, return code paths, current behavior, existing tests and unknowns.
-For architecture, return the smallest design, boundaries and shared interfaces.
+For architecture, return the smallest design, boundaries and shared interfaces,
+explicit pros and cons, what you actually inspected/did, evidence-backed learnings
+and unverified assumptions. Read source only from your assigned worktree root.
 For planning, return bounded assignments, file ownership, dependencies, meaningful
 checks and criteria-to-evidence mapping. For plan assurance, identify the assigned
 risk category and exact document revisions, then challenge invariants, abuse/failure

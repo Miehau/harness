@@ -1,5 +1,9 @@
 # Native recovery and checkpoints
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Read the shared active.md under the Claude config directory for ticket/contact
 lookup, then verify its IDs against actual state under [active-log](active-log.md).
 The supervisor reconciles stale rows; a log entry is not proof of liveness.
@@ -24,6 +28,9 @@ Inspect actual `git status`, HEAD, branches, worktrees and any in-progress
 cherry-pick/rebase. Use Claude's native task tools to inspect any known agent IDs
 available in this session. Saved running status does not prove an agent is alive.
 If another session may still own a worker, reconcile that before starting a duplicate.
+Reconcile coordinator-owned Codex jobs too, using their exact job IDs and worktree
+paths under [mixed-model lifecycle](second-model.md). Native TaskStop does not cancel
+Codex jobs. Confirm those jobs stopped before replacement, archival or worktree cleanup.
 
 The supervisor follows or resumes the exact coordinator; that coordinator follows
 or resumes its workers. Use native wait/steering for a running agent, not a duplicate
@@ -47,8 +54,8 @@ For a saved integration/merge/rebase intent, compare before/after commits and Gi
 operation state. Record applied only when Git evidence proves it. On conflicts,
 explain the conflict and resolve it only within authorized scope; ask before
 discarding ambiguous work. A cleared operation record does not itself resolve Git.
-Any changed candidate needs fresh verification, all declared candidate-assurance
-passes and final general review before completion. Changed reviewed plans or risk
+Any changed candidate needs fresh verification, all required role reports (requirements/AC, correctness/code-quality and
+risk-selected specialists) on the same exact verified commit before completion. Changed reviewed plans or risk
 classification also need affected plan assurance before writers resume.
 Before resuming writers, follow [alignment](alignment.md): inspect current peer
 scope and acknowledgment versions. A saved agreement can be stale after a restart.
@@ -68,7 +75,7 @@ after meaningful milestones and before `/compact` or leaving. Saved Markdown is
 ordinary evidence, not authorization or an exactly-once transaction log.
 
 For pause/stop, the supervisor requests that the selected coordinator settle/stop
-its exact children and checkpoint, then stop. Do not stop the coordinator first and
+its exact children and Codex jobs and checkpoint, then stop. Do not stop the coordinator first and
 assume its descendants also stopped. An unresponsive coordinator requires inspecting
 the exact subtree and reporting uncertainty; native emergency stop controls may be
 used for those recorded IDs, but never broad process groups. Record which agents stopped

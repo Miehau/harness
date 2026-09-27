@@ -12,7 +12,7 @@ runner_action actions and input:
 - answer: {decisionId,artifact} — answer a worker question
 - integrate: {workerId} — commit references come from worker reports
 - verify: {} — execute snapshotted repo commands and retain output files
-- report: {status:"completed"|"failed",artifact}
+- report: {status:"completed"|"failed",artifact,descriptionArtifact?} — hosted coordinator completion supplies a separate reviewer-facing PR/MR description file
 - remove: {path} — workers only; delete a file in their worktree
 - command: {name} — run a named command in your worktree, retaining output
 

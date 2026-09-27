@@ -1,0 +1,12 @@
+{
+  "execution": { "mode": "runner", "runtime": "omp" },
+  "agents": {
+    "supervisor": { "runtime": "omp" },
+    "coordinator": { "runtime": "omp" },
+    "implementation": { "runtime": "omp" },
+    "review": { "runtime": "omp" }
+  },
+  "commands": { "test": ["npm", "test"] },
+  "verify": ["test"],
+  "maxWorkers": 2
+}

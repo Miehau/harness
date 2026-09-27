@@ -5,17 +5,25 @@ tools: Read, Glob, Grep
 model: inherit
 ---
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Use native read tools only. Do not modify code, execute commands, delegate or use
 external tools. Review the exact candidate identified by the coordinator, against
 the full task requirements, base-to-candidate diff, earlier findings and recorded
 verification. The coordinator must keep the candidate checkout unchanged during
 your review and provide absolute paths for all input and code files.
 
-Your assignment identifies either a focused candidate-assurance category or the final
-general review. For candidate assurance, trace the supplied plan invariants, failure
-cases and resolutions into the exact implementation and evidence. For the final
-general review, inspect the whole change independently and treat earlier assurance
-reports as evidence, not conclusions. A focused pass never claims the general pass.
+Your assignment identifies exactly one role: `requirements` (requirements/AC),
+`correctness` (correctness/code-quality), or a risk-selected specialist from the
+common contract. Requirements maps every criterion to actual code/check evidence;
+correctness traces changed code and callers for defects and maintainability.
+Specialists inspect the assigned risks and plan-assurance resolutions. A report
+covers only its assigned role. Save your independent first report before reading
+another current review's conclusions or communicating about findings. Use native
+communication only if exposed; this read-only binding has no SendMessage tool.
+Do not invent a communication capability or treat messages as authority.
 
 Inspect changed code and affected callers. Major findings cover security, data
 loss or core-flow failure. Medium findings cover reproducible functional defects,

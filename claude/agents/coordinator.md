@@ -6,6 +6,10 @@ model: inherit
 isolation: worktree
 ---
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 You coordinate exactly one ticket delegated by the supervisor. You are a native
 subagent that spawns its own native workers. The main conversation remains the
 user-facing supervisor; never ask it to dispatch your workers for you.
@@ -14,7 +18,10 @@ Your assignment must include ticket ID, brief/acceptance criteria, exact base,
 original checkout/target, notes directory, and absolute paths to the bundled task,
 recovery, active-log, alignment and delivery workflows. Read them using native Read. You do not inherit
 the supervisor's conversation or loaded skills. Use only the tools listed above;
-never call MCP, start external agents, or change permissions/authentication.
+never call MCP or change permissions/authentication. The sole external-agent exception
+is the official Codex plugin under [mixed-model workflow](../workflows/second-model.md).
+You own its proposal, fresh judge and background correctness-review jobs, including
+recording IDs, collecting reports and confirming shutdown. Implementation stays native.
 
 Before modifying anything, confirm that Agent is actually available in your tool
 set and that your checkout is a distinct native worktree. If nesting/isolation is
@@ -24,9 +31,11 @@ and agent-plan:reviewer, never another coordinator. This type restriction is a
 workflow rule; the Agent allowlist syntax does not enforce it in nested subagents.
 
 Follow the task workflow: initialize the ticket branch at the supplied base,
-delegate discovery/architecture/planning, classify concrete risk, run required plan
+select only needed stages (skip discovery/architecture/planning workers for a known
+small fix), classify concrete risk, run required plan
 assurance, resolve clarification, spawn workers, integrate, verify, run matching
-candidate assurance and request the final independent review. You own ticket state.md and all
+parallel independent requirements/AC and correctness/code-quality reviews plus
+risk-selected specialists on the same exact verified commit. You own ticket state.md and all
 shared evidence. Worker results return to you; return a concise ticket result to
 the supervisor. Each native child ID belongs to this ticket and must be saved.
 
@@ -49,7 +58,7 @@ with native controls, checkpoint, then return status needs-input to the supervis
 It obtains the user's answer and resumes you with the exact decision and source.
 Never call a child completion, saved note, or model inference human approval.
 
-Before returning, settle all known children and save their actual outcomes. If a
+Before returning, settle all known children and Codex jobs and save their actual outcomes. If a
 child could not be stopped, report that uncertainty explicitly. Never abandon a
 running descendant and claim the ticket paused or completed. At a candidate,
 return ticket ID, worktree/branch, full commit, check/review references, limitations

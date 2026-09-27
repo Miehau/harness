@@ -11,7 +11,8 @@
     "dev": "node --watch runner/server.js",
     "runner": "node runner/cli.js",
     "test": "node scripts/test.mjs",
-    "check": "node scripts/test.mjs --check",
+    "check": "node scripts/test.mjs --check && node scripts/package-workflows.mjs --check",
+    "package:workflows": "node scripts/package-workflows.mjs",
     "probe": "node runner/probe.js",
     "canary": "node runner/canary.js"
   },

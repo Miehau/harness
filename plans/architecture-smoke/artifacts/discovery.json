@@ -1,0 +1,9 @@
+{
+  "base": "b731c08edd71d93a90e7b8faaf05185b934f7fe9",
+  "area": "repo",
+  "featureMap": null,
+  "architecture": null,
+  "featuresDirectory": null,
+  "verificationSetupNeeded": false,
+  "instruction": "Read available index/architecture as needed, then only relevant linked feature documents. Missing discovery docs are normal, not a task failure. If verificationSetupNeeded, reuse verify.sh or establish a meaningful verify.sh in the worker worktree. Ask the owner if verification cannot be established; never fake a passing check."
+}

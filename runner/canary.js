@@ -9,6 +9,11 @@ import { assert, git, id } from './io.js';
 const timeoutMs = Number(process.env.RUNNER_CANARY_TIMEOUT_MS ?? 10 * 60 * 1000);
 assert(Number.isFinite(timeoutMs) && timeoutMs >= 60_000, 'RUNNER_CANARY_TIMEOUT_MS must be at least 60000');
 
+const model = process.env.RUNNER_CANARY_MODEL;
+const provider = process.env.RUNNER_CANARY_PROVIDER;
+assert(Boolean(model) === Boolean(provider), 'Set both RUNNER_CANARY_MODEL and RUNNER_CANARY_PROVIDER');
+const choice = { runtime: 'omp', ...(model ? { model, provider } : {}) };
+
 const root = await mkdtemp(join(tmpdir(), 'agent-plan-canary-'));
 const repo = join(root, 'repo');
 const data = join(root, 'data');
@@ -18,10 +23,12 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => abort.abo
 
 try {
   process.stdout.write(`Live canary: model calls enabled; timeout ${timeoutMs}ms\n`);
-  await mkdir(join(repo, '.runner'), { recursive: true });
+  await mkdir(join(repo, '.agent-plan'), { recursive: true });
   await writeFile(join(repo, 'value.txt'), 'before\n');
   await writeFile(join(repo, 'AGENTS.md'), 'Change only value.txt. Use the configured test command.\n');
-  await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({
+  await writeFile(join(repo, '.agent-plan', 'project.json'), JSON.stringify({
+    execution: { mode: 'runner', runtime: 'omp' },
+    ...(model ? { agents: { coordinator: choice, implementation: choice, review: choice } } : {}),
     commands: { test: [process.execPath, '-e', "const fs=require('node:fs');if(fs.readFileSync('value.txt','utf8')!=='ready\\n')process.exit(1)"] },
     verify: ['test'], maxWorkers: 2, maxAttempts: 5, timeoutMinutes: Math.ceil(timeoutMs / 60_000), commandTimeoutMs: 30_000,
   }, null, 2) + '\n');
@@ -65,7 +72,7 @@ try {
   await app.close(); app = null;
   await rm(root, { recursive: true });
   retained = false;
-  process.stdout.write(JSON.stringify({ passed: true, taskId, commit: head }) + '\n');
+  process.stdout.write(JSON.stringify({ passed: true, taskId, commit: head, execution: task.config.execution, agents: task.agents.map(a => ({ role: a.role, reviewRole: a.reviewRole, stage: a.stage, model: a.modelSelection })), reviews: task.reviews }) + '\n');
 } catch (error) {
   if (app && taskId) {
     const task = app.runtime.task(taskId);

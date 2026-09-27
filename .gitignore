@@ -13,3 +13,7 @@ connection.json
 !.env.example
 
 webhook.json
+
+# Machine preferences and private native task state
+.agent-plan/local.json
+.agent-plan/tasks/

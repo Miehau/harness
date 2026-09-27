@@ -1,0 +1,60 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading how skill instructions",
+      "path": "skill://how"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading why skill instructions",
+      "path": "skill://why"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading skill execution bindings",
+      "path": "skill://how/../../runner.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup implementation",
+      "path": "/private/tmp/agent-plan-skill-smoke-zHiE5o/cache.mjs:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture tests",
+      "path": "/private/tmp/agent-plan-skill-smoke-zHiE5o/cache.test.mjs:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading rationale record",
+      "path": "/private/tmp/agent-plan-skill-smoke-zHiE5o/decision.md:1-10"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture context",
+      "path": "/private/tmp/agent-plan-skill-smoke-zHiE5o/README.md:1-10"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Inspecting two fixture commits",
+      "cwd": "/private/tmp/agent-plan-skill-smoke-zHiE5o",
+      "command": "git log -2 --format='%H%n%s%n%b%n---'",
+      "timeout": 30
+    }
+  }
+]
