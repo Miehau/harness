@@ -41,8 +41,12 @@ remote must match the configured host/project; multiple push URLs are rejected.
 
 After all workers finish, verification passes and all required reviewer roles pass,
 the coordinator's completed report pushes the candidate and creates/updates one PR/MR.
-Its description contains the brief, clarification, handoff mapping AC to evidence and
-links to saved reports. Both providers store evidence on immutable branches named
+The coordinator supplies a separate reviewer-facing description via the completed
+report's `descriptionArtifact` file reference. It describes the problem, changes,
+verification and limitations across the full PR/MR diff. The publisher appends the
+exact candidate and links to full evidence; it never embeds or truncates the task
+prompt, clarification or internal handoff. Older tasks without a description receive
+a short title-and-handoff-link fallback. Description revisions use new immutable files. Both providers store evidence on immutable branches named
 `runner-evidence/TASK/CANDIDATE_SHA/EVIDENCE_COMMIT`; a revised handoff for the same
 product commit creates another evidence revision without rewriting earlier proof.
 Links name the evidence commit directly and preserve repository access controls.

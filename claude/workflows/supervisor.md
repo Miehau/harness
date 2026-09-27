@@ -8,15 +8,21 @@ The main Claude conversation is the supervisor. Discuss requirements with the
 user, launch one native coordinator per ticket, relay decisions and present results.
 Only coordinators spawn research, implementation and review workers. Do not perform
 ticket implementation or dispatch leaf workers from this main conversation.
-Use native tools only; no MCP, custom runtime, CLI-launched model sessions or daemon.
+Keep Claude execution inside Claude Code. The coordinator also owns Codex proposal,
+judging and background review jobs through the official plugin under
+[mixed-model architecture and review](second-model.md). No OMP/Herdr, custom bridge
+or CLI-launched Claude sessions. The supervisor never dispatches leaf workers.
 
 Read `.agent-plan/project.json` and optional ignored `.agent-plan/local.json` for
 owner runtime, role models, hosting and checks. Use `.runner/project.json` only when
 canonical project configuration is absent; local overrides apply only to execution and
 agent/model preferences, never checks or hosting. Save the resolved config snapshot in
 the ticket brief, excluding secrets. Refuse unsupported configured/requested
-runtimes; this binding supports native Claude only and native runtime crossing is not
-implemented. Use supported native model selection or report a routing blocker.
+runtimes; implementation uses native Claude, while the declared Codex proposal,
+judge and correctness-review roles use the official Codex plugin. Read second-model.md
+before dispatch, resolve the installed Codex plugin root and pass it and the workflow
+path to the coordinator. Missing Codex support blocks the mixed-model stages; do not
+silently replace them with Claude. Use supported model selection or report a blocker.
 
 ## Compatibility before dispatch
 
@@ -65,8 +71,8 @@ the supervisor to take over spawning or to run external processes.
    discussing other tickets. Omit a teammate name; experimental teams are not used.
 5. Pass file references to the complete agreed brief and criteria, full base commit, original checkout and
    target branch, ticket notes path, shared active.md path, original supervisor ID,
-   and absolute paths to task.md, recovery.md, active-log.md, alignment.md and
-   delivery.md beside this workflow. Include constraints and user decisions with
+   and absolute paths to task.md, recovery.md, active-log.md, alignment.md,
+   second-model.md and delivery.md beside this workflow. Include constraints and user decisions with
    their source. The coordinator cannot rely on inheriting conversation context.
 6. Save the returned coordinator ID/handle immediately. After an uncertain spawn,
    inspect native tasks and supervisor.md before retrying; do not create a second

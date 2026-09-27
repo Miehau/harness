@@ -28,6 +28,9 @@ Inspect actual `git status`, HEAD, branches, worktrees and any in-progress
 cherry-pick/rebase. Use Claude's native task tools to inspect any known agent IDs
 available in this session. Saved running status does not prove an agent is alive.
 If another session may still own a worker, reconcile that before starting a duplicate.
+Reconcile coordinator-owned Codex jobs too, using their exact job IDs and worktree
+paths under [mixed-model lifecycle](second-model.md). Native TaskStop does not cancel
+Codex jobs. Confirm those jobs stopped before replacement, archival or worktree cleanup.
 
 The supervisor follows or resumes the exact coordinator; that coordinator follows
 or resumes its workers. Use native wait/steering for a running agent, not a duplicate
@@ -72,7 +75,7 @@ after meaningful milestones and before `/compact` or leaving. Saved Markdown is
 ordinary evidence, not authorization or an exactly-once transaction log.
 
 For pause/stop, the supervisor requests that the selected coordinator settle/stop
-its exact children and checkpoint, then stop. Do not stop the coordinator first and
+its exact children and Codex jobs and checkpoint, then stop. Do not stop the coordinator first and
 assume its descendants also stopped. An unresponsive coordinator requires inspecting
 the exact subtree and reporting uncertainty; native emergency stop controls may be
 used for those recorded IDs, but never broad process groups. Record which agents stopped

@@ -7,11 +7,12 @@ shared stages, review roles, evidence and approval rules; this file binds them t
 This workflow runs inside the ticket's `agent-plan:coordinator` subagent. The main
 conversation is the supervisor, which delegates the ticket and receives its result.
 Use Claude's built-in Read, Write, Edit, Glob, Grep, Bash, Agent and question/task
-tools. No MCP tools, custom runner, daemon, SDK, external agent process, custom API client
-or nested `claude -p` calls. Git and project checks run through native Bash under
+tools. The official Codex plugin is the sole external-agent exception, for proposals,
+judging and review under [mixed-model workflow](second-model.md). No MCP tools,
+custom runner, daemon, SDK, custom API client or nested `claude -p` calls. Git and project checks run through native Bash under
 the user's normal permissions. Do not change authentication or permission modes.
 If repository instructions require unavailable external tools, surface that
-limitation instead of overriding this native-only boundary.
+limitation instead of overriding this tool boundary.
 
 ## Start and record state
 
@@ -61,8 +62,11 @@ For a known small fix, skip discovery, architecture and planning workers. Save a
 concise brief, accepted criteria and assignment, then use one implementer. For an
 unclear or broad task, delegate only the bounded stages needed by the common contract.
 
-For unresolved architecture, follow the common contract's independent proposal round.
-Default to three requested seats unless the owner supplies a roster. Pass identical
+For unresolved architecture, follow [mixed-model architecture](second-model.md): two
+Claude proposal agents by default (three for broad changes) plus one Codex proposal
+agent, each in a separate worktree at the same exact base. This is the native Claude
+binding's requested roster. A fresh Codex judge compares all completed reports and
+recommends one approach for the owner. Pass identical
 frozen brief, grounding, rubric and base file references to isolated researchers;
 no hints, evaluative steering or other proposals until submission. Return every full
 proposal or evidence-backed failure to the supervisor. Missing proposals leave the
@@ -91,7 +95,8 @@ real setup and verification commands from the repository; an existing
 `.agent-plan/project.json` and ignored `.agent-plan/local.json` provide owner
 configuration; read runtime, role models, hosting and checks before dispatch. Do not
 execute the runner or silently substitute a runtime/model. Native crossing to another
-runtime is not implemented; unsupported configured/requested runtime blocks dispatch.
+runtime is limited to the declared Codex roles in second-model.md; unsupported
+configured/requested runtime blocks dispatch.
 Do not invent a passing check or quietly replace failing checks with a trivial one.
 
 Resolve routine choices from existing conventions. For missing product/scope
@@ -171,13 +176,15 @@ polling; no shell sleep loop, `/loop`, watcher process or model polling loop.
    that HEAD and tracked files stayed unchanged by verification; inspect untracked
    outputs too. A failing/missing check blocks a ready candidate.
 4. Freeze the full verified candidate and save its base-to-candidate diff. Launch
-   fresh independent read-only `agent-plan:reviewer` agents in parallel: one assigned
-   `requirements` (requirements/AC), one `correctness` (correctness/code-quality),
-   plus every risk-selected specialist role (batch if native concurrency is limited).
-   Supply the same full verified commit,
-   brief/criteria, actual code paths, diff and check evidence to each. Do not reuse its
-   plan-assurance agent or conversation. Do not supply another current review's
-   conclusions before each reviewer saves its independent first report.
+   fresh independent read-only review agents in parallel: one native Claude
+   `agent-plan:reviewer` assigned `requirements` (requirements/AC), and one background
+   Codex job assigned `correctness` (correctness/code-quality), following
+   [mixed-model review](second-model.md). Add native reviewers for every risk-selected
+   specialist role (batch if capacity is limited). Both mandatory roles must finish;
+   background means concurrent, not optional. Supply the same full verified commit,
+   brief/criteria, actual code paths, diff and check evidence to each. Do not reuse a
+   proposal, judge or plan-assurance conversation. Do not supply another current
+   review's conclusions before each reviewer saves its independent first report.
 5. Save each report as `review-ROLE-SHA-vN.md` with role, exact full commit, inspected
    scope, findings and limitations. Native communication is allowed where supported
    after independent first reports; record amendments as new versions. Messages do
@@ -196,7 +203,7 @@ polling; no shell sleep loop, `/loop`, watcher process or model polling loop.
    required role reports and absolute notes path. This remains instruction-level
    coordination, not a server-enforced gate.
 
-Settle your known child agents before returning a question, blocker or candidate.
+Settle your known child agents and Codex jobs before returning a question, blocker or candidate.
 Report any uncertain surviving child explicitly. The supervisor presents the
 candidate and owns PR/MR publication, hosted CI follow-up and human acceptance. Do not merge, push or deploy. Follow its
 revalidation requests under [delivery](delivery.md) and [recovery](recovery.md).

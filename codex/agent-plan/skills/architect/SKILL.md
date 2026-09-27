@@ -66,8 +66,9 @@ Read every proposal and compare the tradeoffs with the user. Recommend an approa
 then record the selected design and rationale, rejected alternatives, fixed contracts,
 acceptance criteria, worker discretion, exact base and user-decision references.
 
-The coordinator returns proposals using `ask` with `requiresOwner:true`; the supervisor
-holds this discussion and records the answer using the existing human decision tool.
+The coordinator returns proposals and the pending design decision through the selected
+execution binding. The supervisor holds this discussion and records the user's actual
+answer through that binding's human-decision mechanism.
 Choosing a design without authorizing implementation keeps the task in preparation.
 More research or a rejection is not permission to build. Reuse prior explicit
 agreement and authorization without asking for them again.

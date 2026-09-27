@@ -410,7 +410,7 @@ export class Runtime {
       assert(task.agents.filter(a => a.role === 'worker' && a.mode === 'write' && a.status === 'completed').every(a => a.integrated), 'Completed writing work must be integrated');
       assertCandidateReviews(task, await git(agent.cwd, 'rev-parse', 'HEAD'));
       assert(task.verification?.passed && task.verification.commit === await git(agent.cwd, 'rev-parse', 'HEAD') && !await git(agent.cwd, 'status', '--porcelain'), 'Fresh passing integration verification is required');
-      if (task.config.hosting) await publishCandidate(this, task, { artifact: input.artifact });
+      if (task.config.hosting) await publishCandidate(this, task, { artifact: input.artifact, descriptionArtifact: input.descriptionArtifact });
     }
     if (agent.role === 'worker' && agent.mode === 'write' && input.status === 'completed') {
       task.operation = { kind: 'worker-commit', agentId: agent.id, at: now() }; await this.save(task);

@@ -44,6 +44,15 @@ for (const name of discussion) {
     let content = await readFile(path, 'utf8');
     if (local === 'SKILL.md') content = content.replaceAll('(references/execution.md)', '(../../workflows/supervisor.md)')
       .replace('---\n\n', '---\n\nRead [the common workflow contract](../../shared/contract.md) and\n[the common task record](../../shared/task-record.md). Follow the native Claude\nsupervisor binding; discussion skills do not expand tool permissions.\n\n');
+    if (local === 'SKILL.md' && ['architect', 'arena'].includes(name)) {
+      content = content.replace('# ' + (name === 'architect' ? 'Architect' : 'Arena'),
+        'For native Claude, follow [mixed-model architecture](../../workflows/second-model.md):\n' +
+        '2–3 Claude proposals plus one Codex proposal in separate worktrees, then a fresh\n' +
+        'Codex judge recommending one approach to the user. This binding overrides the\n' +
+        'generic roster and judge fallback below. Each report includes work done, learnings,\n' +
+        'pros and cons. Candidate review pairs Claude with background Codex.\n\n# ' +
+        (name === 'architect' ? 'Architect' : 'Arena'));
+    }
     await copy(join(destination, local), content);
   }
   for (const path of await files(destination)) if (!expected.has(relative(destination, path))) {

@@ -1,5 +1,20 @@
 # Native Claude handoff
 
+## Mixed-model architecture and review smoke check
+
+The [mixed-model workflow](workflows/second-model.md) adds coordinator-owned Codex
+jobs through the official plugin; it does not route Claude through OMP. In a live
+disposable task, verify two Claude proposal agents (three for a broad change) and
+one Codex proposer inspect distinct worktrees at the exact same base. Each report
+must include work done, learnings, pros and cons. A fresh Codex judge must receive
+all reports and retained worktree evidence, recommend one approach, and return that
+recommendation to the user before implementation. Confirm the judge does not resume
+the proposer. Candidate review must pair a Claude requirements reviewer and a
+background Codex correctness reviewer, with both required on the same verified SHA.
+Test missing Codex, a failed/missing proposal, delayed review, candidate drift and
+cancellation: no silent Claude fallback, premature publication or surviving untracked
+job. These are pending live checks; offline package validation does not prove them.
+
 The earlier MCP/runtime adapter was the wrong architecture and has been removed.
 This replacement consists only of Claude-native skills, subagent definitions,
 workflows and hook JSON. The Pi runtime no longer imports anything from `claude/`.
@@ -66,7 +81,7 @@ upgrade/settings mutation or supervisor-to-worker fallback is implemented.
    Check that no duplicate coordinator/worker is created.
 4. Confirm combined verification, parallel independent requirements/AC and
    correctness/code-quality reviews and a candidate handoff.
-   The prompt Stop hook is a completeness reminder, not a proof checker.
+   The invoked workflow checks report completeness; no Stop hook runs on conversation turns.
 5. Checkpoint, compact or reopen, then recover the supervisor-to-coordinator-to-worker
    mapping from notes/Git. Do not expect old native
    IDs to resume across sessions without checking the installed client's behavior.

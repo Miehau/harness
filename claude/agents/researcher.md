@@ -19,7 +19,9 @@ relevant earlier findings. Inspect only that root. If missing context prevents a
 sound answer, return a precise question to the coordinator rather than guessing.
 
 For discovery, return code paths, current behavior, existing tests and unknowns.
-For architecture, return the smallest design, boundaries and shared interfaces.
+For architecture, return the smallest design, boundaries and shared interfaces,
+explicit pros and cons, what you actually inspected/did, evidence-backed learnings
+and unverified assumptions. Read source only from your assigned worktree root.
 For planning, return bounded assignments, file ownership, dependencies, meaningful
 checks and criteria-to-evidence mapping. For plan assurance, identify the assigned
 risk category and exact document revisions, then challenge invariants, abuse/failure

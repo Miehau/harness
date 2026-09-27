@@ -66,9 +66,9 @@ test('native agent definitions restrict research/review and isolate writers with
   }
 });
 
-test('native startup hook needs no helper program and stop prompt includes bounded completion checks', async t => {
+test('native startup hook needs no helper program and no Stop hook is registered', async t => {
   const hooks = JSON.parse(await read('hooks/hooks.json')).hooks;
-  assert.deepEqual(Object.keys(hooks).sort(), ['SessionStart', 'Stop']);
+  assert.deepEqual(Object.keys(hooks).sort(), ['SessionStart']);
   const startup = hooks.SessionStart[0].hooks[0];
   assert.equal(startup.type, 'command');
   assert.match(startup.command, /^printf '%s\\n' "[^"`\n]*"$/);
@@ -85,12 +85,6 @@ test('native startup hook needs no helper program and stop prompt includes bound
   assert.match(hooks.SessionStart[0].matcher, /clear/);
   assert.match(hooks.SessionStart[0].matcher, /compact/);
   assert.deepEqual(await readdir(cwd), []);
-  const stop = hooks.Stop[0].hooks[0];
-  assert.equal(stop.type, 'prompt');
-  assert.match(stop.prompt, /\$ARGUMENTS/);
-  assert.match(stop.prompt, /stop_hook_active/);
-  assert.match(stop.prompt, /Agent Plan candidate:/);
-  assert.match(stop.prompt, /not proof/);
 });
 
 test('ticket dispatch preserves supervisor to coordinator to worker hierarchy and nesting prerequisite', async () => {
@@ -140,10 +134,6 @@ test('native candidate roles preserve independent report and exact-commit bounda
   const reviewer = await read('agents/reviewer.md');
   assert.match(reviewer, /report\s+covers only its assigned role/);
   assert.match(reviewer, /independent first report before reading/);
-  const stop = JSON.parse(await read('hooks/hooks.json')).hooks.Stop[0].hooks[0].prompt;
-  for (const phrase of ['requirements/AC', 'correctness/code-quality', 'same exact verified commit', 'cannot be waived', 'no generic final reviewer']) {
-    assert(stop.includes(phrase), `Missing role gate: ${phrase}`);
-  }
 });
 
 test('all six shared discussion skills bind to native Claude with upstream attribution', async () => {
@@ -152,6 +142,10 @@ test('all six shared discussion skills bind to native Claude with upstream attri
     assert.match(content, new RegExp(`^name: ${name}$`, 'm'));
     assert.match(content, /\]\(\.\.\/\.\.\/workflows\/supervisor\.md\)/);
     assert.doesNotMatch(content, /\]\(\.\.\/\.\.\/runner\.md\)|runner_supervisor|runner_action|Herdr|OMP daemon/);
+    const mixedBinding = '../../workflows/second-model.md';
+    assert.equal(content.includes(mixedBinding), ['architect', 'arena'].includes(name));
+    const source = await readFile(join(root, '../codex/agent-plan/skills', name, 'SKILL.md'), 'utf8');
+    assert(!source.includes(mixedBinding), 'Claude mixed-model routing must not leak into other bindings');
   }
   const notice = await read('THIRD_PARTY_NOTICES.md');
   assert.match(notice, /pstack 0\.15\.2 by Lauren Tan/);

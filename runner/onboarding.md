@@ -58,8 +58,11 @@ Document prerequisites, commands and coverage gaps. If meaningful verification
 cannot be established, ask the owner. Merge the verification command into the existing
 .agent-plan/project.json; preserve curated commands, setup, verify, hosting, skills and
 UI evidence settings. Use bash verify.sh when no adequate verification command exists.
-Keep .omp/, .pi/, .runner/answers/, and .runner-ui-*/ in .gitignore so
-agent-local files stay untracked. Run every configured verification command, including onboard_verify.
+Keep .omp/, .pi/, .runner/answers/, .runner/briefs/, and .runner-ui-*/ in .gitignore so
+agent-local files stay untracked. Also ignore `.agent-plan/local.json` and
+`.agent-plan/tasks/`. Do not ignore all of `.runner/` or `.agent-plan/`: shared project
+configuration and maintained feature/architecture documents belong in Git. Task-local
+briefs, answers, logs and credentials do not belong in shared project documentation. Run every configured verification command, including onboard_verify.
 
 For an application with a local HTTP preview, save a named long-running command in
 `commands` and `preview: {"command": "preview", "url": "http://127.0.0.1:PORT"}`

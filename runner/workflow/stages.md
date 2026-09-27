@@ -137,7 +137,13 @@ for the later implementation handoff; do not launch a replacement task.
    parallel against one frozen verified commit, bounded by maxWorkers.
    Fix → integrate → verify → rerun every required role until
    there are no major/medium findings. Save a handoff with changes, evidence mapped to
-   acceptance criteria, limitations and the branch/commit. Complete with report only after verification. End at the candidate:
+   acceptance criteria, limitations and the branch/commit. For hosted delivery, also
+   write a separate immutable PR/MR description for a reviewer unfamiliar with the task:
+   explain the problem, resulting changes, verification and material limitations. Cover
+   the full diff against the hosting target, including earlier branch changes. Link full
+   evidence instead of copying prompts or internal handoffs. Pass its file reference as
+   descriptionArtifact alongside artifact in the completed report. No output truncation.
+   Complete with report only after verification. End at the candidate:
    hosted completion publishes the PR/MR; only the owner can approve accept for the
    exact published revision. Local-only acceptance rebases, reverifies and merges.
 

@@ -108,7 +108,8 @@ test('a new handoff invalidates the publication shortcut even on the same candid
   const f = await fixture(t); await publishCandidate(f.runtime, f.task);
   await writeFile(join(f.runtime.dir(f.task), 'artifacts', 'updated-result.md'), 'New acceptance evidence');
   await publishCandidate(f.runtime, f.task, { artifact: 'updated-result.md' });
-  assert.match(f.request.body, /New acceptance evidence/);
+  assert.doesNotMatch(f.request.body, /New acceptance evidence/);
+  assert.match(f.request.body, /updated-result.md/);
   assert(f.task.hosted.evidence.some(evidence => evidence.artifact === 'updated-result.md'));
   assert.equal(f.creates, 1);
 });
@@ -166,4 +167,22 @@ test('GitLab evidence links use repository commit access rather than public uplo
   const evidence = await publishEvidence(f.runtime, f.task, ['brief.md'], { checkRemote: async () => remote });
   assert.equal(evidence[0].url, `https://git.example.test/group/repo/-/blob/${evidence[0].evidenceCommit}/brief.md`);
   assert(!evidence[0].url.includes('/uploads/'));
+});
+
+test('publication uses a separate complete description and links full working documents as evidence', async t => {
+  const f = await fixture(t);
+  const root = join(f.runtime.dir(f.task), 'artifacts');
+  const description = 'Fix empty-state rendering.\n\n' + 'Detailed relevant explanation. '.repeat(900) + 'END OF DESCRIPTION';
+  await writeFile(join(root, 'description.md'), description);
+  await writeFile(join(root, 'result.md'), 'INTERNAL HANDOFF SHOULD NOT BE INLINED');
+  await publishCandidate(f.runtime, f.task, { descriptionArtifact: 'description.md' });
+  assert(f.request.body.startsWith(description));
+  assert.doesNotMatch(f.request.body, /INTERNAL HANDOFF|Implement the agreed requirement/);
+  assert.match(f.request.body, /Full handoff.*result.md/);
+  await writeFile(join(root, 'description-v2.md'), 'Revised reviewer summary');
+  await publishCandidate(f.runtime, f.task, { descriptionArtifact: 'description-v2.md' });
+  assert(f.request.body.startsWith('Revised reviewer summary'));
+  await publishCandidate(f.runtime, f.task);
+  assert(f.request.body.startsWith('Revised reviewer summary'));
+  assert.equal(f.creates, 1);
 });

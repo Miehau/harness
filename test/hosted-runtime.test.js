@@ -83,7 +83,9 @@ test('runtime snapshots hosting, publishes after clean role reviews, and require
   assert.deepEqual(f.current().config.hosting, f.hosting);
   await assert.rejects(f.call(f.who(f.main), 'accept', f.taskId, { commit }), /Owner/);
   await assert.rejects(f.call(f.who(worker), 'accept', f.taskId, { commit }), /Inactive|Owner/);
-  await f.complete();
+  await f.artifact(f.main, 'pr-description.md', 'Improve the value shown to users.');
+  await f.call(f.who(f.main), 'report', f.taskId, { status: 'completed', artifact: 'result.md', descriptionArtifact: 'pr-description.md' });
+  assert(f.request.body.startsWith('Improve the value shown to users.'));
   assert.equal(f.current().status, 'completed'); assert.equal(f.current().hosted.head, commit); assert.equal(f.creates, 1);
   assert.equal(await readFile(join(f.repo, 'value.txt'), 'utf8'), 'base\n');
   await assert.rejects(f.call('owner', 'accept', f.taskId, { commit: 'old' }), /Approval/);

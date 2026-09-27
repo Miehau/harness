@@ -7,6 +7,12 @@ Read [the common workflow contract](../../shared/contract.md) and
 [the common task record](../../shared/task-record.md). Follow the native Claude
 supervisor binding; discussion skills do not expand tool permissions.
 
+For native Claude, follow [mixed-model architecture](../../workflows/second-model.md):
+2–3 Claude proposals plus one Codex proposal in separate worktrees, then a fresh
+Codex judge recommending one approach to the user. This binding overrides the
+generic roster and judge fallback below. Each report includes work done, learnings,
+pros and cons. Candidate review pairs Claude with background Codex.
+
 # Arena
 
 Fan out three independent attempts by default, or the owner's explicit roster. Read every candidate,

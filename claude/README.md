@@ -14,6 +14,35 @@ They introduce no runner daemon dependency. See [third-party notices](THIRD_PART
 for upstream attribution. Regenerate checked-in copies with `npm run package:workflows`;
 `npm run check` rejects changed, missing or obsolete generated resources.
 
+The usual flow is **how → why (when rationale matters) → architect → agreed handoff
+→ native implementation → verification/review**. Small understood tasks can skip
+separate discovery and design. Claude execution stays inside Claude Code.
+
+## Codex architecture and review
+
+Install the official [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)
+separately for the mixed-model architecture and review stages:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+Architect runs two Claude proposal agents by default (three for broader changes) and
+one Codex proposal agent in separate worktrees at the same committed base. Each
+reports what it investigated, its proposed design, pros, cons and uncertainties.
+A fresh Codex judge inspects all reports and available worktree evidence, compares
+them and recommends one approach for your decision before implementation.
+
+Candidate review pairs one Claude requirements reviewer with a background Codex
+correctness reviewer on the same verified commit, plus risk-selected specialists.
+The coordinator owns all jobs, evidence and fixes; both reviews must finish clean.
+See [mixed-model architecture and review](workflows/second-model.md) for the handoffs
+and lifecycle. Implementation remains native Claude; no custom bridge or automatic
+review hook is needed. Live mixed-model execution remains unverified.
+
 ## Native nesting requirement
 
 Use Claude Code **2.1.219 or newer**, with an effective
@@ -21,7 +50,8 @@ Use Claude Code **2.1.219 or newer**, with an effective
 is `3`). The installed development CLI is 2.1.117: it can validate/install this
 package but is below the supported execution baseline. Update Claude through its
 normal update flow before trying the hierarchy. The plugin never silently updates
-Claude, changes settings, flattens worker dispatch or starts external agents.
+Claude, changes settings, flattens worker dispatch or substitutes external agents
+for missing native nesting. Declared Codex roles use the separate plugin above.
 
 ## Install once, then run Claude normally
 
@@ -51,8 +81,8 @@ claude
 The repository is inferred from your current directory. No repo path argument or
 launcher is needed. The plugin does not change Claude's authentication or billing;
 sign in through Claude normally with the subscription you intend to use. No login
-or model call is required to inspect/validate this package. Running agents and the
-prompt hook requires working Claude model access.
+or model call is required to inspect/validate this package. Running agents requires
+working Claude model access.
 
 For development only, `claude --plugin-dir /path/to/this/claude` loads this folder
 directly. Do not load the same plugin both installed and through `--plugin-dir`.
@@ -96,9 +126,10 @@ The [common task record](shared/task-record.md) defines the evidence minimum.
 
 Onboarding reads owner `.agent-plan/project.json` and optional ignored
 `.agent-plan/local.json` for runtime, role models, hosting and checks. This binding
-supports native Claude only; unsupported runtimes block dispatch rather than silently
-substituting Claude. Native crossing to another runtime is not implemented. Agent
-models inherit unless configured routing is supported by the installed native tool.
+uses native Claude for implementation and the official Codex plugin for proposal,
+judge and correctness-review roles. Other unsupported runtimes block dispatch rather
+than silently substituting Claude. Models inherit their runtime defaults unless
+explicitly selected through supported routing.
 
 Before writers start, coordinators publish versioned scope artifacts describing
 features, files, APIs, schemas and dependencies, then return `needs-alignment`.
@@ -219,11 +250,9 @@ One coordinator owns each ticket and its worktree.
 
 The SessionStart hook uses only the shell's built-in `printf` to remind Claude where
 the workflow and notes live, including after compaction. It does not read notes,
-start a service or resume work itself. The native prompt Stop hook checks the
-completeness of a report marked `Agent Plan candidate:`. It permits ordinary stops,
-blockers and human waits, and has a repeat guard. It uses a Claude model evaluation
-on Stop events even when the report is unmarked. It cannot prove test results or
-enforce approvals. There are no scripts behind these hooks.
+start a service or resume work itself. There is no Stop hook or model evaluation
+on ordinary conversation stops. Candidate completeness, verification, independent
+reviews and owner approval remain requirements of the explicitly invoked workflow.
 
 Supervisor continuity uses one readable `agent-plan/sessions/SESSION/memory.md`
 plus versioned snapshots before requested compaction. It preserves discussion,
