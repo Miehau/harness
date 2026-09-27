@@ -1,0 +1,169 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading why-analysis skill",
+      "path": "skill://why"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading confidence framework",
+      "path": "skill://why/references/epistemics.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading output requirements",
+      "path": "skill://why/references/synthesizer-prompt.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Listing fixture repository",
+      "path": "."
+    }
+  },
+  {
+    "name": "glob",
+    "arguments": {
+      "i": "Locating lookup implementations",
+      "path": "**/*",
+      "hidden": true,
+      "gitignore": false,
+      "limit": 200
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup implementation",
+      "path": "cache.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup tests",
+      "path": "cache.test.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading decision record",
+      "path": "decision.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture documentation",
+      "path": "README.md"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Blaming lookup implementation",
+      "command": "git blame -L 1,14 -- cache.mjs",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Tracing lookup history",
+      "command": "git log --follow -p -- cache.mjs",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Listing target commits",
+      "command": "git log --oneline -20 -- cache.mjs cache.test.mjs decision.md README.md",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Inspecting fixture remotes",
+      "command": "git remote -v",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "grep",
+    "arguments": {
+      "i": "Searching rationale references",
+      "pattern": "(?i)(ttl|30000|coalesce|pending|rate limit|retry|performance)",
+      "path": ".",
+      "case": false,
+      "gitignore": false,
+      "skip": 0
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Reading rationale commit",
+      "command": "git show --format=fuller --stat --patch 985ad56",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Reading cache introduction",
+      "command": "git show --format=fuller --stat --patch 86c7fa9",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Inspecting decision history",
+      "command": "git log --follow -p -- decision.md",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Inspecting test history",
+      "command": "git log --follow -p -- cache.test.mjs",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Checking merge pull requests",
+      "command": "git log --merges --format=%H%x09%s --all",
+      "cwd": ".",
+      "timeout": 30
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Exercising fixture behavior",
+      "command": "node cache.test.mjs",
+      "cwd": ".",
+      "timeout": 30
+    }
+  }
+]

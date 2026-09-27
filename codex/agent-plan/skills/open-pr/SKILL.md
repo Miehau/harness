@@ -5,7 +5,7 @@ description: Open or find an existing GitHub pull request or GitLab merge reques
 
 # Open a pull or merge request
 
-With Agent Plan, first read [execution bindings](../../runner.md). Follow the
+With Agent Plan, first read [execution bindings](references/execution.md). Follow the
 assigned role and available tools; skill instructions do not expand permissions.
 
 
@@ -17,7 +17,7 @@ Treat these as distinct actions: commit, push, open PR/MR, wait for CI, approve,
 
 ## Select the forge
 
-1. Read `.runner/project.json` when it exists. Its optional `forge` value is `github`, `gitlab`, or `auto`.
+1. Read `.agent-plan/project.json`, falling back to `.runner/project.json` only when absent. Prefer `hosting.provider` (`github` or `gitlab`); legacy `forge` may be `github`, `gitlab`, or `auto`.
 2. When absent or `auto`, inspect the configured push remote. Select GitHub or GitLab only when unambiguous.
 3. If remotes disagree, the host is custom, or both clients are plausible, ask the owner. Persist an explicit `forge` value only when the owner asks or ambiguity would otherwise recur; preserve the rest of the JSON.
 4. Use [the GitHub recipe](references/github.md) for `github` and [the GitLab recipe](references/gitlab.md) for `gitlab`.

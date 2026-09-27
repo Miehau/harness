@@ -8,8 +8,8 @@ runtime. The retired visual pipeline is retained in Git history.
 ## Operator flow
 
 For collaborative architecture and background implementation, keep a main session
-open with `agent-plan supervisor`. Discuss the problem, commission at least three
-competing architecture proposals when needed, and choose the approach together.
+open with `agent-plan supervisor`. Discuss the problem, commission three competing architecture proposals by default (or your explicit roster)
+when needed, and choose the approach together.
 The bundled `/skill:how`, `/skill:why`, `/skill:arena`, `/skill:architect`,
 `/skill:blast-radius` and `/skill:open-pr` commands load automatically.
 The same background coordinator then implements the agreed design while you discuss
@@ -43,7 +43,7 @@ and configuration, creates an integration worktree and Herdr workspace, and focu
 the OMP coordinator. Workers open isolated sessions as required. Uncommitted source
 changes are not copied.
 
-Without `.runner/project.json`, tasks use `bash verify.sh`. Configure a different
+Without `.agent-plan/project.json`, tasks use `bash verify.sh`. Configure a different
 verification command explicitly:
 
 ```sh
@@ -124,7 +124,15 @@ procedures are in [Runtime and recovery](docs/runtime-and-recovery.md).
 
 ## Repository configuration
 
-`.runner/project.json` is owner-maintained and snapshotted for each task:
+`.agent-plan/project.json` is owner-maintained and snapshotted for each task.
+Legacy `.runner/project.json` remains supported when the canonical file is absent.
+Optional ignored `.agent-plan/local.json` overrides runtime/model preferences only;
+checks and hosting remain project-owned. Use `agent-plan config /path/to/repo` for
+an offline capability report. See [portable workflow](../plans/unified-workflow.md).
+The runner requires `execution: {"mode":"runner","runtime":"omp"}`; omitted
+execution retains this legacy default. Native Claude/Codex use their skill packages.
+
+Example:
 
 ```json
 {
@@ -208,7 +216,7 @@ agent-plan accept TASK EXACT_PUBLISHED_COMMIT
 ```
 
 Onboarding discovers hosting from the remote when possible. Edit `hosting` in
-`.runner/project.json` to switch providers for future tasks; each existing task keeps
+`.agent-plan/project.json` to switch providers for future tasks; each existing task keeps
 its snapshot. Publication uses installed `gh` or `glab` credentials. Both providers
 store evidence on separate `runner-evidence/TASK/CANDIDATE_SHA/EVIDENCE_COMMIT` branches
 with commit-pinned links and repository access controls. GitLab's native image upload

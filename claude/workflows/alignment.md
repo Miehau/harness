@@ -1,5 +1,9 @@
 # Align overlapping tickets
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Compare features and behavior as well as file paths. Discover peers in active.md
 and communicate directly with native SendMessage under [active-log](active-log.md),
 using supervisor relay for unavailable/uncertain peers. No external broker, polling,

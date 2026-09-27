@@ -1,5 +1,9 @@
 # Native Agent Plan workflow
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 This workflow runs inside the ticket's `agent-plan:coordinator` subagent. The main
 conversation is the supervisor, which delegates the ticket and receives its result.
 Use Claude's built-in Read, Write, Edit, Glob, Grep, Bash, Agent and question/task
@@ -36,7 +40,9 @@ limitation instead of overriding this native-only boundary.
    worktree and verify HEAD. Its default ref may differ from the supplied base.
    Leave the supervisor checkout unchanged. Implementation children get their own
    native worktrees. A detached original checkout has no implied merge target.
-5. Save `state.md` before launching any agent. It contains phase, owner session,
+5. Save `state.md` before launching any agent using the common task-record minimum,
+   including brief, decisions, agents, candidate, checks, reviews, pending operation
+   and exact approval. It also contains phase, owner session,
    requirements/decisions with sources, candidate/base/target refs, document
    versions, agent IDs, assigned paths, worktrees, commits, blockers and next action.
    Keep each substantive report as a new versioned Markdown file; do not overwrite
@@ -51,18 +57,23 @@ operation. A session ending is not proof of completion.
 
 ## Discover, plan and clarify
 
-Delegate bounded discovery to `agent-plan:researcher` with the absolute repository
-root and question. Save its code/test references and unknowns. Then delegate
-architecture and planning, passing the earlier findings and exact acceptance
-criteria. Separate dependent stages; independent research can run concurrently.
-Keep the stages brief for small tasks rather than inventing design work.
+For a known small fix, skip discovery, architecture and planning workers. Save a
+concise brief, accepted criteria and assignment, then use one implementer. For an
+unclear or broad task, delegate only the bounded stages needed by the common contract.
 
-Classify the task as routine or declare only its concrete assurance categories:
-`security` for authentication, authorization, privacy or trust boundaries;
-`data-safety` for migrations, destructive behavior, loss or corruption; `recovery`
-for concurrency, retries, durable state or Git operations; and `operator` for a
-safety-critical human workflow. Importance alone is not a risk category, and routine
-tasks keep the normal final review only. Save the classification in state.md.
+For unresolved architecture, follow the common contract's independent proposal round.
+Default to three requested seats unless the owner supplies a roster. Pass identical
+frozen brief, grounding, rubric and base file references to isolated researchers;
+no hints, evaluative steering or other proposals until submission. Return every full
+proposal or evidence-backed failure to the supervisor. Missing proposals leave the
+comparison incomplete; provider failure does not establish architectural nonviability.
+Confirm a prior attempt stopped before replacing it. Judge after submissions settle;
+keep full outputs in files without arbitrary caps. The supervisor records the owner's
+design choice and implementation authorization before writers start.
+
+Record risk-selected specialist roles from the common contract: `security`,
+`database`, `recovery`, `ui` and `performance`. Routine tasks still require independent
+requirements/AC and correctness/code-quality reviews; no generic final reviewer.
 
 For each declared category, after a concrete plan/contract exists and before the
 clarification checkpoint, launch a fresh read-only `agent-plan:researcher` for plan
@@ -74,9 +85,13 @@ findings. Save each report as `plan-assurance-KIND-vN.md`. Resolve material find
 by revising the plan and rerun affected assurance; unresolved material findings block
 writers. Changed reviewed documents make the affected plan assurance stale.
 
-Publish versioned exploration, architecture, plan and acceptance notes. Determine
+Publish versioned notes only for stages actually selected. Small tasks need the
+concise brief, acceptance criteria and evidence; do not create skipped-stage documents. Determine
 real setup and verification commands from the repository; an existing
-`.runner/project.json` may be read as documentation, but never execute the runner.
+`.agent-plan/project.json` and ignored `.agent-plan/local.json` provide owner
+configuration; read runtime, role models, hosting and checks before dispatch. Do not
+execute the runner or silently substitute a runtime/model. Native crossing to another
+runtime is not implemented; unsupported configured/requested runtime blocks dispatch.
 Do not invent a passing check or quietly replace failing checks with a trivial one.
 
 Resolve routine choices from existing conventions. For missing product/scope
@@ -96,7 +111,8 @@ Record the supervisor's version-specific alignment result before implementation.
 
 ## Native parallel implementation
 
-Start with at most two simultaneous implementers unless the user chooses otherwise.
+Default to one implementer. Use parallel writers only for demonstrably independent
+assignments when the common contract and owner configuration permit it.
 You, the coordinator, make these Agent calls. Workers are your children, not the
 supervisor's. Do not spawn another coordinator. Research/review workers are leaves too.
 This is a workflow default, not a runtime-enforced quota. Use the Agent tool with
@@ -154,34 +170,31 @@ polling; no shell sleep loop, `/loop`, watcher process or model polling loop.
    exit status/output references and full commit in a new verification note. Check
    that HEAD and tracked files stayed unchanged by verification; inspect untracked
    outputs too. A failing/missing check blocks a ready candidate.
-4. Save the full base-to-candidate diff. For each declared assurance category, launch
-   a fresh read-only `agent-plan:reviewer` for candidate assurance. Do not reuse its
-   plan-assurance agent or conversation. Supply the exact commit, relevant plan
-   assurance and resolution, requirements, diff and verification. Independent
-   specialist passes may run concurrently while the checkout remains frozen. Save
-   each report as `candidate-assurance-KIND-SHA.md` with its exact commit.
-5. After all declared specialist passes are clean, launch a fresh read-only
-   `agent-plan:reviewer` for the final general review with the candidate root, full
-   commit, requirements, diff, verification, assurance reports and earlier review
-   findings. The reviewer reads actual code and callers, not only a summary. Include
-   cross-ticket agreements and evidence that their dependencies are met. A specialist
-   pass never replaces this final general review.
-6. Save every review with its exact commit. Major and medium findings require fixes;
-   minor suggestions may remain in the handoff. Delegate fixes, integrate, verify
-   and rerun all declared candidate-assurance passes plus the final general review on
-   the resulting commit. Do not reuse an old pass. Rerun plan assurance only when its
-   reviewed documents or risk classification changed.
-   Default to at most three repair rounds; if still blocked, report the evidence
-   and next decision rather than looping indefinitely or weakening the checks.
-7. Only after all assignments and decisions are settled, verification passed, every
-   declared candidate assurance is current and clean, and the exact candidate has no
-   major/medium final-review findings, set awaiting-acceptance.
-   Save a handoff mapping requirements to evidence, with limitations and run steps.
-   Recheck alignment and include its current references and peer dependency state.
-   Return a final report to the supervisor with task ID, full
-   candidate commit, checks/outcomes, risk classification, matching assurance/general
-   reviewer results and absolute notes path. Completion remains a claim supported by
-   evidence, not a server-enforced gate.
+4. Freeze the full verified candidate and save its base-to-candidate diff. Launch
+   fresh independent read-only `agent-plan:reviewer` agents in parallel: one assigned
+   `requirements` (requirements/AC), one `correctness` (correctness/code-quality),
+   plus every risk-selected specialist role (batch if native concurrency is limited).
+   Supply the same full verified commit,
+   brief/criteria, actual code paths, diff and check evidence to each. Do not reuse its
+   plan-assurance agent or conversation. Do not supply another current review's
+   conclusions before each reviewer saves its independent first report.
+5. Save each report as `review-ROLE-SHA-vN.md` with role, exact full commit, inspected
+   scope, findings and limitations. Native communication is allowed where supported
+   after independent first reports; record amendments as new versions. Messages do
+   not grant scope, implementation or human approval authority. There is no generic
+   final reviewer and no specialist substitutes for either mandatory role.
+6. Major and medium findings block completion and cannot be waived. Delegate fixes,
+   integrate and verify the changed candidate, then rerun all required roles on that
+   exact commit, including roles that passed before. Never copy a prior pass onto a
+   changed commit. Rerun affected plan assurance if reviewed documents or risk changed.
+   Default to at most three repair rounds; if blocked, report evidence and next decision
+   instead of weakening checks.
+7. Only with settled assignments/decisions, passed verification and every required
+   role's current clean report for the same exact verified commit, set
+   awaiting-acceptance. Save criteria-to-evidence mapping, limitations, run steps and
+   alignment/dependency references. Return task ID, full candidate commit, checks,
+   required role reports and absolute notes path. This remains instruction-level
+   coordination, not a server-enforced gate.
 
 Settle your known child agents before returning a question, blocker or candidate.
 Report any uncertain surviving child explicitly. The supervisor presents the

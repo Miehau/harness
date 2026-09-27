@@ -1,0 +1,12 @@
+{
+  "execution": { "mode": "native", "runtime": "claude" },
+  "agents": {
+    "supervisor": { "runtime": "claude" },
+    "coordinator": { "runtime": "claude" },
+    "implementation": { "runtime": "claude" },
+    "review": { "runtime": "claude" }
+  },
+  "commands": { "test": ["npm", "test"] },
+  "verify": ["test"],
+  "hosting": { "provider": "gitlab", "host": "gitlab.example.com", "project": "team/project", "target": "main" }
+}

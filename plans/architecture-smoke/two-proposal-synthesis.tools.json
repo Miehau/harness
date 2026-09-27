@@ -1,0 +1,37 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Verifying queue baseline behavior",
+      "path": "queue.js:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Verifying worker delivery behavior",
+      "path": "worker.js:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Verifying documented design rationale",
+      "path": "docs/decision.md:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Verifying existing caller contract",
+      "path": "test.mjs:1-20"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Verifying relevant commit history",
+      "command": "git log --oneline -- queue.js worker.js docs/decision.md"
+    }
+  }
+]

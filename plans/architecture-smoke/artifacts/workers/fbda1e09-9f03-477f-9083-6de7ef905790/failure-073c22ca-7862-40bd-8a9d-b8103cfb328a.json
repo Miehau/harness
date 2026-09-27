@@ -1,0 +1,1 @@
+[{"reason":"error","error":"Thinking loop detected: the model repeated near-identical content (8 low-information segments recycling recent wording). Treating as a stream stall and retrying."}]

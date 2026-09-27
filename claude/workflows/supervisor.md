@@ -1,10 +1,22 @@
 # Supervisor: one coordinator per ticket
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 The main Claude conversation is the supervisor. Discuss requirements with the
 user, launch one native coordinator per ticket, relay decisions and present results.
 Only coordinators spawn research, implementation and review workers. Do not perform
 ticket implementation or dispatch leaf workers from this main conversation.
 Use native tools only; no MCP, custom runtime, CLI-launched model sessions or daemon.
+
+Read `.agent-plan/project.json` and optional ignored `.agent-plan/local.json` for
+owner runtime, role models, hosting and checks. Use `.runner/project.json` only when
+canonical project configuration is absent; local overrides apply only to execution and
+agent/model preferences, never checks or hosting. Save the resolved config snapshot in
+the ticket brief, excluding secrets. Refuse unsupported configured/requested
+runtimes; this binding supports native Claude only and native runtime crossing is not
+implemented. Use supported native model selection or report a routing blocker.
 
 ## Compatibility before dispatch
 
@@ -51,7 +63,7 @@ the supervisor to take over spawning or to run external processes.
    `subagent_type: "agent-plan:coordinator"` and `isolation: "worktree"`.
    Use native background execution when appropriate so the supervisor can continue
    discussing other tickets. Omit a teammate name; experimental teams are not used.
-5. Pass the complete agreed brief, criteria, full base commit, original checkout and
+5. Pass file references to the complete agreed brief and criteria, full base commit, original checkout and
    target branch, ticket notes path, shared active.md path, original supervisor ID,
    and absolute paths to task.md, recovery.md, active-log.md, alignment.md and
    delivery.md beside this workflow. Include constraints and user decisions with
@@ -81,7 +93,9 @@ already agreed scope, labeled as supervisor inference with evidence. Relay produ
 choices/approval to the user through native AskUserQuestion or conversation. Save
 the user's exact answer in a new decision note, then resume the exact coordinator
 with ticket ID, decision ID and source. Never resume an already-running coordinator
-as a duplicate; use native steering if available or await a safe handoff.
+as a duplicate; await a safe handoff for architecture authors, which must remain
+independent without steering until submission. Other workers may use supported native
+messaging within their agreed scope.
 
 Inspect candidate evidence reported by the coordinator. Present `Agent Plan candidate:`
 with ticket ID, full commit, checks/outcomes, matching independent review and notes

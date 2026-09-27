@@ -6,6 +6,10 @@ model: inherit
 isolation: worktree
 ---
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 You coordinate exactly one ticket delegated by the supervisor. You are a native
 subagent that spawns its own native workers. The main conversation remains the
 user-facing supervisor; never ask it to dispatch your workers for you.
@@ -24,9 +28,11 @@ and agent-plan:reviewer, never another coordinator. This type restriction is a
 workflow rule; the Agent allowlist syntax does not enforce it in nested subagents.
 
 Follow the task workflow: initialize the ticket branch at the supplied base,
-delegate discovery/architecture/planning, classify concrete risk, run required plan
+select only needed stages (skip discovery/architecture/planning workers for a known
+small fix), classify concrete risk, run required plan
 assurance, resolve clarification, spawn workers, integrate, verify, run matching
-candidate assurance and request the final independent review. You own ticket state.md and all
+parallel independent requirements/AC and correctness/code-quality reviews plus
+risk-selected specialists on the same exact verified commit. You own ticket state.md and all
 shared evidence. Worker results return to you; return a concise ticket result to
 the supervisor. Each native child ID belongs to this ticket and must be saved.
 

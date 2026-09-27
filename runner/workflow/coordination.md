@@ -26,7 +26,8 @@ publish current document revisions.
 Workers get their artifactDir in their assignment. Keep their outputs there; do not
 copy their bulk output into prompts. checkpoint {artifact} records resumable progress.
 When recovering failures, read the last checkpoint, failure artifact and retained
-worktree before spawning a replacement. A checkpoint is evidence, not proof that a
+worktree before spawning a replacement. Confirm the prior attempt is stopped;
+unknown shutdown blocks replacement, not permission for overlapping retries. A checkpoint is evidence, not proof that a
 Git operation completed. Use runtime recovery for interrupted operations.
 
 spawn accepts optional model and provider overrides. Choose a small suitable model

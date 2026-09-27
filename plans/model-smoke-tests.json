@@ -1,0 +1,155 @@
+{
+  "recordedAt": "2026-09-26T23:31:21.286Z",
+  "scenario": "Disposable tiny fix: value.txt must contain exactly ready followed by LF; one writing worker, verification, independent parallel requirements and correctness reviews, fresh final verification and cleanup.",
+  "scope": "OMP/Herdr runner model routing and small-task workflow. No native runtime lifecycle, remote hosting, merge or Claude test.",
+  "results": [
+    {
+      "label": "terra",
+      "passed": true,
+      "taskId": "9af6c454-8cfa-4487-bf8d-7a36c8cf20f1",
+      "commit": "c47433a36f5057b4c8e09e4fe80372345ab8989c",
+      "execution": {
+        "mode": "runner",
+        "runtime": "omp"
+      },
+      "agents": [
+        {
+          "role": "orchestrator",
+          "model": {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-terra"
+          }
+        },
+        {
+          "role": "worker",
+          "stage": "implementation",
+          "model": {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-terra"
+          }
+        },
+        {
+          "role": "worker",
+          "reviewRole": "requirements",
+          "stage": "review",
+          "model": {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-terra"
+          }
+        },
+        {
+          "role": "worker",
+          "reviewRole": "correctness",
+          "stage": "review",
+          "model": {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-terra"
+          }
+        }
+      ],
+      "reviews": [
+        {
+          "agentId": "cf7ddf5f-7f70-446c-b7dd-2c463bb0f893",
+          "reviewRole": "correctness",
+          "coverage": [
+            "Exact-byte invariant: native read-only inspection of value.txt returned b'ready\\n', matching contract AC1.",
+            "Scope containment: git diff --name-only 445c38174018788f6cc05d384c92edfdd1e8856d c47433a36f5057b4c8e09e4fe80372345ab8989c returned only value.txt; the frozen diff changes before to ready.",
+            "Configured-check adequacy: recorded runtime/4378b304-7a07-46fa-ad30-d5792dacd06a.json shows the configured Node check read value.txt as UTF-8, compared it exactly to ready\\n, and exited 0 for the frozen candidate.",
+            "Compatibility and edge cases: the exact UTF-8 byte comparison covers missing/newline-extra/alternate-content cases; no executable flow or caller was changed."
+          ],
+          "commit": "c47433a36f5057b4c8e09e4fe80372345ab8989c",
+          "artifact": "workers/cf7ddf5f-7f70-446c-b7dd-2c463bb0f893/correctness-review.json",
+          "passed": true,
+          "at": "2026-09-26T23:29:00.804Z"
+        },
+        {
+          "agentId": "97e632bd-1d11-4c86-bfe5-455b0900a8a7",
+          "reviewRole": "requirements",
+          "coverage": [
+            "AC1: runtime/1779cb68-79dc-4755-85fa-a802bd7dcd5b.diff shows value.txt is the only changed file and replaces before with ready; repository value.txt reads as ready followed by one LF.",
+            "AC2: runtime/205c097a-018c-4b1a-853e-195880747674.json records configured test passed for this exact commit; runtime/4378b304-7a07-46fa-ad30-d5792dacd06a.json records exit code 0 for the exact-content check value.txt === ready\\n."
+          ],
+          "commit": "c47433a36f5057b4c8e09e4fe80372345ab8989c",
+          "artifact": "workers/97e632bd-1d11-4c86-bfe5-455b0900a8a7/requirements-review.json",
+          "passed": true,
+          "at": "2026-09-26T23:29:00.912Z"
+        }
+      ]
+    },
+    {
+      "label": "grok",
+      "passed": true,
+      "taskId": "bf070363-9819-46c0-a2c4-dc3f14cee80c",
+      "commit": "ee11fb42149afba077bd35e30cfb66f2d8f01c97",
+      "execution": {
+        "mode": "runner",
+        "runtime": "omp"
+      },
+      "agents": [
+        {
+          "role": "orchestrator",
+          "model": {
+            "provider": "xai-oauth",
+            "model": "grok-4.7"
+          }
+        },
+        {
+          "role": "worker",
+          "stage": "implementation",
+          "model": {
+            "provider": "xai-oauth",
+            "model": "grok-4.7"
+          }
+        },
+        {
+          "role": "worker",
+          "reviewRole": "requirements",
+          "stage": "review",
+          "model": {
+            "provider": "xai-oauth",
+            "model": "grok-4.7"
+          }
+        },
+        {
+          "role": "worker",
+          "reviewRole": "correctness",
+          "stage": "review",
+          "model": {
+            "provider": "xai-oauth",
+            "model": "grok-4.7"
+          }
+        }
+      ],
+      "reviews": [
+        {
+          "agentId": "3a57a4ce-b0bd-4119-8dfc-2c1b462fd775",
+          "reviewRole": "requirements",
+          "coverage": [
+            "AC1: value.txt:1 is exactly ready followed by one newline. runner_read content is ready\\n. Native bytes are [114, 101, 97, 100, 121, 10], length 6, equal to b'ready\\n'. Git diff has no '\\ No newline at end of file' marker.",
+            "AC2: git diff --name-only and --stat e9508420b40fa5d7e462e30eed67eec346b7b11f..ee11fb42149afba077bd35e30cfb66f2d8f01c97 show only value.txt (1 file changed, 1 insertion, 1 deletion). Working tree status is clean. AGENTS.md and other paths are unchanged. Recorded diff runtime/5fd37b08-6bc0-4a3b-87ab-3c1a9c799c7e.diff is the same single-file change.",
+            "AC3: runtime/96adae77-24a9-4467-961a-7b0c44ddd1da.json records passed=true for commit ee11fb42149afba077bd35e30cfb66f2d8f01c97 with check test. runtime/dd57cd6f-53a9-4724-ad95-e26c515221cc.json records command test, code 0, passed true, timedOut false, argv comparing value.txt to ready\\n, cwd the integration worktree. Log runtime/c3122dac-1da0-4480-ab79-22380e59f72d.log is empty, consistent with a silent exit 0. Pre-fix orchestrator/655f82f9-a952-4f66-a03b-4ac5e7a44c43.json is code 1 on the same argv while value.txt was before\\n."
+          ],
+          "commit": "ee11fb42149afba077bd35e30cfb66f2d8f01c97",
+          "artifact": "workers/3a57a4ce-b0bd-4119-8dfc-2c1b462fd775/review.json",
+          "passed": true,
+          "at": "2026-09-26T23:29:27.147Z"
+        },
+        {
+          "agentId": "1fb6fddf-efb9-4666-b134-8c9d9e0d750c",
+          "reviewRole": "correctness",
+          "coverage": [
+            "value.txt:1 commit blob 395527df662d5fdf4b00c5f1cd9b8d7ac048e127 is exactly UTF-8 bytes 72 65 61 64 79 0a (ready\\n), length 6; base e9508420b40fa5d7e462e30eed67eec346b7b11f blob was before\\n",
+            "git diff e9508420b40fa5d7e462e30eed67eec346b7b11f..ee11fb42149afba077bd35e30cfb66f2d8f01c97: parent is the base, one commit, only value.txt (1 insertion, 1 deletion); worktree clean at HEAD",
+            "sole reader: .agent-plan/project.json:27 compares fs.readFileSync('value.txt','utf8') to ready\\n; AGENTS.md:1 allows changing only value.txt and that constraint holds",
+            "edge cases absent: extra newline, missing newline, trailing space, wrong casing — exact 6-byte match rejects all four",
+            "recorded verify on this commit: runtime/96adae77-24a9-4467-961a-7b0c44ddd1da.json passed; test receipt runtime/dd57cd6f-53a9-4724-ad95-e26c515221cc.json code 0, timedOut false, cwd integration worktree"
+          ],
+          "commit": "ee11fb42149afba077bd35e30cfb66f2d8f01c97",
+          "artifact": "workers/1fb6fddf-efb9-4666-b134-8c9d9e0d750c/review.json",
+          "passed": true,
+          "at": "2026-09-26T23:29:53.074Z"
+        }
+      ]
+    }
+  ]
+}

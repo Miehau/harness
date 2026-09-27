@@ -1,0 +1,12 @@
+# Shared design problem and rubric (preparation only)
+
+Base `b731c08edd71d93a90e7b8faaf05185b934f7fe9`. Design durable job delivery for one local process with restart recovery, FIFO best effort and at-least-once delivery. A crash after external delivery but before acknowledgement may duplicate a job; exactly-once is not promised without external receiver idempotency. No external broker service; built-in/local storage is allowed. Existing `Queue.enqueue(payload)` returns an ID synchronously. Explain whether this can remain a truthful durability contract or specify an explicit API migration. Do not implement, change repo files, run implementation, publish, merge, or choose architecture for owner.
+
+All three independent workers must receive the identical problem statement, grounding path, base and rubric. Rubric (score each 0–5 with cited design evidence):
+1. Recovery/delivery semantics: acknowledged persisted job removal; restart replay; crash windows; handling failures and duplicates honestly.
+2. Compatibility: synchronous enqueue/ID contract, actual `drain` caller and migration cost clearly accounted for.
+3. Operational simplicity: one-process local storage, lifecycle, failure handling and bounded conceptual/API surface, no external broker.
+4. Evidence-grounded tradeoffs: distinguishes documented historical rationale from inferred requirements; genuine alternatives and risks.
+5. Testability: focused deterministic crash/restart, order, failure/retry and API migration checks feasible without external dependencies.
+
+Design constraints: preserve FIFO best effort, not global/strict FIFO across failed deliveries; explain poison-job behavior and ordering consequences. Specify persistence and fsync/commit boundary; stable ID and deduplication requirements; queue ownership/close semantics. Caller usage first, then data shape, public signatures, module map, flow and ack/recovery, alternatives, risks, verification. Read `pstack/skills/architect/SKILL.md`, `pstack/skills/arena/SKILL.md`, `pstack/skills/architect/references/runner-prompt.md`, `rationale-template.md`, and `design-red-flags.md`. Follow only your candidate slice; read-only repository; write proposal in own artifact directory. Candidates must not read one another's work.

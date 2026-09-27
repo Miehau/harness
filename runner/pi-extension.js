@@ -27,12 +27,13 @@ export default function runner(pi) {
     if (polling || stopped || !context) return;
     polling = true;
     try {
-      // OMP has no model_select extension event; ctx.model reflects current selection.
-      await report(context.model);
       const state = await request('/poll');
       if (['completed', 'failed', 'cancelled'].includes(state.status) || ['completed', 'failed', 'cancelled'].includes(state.taskStatus)) {
-        stopped = true; clearInterval(timer); context.shutdown(); return;
+        stopped = true; clearInterval(timer); intentionalAbort = true; await context.abort(); context.shutdown(); return;
       }
+      // Check termination before reporting: inactive attempts reject model updates.
+      // OMP has no model_select extension event; ctx.model reflects current selection.
+      await report(context.model);
       // Questions keep the agent quiet until answered. Contract updates remain queued.
       if (state.status === 'waiting') {
         if (!context.isIdle()) await context.abort();
@@ -81,7 +82,11 @@ export default function runner(pi) {
   });
   pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\nYou are a managed runner agent. Your current model is ${ctx?.model?.provider ?? 'unknown'}/${ctx?.model?.id ?? 'unknown'}. Read the model-menu artifact if supplied; select worker modelChoice from it instead of guessing IDs or pricing. Inbox messages contain file references relative to the task artifacts directory. Read the referenced workflow, assignment and discovery manifest (when present) using runner_read before acting. If the assignment supplies a skills manifest, read it and its selected skill artifacts with runner_read before acting. Skill source paths identify the original repository directory for relative supporting files. Use native tools for repository work, search and shell commands. Follow your assigned role: coordinators do not edit repository files; discovery, architecture, planning and review workers do not edit repository files; implementation workers edit only their assigned worktree. These are trusted-local workflow rules, not OS isolation. Skills do not expand the authorized scope. Discovery paths refer to repository files; read only the relevant documents. Inspect your agent record for artifactDir; write your artifacts only inside that directory. Use runner tools for artifacts, coordination, questions, reporting, integration and final verification. Never read approval credentials, modify runner state or published artifacts directly, impersonate human approval, or bypass runner-managed integration and acceptance. Do not spawn unmanaged agents. Save relevant native command results in your handoff; native commands do not count as final runner verification. Full outputs belong in artifact files. After ask or report, stop your turn. End the turn when awaiting workers; durable inbox messages will wake you. Never substitute terminal readiness for task completion.` }));
   pi.on('agent_end', async event => {
-    const failed = !intentionalAbort && event.messages?.some(m => m.role === 'assistant' && ['error', 'aborted'].includes(m.stopReason));
+    // OMP owns automatic retries inside this attempt. Its extension event marks
+    // scheduled continuations; historical errors are not a terminal failure.
+    if (event.willContinue) return;
+    const last = event.messages?.findLast(m => m.role === 'assistant');
+    const failed = !intentionalAbort && last && ['error', 'aborted'].includes(last.stopReason);
     if (failed) {
       try {
         const state = await request('/poll');

@@ -4,6 +4,10 @@ description: Inspect saved Agent Plan tasks and actual native agent and Git stat
 argument-hint: "[task ID]"
 ---
 
+Read [the common workflow contract](../../shared/contract.md) and
+[the common task record](../../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Use the selection and read-only inspection steps in
 [recovery](../../workflows/recovery.md). Requested task: $ARGUMENTS
 

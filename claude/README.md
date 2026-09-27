@@ -6,6 +6,14 @@ per ticket; each coordinator spawns and manages its own workers. There is no cus
 SDK, custom API client, Pi or Herdr dependency. File edits, Git and project checks use
 Claude's built-in tools with the user's normal permissions.
 
+The shared discussion skills are `/agent-plan:how`, `/agent-plan:why`,
+`/agent-plan:arena`, `/agent-plan:architect`, `/agent-plan:blast-radius` and
+`/agent-plan:open-pr`. Their methods and reference playbooks are generated from the
+canonical Codex package, with binding links redirected to this native supervisor.
+They introduce no runner daemon dependency. See [third-party notices](THIRD_PARTY_NOTICES.md)
+for upstream attribution. Regenerate checked-in copies with `npm run package:workflows`;
+`npm run check` rejects changed, missing or obsolete generated resources.
+
 ## Native nesting requirement
 
 Use Claude Code **2.1.219 or newer**, with an effective
@@ -60,9 +68,8 @@ flowchart TD
   S <--> C2[Ticket B coordinator: native worktree]
   C1 --> R[Research / planning assurance workers]
   C1 --> W1[Implementation worker A: native worktree]
-  C1 --> W2[Implementation worker B: native worktree]
-  C1 --> A[Candidate assurance reviewers]
-  C1 --> V[Final general reviewer]
+  C1 --> A[Risk-selected specialist reviewers]
+  C1 --> V[Parallel requirements and correctness reviewers]
   C2 --> W3[Ticket B workers]
 ```
 
@@ -73,17 +80,25 @@ separate native worktrees while the supervisor remains available to the user.
 
 A coordinator receives the full brief, exact base commit, original checkout/target,
 notes path and bundled workflow paths. It checks that native Agent is available,
-initializes its ticket branch in its own worktree, delegates discovery, architecture
-and planning, records clarification, then spawns up to two parallel implementers.
+initializes its ticket branch in its own worktree, selects only necessary discovery,
+architecture and planning, records clarification, then spawns one implementer by default.
+Known small fixes skip discovery/architecture/planning workers.
 The coordinator alone owns ticket state, worker assignments, integration, checks
 and independent reviewer dispatch. Workers report to it; it reports to the supervisor.
 No experimental agent teams are required. The hierarchy has two subagent layers.
 
-During planning the coordinator classifies concrete security, data-safety, recovery
-and operator risks. Routine work adds no planning ceremony. Sensitive changes get a
-fresh read-only plan-assurance worker before implementation and a fresh matching
-candidate-assurance reviewer on the exact verified commit. A separate general review
-still runs last. Changed plans or commits invalidate the affected assurance evidence.
+The [common contract](shared/contract.md) defines stages and mandatory independent
+parallel requirements/AC and correctness/code-quality reviews, plus risk-selected
+security, database, recovery, UI and performance specialists. Every required report
+covers the same exact verified commit. A changed candidate reruns every required
+role; major/medium blockers cannot be waived. No generic final reviewer is required.
+The [common task record](shared/task-record.md) defines the evidence minimum.
+
+Onboarding reads owner `.agent-plan/project.json` and optional ignored
+`.agent-plan/local.json` for runtime, role models, hosting and checks. This binding
+supports native Claude only; unsupported runtimes block dispatch rather than silently
+substituting Claude. Native crossing to another runtime is not implemented. Agent
+models inherit unless configured routing is supported by the installed native tool.
 
 Before writers start, coordinators publish versioned scope artifacts describing
 features, files, APIs, schemas and dependencies, then return `needs-alignment`.
@@ -107,8 +122,8 @@ currently enforced by Claude. Leaves omit Agent entirely.
 Both the coordinator and writers verify their worktree and initialize the assigned
 new branch at the exact supplied commit; native worktree defaults may start from
 another ref. Writers share a versioned contract and explicit file ownership.
-Overlapping changes are sequenced. The coordinator defaults to two concurrent
-implementers and three repair rounds; these limits are workflow instructions.
+Overlapping changes are sequenced. The coordinator defaults to one
+implementer and three repair rounds; these limits are workflow instructions.
 
 For a product question, the coordinator saves the decision, settles affected workers,
 checkpoints and returns needs-input. The supervisor obtains the user's answer and
@@ -117,7 +132,8 @@ second coordinator to answer a question. A coordinator settles its known childre
 before returning a candidate, blocker or pause, reporting any uncertainty.
 
 The coordinator integrates commits, verifies the combined candidate, runs required
-candidate assurance and then spawns a separate read-only general reviewer. After a pass, the supervisor presents that exact
+parallel independent requirements/AC and correctness/code-quality reviewers plus
+risk-selected specialists. After a pass, the supervisor presents that exact
 candidate as a GitHub PR or GitLab MR with evidence. The supervisor follows hosted
 CI and required reviews, then merges through the host only after you approve the
 exact candidate. Fixes return to the coordinator for workers, verification and a

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readdir, readFile, mkdtemp, rm, stat } from 'node:fs/promises';
 import { resolve, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -36,10 +36,10 @@ test('native Claude package has no executable runtime, MCP config or escaping re
       if (/^https:\/\//.test(target)) continue;
       const destination = resolve(dirname(path), target.split('#')[0]);
       assert(destination.startsWith(resolve(root) + sep), `Escaping link: ${target}`);
-      await readFile(destination);
+      await stat(destination);
     }
   }
-  assert.equal(paths.filter(path => path.endsWith('SKILL.md')).length, 9);
+  assert.equal(paths.filter(path => path.endsWith('SKILL.md')).length, 15);
 });
 
 test('native agent definitions restrict research/review and isolate writers without permission bypass', async () => {
@@ -62,7 +62,7 @@ test('native agent definitions restrict research/review and isolate writers with
   for (const entry of await readdir(join(root, 'skills'))) {
     const content = await read(`skills/${entry}/SKILL.md`);
     assert.match(content, /\.\.\/\.\.\/workflows\//);
-    if (entry !== 'status') assert.match(content.split('---')[1], /^disable-model-invocation: true$/m);
+    if (!['status', 'how', 'why', 'arena', 'architect', 'blast-radius', 'open-pr'].includes(entry)) assert.match(content.split('---')[1], /^disable-model-invocation: true$/m);
   }
 });
 
@@ -111,27 +111,49 @@ test('ticket dispatch preserves supervisor to coordinator to worker hierarchy an
   assert.match(coordinator, /settle all known children/);
 });
 
-test('native workflow performs risk-matched assurance before and after implementation', async () => {
+test('native entry points read the packaged common contract and record', async () => {
+  for (const entry of await readdir(join(root, 'skills'))) {
+    const content = await read(`skills/${entry}/SKILL.md`);
+    assert.match(content, /Read \[the common workflow contract\]\(\.\.\/\.\.\/shared\/contract\.md\)/);
+    assert.match(content, /shared\/task-record\.md/);
+  }
+  for (const entry of ['supervisor', 'task', 'delivery', 'recovery']) {
+    const content = await read(`workflows/${entry}.md`);
+    assert.match(content, /\.\.\/shared\/contract\.md/);
+    assert.match(content, /\.\.\/shared\/task-record\.md/);
+  }
+  const onboard = await read('skills/onboard/SKILL.md');
+  assert.match(onboard, /\.agent-plan\/project\.json/);
+  assert.match(onboard, /unsupported runtime rather than silently substituting/);
+});
+
+test('native candidate roles preserve independent report and exact-commit boundaries', async () => {
   const task = await read('workflows/task.md');
-  for (const category of ['security', 'data-safety', 'recovery', 'operator']) assert.match(task, new RegExp('`' + category + '`'));
-  assert.match(task, /routine\s+tasks keep the normal final review only/i);
-  assert.match(task, /plan-assurance-KIND-vN\.md/);
-  assert.match(task, /candidate-assurance-KIND-SHA\.md/);
-  assert.match(task, /Do not reuse its\s+plan-assurance agent or conversation/);
-  assert.match(task, /final general review/);
-
-  const researcher = await read('agents/researcher.md');
+  assert.match(task, /known small fix, skip discovery, architecture and planning workers/);
+  assert.match(task, /Default to one implementer/);
+  assert.match(task, /agents in parallel/);
+  assert.match(task, /`requirements`/);
+  assert.match(task, /`correctness`/);
+  assert.match(task, /rerun all required roles/);
+  assert.match(task, /cannot be waived/);
+  assert.match(task, /independent first report/);
   const reviewer = await read('agents/reviewer.md');
-  const delivery = await read('workflows/delivery.md');
-  const recovery = await read('workflows/recovery.md');
-  assert.match(researcher, /For plan assurance/);
-  assert.match(reviewer, /focused candidate-assurance category/);
-  assert.match(reviewer, /focused pass never claims the general pass/);
-  assert.match(delivery, /risk classification/);
-  assert.match(recovery, /all declared candidate-assurance/);
-
+  assert.match(reviewer, /report\s+covers only its assigned role/);
+  assert.match(reviewer, /independent first report before reading/);
   const stop = JSON.parse(await read('hooks/hooks.json')).hooks.Stop[0].hooks[0].prompt;
-  assert.match(stop, /recorded risk classification/);
-  assert.match(stop, /Routine classifications require no specialist assurance/);
-  assert.match(stop, /final general reviewer result/);
+  for (const phrase of ['requirements/AC', 'correctness/code-quality', 'same exact verified commit', 'cannot be waived', 'no generic final reviewer']) {
+    assert(stop.includes(phrase), `Missing role gate: ${phrase}`);
+  }
+});
+
+test('all six shared discussion skills bind to native Claude with upstream attribution', async () => {
+  for (const name of ['how', 'why', 'arena', 'architect', 'blast-radius', 'open-pr']) {
+    const content = await read(`skills/${name}/SKILL.md`);
+    assert.match(content, new RegExp(`^name: ${name}$`, 'm'));
+    assert.match(content, /\]\(\.\.\/\.\.\/workflows\/supervisor\.md\)/);
+    assert.doesNotMatch(content, /\]\(\.\.\/\.\.\/runner\.md\)|runner_supervisor|runner_action|Herdr|OMP daemon/);
+  }
+  const notice = await read('THIRD_PARTY_NOTICES.md');
+  assert.match(notice, /pstack 0\.15\.2 by Lauren Tan/);
+  assert.match(notice, /MIT License/);
 });

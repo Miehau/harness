@@ -1,5 +1,9 @@
 # Native recovery and checkpoints
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Read the shared active.md under the Claude config directory for ticket/contact
 lookup, then verify its IDs against actual state under [active-log](active-log.md).
 The supervisor reconciles stale rows; a log entry is not proof of liveness.
@@ -47,8 +51,8 @@ For a saved integration/merge/rebase intent, compare before/after commits and Gi
 operation state. Record applied only when Git evidence proves it. On conflicts,
 explain the conflict and resolve it only within authorized scope; ask before
 discarding ambiguous work. A cleared operation record does not itself resolve Git.
-Any changed candidate needs fresh verification, all declared candidate-assurance
-passes and final general review before completion. Changed reviewed plans or risk
+Any changed candidate needs fresh verification, all required role reports (requirements/AC, correctness/code-quality and
+risk-selected specialists) on the same exact verified commit before completion. Changed reviewed plans or risk
 classification also need affected plan assurance before writers resume.
 Before resuming writers, follow [alignment](alignment.md): inspect current peer
 scope and acknowledgment versions. A saved agreement can be stale after a restart.

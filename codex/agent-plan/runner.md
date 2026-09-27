@@ -1,7 +1,14 @@
 # Agent Plan execution bindings
 
-Read this page when using these skills with the OMP/Herdr runner. It changes tool
-usage and ownership, not the skills' engineering methods.
+First select the configured execution mode using `.agent-plan/project.json`
+(legacy `.runner/project.json` only when absent) and private local preferences.
+For native Codex, read [the native binding](native.md) and use the skill's engineering
+method with exposed native tools; skip the OMP-specific sections below. Discussion
+alone can use the current native session before onboarding; implementation requires
+an explicit execution selection. Missing native capabilities are reported, never
+replaced by an OMP daemon. These skills do not enable automatic mixed-runtime delegation.
+
+For OMP/Herdr runner execution, use the following tool and ownership boundaries.
 
 ## Main conversation
 
@@ -9,8 +16,13 @@ usage and ownership, not the skills' engineering methods.
 `/skill:arena`, `/skill:architect`, `/skill:blast-radius` and `/skill:open-pr`.
 Use native read-only tools for small explanations. For substantial architecture,
 use `runner_supervisor start` with the target repo, stable requestId and a
-preparation-only brief. The coordinator manages at least three independent
-architecture workers and returns every proposal plus comparison for discussion here.
+preparation-only brief. The coordinator manages three independent
+architecture workers by default (or the owner's explicit roster). It freezes the same
+brief, grounding, rubric and base references for every seat, preserves independence
+without hints or steering, and returns every full proposal or evidence-backed failure.
+Missing proposals leave comparison incomplete and return to the owner; execution
+failure does not prove architectural nonviability. Judge only after submissions settle.
+End the turn while awaiting events; do not use shell sleep or model polling loops.
 Keep the same task through the later implementation handoff. Send the draft design
 using `runner_supervisor {action:"feedback",taskId,text}`, then capture the user's
 choice with `{action:"ask_user",taskId,decisionId,text}`. Feedback is not approval.

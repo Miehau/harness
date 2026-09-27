@@ -11,6 +11,13 @@ export function modelMenu(config) {
     complex: { ...coordinator, purpose: 'Difficult debugging or broad changes; inherits coordinator when unspecified' },
     ...config.workerModels,
   };
+  for (const role of ['discovery', 'planning', 'implementation', 'review', 'requirements', 'correctness', 'security', 'database', 'recovery', 'ui', 'performance']) {
+    const configured = config.agents?.[role];
+    if (!configured) continue;
+    menu[role] = { ...(['requirements', 'correctness', 'security', 'database', 'recovery', 'ui', 'performance'].includes(role) ? menu.review : {}), ...menu[role],
+      ...(configured.model !== undefined ? { model: configured.model } : {}),
+      ...(configured.provider !== undefined ? { provider: configured.provider } : {}) };
+  }
   for (const [name, choice] of Object.entries(menu)) {
     assert(/^[a-z][a-z0-9_-]*$/.test(name) && choice && typeof choice === 'object', 'Invalid worker model choice');
     for (const key of ['model', 'provider', 'purpose']) if (choice[key] !== undefined) string(choice[key], `workerModels.${name}.${key}`, 500);
@@ -19,8 +26,8 @@ export function modelMenu(config) {
 }
 
 export function chooseModel(task, input, stage) {
-  const choice = input.modelChoice ?? (stage === 'review' ? 'review' : stage === 'discovery' ? 'discovery' : ['architecture', 'planning'].includes(stage) ? 'planning' : 'implementation');
   const menu = task.modelMenu ?? modelMenu(task.config);
+  const choice = input.modelChoice ?? (stage === 'review' ? (Object.hasOwn(menu.choices, input.reviewRole) ? input.reviewRole : 'review') : stage === 'discovery' ? 'discovery' : ['architecture', 'planning'].includes(stage) ? 'planning' : 'implementation');
   assert(Object.hasOwn(menu.choices, choice), `Unknown model choice: ${choice}`);
   const selected = menu.choices[choice];
   const selection = { model: selected.model ?? task.config.model, provider: selected.provider ?? task.config.provider };
@@ -36,6 +43,15 @@ export async function reviewModel(task, input, transport, commit) {
   const writer = task.agents.findLast(a => a.mode === 'write' && a.integrated)?.modelSelection ?? task.config;
   const failed = task.agents.filter(a => a.stage === 'review' && a.base === commit && a.status === 'failed');
   const unavailable = selection => failed.some(a => a.modelSelection?.model === selection.model && a.modelSelection?.provider === selection.provider);
+  const menu = task.modelMenu?.choices.review ? task.modelMenu : modelMenu(task.config);
+  const requested = chooseModel({ ...task, modelMenu: menu }, input, 'review');
+  const roleConfig = task.config.agents?.[requested.choice];
+  const reviewConfig = requested.choice === 'review' || requested.choice === input.reviewRole ? task.config.agents?.review : undefined;
+  if ([roleConfig, reviewConfig].some(choice => choice?.model !== undefined || choice?.provider !== undefined)) {
+    assert(!unavailable(requested.selection), 'Configured review model failed; resolve provider/budget errors before continuing');
+    if (transport.resolveModel) requested.selection = await transport.resolveModel(requested.selection);
+    return requested;
+  }
   let configuredError;
   const configured = input.model || input.provider || task.config.workerModels?.review?.model;
   if (configured && !failed.length) {
@@ -51,7 +67,7 @@ export async function reviewModel(task, input, transport, commit) {
   const opposite = family(writer) === 'openai' ? 'anthropic' : 'openai';
   const candidates = available.filter(selection => !unavailable(selection));
   // Prefer configured menu choices within the opposite family, then Pi's available models.
-  const preferred = ['review', 'planning', 'complex'].map(name => task.modelMenu.choices[name]).filter(Boolean).filter(c => c.model).map(c => candidates.find(m => m.model === c.model && (!c.provider || m.provider === c.provider))).filter(Boolean);
+  const preferred = ['review', 'planning', 'complex'].map(name => menu.choices[name]).filter(Boolean).filter(c => c.model).map(c => candidates.find(m => m.model === c.model && (!c.provider || m.provider === c.provider))).filter(Boolean);
   const selection = [...preferred, ...candidates].find(m => family(m) === opposite && !used(m))
     ?? candidates.find(m => !used(m))
     ?? candidates.find(m => family(m) === opposite)

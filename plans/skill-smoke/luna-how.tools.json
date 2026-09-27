@@ -1,0 +1,68 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading how skill",
+      "path": "skill://how"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading execution bindings",
+      "path": "skill://how/../../runner.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading explanation format",
+      "path": "skill://how/references/explainer-prompt.md"
+    }
+  },
+  {
+    "name": "glob",
+    "arguments": {
+      "i": "Locating fixture files",
+      "path": ".",
+      "hidden": true,
+      "gitignore": false,
+      "limit": 100
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading cache implementation",
+      "path": "cache.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading cache fixture tests",
+      "path": "cache.test.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture overview",
+      "path": "README.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading skill execution bindings",
+      "path": "skill://runner.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading cache with line references",
+      "path": "cache.mjs:1-20"
+    }
+  }
+]

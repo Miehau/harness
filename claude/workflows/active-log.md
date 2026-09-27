@@ -1,5 +1,9 @@
 # Active log and direct coordinator communication
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Use `<Claude config directory>/agent-plan/active.md` as the shared active-ticket
 directory and activity log. CLAUDE_CONFIG_DIR selects the config directory;
 otherwise use `$HOME/.claude`. It sits beside `tasks/`, outside source worktrees.

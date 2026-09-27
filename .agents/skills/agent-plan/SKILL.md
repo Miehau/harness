@@ -22,7 +22,8 @@ focuses a task and `agent-plan stop` cancels it. State defaults to
 `~/.local/state/agent-plan`; `RUNNER_DATA` selects another data directory.
 Use `npm run runner -- help` without a global installation. Explicit `submit` creates
 an inert draft; direct `start REPO TEXT` launches immediately. Pending questions can
-be answered interactively in the OMP terminal using its scoped reply credential. Repo configuration lives in `.runner/project.json`; optional
+be answered interactively in the OMP terminal using its scoped reply credential. Repo configuration lives in `.agent-plan/project.json` (legacy `.runner/project.json`
+fallback). Private `.agent-plan/local.json` overrides runtime/model choices only; optional
 `.runner/workflow.md` replaces the bundled workflow. Both are snapshotted per task.
 
 Keep worker output in immutable files and pass references. Preserve exact task,

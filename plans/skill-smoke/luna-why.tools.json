@@ -1,0 +1,103 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading why skill instructions",
+      "path": "skill://why"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading epistemic confidence framework",
+      "path": "skill://why/references/epistemics.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading synthesis output format",
+      "path": "skill://why/references/synthesizer-prompt.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading runner execution bindings",
+      "path": "skill://why/../../runner.md"
+    }
+  },
+  {
+    "name": "grep",
+    "arguments": {
+      "i": "Finding createLookup implementation",
+      "pattern": "createLookup",
+      "path": ".",
+      "case": false,
+      "gitignore": true,
+      "skip": 0
+    }
+  },
+  {
+    "name": "glob",
+    "arguments": {
+      "i": "Listing fixture files",
+      "path": ".",
+      "hidden": true,
+      "gitignore": false,
+      "limit": 100
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup implementation",
+      "path": "cache.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture context",
+      "path": "README.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading recorded decision",
+      "path": "decision.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup behavior test",
+      "path": "cache.test.mjs"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Reviewing target history",
+      "command": "git log --oneline --decorate -20 -- cache.mjs cache.test.mjs decision.md README.md && git blame -L 1,30 -- cache.mjs && git log --follow --format='%H %s' -- cache.mjs",
+      "cwd": "/tmp/agent-plan-skill-smoke-zHiE5o"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Reviewing rationale commit",
+      "command": "git show --format=fuller --stat 985ad56 && git show --format=fuller --no-ext-diff 985ad56 -- decision.md cache.mjs cache.test.mjs && git show --format=fuller --no-ext-diff 86c7fa9 -- cache.mjs cache.test.mjs",
+      "cwd": "/tmp/agent-plan-skill-smoke-zHiE5o"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Running fixture smoke check",
+      "command": "node cache.test.mjs",
+      "cwd": "/tmp/agent-plan-skill-smoke-zHiE5o"
+    }
+  }
+]

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile, realpath, readdir } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -11,6 +11,7 @@ import { repos, resolveAlias, resolveRepo } from './repos.js';
 import { validateWebhook } from './notifications.js';
 import { discoverHosting } from './hosting.js';
 import { ompCli, ensureBun, guardSupervisorSessions } from './omp.js';
+import { loadProjectConfig, projectConfigPath, validateExecution, runtimeCapabilities } from './project-config.js';
 const help = `agent-plan — launch OMP tasks in your running Herdr
 
 agent-plan start <repo> "task description"       Create a workspace and open its orchestrator
@@ -31,6 +32,7 @@ agent-plan preview <task> [--stop]                 Start/stop the configured app
 agent-plan verify <task>                          Verify a recovered candidate
 agent-plan stop <task>                            Stop agents; preserve worktrees and artifacts
 agent-plan init <repo> '<verification argv JSON>' Configure a repository once
+agent-plan config <repo>                         Check configuration and runtime capabilities offline
 
 The background runtime starts automatically. No daemon terminal or copied submission ID.
 Repositories accept saved aliases or paths (use ./name to bypass an alias).
@@ -56,9 +58,11 @@ Stage defaults: --discovery-model/--discovery-provider, --planning-model/--plann
 Starting work uses your configured OMP model and the repo's committed HEAD.
 `;
 const topics = {
-  supervisor: `agent-plan supervisor [--model MODEL] [--provider PROVIDER] [--mcp] [--mcp-config FILE]
+  supervisor: `agent-plan supervisor [--cwd REPO] [--model MODEL] [--provider PROVIDER] [--mcp] [--mcp-config FILE]
 
 Open an ordinary OMP supervisor. /runner-watch TASK subscribes to coordinator events.
+Repository configuration must select runner/omp. Supervisor role model settings
+apply unless overridden by explicit model/provider flags.
 Bundled skills: /skill:how, /skill:why, /skill:arena, /skill:architect,
 /skill:blast-radius and /skill:open-pr. Architecture returns at least three proposals
 for discussion before authorized background implementation.
@@ -79,7 +83,7 @@ agent-plan start TASK
 
 REPO is a saved alias or path. TASK is a saved draft ID or unique prefix.
 Start Herdr and configure OMP credentials first. The runtime starts automatically.
-New tasks use committed HEAD and snapshot .runner/project.json plus the workflow.
+New tasks use committed HEAD and snapshot .agent-plan/project.json (legacy .runner fallback) plus the workflow.
 Model/provider flags select the coordinator for a new task.
 
 Example: agent-plan start demo "Add a dark mode toggle"`,
@@ -103,14 +107,19 @@ Example: agent-plan repo add demo /path/to/demo`,
 
 Launch an agent task to produce verify.sh, a .runner/feature-map.md index with
 .runner/features/ documents, and conceptual .runner/architecture.md for existing code.
-Missing .runner/project.json is scaffolded; existing configuration is preserved.
-Missing .pi/, .runner/answers/, and .runner-ui-*/ gitignore entries are added and
+Missing project configuration is scaffolded in .agent-plan; existing canonical or legacy configuration is preserved.
+Missing agent-local gitignore entries, including .agent-plan/local.json and tasks/, are added and
 committed so agent-local files do not dirty later worktrees.
 The result stays in its integration worktree for review; it is not merged.`,
   init: `agent-plan init REPO 'VERIFY_ARGV_JSON'
 
-Create .runner/project.json without launching an agent. Existing config is preserved.
+Create .agent-plan/project.json without launching an agent. Existing canonical or legacy config is preserved.
 Example: agent-plan init demo '["bun","test"]'`,
+  config: `agent-plan config REPO
+
+Read effective .agent-plan/project.json (or legacy .runner/project.json) with private
+.agent-plan/local.json overrides and report runtime capabilities without connecting
+to Herdr or launching a model. Unsupported execution is reported with its reason.`,
   feedback: `agent-plan feedback TASK FILE
 agent-plan answer TASK DECISION_ID FILE
 
@@ -137,7 +146,8 @@ function showHelp(topic) {
 }
 export function supervisorArgs(raw) {
   const args = ['-e', fileURLToPath(new URL('./supervisor-extension.js', import.meta.url)),
-    '--skills', fileURLToPath(new URL('../codex/agent-plan/skills/', import.meta.url))];
+    '--plugin-dir', fileURLToPath(new URL('../codex/agent-plan/', import.meta.url)),
+    '--skills', 'how,why,arena,architect,blast-radius,open-pr'];
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '--mcp') continue;
     if (raw[i] === '--mcp-config') {
@@ -146,7 +156,33 @@ export function supervisorArgs(raw) {
   }
   return args;
 }
-export const agentIgnore = ['.pi/', '.omp/', '.runner/answers/', '.runner-ui-*/'];
+export async function supervisorProjectArgs(raw) {
+  raw = [...raw];
+  const flags = raw.slice(0, raw.indexOf('--') < 0 ? raw.length : raw.indexOf('--'));
+  const selected = {}, cwdFlags = [];
+  for (let i = 0; i < flags.length; i++) {
+    const match = flags[i].match(/^--(cwd|model|provider)(?:=(.*))?$/);
+    if (!match) continue;
+    const index = i;
+    const value = match[2] ?? flags[++i];
+    assert(value && !value.startsWith('--'), `Missing --${match[1]} value`);
+    selected[match[1]] = value;
+    if (match[1] === 'cwd') cwdFlags.push({ index, inline: match[2] !== undefined });
+  }
+  const cwd = await realpath(resolve(selected.cwd ?? process.cwd()));
+  for (const { index, inline } of cwdFlags) {
+    if (inline) raw[index] = `--cwd=${cwd}`; else raw[index + 1] = cwd;
+  }
+  let repo = cwd;
+  try { repo = await git(cwd, 'rev-parse', '--show-toplevel'); } catch (error) { if (error.code !== 128) throw error; }
+  const config = await loadProjectConfig(repo);
+  validateExecution(config, { mode: 'runner', runtime: 'omp' });
+  const choice = config.agents?.supervisor ?? {};
+  const defaults = [];
+  for (const key of ['model', 'provider']) if (!selected[key] && (choice[key] ?? config[key])) defaults.push(`--${key}`, choice[key] ?? config[key]);
+  return { cwd, args: supervisorArgs([...defaults, ...raw]) };
+}
+export const agentIgnore = ['.pi/', '.omp/', '.runner/answers/', '.runner-ui-*/', '.agent-plan/local.json', '.agent-plan/tasks/'];
 export async function ensureAgentIgnore(repo) {
   const path = join(repo, '.gitignore');
   let current = '';
@@ -170,12 +206,12 @@ export async function main(args = process.argv.slice(2)) {
     assert(names.includes(raw[0]), 'Unknown packaged skill'); return { name: raw[0], source: join(directory, raw[0], 'SKILL.md'), content: await readFile(join(directory, raw[0], 'SKILL.md'), 'utf8') };
   }
   if (command === 'supervisor') {
-    const args = supervisorArgs(raw);
+    const { args, cwd } = await supervisorProjectArgs(raw);
     await guardSupervisorSessions(args);
     await connect();
     const bun = await ensureBun();
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(bun, [ompCli, ...args], { stdio: 'inherit' });
+      const child = spawn(bun, [ompCli, ...args], { stdio: 'inherit', cwd });
       child.once('error', reject); child.once('exit', code => resolve(code ?? 1));
     });
     assert(code === 0, `Supervisor exited with status ${code}`); return '';
@@ -186,28 +222,40 @@ export async function main(args = process.argv.slice(2)) {
     else if (['--model', '--provider', '--target', '--request-id', '--discovery-model', '--discovery-provider', '--planning-model', '--planning-provider', '--hosting-provider', '--hosting-host', '--hosting-project', '--hosting-remote', '--hosting-target'].includes(raw[i])) { const key = raw[i].slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()); assert(raw[i + 1] && !raw[i + 1].startsWith('--'), `Missing ${raw[i]} value`); selection[key] = raw[++i]; }
     else rest.push(raw[i]);
   }
-  assert(['init', 'start', 'launch', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook', 'hosting', 'hosted-status', 'publish-candidate', 'preview'].includes(command), `Unknown command: ${command}\n${help}`);
+  assert(['config', 'init', 'start', 'launch', 'list', 'open', 'stop', 'submit', 'inspect', 'answer', 'resume', 'recover', 'cleanup', 'artifact', 'dashboard', 'notifications', 'cancel', 'feedback', 'onboard', 'repo', 'accept', 'verify', 'webhook', 'hosting', 'hosted-status', 'publish-candidate', 'preview'].includes(command), `Unknown command: ${command}\n${help}`);
   if (command === 'webhook') { assert(rest.length === 1, 'Usage: agent-plan webhook PRIVATE_CONFIG_FILE'); const config = await json(resolve(rest[0])); validateWebhook(config); config.since ??= new Date().toISOString(); await atomic(join(dataRoot(), 'webhook.json'), config); return { configured: true, format: config.webhook.format ?? 'references', since: config.since }; }
   if (command === 'repo') return repos(rest);
+  if (command === 'config') {
+    assert(rest.length === 1, 'Usage: agent-plan config REPO');
+    const repo = await resolveRepo(rest[0]); const config = await loadProjectConfig(repo);
+    let execution;
+    try { execution = { supported: true, ...validateExecution(config) }; }
+    catch (error) { execution = { supported: false, error: error.message }; }
+    return { file: await projectConfigPath(repo), execution, capabilities: runtimeCapabilities, agents: config.agents ?? {} };
+  }
   if (command === 'init') {
     assert(rest.length === 2, "Usage: agent-plan init <repo> '<verification argv JSON>'");
     const root = await resolveRepo(rest[0]); const argv = JSON.parse(rest[1]);
     if (!Array.isArray(argv) || !argv.length || !argv.every(v => typeof v === 'string' && v.length)) throw new Error('Verification command must be an argv array');
-    await mkdir(join(root, '.runner'), { recursive: true });
-    await writeFile(join(root, '.runner', 'project.json'), JSON.stringify({ commands: { test: argv }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' });
+    const file = await projectConfigPath(root);
+    await mkdir(dirname(file), { recursive: true });
+    try { await writeFile(file, JSON.stringify({ commands: { test: argv }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
     return { configured: root };
   }
   if (!['list', 'dashboard', 'notifications'].includes(command)) assert(rest[0], `Missing arguments. Run agent-plan help.`);
   if (command === 'hosting') {
-    const repo = await resolveRepo(rest[0]); const file = join(repo, '.runner', 'project.json'); const config = await json(file);
+    const repo = await resolveRepo(rest[0]); const file = await projectConfigPath(repo); const config = await json(file);
     const overrides = Object.fromEntries(Object.entries(selection).filter(([k]) => k.startsWith('hosting')).map(([k,v]) => [k.slice(7,8).toLowerCase()+k.slice(8),v]));
     config.hosting = await discoverHosting(repo, overrides); await atomic(file, config); return { configured: file, hosting: config.hosting };
   }
   if (command === 'onboard') {
-    const repo = await resolveRepo(rest[0]); await mkdir(join(repo, '.runner'), { recursive: true });
-    try { await writeFile(join(repo, '.runner', 'project.json'), JSON.stringify({ commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' }); }
+    const repo = await resolveRepo(rest[0]); const file = await projectConfigPath(repo);
+    validateExecution(await loadProjectConfig(repo), { mode: 'runner', runtime: 'omp' });
+    await mkdir(dirname(file), { recursive: true });
+    try { await writeFile(file, JSON.stringify({ commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], maxWorkers: 2 }, null, 2) + '\n', { flag: 'wx' }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
-    const file = join(repo, '.runner', 'project.json'); const config = await json(file);
+    const config = await json(file);
     const overrides = Object.fromEntries(Object.entries(selection).filter(([k]) => k.startsWith('hosting')).map(([k,v]) => [k.slice(7,8).toLowerCase()+k.slice(8),v]));
     if (Object.keys(overrides).length || !config.hosting) {
       let discovered;
@@ -220,6 +268,11 @@ export async function main(args = process.argv.slice(2)) {
   }
   const root = dataRoot();
   if (command === 'notifications') { try { return await json(join(root, 'notifications.json')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }
+  if (command === 'submit' || command === 'launch' || command === 'start' && rest.length >= 2) {
+    if (command === 'launch') assert(rest.length === 3, 'Usage: agent-plan launch ALIAS BRIEF_FILE REQUEST_ID');
+    const repo = await (command === 'launch' ? resolveAlias(rest[0]) : resolveRepo(rest[0]));
+    validateExecution(await loadProjectConfig(repo), { mode: 'runner', runtime: 'omp' });
+  }
   const connection = await connect(root); const url = `http://127.0.0.1:${connection.port}`;
   async function request(path, body) {
     const response = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: { authorization: `Bearer ${connection.token}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });

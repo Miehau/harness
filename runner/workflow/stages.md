@@ -23,8 +23,7 @@ for the later implementation handoff; do not launch a replacement task.
      Skip separate discovery, architecture and planning workers and their documents.
      For deletion, check callers, imports, build/config and documentation references.
    - Unfamiliar code or uncertain impact: delegate a bounded discovery question to a
-     read-only stage="discovery" worker. Use the configured discovery model (Luna by
-     default); escalate only for a concrete deficiency and record why.
+     read-only stage="discovery" worker. Use the configured discovery model (inheriting the coordinator when unset); escalate only for a concrete deficiency and record why.
    - New features or changes with unresolved system boundaries, contracts, data flow
      or consequential design tradeoffs: run the competing proposals in step 3.
      A new feature following an established pattern does not automatically need one;
@@ -51,8 +50,9 @@ for the later implementation handoff; do not launch a replacement task.
    - Resolve routine implementation details from existing code, documentation or
      evidence. Keep within the agreed architecture; do not ask the owner to predict
      behavior that can be measured.
-   - For unresolved architecture or requested competing proposals, give at least
-     three independent architecture workers the same grounded brief and rubric.
+   - For unresolved architecture or requested competing proposals, give
+     three independent architecture workers by default (or the owner's explicit roster)
+     the same frozen brief, grounding and rubric file references.
      Read pstack/skills/architect/SKILL.md and pstack/skills/arena/SKILL.md through
      artifact reads. Give each candidate architect/references/runner-prompt.md and
      architect/references/rationale-template.md beneath pstack/skills/. After the
@@ -62,9 +62,15 @@ for the later implementation handoff; do not launch a replacement task.
      Use mode="explore", stage="architecture" and separate worktrees at the same
      committed integration base. Keep that base fixed until proposals finish. Respect
      maxWorkers: run in batches if needed, without reducing the proposal count or
-     showing earlier proposals to later authors. Failed attempts do not count as
-     proposals; replace them within the budget or report the limit, never silently
-     choose from fewer than three.
+     showing earlier proposals to later authors. Do not steer authors with hints or
+     evaluations while they generate proposals. A material correction starts a new
+     round with the same corrected inputs for all seats; retain the previous round.
+     Every requested seat needs a complete proposal or specific evidence-backed failure.
+     Confirm prior attempts stopped before replacement within the budget; uncertain
+     shutdown blocks replacement. Execution failure is not architectural nonviability;
+     that conclusion requires conflicting constraints and evidence. Missing proposals
+     leave comparison incomplete: return full available files and failure evidence to
+     the owner without silently dropping seats or claiming complete coverage.
      Each proposal covers the what, how and why: boundaries, contracts, data flow,
      code references, tradeoffs, risks and verification. Workers write proposals in
      their artifact directories; architecture worktrees are read-only for repo files.

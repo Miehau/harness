@@ -1,0 +1,52 @@
+{
+  "coordinator": {
+    "model": "gpt-6-sol",
+    "provider": "openai-codex"
+  },
+  "choices": {
+    "discovery": {
+      "model": "gpt-6-luna",
+      "provider": "openai-codex",
+      "purpose": "Cheap, bounded code and documentation discovery"
+    },
+    "planning": {
+      "model": "gpt-6-sol",
+      "provider": "openai-codex",
+      "purpose": "Architecture, tradeoffs and implementation planning"
+    },
+    "implementation": {
+      "model": "gpt-6-sol",
+      "provider": "openai-codex",
+      "purpose": "Routine implementation; inherits coordinator when unspecified"
+    },
+    "review": {
+      "purpose": "Independent candidate review; prefer the opposite OpenAI/Claude family from implementation"
+    },
+    "complex": {
+      "model": "gpt-6-sol",
+      "provider": "openai-codex",
+      "purpose": "Difficult debugging or broad changes; inherits coordinator when unspecified"
+    },
+    "proposal_grok": {
+      "model": "grok-4.7",
+      "provider": "xai-oauth",
+      "purpose": "Independent architecture proposal A"
+    },
+    "proposal_terra": {
+      "model": "gpt-5.6-terra",
+      "provider": "openai-codex",
+      "purpose": "Independent architecture proposal B"
+    },
+    "proposal_sol": {
+      "model": "gpt-6-sol",
+      "provider": "openai-codex",
+      "purpose": "Independent architecture proposal C"
+    },
+    "judge": {
+      "model": "grok-4.7",
+      "provider": "xai-oauth",
+      "purpose": "Separate cross-family judge after all proposals finish"
+    }
+  },
+  "instruction": "Select modelChoice when spawning. Missing model/provider inherit the task selection. Explicit overrides require modelReason. Availability is checked before launch; a rejected choice is not a reason to guess another model ID."
+}

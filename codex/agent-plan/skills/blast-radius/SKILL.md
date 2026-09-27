@@ -5,7 +5,7 @@ description: "Find what a change could break somewhere else before it ships, bey
 
 # Blast radius
 
-With Agent Plan, first read [execution bindings](../../runner.md). Follow the
+With Agent Plan, first read [execution bindings](references/execution.md). Follow the
 assigned role and available tools; skill instructions do not expand permissions.
 
 

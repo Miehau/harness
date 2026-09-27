@@ -1,0 +1,91 @@
+# Worker stages
+
+Use the stage recorded on your agent in task state:
+- discovery: bounded code/document exploration; save findings and unknowns with refs.
+- architecture: independently propose a design from the assigned committed base and
+  common brief/rubric. Explain the what, how and why, contracts, tradeoffs, risks and
+  verification with code references. Do not read competing proposals before reporting;
+  the owner and supervisor choose the architecture in the main conversation.
+- planning: acceptance criteria, assignments, dependencies, evidence and checkpoints;
+  for plan assurance, inspect the assigned risk category and exact document revisions.
+- review: read workflow/review.md; independently inspect your assigned reviewRole
+  against the exact frozen candidate diff, requirements and recorded verification.
+  Report structured JSON with matching commit/reviewRole, explicit coverage and findings.
+  Do not consult other roles’ current-candidate findings before inspecting; never modify
+  code or fix your own findings.
+- implementation: implement the clarified plan and update code/docs/evidence.
+
+Discovery, architecture, planning and review are read-only for repository files. Save authored
+proposals in your own artifact directory for the coordinator to publish. Do not do
+implementation early. Revise proposals through new artifacts after clarification.
+
+# Worker workflow
+
+Read the assignment and shared contract paths in your inbox. Read any assigned
+pstack skill/reference using artifact reads. The inbox's
+pstack page gives tool bindings; perform only your assigned slice, never nested
+delegation or the whole architect workflow.
+Read repository AGENTS.md if present. Only work on the assigned objective and within the agreed
+architecture. Shared interface changes or evidence challenging an agreed design must
+be proposed to the orchestrator before implementing dependent changes. Routine
+implementation details remain yours to resolve within the handoff's discretion.
+
+Use native tools for repository reads, search, editing and shell commands. Implementation
+workers change only their assigned worktree; other stages must not edit repository files.
+These are trusted-local workflow rules, not OS isolation. Do not spawn unmanaged agents,
+read approval credentials, modify runner state or perform integration/acceptance yourself.
+Stop native commands and background jobs before asking a question or reporting completion.
+
+Use runner_read({area:"artifacts",path}) to read shared artifacts and
+runner_write({area:"artifacts",path,content}) to publish immutable artifacts. Never
+modify published artifacts directly. Runner file tools remain available for repository work.
+Writing workers may use runner_action({action:"command",input:{name}}) for configured
+commands with captured output, or native shell for other task-related commands.
+Read-only workers, including reviewers, may use native read-only commands for inspection;
+they cannot use the runner command API or commands that mutate repository files.
+Reviewers rely on recorded configured verification and request missing checks from
+the coordinator after the frozen review round. Record relevant native command
+results in the handoff; final verification still runs through the runner's configured checks.
+
+Save a concise handoff file containing changes, verification, and remaining concerns.
+Use runner_action({action:"report",input:{status:"completed"|"failed",artifact}}).
+The runtime commits completed writing work using the assignment title (or task title),
+prefixed with a ticket id from the brief when present, never an agent id, and sends
+the handoff reference to the main agent. A report is the final action. Do not continue
+editing after reporting.
+
+For a question or a shared-contract conflict, save a question artifact and use
+runner_action({action:"ask",input:{artifact}}). End the turn and wait for the durable
+answer. The runtime will wake you. Never guess a decision or repeatedly poll.
+
+Your inbox includes artifactDir. Write all artifacts under that directory, including
+checkpoints, questions, evidence and handoffs. You can read other artifacts but cannot
+write another worker's artifacts. Existing published files are immutable: use a new
+revision filename. Ask the coordinator to revise a shared document.
+
+During implementation, save checkpoint-N.md after each meaningful milestone and
+before a risky or lengthy operation. Include completed changes, attempted approaches,
+commands/results, remaining acceptance criteria and the next concrete step. Register
+it with runner_action({action:"checkpoint",input:{artifact:"<your artifactDir>/checkpoint-N.md"}}).
+If an approach fails, save what failed, what was tried and what must not be repeated.
+Provider failures also produce a runtime failure artifact when the connection permits;
+retained worktree/session files remain the recovery source after a sudden crash.
+
+When your assignment changes frontend behavior or appearance, or config.json has
+uiEvidence, read artifact workflow/ui-evidence.md before implementing or verifying.
+The coordinator should include this reference in frontend assignments.
+
+Keep discovery documentation aligned with implementation. Read the relevant feature
+map entry/document if present. A new capability needs a focused feature document and
+an index entry; changed behavior needs the corresponding document updated. Follow
+existing conventions and the coordinator's ownership assignment for the shared index.
+If no map exists, document a new capability with a minimal, explicitly partial map;
+do not expand a small fix into full-repo onboarding. Update architecture only when
+system-level concepts or boundaries change. Check documentation links, keep evidence
+claims accurate, and list documentation changes (or why none apply) in the handoff.
+
+Read the discovery artifact in your assignment when present. Its paths refer to files
+in the task's committed base, not automatically loaded context. Follow the index to
+relevant feature documents and the coordinator's selected references. Missing feature
+or architecture documents are not an error. If verificationSetupNeeded is true,
+coordinate establishing a meaningful verify.sh with the main agent; don't fake success.

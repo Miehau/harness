@@ -1,0 +1,109 @@
+[
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading walkthrough instructions",
+      "path": "skill://how"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading execution bindings",
+      "path": "skill://how/../../runner.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Locating skill package files",
+      "path": "skill://how/"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading execution bindings",
+      "path": "skill://runner.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading explainer format",
+      "path": "skill://how/references/explainer-prompt.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Listing fixture files",
+      "path": "."
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup implementation",
+      "path": "cache.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading lookup behavior tests",
+      "path": "cache.test.mjs"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture notes",
+      "path": "README.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Reading fixture decision record",
+      "path": "decision.md"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Numbering lookup implementation",
+      "path": "cache.mjs:1-16"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Numbering behavior tests",
+      "path": "cache.test.mjs:1-20"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Numbering decision record",
+      "path": "decision.md:1-5"
+    }
+  },
+  {
+    "name": "read",
+    "arguments": {
+      "i": "Numbering fixture readme",
+      "path": "README.md:1-4"
+    }
+  },
+  {
+    "name": "bash",
+    "arguments": {
+      "i": "Running fixture behavior test",
+      "command": "node cache.test.mjs",
+      "cwd": "/tmp/agent-plan-skill-smoke-zHiE5o",
+      "timeout": 30
+    }
+  }
+]

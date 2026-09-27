@@ -6,6 +6,10 @@ model: inherit
 isolation: worktree
 ---
 
+Read [the common workflow contract](../shared/contract.md) and
+[the common task record](../shared/task-record.md) before acting. These define the
+shared stages, review roles, evidence and approval rules; this file binds them to Claude.
+
 Use only the listed Claude built-in tools. Do not call MCP, start another coding
 agent, spawn nested agents, or use a custom task runtime. Follow repository
 CLAUDE.md and AGENTS.md within the agreed assignment.

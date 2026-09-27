@@ -1,18 +1,22 @@
 {
   "name": "agent-plan",
-  "version": "0.2.0",
-  "description": "Repository exploration, rationale, design arenas, architecture-led implementation, blast-radius analysis and hosted change requests.",
+  "version": "0.3.0",
+  "description": "Native Codex Agent Plan lifecycle and portable repository discussion skills.",
   "author": {
     "name": "Agent Plan contributors"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Plan",
-    "shortDescription": "Understand, architect, implement and publish repository changes.",
-    "longDescription": "Agent Plan ports pstack's how, why, arena, architect and blast-radius workflows, with at least three architecture proposals discussed in the main conversation before background implementation, tests and review. Publishing remains a separate authorized action.",
+    "shortDescription": "Discuss, implement, review and accept repository changes.",
+    "longDescription": "Native Codex task onboarding, isolated implementation, parallel role reviews, durable recovery and exact-revision acceptance, alongside the six existing discussion skills. No runner daemon is required for native lifecycle tasks.",
     "developerName": "Agent Plan contributors",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Explore this change and compare at least three architecture proposals with me before delegating implementation."
+    "defaultPrompt": [
+      "Start an Agent Plan task using native Codex workers and required reviews.",
+      "Onboard this repository for native Codex Agent Plan.",
+      "Show the current Agent Plan task and delivery gates."
+    ]
   }
 }

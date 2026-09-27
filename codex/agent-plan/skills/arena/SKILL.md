@@ -1,15 +1,15 @@
 ---
 name: arena
-description: "Compare at least three independent candidates, cross-judge their tradeoffs, and recommend a synthesis. Architectural choices return to the main conversation. Use for arena this, competing proposals, or consequential design alternatives."
+description: "Compare independent candidates, cross-judge their tradeoffs, and recommend a synthesis. Architectural choices return to the main conversation. Use for arena this, competing proposals, or consequential design alternatives."
 ---
 
 # Arena
 
-Fan out at least three independent attempts at the same task. Read every candidate,
+Fan out three independent attempts by default, or the owner's explicit roster. Read every candidate,
 cross-judge and recommend the strongest base with useful ideas from the others.
 For architecture, return the recommendation and all proposals to the main conversation;
 only the user's agreement makes it the selected design. Follow the
-[Agent Plan execution bindings](../../runner.md) for tool and ownership boundaries.
+[Agent Plan execution bindings](references/execution.md) for tool and ownership boundaries.
 
 ## Start
 
@@ -26,26 +26,31 @@ Keep a short phase checklist in the available plan tool or task notes.
 
 The N candidates will receive the same prompt, so the prompt is the contract.
 
-1. State the artifact each candidate is producing.
+1. State the artifact each candidate is producing. Freeze the brief, grounding, rubric and requested seat roster in immutable files; pass their references.
 2. Derive the rubric. State what success looks like for *this* task, then turn it into 3-6 concrete gradeable criteria. Give every candidate the same task, grounding and rubric.
 3. Pick the runners. Use configured models when present. Otherwise choose available models with different strengths or families; use the same model in independent contexts when generation diversity matters more than model diversity. Spawn more only when the arena covers more design directions.
 4. Assign separate worktrees at the same exact committed base for repository architecture. Keep the integration base fixed during the round. Managed read-only workers write proposals and code sketches to their artifact directories. For non-repository artifacts, isolated directories suffice.
 
 ## Phase B: Fan out
 
-Launch at least three independent candidates with the common brief, rubric, grounding,
+Launch every requested candidate with the same frozen brief, rubric, grounding,
 base and individual output paths. Respect worker capacity by batching; do not show
 later candidates earlier outputs. If independent delegation is unavailable, report
 that limitation rather than label three drafts from one context independent proposals.
 
-Each rationale names the alternatives the candidate considered and what it rejected.
+Keep authors independent until submission: no hints, evaluations, steering or other
+proposals. If material inputs change, start a new round for every seat and retain the
+old one. Each rationale names the alternatives considered and what it rejected.
 
-If a candidate fails, replace it within the budget and record the dropout. At least
-three completed proposals are required; otherwise report the blocker without picking.
+Every requested seat must yield a full proposal or a specific failure report with
+evidence. Confirm the old attempt stopped before replacement within the budget.
+Provider/tool failures and timeouts do not prove a design nonviable; that conclusion
+requires constraints and evidence. Missing proposals leave comparison incomplete:
+return the available files and gaps to the owner, never silently reduce coverage.
 
 ## Phase C: Cross-judge
 
-After all Phase B candidates complete, choose a separate judge, preferably from a different available model family. It sees the rubric and candidates by path label, scores each criterion, and recommends a base with rationale. Run this read-only judgment in parallel with the parent's reading in Phase D, not while candidates are still writing. If no separate judge is available, perform the same labeled scoring yourself and record that limitation.
+After all requested Phase B proposals complete, choose a separate judge, preferably from a different available model family. It sees the rubric and candidates by path label, scores each criterion, and recommends a base with rationale. Run this read-only judgment in parallel with the parent's reading in Phase D, not while candidates are still writing. If no separate judge is available, perform the same labeled scoring yourself and record that limitation.
 
 ## Phase D: Recommend a base
 
@@ -83,6 +88,10 @@ If verification surfaces a problem the arena did not catch, either Phase A was w
 
 ## Outputs
 
-All original candidates, the judge's comparison and a recommended synthesized
+Full original candidate files, explicit failure reports and coverage gaps, the judge's comparison and a recommended synthesized
 artifact. A short note names the proposed base, grafts, rejections, dropouts and
 verification result, keeping recommendations distinct from the user's decision.
+
+Pass briefs, proposals, critiques, synthesis and decisions as file references. Keep full
+outputs without arbitrary length caps; summaries do not replace them. End the turn
+while waiting for completion events; do not use shell sleep or model polling loops.

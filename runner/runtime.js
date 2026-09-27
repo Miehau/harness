@@ -15,13 +15,15 @@ import { preview } from './preview.js';
 import { modelMenu, chooseModel, reviewModel } from './models.js';
 import { hookFields } from './notifications.js';
 import { selectedSkills } from './skills.js';
+import { loadProjectConfig, validateExecution } from './project-config.js';
+import policy from '../workflow/policy.json' with { type: 'json' };
 import { mediaFile, verifyUI } from './evidence.js';
 import { titleOf, slugOf, agentName, branchName, commitMessage, ticketOf } from './names.js';
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const active = a => ['starting', 'running', 'waiting'].includes(a.status);
 const digest = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const bundled = name => readFile(fileURLToPath(new URL(name, import.meta.url)), 'utf8');
-const riskRoles = { security: 'security', 'data-safety': 'database', database: 'database', recovery: 'recovery', operator: 'recovery', ui: 'ui', performance: 'performance' };
+const riskRoles = policy.riskReviewRoles;
 
 // Existing snapshotted tasks retain their original single-review contract.
 export function assertCandidateReviews(task, commit) {
@@ -163,8 +165,9 @@ export class Runtime {
     string(input.text, 'task', 100000); string(input.requestId, 'requestId', 200);
     const fingerprint = digest({ repo, text: input.text, model: input.model, provider: input.provider, onboarding: input.onboarding, discoveryModel: input.discoveryModel, discoveryProvider: input.discoveryProvider, planningModel: input.planningModel, planningProvider: input.planningProvider });
     for (const task of this.tasks.values()) if (task.requestId === input.requestId) { assert(task.fingerprint === fingerprint, 'requestId reused with different input'); return this.view(task); }
-    let config;
-    try { config = await json(join(repo, '.runner', 'project.json')); } catch (e) { if (e.code !== 'ENOENT') throw e; config = { commands: { test: ['bash', 'verify.sh'] }, verify: ['test'], inferredSetup: true }; }
+    const config = await loadProjectConfig(repo);
+    config.execution = validateExecution(config, { mode: 'runner', runtime: 'omp' });
+    for (const key of ['model', 'provider']) if (config.agents?.coordinator?.[key] !== undefined) config[key] = config.agents.coordinator[key];
     if (config.hosting) config.hosting = validateHosting(config.hosting);
     if (config.preview) assert(typeof config.preview.url === 'string' && Object.hasOwn(config.commands ?? {}, config.preview.command), 'Configure preview.command and preview.url');
     for (const key of ['model', 'provider']) if (input[key] !== undefined) config[key] = string(input[key], key, 200);
@@ -179,14 +182,14 @@ export class Runtime {
     if (config.uiEvidence !== undefined) assert(config.uiEvidence && Object.hasOwn(config.commands, config.uiEvidence.command), 'uiEvidence.command must name a configured command');
     for (const key of ['setup']) if (config[key]) assert(Object.hasOwn(config.commands, config[key]), 'Unknown setup command');
     for (const key of ['discoveryModel', 'discoveryProvider', 'planningModel', 'planningProvider']) if (input[key] !== undefined) config[key] = string(input[key], key, 200);
-    config.discoveryModel ??= 'gpt-5.6-luna'; config.discoveryProvider ??= 'openai-codex';
+    config.discoveryModel ??= config.model; config.discoveryProvider ??= config.provider;
     for (const key of ['provider', 'model', 'discoveryModel', 'discoveryProvider', 'planningModel', 'planningProvider']) if (config[key]) string(config[key], key, 200);
     config.maxWorkers ??= 2; config.maxAttempts ??= 12; config.timeoutMinutes ??= 60; config.commandTimeoutMs ??= 120000;
     assert(Number.isInteger(config.maxWorkers) && config.maxWorkers >= 1 && config.maxWorkers <= 8, 'maxWorkers must be 1–8');
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
     assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
-    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, reviewPolicy: { version: 1, requiredRoles: ['requirements', 'correctness'], risks: [] }, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
+    const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, reviewPolicy: { version: policy.version, requiredRoles: [...policy.requiredReviewRoles], risks: [] }, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
     const skills = await selectedSkills(repo, task.base, config.skills);
     await mkdir(join(this.dir(task), 'artifacts'), { recursive: true, mode: 0o700 });
@@ -268,8 +271,22 @@ export class Runtime {
     this.message(agent, 'assignment', 'brief.md', { workflow: 'workflow.md', config: 'config.json', models: 'model-menu.json', discovery: task.discovery, skills: task.skills, pstack: task.pstack, artifactDir: agent.artifactDir });
     await this.launch(task, agent); return this.view(task);
   }
+  async failAttempt(task, agent, artifact, error) {
+    // Revoke API access durably before stopping the provider; publish only after
+    // the concrete session is gone. A crash or uncertain stop remains inspectable.
+    agent.status = 'failed'; agent.error = error; agent.failure = artifact;
+    await this.save(task);
+    await this.transport.stop(agent);
+    assert(await this.transport.status(agent) === 'missing', 'Failed attempt has not stopped; inspect before replacing it');
+    this.event(task, 'attention', { agentId: agent.id, error, artifact });
+    if (agent.role === 'worker') this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', artifact, { workerId: agent.id, status: 'failed' });
+    await this.save(task);
+  }
   async spawn(task, input) {
     assert(!task.operation, 'Resolve the interrupted operation before spawning');
+    for (const previous of task.agents.filter(a => a.status === 'failed')) {
+      assert(await this.transport.status(previous) === 'missing', 'Failed attempt session is present or unknown; stop or resume it before spawning');
+    }
     assert(task.agents.length < task.config.maxAttempts, 'Attempt budget exhausted');
     assert(task.agents.filter(a => a.role === 'worker' && active(a)).length < task.config.maxWorkers, 'Worker capacity reached');
     assert(['write', 'explore'].includes(input.mode), 'mode must be write or explore');
@@ -423,7 +440,7 @@ export class Runtime {
         assert(Number.isInteger(finding.line) && finding.line > 0, 'Finding needs a positive line number');
       }
       task.reviews ??= [];
-      task.reviews.push({ agentId: agent.id, ...(task.reviewPolicy ? { reviewRole: agent.reviewRole, coverage: review.coverage } : {}), commit: agent.base, artifact: input.artifact, passed: !review.findings.some(f => f.severity !== 'minor'), at: now() });
+      task.reviews.push({ agentId: agent.id, ...(task.reviewPolicy ? { reviewRole: agent.reviewRole, coverage: review.coverage } : {}), commit: agent.base, artifact: input.artifact, passed: !review.findings.some(f => policy.blockingSeverities.includes(f.severity)), at: now() });
     }
     agent.status = input.status; agent.report = input.artifact;
     if (agent.role === 'orchestrator') { task.status = input.status; task.result = input.artifact; }
@@ -659,7 +676,7 @@ export class Runtime {
         if (task.reviewPolicy) {
           const risks = body.risks ?? task.reviewPolicy.risks;
           assert(Array.isArray(risks) && risks.every(r => Object.hasOwn(riskRoles, r)), 'Unknown review risk category');
-          task.reviewPolicy = { version: 1, risks: [...new Set([...task.reviewPolicy.risks, ...risks])], requiredRoles: [...new Set([...task.reviewPolicy.requiredRoles, 'requirements', 'correctness', ...risks.map(r => riskRoles[r])])] };
+          task.reviewPolicy = { version: policy.version, risks: [...new Set([...task.reviewPolicy.risks, ...risks])], requiredRoles: [...new Set([...task.reviewPolicy.requiredRoles, ...policy.requiredReviewRoles, ...risks.map(r => riskRoles[r])])] };
         }
         task.clarification = { artifact: body.artifact, documentsDigest: digest(task.documents ?? {}), at: now() };
         this.event(task, 'clarified', { artifact: body.artifact }); await this.save(task); result = task.clarification;
@@ -721,7 +738,7 @@ export class Runtime {
       else if (action === 'verify') { assert(owner || orchestrator, 'Orchestrator access required'); result = await this.verify(task); }
       else if (action === 'command') { assert(!owner && (orchestrator || actor.mode === 'write'), 'Explore workers cannot run commands'); result = await this.command(task, actor, body.name); }
       else if (action === 'ask') { assert(!owner, 'Agent access required'); result = await this.ask(task, actor, body); }
-      else if (action === 'fault') { assert(!owner, 'Agent access required'); await this.reference(task, body.artifact); actor.status = 'failed'; actor.error = 'Agent turn failed; see the failure artifact'; actor.failure = body.artifact; this.event(task, 'attention', { agentId: actor.id, artifact: body.artifact }); if (actor.role === 'worker') this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', body.artifact, { workerId: actor.id, status: 'failed' }); await this.save(task); result = { status: 'failed' }; }
+      else if (action === 'fault') { assert(!owner, 'Agent access required'); await this.reference(task, body.artifact); await this.failAttempt(task, actor, body.artifact, 'Agent turn failed; see the failure artifact'); result = { status: 'failed' }; }
       else if (action === 'report') { assert(!owner, 'Agent access required'); result = await this.report(task, actor, body); }
       else throw new Error(`Unknown action: ${action}`);
 
@@ -792,11 +809,9 @@ export class Runtime {
           if (status === 'missing' || overdue) {
             agent.status = 'failed'; agent.error = overdue ? 'Attempt time budget exceeded' : 'Session disappeared; partial work retained';
             const artifact = await this.artifact(task, JSON.stringify({ agentId: agent.id, error: agent.error, observedStatus: status, lastHeartbeat: this.heartbeats.get(agent.id) ?? null, checkedAt: now(), session: agent.session, place: agent.place }, null, 2), 'json');
-            agent.failure = artifact;
-            this.event(task, 'attention', { agentId: agent.id, error: agent.error, artifact });
-            if (agent.role === 'worker') this.message(task.agents.findLast(a => a.role === 'orchestrator'), 'worker-report', artifact, { workerId: agent.id, status: 'failed' });
-            await this.save(task);
-            if (overdue) await this.transport.stop(agent).catch(() => {});
+            // Stop uncertainty retains the failed attempt without announcing that
+            // a replacement can run. spawn/resume reconcile the provider session.
+            await this.failAttempt(task, agent, artifact, agent.error).catch(() => {});
           }
         }, original.id);
       }

@@ -38,7 +38,7 @@ test('workflow routes task playbooks and resolves observable forks with evidence
   assert.match(playbooks, /numeric baseline/i);
   assert.match(stages, /two or three isolated throwaway\s+prototypes/i);
   assert.match(stages, /Do not integrate\s+prototype commits/i);
-  assert.match(stages, /at least\s+three independent architecture workers the same grounded brief/i);
+  assert.match(stages, /three independent architecture workers by default.*same frozen brief/is);
   assert.match(stages, /same\s+committed integration base/i);
   assert.match(stages, /run in batches if needed/i);
   assert.match(stages, /ask \{artifact,requiresOwner:true\}/);
@@ -150,7 +150,7 @@ test('three architecture proposals return to the supervisor before the same coor
   t.after(() => handlers.session_shutdown());
   await handlers.session_start({}, ctx);
   const prompt = (await handlers.before_agent_start({ systemPrompt: '' })).systemPrompt;
-  assert.match(prompt, /at least three independent architecture workers/);
+  assert.match(prompt, /three independent architecture workers by default/);
   assert.match(prompt, /Continue the same task after agreement/);
   await commands['runner-watch'].handler(task.id, ctx);
   assert(JSON.parse(messages[0].content).some(event => event.decisionId === question.decisionId));
@@ -374,7 +374,7 @@ test('OMP extension delivers references, acknowledges turns, and surfaces model 
     if (prior.token === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = prior.token;
     if (prior.reply === undefined) delete process.env.RUNNER_REPLY_TOKEN; else process.env.RUNNER_REPLY_TOKEN = prior.reply;
   });
-  const notices = []; const ctx = { isIdle: () => true, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
+  const notices = []; const ctx = { isIdle: () => true, async abort() {}, shutdown() {}, model: { provider: 'anthropic', id: 'claude-test' }, ui: { setStatus() {}, notify(text) { notices.push(text); } } };
   assert.equal(handlers.has('project_trust'), false, 'OMP uses native approval configuration');
   assert.equal(handlers.has('tool_call'), false, 'Native tool calls are not blocked');
   assert.equal(handlers.has('user_bash'), false, 'Interactive shell remains available');
@@ -407,9 +407,43 @@ test('OMP extension delivers references, acknowledges turns, and surfaces model 
   assert.equal(messages.length, 2); assert.match(messages[1].content, /answer/);
   const decision = server.runtime.task(f.task.id).decisions.find(d => d.id === q.details.decisionId);
   assert.equal(await readFile(join(server.runtime.dir(f.task), 'artifacts', decision.answer), 'utf8'), 'Proceed');
+  const providerError = { role: 'assistant', stopReason: 'error', errorMessage: 'Provider unavailable' };
+  await handlers.get('agent_end')({ messages: [messages[1], providerError], willContinue: true });
+  assert.equal(server.runtime.task(f.task.id).agents[0].status, 'running', 'OMP retry stays inside the authoritative attempt');
+  await handlers.get('agent_end')({ messages: [messages[1], providerError, { role: 'assistant', stopReason: 'stop' }] });
+  assert.equal(server.runtime.task(f.task.id).agents[0].status, 'running', 'An older failed message cannot fail a recovered turn');
   await handlers.get('agent_end')({ messages: [messages[1], { role: 'assistant', stopReason: 'error', errorMessage: 'Provider unavailable' }] });
   assert.equal(server.runtime.task(f.task.id).agents[0].status, 'failed');
   assert.equal(server.runtime.task(f.task.id).status, 'running');
+});
+
+test('failed workers cannot be replaced until the provider session is confirmed stopped', async t => {
+  const f = await fixture(t);
+  const assignment = await f.artifact('assignment.md');
+  const spawned = await f.call(f.who(f.main), 'spawn', f.task.id, { mode: 'explore', assignment });
+  const task = f.runtime.task(f.task.id), worker = task.agents.find(a => a.id === spawned.workerId);
+  const failure = await f.artifact('failure.json', 'Provider exhausted retries', f.who(worker));
+  const stop = f.transport.stop.bind(f.transport);
+  f.transport.stop = async () => {}; // Provider has not actually terminated.
+  await assert.rejects(f.call(f.who(worker), 'fault', task.id, { artifact: failure }), /has not stopped/);
+  const current = () => f.runtime.task(f.task.id);
+  assert.equal(current().agents.find(a => a.id === worker.id).status, 'failed');
+  assert.equal(current().agents[0].inbox.filter(m => m.kind === 'worker-report').length, 0);
+  const attempts = task.agents.length;
+  await assert.rejects(f.call(f.who(f.main), 'spawn', task.id, { mode: 'explore', assignment }), /session is present or unknown/);
+  assert.equal(current().agents.length, attempts);
+  f.transport.status = async agent => agent.id === worker.id ? 'unknown' : 'idle';
+  await assert.rejects(f.call(f.who(f.main), 'spawn', task.id, { mode: 'explore', assignment }), /session is present or unknown/);
+  f.transport.status = FakeHerdr.prototype.status;
+  f.transport.stop = stop;
+  await stop(worker);
+  const replacement = await f.call(f.who(f.main), 'spawn', task.id, { mode: 'explore', assignment });
+  assert.equal(replacement.status, 'running');
+  const next = current().agents.find(a => a.id === replacement.workerId);
+  const nextFailure = await f.artifact('failure.json', 'Terminal failure', f.who(next));
+  await f.call(f.who(next), 'fault', task.id, { artifact: nextFailure });
+  assert.equal(await f.transport.status(next), 'missing');
+  assert(current().agents[0].inbox.some(m => m.workerId === next.id && m.status === 'failed'));
 });
 
 test('resume wakes acknowledged sessions and preserves unanswered user decisions', async t => {
@@ -784,7 +818,7 @@ test('onboard gitignore helper appends missing agent directories, commits, and i
   await git(repo, 'add', '.'); await git(repo, 'commit', '-m', 'Base');
   const { ensureAgentIgnore } = await import('../runner/cli.js');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: true });
-  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.omp/\n.runner/answers/\n.runner-ui-*/\n');
+  assert.equal(await readFile(join(repo, '.gitignore'), 'utf8'), 'node_modules/\n.pi/\n.omp/\n.runner/answers/\n.runner-ui-*/\n.agent-plan/local.json\n.agent-plan/tasks/\n');
   assert.equal(await git(repo, 'log', '-1', '--format=%s'), 'Ignore agent-local directories');
   const head = await git(repo, 'rev-parse', 'HEAD');
   assert.deepEqual(await ensureAgentIgnore(repo), { updated: false });

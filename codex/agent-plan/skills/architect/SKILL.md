@@ -1,6 +1,6 @@
 ---
 name: architect
-description: "Ground a change, compare at least three independent architecture proposals with the user, then delegate agreed implementation to a background coordinator. Use for architect this, design this, or consequential choices before implementation."
+description: "Ground a change, compare independent architecture proposals with the user, then delegate agreed implementation to a background coordinator. Use for architect this, design this, or consequential choices before implementation."
 ---
 
 # Architect
@@ -11,7 +11,7 @@ perspectives in the main conversation, record the chosen design and why, then ha
 authorized implementation to the background coordinator. If evidence challenges the
 design, bring it back for discussion before changing the agreement.
 
-Follow [Agent Plan execution bindings](../../runner.md) for supervisor and managed
+Follow [Agent Plan execution bindings](references/execution.md) for supervisor and managed
 worker tools. A candidate worker performs its assigned proposal only; it never
 recursively invokes this whole workflow. Already-agreed architecture or a small,
 understood change can go directly to an authorized implementation handoff.
@@ -39,17 +39,21 @@ Skip Phase A only when the work is genuinely greenfield with no surrounding syst
 
 Run the **arena** skill with the design-sketch task and the Phase A grounding artifacts. Pass `references/runner-prompt.md` as each runner's prompt. Each candidate produces a design package shaped per `references/rationale-template.md`.
 
-Use at least three independent architecture workers, with the same grounded brief,
-rubric and committed base in separate worktrees. Prefer different available models
-when appropriate; independent contexts on the same model are valid. Respect capacity
-by batching workers without exposing earlier proposals to later authors.
+Default to three independent architecture workers unless the owner specifies a roster.
+Freeze the common brief, grounding, rubric and committed base as file references.
+Give every requested seat the same inputs in separate worktrees. Respect capacity
+by batching without exposing earlier proposals to later authors. No evaluations,
+hints or steering during proposal generation. A material correction starts a new
+round for every seat; preserve the original submissions.
 
-Require at least three completed proposals before comparison, even when the first
-looks sufficient. Explore whole-shape alternatives, not point fixes inside one
-shape. Replace failed attempts within the budget or report the limitation; do not
-silently lower the minimum or fabricate disagreement when proposals converge.
+Account for every requested seat: a complete proposal or a specific evidence-backed
+failure report. Confirm an attempt stopped before replacing it within the budget.
+Execution failure is not architectural nonviability; a nonviability claim must name
+conflicting constraints and evidence. If proposals remain missing, return all available
+files and failure evidence to the user with the coverage gap. Do not silently lower
+coverage, claim a complete comparison or fabricate disagreement when proposals converge.
 
-Screen every candidate against [`references/design-red-flags.md`](references/design-red-flags.md) before synthesis. Reject or revise shallow modules, information leakage, temporal decomposition, and pass-through methods.
+Screen every candidate against [`references/design-red-flags.md`](references/design-red-flags.md) before synthesis. Record shallow modules, information leakage, temporal decomposition and pass-through methods as judging findings after submission; do not steer authors mid-round.
 
 Compare viable candidates on interface depth. Prefer the design that hides more complexity behind a smaller, simpler public surface. A rich interface can keep call chains short by concentrating capability instead of scattering it across layers.
 
@@ -121,7 +125,7 @@ When proposing a replacement:
 
 ## Outputs
 
-Write the caller's usage first and derive the type sketch from it. Return at least
-three proposal artifacts, comparison/judgment and a rationale shaped per
+Write the caller's usage first and derive the type sketch from it. Return all
+requested proposal artifacts (or explicit failure evidence), comparison/judgment and a rationale shaped per
 `references/rationale-template.md`. Record the user-agreed handoff separately from
 the recommendation. After authorized implementation, return the candidate and evidence.
