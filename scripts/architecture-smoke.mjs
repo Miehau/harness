@@ -39,7 +39,7 @@ await writeFile(join(repo, '.agent-plan/project.json'), JSON.stringify({
   proposal_terra: { model: 'gpt-5.6-terra', provider: 'openai-codex', purpose: 'Independent architecture proposal B' },
   proposal_sol: { model: 'gpt-6-sol', provider: 'openai-codex', purpose: 'Independent architecture proposal C' },
   judge: { model: 'grok-4.7', provider: 'xai-oauth', purpose: 'Separate cross-family judge after all proposals finish' }
- }, commands: { test: [process.execPath, 'test.mjs'] }, verify: ['test'], maxWorkers: 3, maxAttempts: 10, timeoutMinutes: 20,
+ }, commands: { test: [process.execPath, 'test.mjs'] }, verify: ['test'], maxWorkers: 3, maxAttempts: 100,
 }, null, 2));
 await git(repo,'init','-b','main'); await git(repo,'config','user.name','Skill Smoke'); await git(repo,'config','user.email','smoke@example.invalid');
 await git(repo,'add','.'); await git(repo,'commit','-m','Prototype queue uses memory to avoid infrastructure before durability is required');

@@ -184,10 +184,9 @@ export class Runtime {
     for (const key of ['discoveryModel', 'discoveryProvider', 'planningModel', 'planningProvider']) if (input[key] !== undefined) config[key] = string(input[key], key, 200);
     config.discoveryModel ??= config.model; config.discoveryProvider ??= config.provider;
     for (const key of ['provider', 'model', 'discoveryModel', 'discoveryProvider', 'planningModel', 'planningProvider']) if (config[key]) string(config[key], key, 200);
-    config.maxWorkers ??= 2; config.maxAttempts ??= 12; config.timeoutMinutes ??= 60; config.commandTimeoutMs ??= 120000;
+    config.maxWorkers ??= 2; config.maxAttempts ??= 12; config.commandTimeoutMs ??= 120000;
     assert(Number.isInteger(config.maxWorkers) && config.maxWorkers >= 1 && config.maxWorkers <= 8, 'maxWorkers must be 1–8');
     assert(Number.isInteger(config.maxAttempts) && config.maxAttempts >= 1 && config.maxAttempts <= 100, 'maxAttempts must be 1–100');
-    assert(Number.isFinite(config.timeoutMinutes) && config.timeoutMinutes > 0 && config.timeoutMinutes <= 1440, 'timeoutMinutes must be 0–1440');
     assert(Number.isInteger(config.commandTimeoutMs) && config.commandTimeoutMs >= 100 && config.commandTimeoutMs <= 600000, 'commandTimeoutMs must be 100–600000');
     const task = { version: 1, id: id(), requestId: input.requestId, fingerprint, repo, base: await git(repo, 'rev-parse', 'HEAD'), status: 'queued', stagedWorkflow: true, reviewRequired: true, reviewPolicy: { version: policy.version, requiredRoles: [...policy.requiredReviewRoles], risks: [] }, createdAt: now(), title: titleOf(input.text), slug: slugOf(input.text), ticket: ticketOf(input.text) || undefined, config, agents: [], decisions: [], events: [], receipts: {}, contracts: [], verification: null };
     task.modelMenu = modelMenu(config);
@@ -787,27 +786,19 @@ export class Runtime {
   }
   async reconcile() {
     await this.deliverCoordination();
-    const expired = (task, agent) => {
-      if (agent.status === 'waiting') return false;
-      if (agent.role === 'orchestrator' && task.agents.some(other => other.role === 'worker' && active(other))) return false;
-      const anchor = agent.role === 'orchestrator' ? task.updatedAt : agent.startedAt;
-      return Date.now() - Date.parse(anchor ?? agent.createdAt) > task.config.timeoutMinutes * 60000;
-    };
     for (const original of [...this.tasks.values()]) {
       if (!['running', 'waiting'].includes(original.status)) continue;
       for (const old of original.agents.filter(active)) {
-        const overdue = expired(original, old);
-        if (!overdue && Date.now() - (this.heartbeats.get(old.id) ?? 0) < 15000) continue;
+        if (Date.now() - (this.heartbeats.get(old.id) ?? 0) < 15000) continue;
         const observedStart = old.startedAt;
         const status = await this.transport.status(old);
         await this.serial(async () => {
           const task = this.task(original.id); const agent = task.agents.find(a => a.id === old.id);
           if (!active(agent) || agent.startedAt !== observedStart) return;
-          const overdue = expired(task, agent);
           // Herdr lookup happens outside the task queue: a live Pi may poll while it runs.
-          if (!overdue && Date.now() - (this.heartbeats.get(agent.id) ?? 0) < 15000) return;
-          if (status === 'missing' || overdue) {
-            agent.status = 'failed'; agent.error = overdue ? 'Attempt time budget exceeded' : 'Session disappeared; partial work retained';
+          if (Date.now() - (this.heartbeats.get(agent.id) ?? 0) < 15000) return;
+          if (status === 'missing') {
+            agent.status = 'failed'; agent.error = 'Session disappeared; partial work retained';
             const artifact = await this.artifact(task, JSON.stringify({ agentId: agent.id, error: agent.error, observedStatus: status, lastHeartbeat: this.heartbeats.get(agent.id) ?? null, checkedAt: now(), session: agent.session, place: agent.place }, null, 2), 'json');
             // Stop uncertainty retains the failed attempt without announcing that
             // a replacement can run. spawn/resume reconcile the provider session.

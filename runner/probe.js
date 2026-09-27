@@ -9,7 +9,7 @@ const root = await mkdtemp(join(tmpdir(), 'runner-herdr-probe-'));
 // Keep OMP's writable auth/settings/session database out of the user's profile.
 process.env.PI_CODING_AGENT_DIR = join(root, 'omp');
 const app = await serve(root);
-const task = { version: 1, id: id(), status: 'running', createdAt: now(), config: { maxAttempts: 2, timeoutMinutes: 2 }, agents: [], events: [], decisions: [], receipts: {} };
+const task = { version: 1, id: id(), status: 'running', createdAt: now(), config: { maxAttempts: 2 }, agents: [], events: [], decisions: [], receipts: {} };
 await mkdir(app.runtime.dir(task), { recursive: true });
 const agent = app.runtime.agent(task, 'orchestrator', root);
 let good = false;

@@ -30,7 +30,7 @@ try {
     execution: { mode: 'runner', runtime: 'omp' },
     ...(model ? { agents: { coordinator: choice, implementation: choice, review: choice } } : {}),
     commands: { test: [process.execPath, '-e', "const fs=require('node:fs');if(fs.readFileSync('value.txt','utf8')!=='ready\\n')process.exit(1)"] },
-    verify: ['test'], maxWorkers: 2, maxAttempts: 5, timeoutMinutes: Math.ceil(timeoutMs / 60_000), commandTimeoutMs: 30_000,
+    verify: ['test'], maxWorkers: 2, maxAttempts: 5, commandTimeoutMs: 30_000,
   }, null, 2) + '\n');
   await git(repo, 'init', '-b', 'main');
   await git(repo, 'config', 'user.name', 'Agent Plan Canary');

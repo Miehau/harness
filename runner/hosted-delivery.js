@@ -6,6 +6,7 @@ import { createHosting, validateHosting } from './hosting.js';
 import { assertHostingRemote, publishEvidence } from './hosted-evidence.js';
 
 const bodyDigest = text => createHash('sha256').update(text ?? '').digest('hex');
+const publicationAttachments = task => (task.hosted?.evidence ?? []).map(e => e.artifact).filter(path => /\.png$/i.test(path)).slice(0, 4);
 
 function host(runtime, task) {
   const config = validateHosting(task.config.hosting);
@@ -95,7 +96,7 @@ export async function publishCandidate(runtime, task, { artifact = task.result, 
     assert(bodyDigest(current.body) === task.hosted.bodyDigest, 'Remote request body does not match the candidate evidence handoff');
     task.hosted = { ...task.hosted, ...current, commit, phase: 'published' };
     task.operation = null;
-    runtime.event(task, 'published', { artifact, pr: current.number, url: current.url, commit, evidence: task.verification.artifact });
+    runtime.event(task, 'published', { artifact, pr: current.number, url: current.url, commit, evidence: task.verification.artifact, attachments: publicationAttachments(task) });
     await runtime.save(task); return task.hosted;
   } catch (error) {
     task.hosted.phase = 'needs-attention';
@@ -120,7 +121,7 @@ export async function hostedStatus(runtime, task) {
     }
   } else if (operation?.kind === 'hosted-publish' && operation.step === 'request' && current.head === operation.commit && current.target === task.config.hosting.target && bodyDigest(current.body) === task.hosted.bodyDigest) {
     task.hosted.phase = 'published'; task.operation = null;
-    runtime.event(task, 'published', { artifact: task.hosted.publicationArtifact ?? task.result, pr: current.number, url: current.url, commit: operation.commit, evidence: task.verification?.artifact, recovered: true });
+    runtime.event(task, 'published', { artifact: task.hosted.publicationArtifact ?? task.result, pr: current.number, url: current.url, commit: operation.commit, evidence: task.verification?.artifact, attachments: publicationAttachments(task), recovered: true });
   }
   if (previousCI !== current.ci?.state) runtime.event(task, 'ci-status', { commit: current.head, ci: current.ci, url: current.url });
   await runtime.save(task); return task.hosted;

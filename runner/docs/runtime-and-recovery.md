@@ -103,15 +103,13 @@ after successful turns. Delivery can repeat after an uncertain crash, so mutatin
 calls use durable request receipts. An uncertain receipt is surfaced instead of being
 replayed automatically.
 
-Herdr `idle` and `done` are not evidence of completion. Missing sessions and expired
-attempt budgets become attention events. The runtime reconnects surviving OMP sessions
+Herdr `idle` and `done` are not evidence of completion. Missing sessions become attention events. The runtime reconnects surviving OMP sessions
 after restart and reuses saved session files.
 
-Budgets limit concurrent workers, total attempts, commands, and running-attempt time.
-Workers have a hard per-attempt window. For the long-lived coordinator,
-`timeoutMinutes` measures task inactivity and does not expire while a worker is active;
-task progress refreshes the window. A recorded user wait is exempt. An explicit resume
-grants a fresh window.
+Budgets limit concurrent workers, total attempts and individual commands. Workers
+and coordinators have no elapsed-time or inactivity deadline. Legacy `timeoutMinutes`
+values in project configuration or saved tasks are ignored. Missing sessions still
+trigger recovery; use explicit cancellation to stop a live agent.
 
 ## Resume, cancel, and clean up
 

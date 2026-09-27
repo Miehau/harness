@@ -73,6 +73,9 @@ This command grants task launch only. Questions and candidate acceptance retain 
 existing human-approval rules. The runner exposes no remote control port and keeps no
 second schedule database.
 
+Publication notifications select up to four PNGs from the published candidate's
+evidence, including after interrupted-publication recovery. Remaining screenshots
+stay available through evidence links.
 Up to four PNG attachments of at most 1 MB each may be base64 encoded. Larger images,
 videos, and other files carry an omission notice and artifact reference. A trusted
 local relay must implement authenticated retrieval for those references; hosted candidates link uploaded provider evidence; the runner
