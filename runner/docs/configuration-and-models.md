@@ -23,7 +23,6 @@ Example:
   "verify": ["test"],
   "maxWorkers": 2,
   "maxAttempts": 12,
-  "timeoutMinutes": 60,
   "commandTimeoutMs": 120000
 }
 ```

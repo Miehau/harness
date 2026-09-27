@@ -41,7 +41,7 @@ Prefer a reviewer from the opposite model family: Claude implementation → Open
 review; OpenAI implementation → Claude review. The runtime checks availability and
 records choices/fallbacks. Configured review preferences remain explicit preferences.
 A failed provider attempt is not review evidence: replace the failed role within the
-attempt/time budget. If no reviewer can finish, surface the blocker; never waive it.
+attempt budget. If no reviewer can finish, surface the blocker; never waive it.
 
 ## Rubric and report
 

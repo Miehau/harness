@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../runner/io.js';
@@ -66,6 +66,40 @@ test('missing evidence and failed reviews prevent a publishable candidate', asyn
   f.runtime.assertCandidateReviews = () => {};
   f.adapter.uploadEvidence = async () => ({ supported: false, reason: 'Upload unavailable' });
   await assert.rejects(publishCandidate(f.runtime, f.task), /Upload unavailable/); assert.equal(f.creates, 0); assert.equal(f.task.operation.step, 'evidence');
+});
+
+test('normal and recovered publication attach current screenshots to Grok with bounded payloads', async t => {
+  for (const recover of [false, true]) {
+    const f = await fixture(t);
+    const artifacts = join(f.runtime.dir(f.task), 'artifacts');
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6pAAAAABJRU5ErkJggg==', 'base64');
+    f.task.events.push({ kind: 'evidence-published', commit: 'old', artifact: 'stale.png' });
+    for (let i = 0; i < 5; i++) {
+      const artifact = `screen-${i}.png`;
+      await writeFile(join(artifacts, artifact), i === 1 ? Buffer.concat([png, Buffer.alloc(1000000)]) : png);
+      f.task.events.push({ kind: 'evidence-published', commit: f.commit, artifact });
+    }
+    if (recover) {
+      const create = f.adapter.create;
+      f.adapter.create = async input => { await create(input); throw Error('timeout'); };
+      await assert.rejects(publishCandidate(f.runtime, f.task), /timeout/);
+      await hostedStatus(f.runtime, f.task);
+    } else await publishCandidate(f.runtime, f.task);
+    const published = f.task.events.find(event => event.kind === 'published');
+    assert.deepEqual(published.attachments, ['screen-0.png', 'screen-1.png', 'screen-2.png', 'screen-3.png']);
+    const runtime = { ...f.runtime, files: async (_task, _who, _action, { path }) => path.endsWith('.png')
+      ? { mimeType: 'image/png', base64: (await readFile(join(artifacts, path))).toString('base64') }
+      : { content: await readFile(join(artifacts, path), 'utf8') } };
+    const payload = await notificationPayload(runtime, f.task, published, 'grokbot');
+    assert.equal(payload.attachments.length, 4);
+    assert.equal(payload.attachments[0].base64, png.toString('base64'));
+    assert.equal(payload.attachments[0].mimeType, 'image/png');
+    assert.equal(payload.attachments[1].retrieval.input.path, 'screen-1.png');
+    assert.equal(payload.attachments[1].base64, undefined);
+    assert(payload.evidenceLinks.some(e => e.artifact === 'screen-4.png'));
+    assert(!payload.evidenceLinks.some(e => e.artifact === 'stale.png'));
+    assert.deepEqual((await notificationPayload(runtime, f.task, published, 'references')).attachments, published.attachments);
+  }
 });
 
 test('stale approval, failed CI, wrong target and pending mergeability never merge', async t => {
