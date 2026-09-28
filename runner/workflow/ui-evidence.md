@@ -4,6 +4,16 @@ Read this page when the task changes frontend behavior/appearance or config.json
 contains uiEvidence. Browser control belongs to the target project: read its
 instructions and reuse its CLI/tests. The harness does not prescribe a browser CLI.
 
+Before implementing non-trivial UI work, follow the shared contract's mockup approval
+rule. Prepare an isolated visual mockup as an artifact (a disposable HTML preview or
+image), without modifying production UI. Publish its screenshots and ask with
+{artifact,requiresOwner:true,attachments:[...]} for approval of the proposed UI. The
+question must reference the mockup, important states and what implementation approval
+authorizes. Wait for the actual owner answer before dependent UI implementation;
+a surface notification alone is not approval. Carry approved artifact/decision references
+into clarification and worker assignments. Trivial UI fixes and backend-only tasks skip
+this step; an already approved design needs no repeated approval.
+
 Planning must map changed acceptance criteria to browser assertions and screenshots
 or video, including relevant viewport sizes and interaction/error states. Include
 this page's artifact reference in frontend assignments. If the project has no UI

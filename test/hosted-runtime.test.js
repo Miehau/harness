@@ -95,11 +95,15 @@ test('runtime snapshots hosting, publishes after clean role reviews, and require
 
 test('feedback resumes the same published task and invalidates candidate verification and approval', async t => {
   const f = await fixture(t); await f.prepare(); await f.complete();
+  const integration = structuredClone(f.current().integration);
   const before = f.current().agents.filter(agent => agent.role === 'orchestrator').length;
   f.current().hosted.approvedCommit = f.current().hosted.commit; await f.runtime.save(f.current());
   const feedback = await f.artifact('owner', 'feedback.md', 'Also improve the wording');
   await f.call('owner', 'feedback', f.taskId, { artifact: feedback });
   const task = f.current(); assert.equal(task.id, f.taskId); assert.equal(task.status, 'running'); assert.equal(task.verification, null);
+  assert.deepEqual(task.integration, integration);
+  assert.equal(await git(f.repo, 'branch', '--show-current'), 'main');
+  assert.equal(task.hosted.url, 'https://github.com/owner/repo/pull/1');
   assert.equal(task.hosted.approvedCommit, undefined); assert.equal(task.hosted.number, 1);
   assert.equal(task.agents.filter(agent => agent.role === 'orchestrator').length, before);
   const coordinator = task.agents.find(agent => agent.id === f.main.id);

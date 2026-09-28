@@ -88,6 +88,21 @@ The dashboard is an optional view of the same runtime state. Its URL contains ow
 access in the fragment; keep it private. Full conversations remain in Herdr and the
 recorded OMP session files.
 
+### Revise an existing candidate
+
+For follow-up changes to an open PR/MR, find its task with `agent-plan list` (includes
+PR URL, branch and worktree), then send the saved request:
+
+```sh
+agent-plan feedback TASK /absolute/revision.md
+```
+
+This reopens a completed hosted task in its existing worktree and updates the same
+PR/MR after fresh verification and reviews. No merge, replacement task or source
+checkout switch is needed. Use `answer` instead for a pending decision.
+Non-trivial UI work first presents a mockup for owner approval; trivial UI fixes and
+backend-only work skip that step. Already approved designs are reused.
+
 ### 3. Accept
 
 With `hosting` configured, a completed task has a verified, reviewed candidate and a

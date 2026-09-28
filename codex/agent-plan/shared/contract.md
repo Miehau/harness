@@ -60,6 +60,15 @@ risks. Sensitive changes get fresh targeted plan assurance before writers start.
 Resolve material findings; changed reviewed plans require renewed assurance. Routine
 changes require no plan-assurance specialist. Do not classify every task as risky.
 
+For tasks requiring non-trivial UI work (new screens, substantial layout or interaction
+changes, redesigns), prepare a visual mockup and obtain owner approval before implementing
+that UI. Reuse an already approved design; do not ask again. Skip mockup approval for
+backend-only work and trivial UI fixes such as copy, spacing or an established component
+adjustment. Record the reason in the existing clarification. Keep mockups separate from
+production changes, show the relevant states and viewports, and persist the design and
+actual approval references. Independent non-UI work may continue while approval waits.
+A mockup is not final browser verification of the implemented candidate.
+
 ## Implement and communicate
 
 The coordinator owns assignments, integration and task state; the supervisor owns
@@ -102,6 +111,12 @@ limitations, and gives worktree/preview inspection instructions. Publish one PR/
 the configured GitHub/GitLab project when authorized. Upload only selected evidence
 with known access controls; private task notes and credentials stay local. Reconcile
 existing requests before retrying. Evidence must belong to the reviewed candidate.
+
+When the owner requests revisions to an open candidate, continue its existing task,
+branch, worktree and PR/MR. Inspect its current state and use the binding's feedback or
+reactivation mechanism; do not launch a replacement, switch the owner's checkout or
+require merging first. Reverify and review the revised candidate before updating the
+same PR/MR. If the original task cannot be recovered, surface the concrete blocker.
 
 Publication and CI success are not merge approval. Owner approval must identify the
 exact candidate and target; recheck remote head, current required CI and hosting gates

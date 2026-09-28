@@ -37,6 +37,17 @@ keeps that decision pending quietly; no automatic scheduled wake-up is implied.
 Once authorized, delegate implementation to the background coordinator and continue
 the main conversation. Do not implement in the supervisor's source checkout.
 
+For revisions to an existing open PR/MR, inspect its task and use
+`runner_supervisor {action:"feedback",taskId,text}`. From a CLI client such as GrokBot,
+use `agent-plan list` to find the task by PR URL, then
+`agent-plan feedback TASK /absolute/revision.md`. This reopens a completed hosted task
+in its existing branch/worktree and updates the same PR/MR after verification and review.
+Do not launch a replacement task, switch the owner's checkout or merge first.
+Use the exact pending decision's answer flow when the task is waiting for a decision.
+For non-trivial UI work, relay a visual mockup for owner approval before dependent UI
+implementation; skip this for trivial UI fixes and backend-only tasks, and reuse
+already approved designs.
+
 ## Managed coordinator and workers
 
 Each new task snapshots this package under `pstack/` in its artifacts, including
