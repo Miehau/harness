@@ -21,7 +21,7 @@ agent-plan repo list                              List saved repositories
 agent-plan repo remove <alias>                    Forget an alias
 agent-plan skills [name]                         Read packaged skills from GrokBot or scripts
 agent-plan onboard <repo>                        Explore the repo and create onboarding docs
-agent-plan feedback <task> <file>                 Send feedback to its coordinator
+agent-plan feedback <task> <file>                 Revise an open PR or send coordinator feedback
 agent-plan list                                  Show tasks
 agent-plan open <task>                            Focus the task's Herdr session
 agent-plan accept <task> [commit] [--target main] Rebase, verify and merge an accepted result
@@ -123,7 +123,9 @@ to Herdr or launching a model. Unsupported execution is reported with its reason
   feedback: `agent-plan feedback TASK FILE
 agent-plan answer TASK DECISION_ID FILE
 
-Feedback sends a saved text file to an unfinished task's coordinator.
+Feedback sends a saved text file to an unfinished task's coordinator, or reopens a
+completed task whose hosted PR/MR is still open. Revisions reuse its branch, worktree
+and PR/MR; no merge or checkout switch is needed. Use list to find the task by PR URL.
 Use answer for an exact pending decision; feedback does not resume a waiting agent.`,
   dashboard: `agent-plan dashboard
 
@@ -280,7 +282,7 @@ export async function main(args = process.argv.slice(2)) {
   }
   const action = (action, taskId, input = {}, requestId = randomUUID()) => request('/action', { action, taskId, input, requestId });
   if (command === 'dashboard') return `${url}/#${connection.token}`;
-  if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, title: t.title ?? null, status: t.status, repo: t.repo, workspace: t.workspace ?? null }));
+  if (command === 'list') return (await request('/tasks')).map(t => ({ id: t.id, title: t.title ?? null, status: t.status, repo: t.repo, workspace: t.workspace ?? null, branch: t.integration?.branch ?? null, worktree: t.integration?.cwd ?? null, url: t.hosted?.url ?? null }));
   if (command === 'submit') return action('submit', null, { repo: await resolveRepo(rest[0]), text: await readFile(rest[1], 'utf8'), requestId: rest[2] ?? randomUUID() });
   if (command === 'launch') {
     assert(rest.length === 3, 'Usage: agent-plan launch ALIAS BRIEF_FILE REQUEST_ID');

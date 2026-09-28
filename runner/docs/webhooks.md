@@ -4,6 +4,16 @@ GrokBot-style webhooks are optional and disabled until the owner installs privat
 configuration. A receiver URL alone does not prove payload compatibility, wake a bot,
 or authorize a human decision.
 
+## Follow-up work
+
+Before launching a revision, use `agent-plan list` to locate the existing task by its
+PR/MR URL, then inspect it and send `agent-plan feedback TASK /absolute/revision.md`.
+A completed task with an open hosted candidate reopens in the same worktree/branch and
+updates the same PR/MR. Do not launch a replacement or merge the original first.
+For an existing pending question, use `answer` with its exact decision ID instead.
+Relay mockup approval questions and their media to the owner for non-trivial UI tasks;
+HTTP acceptance is not design approval.
+
 ## Configure
 
 Copy [webhook.example.json](../../webhook.example.json) to a private `webhook.json`, add the receiver URL
